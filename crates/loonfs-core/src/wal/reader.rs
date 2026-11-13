@@ -6,6 +6,7 @@ use super::wal_object_key;
 use super::{
     ValidatedWalObject, ValidatedWalTail, WalObjectError, WalTailLoadError, WalTailLoadRequest,
 };
+use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::MetadataState;
@@ -13,7 +14,7 @@ use crate::namespace::state::NamespaceReadState;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalObjectEnvelope};
-use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
+use loonfs_types::{CommitSeq, NamespaceId, WalNo, WriterEpoch};
 use std::sync::Arc;
 
 // Missing and malformed objects still need their numbered key in caller diagnostics.
@@ -83,12 +84,31 @@ pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Returns whether the WAL object at `wal_no` exists, with one HEAD request
+/// and no read of the object's bytes.
+pub(crate) async fn wal_object_exists<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    wal_no: WalNo,
+) -> Result<bool, ControlObjectLoadError> {
+    let object_key = wal_object_key(namespace_id, &wal_no);
+    Ok(store
+        .head(&object_key)
+        .await
+        .map_err(|error| ControlObjectLoadError::Store {
+            object_key: object_key.clone(),
+            message: error.public_message().into_owned(),
+            kind: error.kind(),
+        })?
+        .is_some())
+}
+
 /// Reads consecutive numbered objects after a position, each validated as
 /// the contiguous successor of the one before.
 pub(super) struct WalWalk<'a> {
     namespace_id: &'a NamespaceId,
     wal_no: WalNo,
-    seq: ChangeSeq,
+    seq: CommitSeq,
     epoch: WriterEpoch,
     epoch_bound: WriterEpoch,
 }
@@ -98,7 +118,7 @@ impl<'a> WalWalk<'a> {
     pub(super) fn after(
         namespace_id: &'a NamespaceId,
         wal_no: WalNo,
-        seq: ChangeSeq,
+        seq: CommitSeq,
         epoch_bound: WriterEpoch,
     ) -> Self {
         Self {
@@ -110,7 +130,7 @@ impl<'a> WalWalk<'a> {
         }
     }
 
-    pub(super) fn seq(&self) -> ChangeSeq {
+    pub(super) fn seq(&self) -> CommitSeq {
         self.seq
     }
 

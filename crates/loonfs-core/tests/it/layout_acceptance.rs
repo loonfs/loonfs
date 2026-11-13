@@ -20,7 +20,7 @@ use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::AbsolutePath;
 use loonfs_types::CompleteUploadBody;
-use loonfs_types::{ChangeSeq, NamespaceId};
+use loonfs_types::{CommitSeq, NamespaceId};
 use tempfile::tempdir;
 
 async fn put_file<S: ObjectStore + ?Sized>(
@@ -154,7 +154,7 @@ async fn reads_commits_and_change_feed_never_list() {
     assert_eq!(bytes.bytes, b"hello\n");
     let changes = engine
         .list_changes_after(
-            loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+            loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
             loonfs_test_support::ids::page_limit(1024),
             loonfs_types::options::CommitSplitting::Whole,
             &ctx,
@@ -200,20 +200,20 @@ async fn maintenance_preserves_the_logical_head() {
 
     engine
         .create_snapshot(
-            "test-pin".to_owned(),
+            "test-snapshot".to_owned(),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &namespace_id))
                 .await
                 .expect("fold the WAL tail"),
         )
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     engine
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await
         .expect("advance floor");
     namespace_store(&store, &namespace_id)
-        .gc(None, &GcOptions::default(), &context.clock())
+        .gc(&GcOptions::default(), &context.clock())
         .await
         .expect("collection");
     let staged = engine.begin_upload().await.expect("second upload");
@@ -238,12 +238,9 @@ async fn maintenance_preserves_the_logical_head() {
         .load_read_state()
         .await
         .expect("namespace state");
-    // A retention advance without a writer session takes the writer epoch
-    // (format spec, "Advancing the retention floor"), and the other
-    // maintenance calls leave it.
-    assert_eq!(
-        after.writer_epoch,
-        before.writer_epoch.successor().expect("next epoch")
-    );
+    // A retention advance creates a floor object and claims no epoch
+    // (format spec, "Advancing the retention floor"), and neither do the
+    // other maintenance calls.
+    assert_eq!(after.writer_epoch, before.writer_epoch);
     assert_eq!(after.seq, before.seq);
 }

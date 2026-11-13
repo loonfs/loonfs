@@ -13,10 +13,10 @@ pub fn observed_now() -> crate::time::Observation {
     crate::time::Observation::now(std_timer())
 }
 
-/// A pool of 32 content write permits that reports its counts to nothing,
-/// for a test whose content write limit doesn't matter.
-pub fn content_writes() -> crate::PermitPool {
-    crate::PermitPool::new(
+/// 32 content write permits with no observer, for a test whose content
+/// write limit doesn't matter.
+pub fn content_writes() -> crate::Permits {
+    crate::Permits::new(
         std::num::NonZeroUsize::new(32).expect("32 is nonzero"),
         None,
     )
@@ -50,7 +50,7 @@ pub(crate) fn binding_row(
     seq: u64,
 ) -> loonfs_types::format::manifest::DirentryBindingRecord {
     let position = loonfs_types::format::manifest::DeltaPosition {
-        seq: loonfs_types::ChangeSeq(seq),
+        seq: loonfs_types::CommitSeq(seq),
         delta_index: 0,
     };
     loonfs_types::format::manifest::DirentryBindingRecord {
@@ -90,12 +90,12 @@ pub(crate) fn proxied_upload_session(
 }
 
 /// Writes an upload session's record, and its outcome record when `outcome`
-/// is set, under the prefix of `family_root_id`, as a session that ended that
+/// is set, under the prefix of `pool_id`, as a session that ended that
 /// way leaves them. Returns the key of the session record.
 #[cfg(test)]
 pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     session: &loonfs_types::format::control::UploadSessionPayload,
     outcome: Option<loonfs_types::format::control::UploadOutcome>,
 ) -> String {
@@ -103,7 +103,7 @@ pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?S
     use loonfs_types::format::control::{
         encode_control_state, ControlObjectKind, UploadOutcomePayload,
     };
-    let key = loonfs_objectstore::keys::upload_session(family_root_id, &session.upload_id);
+    let key = loonfs_objectstore::keys::upload_session(pool_id, &session.upload_id);
     let bytes =
         encode_control_state(ControlObjectKind::UploadSession, session).expect("encode session");
     store
@@ -120,7 +120,7 @@ pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?S
             .expect("encode outcome");
         store
             .put_if_absent(
-                &loonfs_objectstore::keys::upload_outcome(family_root_id, &session.upload_id),
+                &loonfs_objectstore::keys::upload_outcome(pool_id, &session.upload_id),
                 bytes::Bytes::from(bytes),
             )
             .await
@@ -150,11 +150,11 @@ pub(crate) fn assert_matches_golden_token(name: &str, actual: &str) {
 }
 
 /// Returns the wall-clock reading at which a commit stamped at
-/// `committed_at_ms` is one default garbage collection grace window old, so a
+/// `committed_at_ms` is one retention advance minimum commit age old, so a
 /// retention advance measured at that reading can pass the commit.
 #[cfg(test)]
 pub(crate) fn grace_elapsed_after(committed_at_ms: u64) -> u64 {
-    committed_at_ms + crate::limits::GC_DEFAULT_GRACE_WINDOW_MS
+    committed_at_ms + crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS
 }
 
 /// A writer ID and the wall-clock time that a test's operations run at.
@@ -207,7 +207,7 @@ use crate::engine::NamespaceWriterEngine;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{ManifestNo, NamespaceId, WallClock, WriterId};
+use loonfs_types::{ManifestNo, NamespaceId, PoolId, WallClock, WriterId};
 use std::sync::Arc;
 
 /// Returns `namespace_id`'s components over `store`, for a test whose caches,
@@ -219,6 +219,22 @@ pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStor
     NamespaceStore::new(
         store,
         namespace_id.clone(),
+        Arc::new(MetadataSegmentCache::unshared(0)),
+        Arc::new(crate::cache::HeadAndWalTailCache::unshared(0)),
+        Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        Arc::new(crate::time::SystemWallClock),
+        std_timer(),
+        Arc::new(content_writes()),
+        MetadataRunPolicy::default(),
+    )
+}
+
+/// Returns `pool_id`'s components over `store`, with the components of
+/// [`namespace_store`].
+pub fn pool_store<S>(store: S, pool_id: &PoolId) -> crate::PoolStore<S> {
+    crate::PoolStore::new(
+        store,
+        pool_id.clone(),
         Arc::new(MetadataSegmentCache::unshared(0)),
         Arc::new(crate::cache::HeadAndWalTailCache::unshared(0)),
         Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
@@ -252,8 +268,40 @@ pub fn namespace_store_with_segment_cache<S>(
     }
 }
 
+/// Writes the record of `pool_id` with `first_member_namespace_id` as its first member,
+/// created at `created_at_ms`, for a test that writes a namespace's first
+/// manifest without a create call.
+#[cfg(test)]
+pub(crate) async fn write_pool_record<S: ObjectStore>(
+    store: S,
+    pool_id: &PoolId,
+    first_member_namespace_id: &NamespaceId,
+    created_at_ms: u64,
+) {
+    namespace_store(store, first_member_namespace_id)
+        .write_pool_record(&loonfs_types::format::control::PoolPayload {
+            pool_id: pool_id.clone(),
+            first_member_namespace_id: first_member_namespace_id.clone(),
+            created_at_ms,
+        })
+        .await
+        .expect("write the pool record");
+}
+
+/// Returns the pool that the current manifest of `namespace_id` records, for a
+/// test that builds the key of a content object or an upload record.
+pub async fn load_pool_id<S: ObjectStore>(store: S, namespace_id: &NamespaceId) -> PoolId {
+    namespace_store(store, namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the namespace should have a current manifest")
+        .payload()
+        .pool_id
+        .clone()
+}
+
 /// Folds the namespace's WAL tail and returns the manifest that covers it,
-/// the manifest that a snapshot or a fork of the current head pins.
+/// the manifest that a snapshot or a fork of the current head keeps.
 pub async fn folded_manifest<S: ObjectStore>(
     namespace: &NamespaceStore<S>,
 ) -> crate::Result<loonfs_types::format::control::ManifestRef> {
@@ -435,7 +483,7 @@ pub async fn drain_compaction<S: ObjectStore + ?Sized>(
 pub fn merge_candidate(
     candidate: crate::commit::engine::CommitCandidate,
     record: loonfs_types::format::wal::MergeRecord,
-    fork_point_seq: loonfs_types::ChangeSeq,
+    fork_point_seq: loonfs_types::CommitSeq,
     created_inode_ids: std::collections::BTreeMap<usize, loonfs_types::InodeId>,
 ) -> crate::commit::engine::CommitCandidate {
     candidate.with_merge(record, fork_point_seq, created_inode_ids)

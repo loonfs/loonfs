@@ -17,7 +17,7 @@ use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::MergeIndexRecord;
 use loonfs_types::format::wal::WalCommitPayload;
-use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, InodeId, NameKey, NamespaceId};
+use loonfs_types::{AbsolutePath, CommitId, CommitSeq, InodeId, NameKey, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -32,7 +32,10 @@ pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
 }
 
 pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
+    /// The view's retention floor: the manifest's floor, raised by the floor
+    /// objects in the WAL tail that the view replays.
+    retention_floor_seq: CommitSeq,
     sources: MetadataSourceStack<'a, 'store, S>,
 }
 
@@ -81,10 +84,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         manifest: &'a VerifiedMetadataSegments<'store, S>,
         base: &'a ProjectedWalTail,
         overlay: Option<&'a MetadataState>,
-        visible_seq: ChangeSeq,
+        visible_seq: CommitSeq,
     ) -> Self {
         Self {
             visible_seq,
+            retention_floor_seq: manifest.manifest().payload().retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay,
                 batch_accepted: None,
@@ -100,19 +104,21 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         segments: &'a VerifiedMetadataSegments<'store, S>,
         wal_tail: &'a ProjectedWalTail,
     ) -> Self {
-        Self::over_loaded_basis(segments, wal_tail, head.seq)
+        Self::over_loaded_basis(head, segments, wal_tail, head.seq)
     }
 
     /// Creates a view of a manifest's segments and the WAL tail replayed
-    /// above them, at `visible_seq`, which can be below the head that the
-    /// tail reaches and below the manifest's head.
+    /// above them to `head`, at `visible_seq`, which can be below `head` and
+    /// below the manifest's head. The view's retention floor is `head`'s.
     pub(crate) fn over_loaded_basis(
+        head: &NamespaceReadState,
         segments: &'a VerifiedMetadataSegments<'store, S>,
         wal_tail: &'a ProjectedWalTail,
-        visible_seq: ChangeSeq,
+        visible_seq: CommitSeq,
     ) -> Self {
         Self {
             visible_seq,
+            retention_floor_seq: head.retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -126,14 +132,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// Creates a view containing only one manifest, at its folded head.
     ///
     /// Unlike [`Self::from_loaded_head`], this view does not replay the current
-    /// WAL tail. It is used for pinned manifests such as snapshots, so later
-    /// commits cannot affect the result.
+    /// WAL tail. It is used for the manifests that snapshots keep, so later
+    /// commits cannot affect the result, and its retention floor is the
+    /// manifest's.
     pub(crate) fn over_manifest_segments(
         segments: &'a VerifiedMetadataSegments<'store, S>,
-        folded_head_seq: ChangeSeq,
+        folded_head_seq: CommitSeq,
     ) -> Self {
         Self {
             visible_seq: folded_head_seq,
+            retention_floor_seq: segments.manifest().payload().retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -148,10 +156,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &'view self,
         overlay: Option<&'view MetadataState>,
         batch_accepted: &'view MetadataState,
-        visible_seq: ChangeSeq,
+        visible_seq: CommitSeq,
     ) -> MetadataView<'view, 'store, S> {
         MetadataView {
             visible_seq,
+            retention_floor_seq: self.retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay,
                 batch_accepted: Some(batch_accepted),
@@ -162,19 +171,20 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
-    pub(crate) fn visible_seq(&self) -> ChangeSeq {
+    pub(crate) fn visible_seq(&self) -> CommitSeq {
         self.visible_seq
     }
 
     /// Returns this view's sources at `visible_seq`, at or below this view's
     /// sequence, without the durable cache, which keeps only the newest rows.
-    pub(crate) fn at_seq(&self, visible_seq: ChangeSeq) -> MetadataView<'a, 'store, S> {
+    pub(crate) fn at_seq(&self, visible_seq: CommitSeq) -> MetadataView<'a, 'store, S> {
         assert!(
             visible_seq <= self.visible_seq,
             "a view at an earlier sequence is at or below the view it comes from"
         );
         MetadataView {
             visible_seq,
+            retention_floor_seq: self.retention_floor_seq,
             sources: MetadataSourceStack {
                 overlay: self.sources.overlay,
                 batch_accepted: self.sources.batch_accepted,
@@ -185,13 +195,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
-    /// The retention floor of the view's manifest.
-    pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
-        self.sources
-            .manifest
-            .manifest()
-            .payload()
-            .retention_floor_seq
+    /// The view's retention floor (format spec, "Replaying the visible
+    /// WAL"). A deletion at or below it has expired in the view.
+    pub(crate) fn retention_floor_seq(&self) -> CommitSeq {
+        self.retention_floor_seq
     }
 
     /// Attaches a cache for durable lookups performed during one batch.
@@ -420,7 +427,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         ))
     }
 
-    pub(crate) async fn commit_at_seq(&self, seq: ChangeSeq) -> Result<Option<WalCommitPayload>> {
+    pub(crate) async fn commit_at_seq(&self, seq: CommitSeq) -> Result<Option<WalCommitPayload>> {
         if seq > self.visible_seq() {
             return Ok(None);
         }
@@ -439,7 +446,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// bytes to `max_bytes` or past.
     pub(crate) async fn commits_after(
         &self,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         limit: usize,
         max_bytes: usize,
     ) -> Result<Vec<WalCommitPayload>> {
@@ -497,7 +504,7 @@ pub(crate) struct MetadataViewReads<'a, 'store, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, '_, S> {
     type Error = CoreError;
 
-    fn retention_floor_seq(&self) -> ChangeSeq {
+    fn retention_floor_seq(&self) -> CommitSeq {
         self.view.retention_floor_seq()
     }
 
@@ -542,7 +549,7 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
 
 pub(super) fn latest_visible_binding<'a>(
     rows: impl Iterator<Item = &'a DirentryBindingRecord>,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<DirentryBindingRecord> {
     rows.filter(|direntry| direntry.committed_seq <= visible_seq)
         .max_by_key(|direntry| direntry.position())

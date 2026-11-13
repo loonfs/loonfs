@@ -5,7 +5,7 @@ use loonfs_types::format::manifest::{
     MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceManifestEnvelope,
     NamespaceManifestPayload, RunTier,
 };
-use loonfs_types::{ChangeSeq, RunNo};
+use loonfs_types::{CommitSeq, RunNo};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
@@ -28,7 +28,7 @@ pub(crate) struct MetadataFamilySegments {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataRunManifest {
     pub(crate) run_no: RunNo,
-    pub(crate) run_seq: ChangeSeq,
+    pub(crate) run_seq: CommitSeq,
     pub(crate) tier: RunTier,
     pub(crate) segments: Vec<MetadataFamilySegments>,
 }

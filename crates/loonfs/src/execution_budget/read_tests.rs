@@ -246,7 +246,7 @@ async fn lists_share_one_slot_across_writable_and_read_only_runtimes() {
 }
 
 #[tokio::test]
-async fn commits_folds_and_pin_folds_complete_while_a_read_holds_the_only_slot() {
+async fn commits_folds_and_snapshot_folds_complete_while_a_read_holds_the_only_slot() {
     let fixture = Fixture::new(KeyPredicate::content_blob()).await;
     fixture.store.block_next();
     let held = tokio::spawn({

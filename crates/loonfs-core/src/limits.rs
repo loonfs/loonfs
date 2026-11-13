@@ -28,8 +28,8 @@ pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 /// inode ID and the row key where the walk resumes that directory, which is
 /// at most about 1.6 KiB for a name key of `MAX_NAME_KEY_BYTES`, so the stack
 /// takes at most about 7 MiB. A move can nest a tree deeper than any request
-/// path, and a compaction that meets a deeper tree keeps every row it would
-/// have tested.
+/// path, and a compaction whose walk would need more levels keeps every row it
+/// would have tested and reports that it skipped removing hidden rows.
 pub const MAX_KEPT_INODE_WALK_DEPTH: usize = 4_096;
 
 /// Most encoded segment bytes that one fold or compaction keeps in memory
@@ -185,8 +185,7 @@ pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 5 * 60 * 1000;
 
 /// Self-enforced budget for one metadata publication: a fold, a compaction
-/// step, a claim, a deletion, a fork installation, a retention advance, or a
-/// grep step.
+/// step, a claim, a deletion, a fork installation, or a grep step.
 ///
 /// It runs from the start of the publication, before the publisher loads the
 /// manifest it builds on, until the manifest put-if-absent is initiated. A
@@ -218,8 +217,8 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 /// it was planned against, and the provider applies it within its request
 /// bound, so an object older than the longest budget plus the request bound
 /// plus the clock allowance was written before any put still in flight was
-/// planned. Collection roots only the current manifest and the pinned
-/// manifests. A read whose manifest a newer one replaced can find a segment
+/// planned. Collection roots only the current manifest and the manifests
+/// that snapshots keep. A read whose manifest a newer one replaced can find a segment
 /// collected; it returns `stale_head` and is read again. A read that must
 /// outlive the current manifest takes a snapshot.
 pub const GC_MIN_GRACE_WINDOW_MS: u64 =
@@ -300,37 +299,37 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
     METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
 
-/// Elapsed monotonic time, from the start of a family root's collection,
-/// within which the collection reads the roots of every member of its fork
-/// family, or skips the family's content sweep.
+/// Elapsed monotonic time, from the start of a pool's collection, within
+/// which the collection reads the roots of every member of the pool, or skips
+/// the pool's content sweep.
 ///
 /// A member that the collection hasn't read yet can't be retired until the
 /// retirement grace, less the clock allowance between the deleting host and
-/// the collector, has passed since the collection started, so its fork pin keeps
+/// the collector, has passed since the collection started, so its fork snapshot keeps
 /// it in the walk until then (format spec, "Content roots").
-pub const FAMILY_ROOTS_READ_BUDGET_MS: u64 =
+pub const POOL_ROOTS_READ_BUDGET_MS: u64 =
     NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
 
-pub use loonfs_types::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+pub use loonfs_types::limits::{GC_DEFAULT_GRACE_WINDOW_MS, RETENTION_ADVANCE_MIN_COMMIT_AGE_MS};
 
 const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 
-/// A member that replaces or deletes a revision after a family root's
+/// A member that replaces or deletes a revision after a pool's
 /// collection started keeps the revision's rows until a retention advance
-/// passes that commit, a default grace window later, so the collection
-/// reads the member's current manifest with the reference still in it
-/// (format section 11.9).
-const _: () = assert!(FAMILY_ROOTS_READ_BUDGET_MS < GC_DEFAULT_GRACE_WINDOW_MS);
+/// passes that commit, at least the advance's minimum commit age later, so
+/// the collection reads the member's current manifest with the reference
+/// still in it (format section 11.9).
+const _: () = assert!(POOL_ROOTS_READ_BUDGET_MS < RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
 
 /// A retention advance moves the floor only past commits older than the
-/// default grace, so a revision stays referenced for at least that long
-/// after a commit replaces it. A view at most the revalidation bound old,
-/// and a direct transfer URL it issued, read content that was referenced
-/// when the view was checked, and the margin keeps it referenced until the
-/// URL ends.
+/// advance's minimum commit age, so a revision stays referenced for at least
+/// that long after a commit replaces it. A view at most the revalidation
+/// bound old, and a direct transfer URL it issued, read content that was
+/// referenced when the view was checked, and the margin keeps it referenced
+/// until the URL ends.
 const _: () = assert!(
     READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS + GC_SAFETY_MARGIN_MS
-        <= GC_DEFAULT_GRACE_WINDOW_MS
+        <= RETENTION_ADVANCE_MIN_COMMIT_AGE_MS
 );
 
 /// Most parts one direct multipart upload may cut into. This is the

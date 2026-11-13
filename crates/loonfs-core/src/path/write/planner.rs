@@ -17,7 +17,7 @@ use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::{
-    ChangeSeq, CommitFingerprintInput, ContentId, DestinationBehavior, FileContent,
+    CommitFingerprintInput, CommitSeq, ContentId, DestinationBehavior, FileContent,
     InlineContentIdentity, InodeId, MergeFingerprintInput, NamespaceId,
 };
 use std::collections::BTreeMap;
@@ -69,7 +69,7 @@ pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
     pub(super) pieces: &'p CommitPieces<'p, S>,
     pub(super) content_writes: ContentWrites<'p, S>,
     /// The sequence that the commit is assigned.
-    pub(super) committed_seq: ChangeSeq,
+    pub(super) committed_seq: CommitSeq,
     pub(super) created_inode_ids: CreatedInodeIds<'p>,
     /// The leg of a merge's move through a temporary name that the operation
     /// is, if it's one.
@@ -93,7 +93,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     /// A merge whose operation creates an inode without an assigned ID, or
     /// more than one inode, fails with `InvalidCommitRequest`. Only a bug in
     /// the merge's planner causes that. A panic would return
-    /// `commit_outcome_unknown` and panic again on every retry, so the merge
+    /// `outcome_unknown` and panic again on every retry, so the merge
     /// fails with an error that the caller doesn't retry.
     pub(super) fn next_inode_id(&mut self) -> Result<InodeId> {
         match &mut self.created_inode_ids {
@@ -272,12 +272,12 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 self.plan_restore_revision(target, *source_revision_no)
                     .await
             }
-            Op::Undelete {
+            Op::RestoreDeleted {
                 inode_id,
                 deletion_seq,
                 destination,
             } => {
-                self.plan_undelete(*inode_id, *deletion_seq, destination.clone())
+                self.plan_restore_deleted(*inode_id, *deletion_seq, destination.clone())
                     .await
             }
             Op::UpdateAttributes {
@@ -347,7 +347,7 @@ mod tests {
     use crate::test_support::WriterAt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
-    use loonfs_types::FilesystemChange;
+    use loonfs_types::FilesystemEvent;
     use loonfs_types::{
         AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
         CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
@@ -782,17 +782,17 @@ mod tests {
             .events
             .iter()
             .find_map(|event| match event {
-                FilesystemChange::Deleted { inode_id, .. } => Some(*inode_id),
+                FilesystemEvent::Deleted { inode_id, .. } => Some(*inode_id),
                 _ => None,
             })
             .expect("the delete names its inode");
-        let undelete = |destination: Option<&str>| FilesystemOperation::Undelete {
+        let restore_deleted = |destination: Option<&str>| FilesystemOperation::RestoreDeleted {
             inode_id: deleted_inode_id,
             deletion_seq: deletion.committed_seq,
             destination: destination.map_or(
-                loonfs_types::options::UndeleteDestination::Recorded,
+                loonfs_types::options::RestoreDeletedDestination::Recorded,
                 |path| {
-                    loonfs_types::options::UndeleteDestination::Path(
+                    loonfs_types::options::RestoreDeletedDestination::Path(
                         AbsolutePath::parse(path).expect("path"),
                     )
                 },
@@ -979,16 +979,16 @@ mod tests {
                 &["content_changed"],
             ),
             (
-                "undelete in place",
+                "restore in place",
                 &namespace_id,
-                request(undelete(None)),
-                &["undeleted"],
+                request(restore_deleted(None)),
+                &["restored"],
             ),
             (
-                "undelete to a destination",
+                "restore to a destination",
                 &namespace_id,
-                request(undelete(Some("/docs/found.txt"))),
-                &["undeleted"],
+                request(restore_deleted(Some("/docs/found.txt"))),
+                &["restored"],
             ),
             (
                 "update attributes",

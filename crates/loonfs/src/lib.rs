@@ -8,8 +8,9 @@
 //! crate adds caching, batching, budgets, and maintenance around it.
 //!
 //! The crate root re-exports each type that a public runtime signature, or a
-//! field of a type that one returns, uses, and the sub-modules re-export the
-//! items their docs list. Nothing else is re-exported.
+//! field of a type that one returns, uses, except an extension's types, which
+//! [`engine`] re-exports. The sub-modules re-export the items their docs
+//! list. Nothing else is re-exported.
 //!
 //! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
 //! client and the read budgets, and reads through a [`MetadataCache`] that
@@ -87,38 +88,42 @@ pub use loonfs_core::cache::SegmentFilterStats;
 pub use loonfs_core::limits::{
     DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
     MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES, MAX_SIGNED_PARTS_PER_REQUEST,
-    SSD_WRITE_QUEUE_BYTES,
+    RETENTION_ADVANCE_MIN_COMMIT_AGE_MS, SSD_WRITE_QUEUE_BYTES,
 };
 pub use loonfs_core::time::WallClock;
 pub use loonfs_core::{
-    classify_store_failure, CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile,
-    CurrentFileState, DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream,
-    FoldWalOutcome, FoldWalResponse, GcOptions, ListSnapshotFilesOptions, RetainedRevisionsPage,
+    classify_store_failure, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
+    DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream, FoldWalOutcome,
+    FoldWalResponse, GcOptions, ListSnapshotFilesOptions, RetainedRevisionsPage,
     RetainedRevisionsPageCursor, RetentionTarget, SnapshotFile, SnapshotFilesPage,
-    SnapshotFilesPageCursor, SnapshotPageCursor, StreamRange, WriterFence,
-    CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
+    SnapshotFilesPageCursor, SnapshotPageCursor, SnapshotRecordPageCursor, StreamRange,
+    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::{
-    AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
-    AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, ChangeSeq,
-    Checkpoint, CheckpointOwner, ChecksumAlgorithm, CommitId, CommitPrecondition, ContentId,
+    AbsolutePath, AccessRevisionNo, ActorId, AdvanceRetentionResponse, AttributeKey,
+    AttributeValue, Attributes, AttributesProjection, AttributesRevisionNo, BindingVersion,
+    CapabilityDocument, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
+    DeleteSnapshotResponse, DeletedObjectCounts, DeletedSnapshotsByOwner, DestinationBehavior,
     DirectoryPageCursor, DisplayName, EffectiveLimit, EntryInodeKind, FileRevision,
-    FileRevisionsPageCursor, GcResponse, InodeId, InodeKind, ListCheckpointsResponse,
+    FileRevisionsPageCursor, GcResponse, GcSkippedWork, InodeId, InodeKind,
     ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
-    ListSnapshotsResponse, ManifestNo, MetadataMaintenanceOutcome, MetadataMaintenanceResponse,
-    NameKey, NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
-    PathEntryKind, PinId, RetainedCandidates, RetainedReason, RevisionNo,
-    SetRetentionWindowResponse, Snapshot, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, ManifestNo, MetadataMaintenanceOutcome,
+    MetadataMaintenanceResponse, MetadataSkippedWork, MonotonicTimer, NameKey,
+    NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
+    PathEntryKind, PoolDeletedObjectCounts, PoolGcResponse, PoolId, PoolRetainedCandidates,
+    PoolRetainedReason, PrincipalId, PrincipalScope, PrincipalSet, RecoverAdministratorResponse,
+    RetainedCandidates, RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot,
+    SnapshotId, SnapshotRecord, SnapshotRecordOwner, Subject, SubjectId, TrashEntry, UploadId,
+    WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
-    FilesystemChange, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
-    MergeConflictVersion, NextMergeRangeOutcome, NextMergeRangeResponse, ObjectTransferAccess,
-    RebaseForkResponse, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
+    FilesystemEvent, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
+    MergeConflictVersion, NextMergeRangeOutcome, NextMergeRangeResponse, ObjectTransfer,
+    ReplayForkResponse, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession,
+    UploadSessionStatus,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -133,10 +138,11 @@ pub mod engine {
         READ_REVALIDATION_BOUND_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
     };
     pub use loonfs_core::{
-        next_run_no_after, refill_iterators, select_next_iterator, BudgetPermit, ExtensionBasis,
-        ExtensionPublication, LoadedBlocks, PermitPool, PoolCounts, SegmentBlockLoader,
-        SegmentRowIterator,
+        refill_iterators, select_next_iterator, BudgetPermit, ExtensionBasis, ExtensionPublication,
+        LoadedBlocks, PermitCounts, Permits, SegmentBlockLoader, SegmentRowIterator,
     };
+    pub use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef};
+    pub use loonfs_types::{ExtensionName, RunNo};
 }
 
 /// Commit types used by integrations that submit classified mutations to
@@ -239,13 +245,13 @@ pub use options::{
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
     ListFileRevisionsOptions, ListOptions, ListTrashOptions, MaintainMetadataOptions,
     MergeForkOptions, MoveOptions, PutFileOptions, ReadAt, ReadConsistency, ReadFileOptions,
-    ReadFileStreamOptions, ReadRange, StatOptions, UndeleteDestination, UndeleteOptions,
-    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    ReadFileStreamOptions, ReadRange, RestoreDeletedDestination, RestoreDeletedOptions,
+    StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
     UpdateAttributesOptions,
 };
 pub use pagers::{
-    ChangesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
-    RetainedRevisionsPager, SnapshotFilesPager, SnapshotsPager, TrashPager,
+    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, RetainedRevisionsPager,
+    SnapshotFilesPager, SnapshotRecordsPager, SnapshotsPager, TrashPager,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
 pub use read_view::ReadView;

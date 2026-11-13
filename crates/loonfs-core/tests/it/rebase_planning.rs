@@ -1,6 +1,6 @@
 //! Rebase planning: the replay commit that replays a fork's unmerged commits
 //! into a new fork of its source, classified against the new fork's head
-//! with the source's history read through the new fork's pin, which skips
+//! with the source's history read through the new fork's snapshot, which skips
 //! the changes that conflict and reports them.
 
 use crate::common::{default_writer, namespace_engine, read_context};
@@ -10,7 +10,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
-    ChangeSeq, Commit, CommitId, InodeId, Merge, MergeConflict, MergeConflictKind,
+    Commit, CommitId, CommitSeq, InodeId, Merge, MergeConflict, MergeConflictKind,
     MergeConflictRevision, MergeConflictVersion, NamespaceId, NamespaceRebasedFrom,
     NextMergeRangeOutcome, NextMergeRangeResponse, PathEntry, PathEntryKind,
 };
@@ -109,7 +109,7 @@ impl Family {
         .expect("the rebase's new fork")
     }
 
-    fn request(&self, commit_id: &str, through_seq: Option<ChangeSeq>) -> MergeRequest {
+    fn request(&self, commit_id: &str, through_seq: Option<CommitSeq>) -> MergeRequest {
         MergeRequest {
             source_namespace_id: self.fork.clone(),
             through_seq,
@@ -120,21 +120,21 @@ impl Family {
         }
     }
 
-    /// Reads `main` through the new fork's pin.
-    async fn pinned_context(&self) -> RuntimeReadContext {
-        let pin_id = read_context(&self.store, &self.rebase)
+    /// Reads `main` through the new fork's snapshot.
+    async fn snapshot_context(&self) -> RuntimeReadContext {
+        let snapshot_id = read_context(&self.store, &self.rebase)
             .await
             .read_basis
             .head
             .fork_basis
             .expect("the new fork's basis")
-            .source_pin_id;
+            .source_snapshot_id;
         let live = read_context(&self.store, &self.main).await;
         RuntimeReadContext {
             read_basis: namespace_store(&self.store, &self.main)
-                .load_snapshot_read_basis(&live.read_basis.head, &pin_id)
+                .load_snapshot_read_basis(&live.read_basis.head, &snapshot_id)
                 .await
-                .expect("main through the pin"),
+                .expect("main through the snapshot"),
             tail: None,
             visible_seq: None,
         }
@@ -145,7 +145,7 @@ impl Family {
     async fn replay(
         &self,
         commit_id: &str,
-        through_seq: Option<ChangeSeq>,
+        through_seq: Option<CommitSeq>,
     ) -> Result<Replay, CoreError> {
         let request = self.request(commit_id, through_seq);
         let rebase = namespace_engine(&self.store, &self.rebase, &self.writer);
@@ -173,13 +173,10 @@ impl Family {
                 &fork,
                 &read_context(&self.store, &self.fork).await,
                 &main,
-                &self.pinned_context().await,
+                &self.snapshot_context().await,
                 &request,
                 self.writer.now_ms,
-                MergeAllowance {
-                    max_bytes: usize::MAX,
-                    peak_per_planned_byte: 3,
-                },
+                MergeAllowance::unshared(usize::MAX, 3),
             )
             .await?;
         let conflicts = plan.conflicts().to_vec();
@@ -226,10 +223,7 @@ impl Family {
                 &read_context(&self.store, source).await,
                 &request,
                 self.writer.now_ms,
-                MergeAllowance {
-                    max_bytes: usize::MAX,
-                    peak_per_planned_byte: 3,
-                },
+                MergeAllowance::unshared(usize::MAX, 3),
             )
             .await
             .expect("plan the merge")
@@ -319,12 +313,12 @@ async fn a_rebase_whose_changes_all_apply_replays_them_into_the_new_fork() {
     // The fork was made at main's sequence 2, after main's two seeding
     // commits, and the rebase forks main's head after `/other.txt`.
     let basis = created.fork_basis.expect("the new fork's basis");
-    assert_eq!(basis.source_head_seq, ChangeSeq(3));
+    assert_eq!(basis.fork_point_seq, CommitSeq(3));
     assert_eq!(
         basis.rebased_from,
         Some(NamespaceRebasedFrom {
             source_namespace_id: family.fork.clone(),
-            resume_after_seq: ChangeSeq(2),
+            resume_after_seq: CommitSeq(2),
         })
     );
 
@@ -332,7 +326,7 @@ async fn a_rebase_whose_changes_all_apply_replays_them_into_the_new_fork() {
     assert_eq!(replay.conflicts, Some(Vec::new()));
     let merge = replay.commit.merge.expect("a replay commit is a merge");
     assert_eq!(merge.source_namespace_id, family.fork);
-    assert_eq!(merge.source_after_seq, ChangeSeq(2));
+    assert_eq!(merge.source_after_seq, CommitSeq(2));
     for path in ["/new", "/new/c.txt"] {
         assert_eq!(
             family
@@ -370,7 +364,7 @@ async fn a_rebase_whose_changes_all_apply_replays_them_into_the_new_fork() {
 }
 
 /// Checks that a change that conflicts with a row main committed after the
-/// fork point is skipped and reported with the base through the pin, the
+/// fork point is skipped and reported with the base through the snapshot, the
 /// fork's version, and the new fork's version, while the fork's other
 /// change applies.
 #[tokio::test]
@@ -518,11 +512,11 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
     assert_eq!(
         family.next_range().await,
         NextMergeRangeResponse {
-            fork_point_seq: ChangeSeq(2),
+            fork_point_seq: CommitSeq(2),
             source_head_seq: last.committed_seq,
             outcome: NextMergeRangeOutcome::Open {
                 merge: None,
-                next_after_seq: ChangeSeq(2),
+                next_after_seq: CommitSeq(2),
             },
         }
     );
@@ -537,7 +531,7 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
         NextMergeRangeOutcome::Open {
             merge: Some(Merge {
                 source_namespace_id: family.fork.clone(),
-                source_after_seq: ChangeSeq(2),
+                source_after_seq: CommitSeq(2),
                 source_through_seq: first.committed_seq,
             }),
             next_after_seq: first.committed_seq,
@@ -623,14 +617,14 @@ async fn a_resolvers_commit_between_pieces_makes_its_row_foreign_for_the_next_pi
 }
 
 /// Checks that a replay reads main's history at or below the new fork's fork
-/// point through the pin. Main's earlier merge of the fork changed
+/// point through the snapshot. Main's earlier merge of the fork changed
 /// `/docs/a.txt` there, and the fork then deletes `/docs`. After a
 /// compaction of the new fork removes main's commit rows from the new fork,
 /// the subtree check of `/docs` still finds that change in the source's part
-/// of the history through the pin, and the pin still shows that the row is
+/// of the history through the snapshot, and the snapshot still shows that the row is
 /// the fork's own, so the delete applies with no conflict.
 #[tokio::test]
-async fn a_replay_reads_main_through_the_pin_after_the_new_fork_compacts() {
+async fn a_replay_reads_main_through_the_snapshot_after_the_new_fork_compacts() {
     let family = Family::new().await;
     family.write(&family.fork, "/docs/a.txt", b"merged").await;
     let merged = family.merge_into_main(&family.fork, "merge-1").await;
@@ -660,9 +654,9 @@ async fn a_replay_reads_main_through_the_pin_after_the_new_fork_compacts() {
 /// Checks that a change that main made below a directory after the fork
 /// point, and before the rebase, is a `subtree` conflict for the fork's
 /// delete of the directory, which the source's part of the history through
-/// the pin finds, because the new fork's own part starts after it.
+/// the snapshot finds, because the new fork's own part starts after it.
 #[tokio::test]
-async fn a_subtree_change_on_main_before_the_rebase_is_found_through_the_pin() {
+async fn a_subtree_change_on_main_before_the_rebase_is_found_through_the_snapshot() {
     let family = Family::new().await;
     family.write(&family.main, "/docs/new.txt", b"theirs").await;
     family

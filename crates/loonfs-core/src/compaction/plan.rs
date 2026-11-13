@@ -8,7 +8,7 @@ use crate::segment::runs::{
 use loonfs_types::format::manifest::{
     MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
 };
-use loonfs_types::{ChangeSeq, MetadataCompactionId, RunNo};
+use loonfs_types::{CommitSeq, MetadataCompactionId, RunNo};
 use std::num::NonZeroUsize;
 
 /// The size ratio within which a run joins a compaction window.
@@ -38,7 +38,7 @@ pub(crate) struct MetadataCompactionSpec {
     /// whatever the floor lets go.
     input_rows: u64,
     pub(crate) placement: CompactionPlacement,
-    frozen_floor_seq: ChangeSeq,
+    frozen_floor_seq: CommitSeq,
 }
 
 impl MetadataCompactionSpec {
@@ -47,7 +47,7 @@ impl MetadataCompactionSpec {
         inputs: Vec<RunNo>,
         input_rows: u64,
         placement: CompactionPlacement,
-        frozen_floor_seq: ChangeSeq,
+        frozen_floor_seq: CommitSeq,
     ) -> Self {
         assert!(!inputs.is_empty(), "a compaction plan must have input");
         Self {
@@ -88,7 +88,7 @@ impl MetadataCompactionSpec {
         &self.inputs
     }
 
-    pub(crate) fn frozen_floor_seq(&self) -> ChangeSeq {
+    pub(crate) fn frozen_floor_seq(&self) -> CommitSeq {
         self.frozen_floor_seq
     }
 
@@ -97,7 +97,7 @@ impl MetadataCompactionSpec {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_frozen_floor_seq(&self, frozen_floor_seq: ChangeSeq) -> Self {
+    pub(crate) fn with_frozen_floor_seq(&self, frozen_floor_seq: CommitSeq) -> Self {
         Self {
             frozen_floor_seq,
             ..self.clone()
@@ -163,14 +163,14 @@ pub(crate) enum CompactionPlacement {
     /// and retention may remove related row pairs because both the older row
     /// and its newer cancellation row are included (format spec,
     /// "Retention and compaction").
-    Base { output_seq: ChangeSeq },
+    Base { output_seq: CommitSeq },
     /// The window started above the group's oldest run. The output is a delta
     /// run at the newest input's sequence, and nothing is dropped.
-    Delta { output_seq: ChangeSeq },
+    Delta { output_seq: CommitSeq },
 }
 
 impl CompactionPlacement {
-    pub(super) fn output_seq(self) -> ChangeSeq {
+    pub(super) fn output_seq(self) -> CommitSeq {
         match self {
             Self::Base { output_seq } | Self::Delta { output_seq } => output_seq,
         }
@@ -192,7 +192,7 @@ impl CompactionPlacement {
 fn compaction_placement(
     bottom_anchored: bool,
     runs: &[MetadataRunManifest],
-    head_seq: ChangeSeq,
+    head_seq: CommitSeq,
 ) -> CompactionPlacement {
     if bottom_anchored {
         return CompactionPlacement::Base {
@@ -407,7 +407,7 @@ mod planning_tests {
             .map(|(index, size_mib)| {
                 let mut run = template.clone();
                 run.run_no = RunNo(index as u64);
-                run.run_seq = ChangeSeq(index as u64);
+                run.run_seq = CommitSeq(index as u64);
                 run.tier = if index == 0 {
                     RunTier::Base
                 } else {
@@ -418,7 +418,7 @@ mod planning_tests {
                 run
             })
             .collect();
-        payload.head_seq = ChangeSeq(sizes_mib.len() as u64);
+        payload.head_seq = CommitSeq(sizes_mib.len() as u64);
         payload.next_run_no = RunNo(sizes_mib.len() as u64);
         payload
     }

@@ -1,10 +1,10 @@
-//! Undelete positions, delete preconditions, and restored visibility.
+//! Restore positions, delete preconditions, and restored visibility.
 
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::test_support::fresh_reader;
 use loonfs::{
-    AdvanceRetentionFloorOptions, ChangeSeq, CommitId, DeleteDirectoryBehavior, DeleteOptions,
+    AdvanceRetentionFloorOptions, CommitId, CommitSeq, DeleteDirectoryBehavior, DeleteOptions,
     DestinationBehavior, Error, ErrorCode, InodeId, PutFileOptions, RetentionTarget, RevisionNo,
 };
 use loonfs_test_support::ids::namespace_id;
@@ -60,9 +60,9 @@ fn delete_options_select_recursive_behavior() {
 }
 
 #[test]
-fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
+fn a_restore_recovers_a_deleted_file_and_positions_stay_scoped() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "undelete-test");
+    let fs = runtime(temp_dir.path(), "restore-test");
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -111,13 +111,13 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
 
     // Recovery re-attaches the same inode — identity, content, and the full
     // revision history come back, even at a new path.
-    block_on(namespace_writer.undelete_with_options(
+    block_on(namespace_writer.restore_deleted_with_options(
         inode_id,
         first_deletion,
         &loonfs_test_support::test_actor(),
-        &undelete_at("/docs/recovered.txt"),
+        &restore_deleted_at("/docs/recovered.txt"),
     ))
-    .expect("undelete");
+    .expect("restore_deleted");
     let recovered = fs
         .stat_path_blocking(&namespace_id, "/docs/recovered.txt")
         .expect("stat recovered file");
@@ -137,13 +137,13 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
 
     // The recovered inode is no longer deleted: replaying the handle
     // conflicts.
-    let error = block_on(namespace_writer.undelete_with_options(
+    let error = block_on(namespace_writer.restore_deleted_with_options(
         inode_id,
         first_deletion,
         &loonfs_test_support::test_actor(),
-        &undelete_at("/docs/again.txt"),
+        &restore_deleted_at("/docs/again.txt"),
     ))
-    .expect_err("double undelete should conflict");
+    .expect_err("double restore should conflict");
     assert_matches!(
         &error,
         Error::Core(error) if error.code() == ErrorCode::NotDeleted
@@ -159,11 +159,11 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
         )
         .expect("delete recovered file again")
         .committed_seq;
-    let error = block_on(namespace_writer.undelete_with_options(
+    let error = block_on(namespace_writer.restore_deleted_with_options(
         inode_id,
         first_deletion,
         &loonfs_test_support::test_actor(),
-        &undelete_at("/docs/stale.txt"),
+        &restore_deleted_at("/docs/stale.txt"),
     ))
     .expect_err("stale position handle must not clear the newer deletion");
     match &error {
@@ -178,19 +178,19 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
     let still_gone = fs.stat_path_blocking(&namespace_id, "/docs/stale.txt");
     assert_eq!(
         still_gone
-            .expect_err("stale undelete must not bind anything")
+            .expect_err("stale restore must not bind anything")
             .code(),
         loonfs_types::ErrorCode::PathNotFound
     );
 
     // The current position's handle recovers to the original path.
-    block_on(namespace_writer.undelete_with_options(
+    block_on(namespace_writer.restore_deleted_with_options(
         inode_id,
         second_deletion,
         &loonfs_test_support::test_actor(),
-        &undelete_at("/docs/report.txt"),
+        &restore_deleted_at("/docs/report.txt"),
     ))
-    .expect("undelete the active position");
+    .expect("restore the active position");
     assert_eq!(
         fs.stat_path_blocking(&namespace_id, "/docs/report.txt")
             .expect("stat restored original path")
@@ -200,9 +200,9 @@ fn undelete_recovers_a_deleted_file_and_positions_stay_scoped() {
 }
 
 #[test]
-fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
+fn a_restore_recovers_a_deleted_subtree_and_rejects_covered_children() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "undelete-subtree-test");
+    let fs = runtime(temp_dir.path(), "restore-subtree-test");
     let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
         .expect("create namespace");
@@ -246,11 +246,11 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
 
     // A child is covered by the subtree root's tombstone, not its own:
     // recovery targets the root.
-    let error = block_on(namespace.undelete_with_options(
+    let error = block_on(namespace.restore_deleted_with_options(
         child_inode,
         deletion,
         &loonfs_test_support::test_actor(),
-        &undelete_at("/docs/a-alone.txt"),
+        &restore_deleted_at("/docs/a-alone.txt"),
     ))
     .expect_err("child of a deleted directory is not the deletion root");
     assert_matches!(
@@ -258,13 +258,13 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         Error::Core(error) if error.code() == ErrorCode::NotDeleted
     );
 
-    block_on(namespace.undelete_with_options(
+    block_on(namespace.restore_deleted_with_options(
         directory_inode,
         deletion,
         &loonfs_test_support::test_actor(),
-        &undelete_at("/docs/notes"),
+        &restore_deleted_at("/docs/notes"),
     ))
-    .expect("undelete the subtree root");
+    .expect("restore the subtree root");
     assert_eq!(
         fs.read_file_blocking(&namespace_id, "/docs/notes/a.txt")
             .expect("nested file is visible again")
@@ -274,9 +274,9 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
 }
 
 #[test]
-fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
+fn a_restore_of_an_ancestor_keeps_independently_deleted_children_hidden() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "undelete-nested-test");
+    let fs = runtime(temp_dir.path(), "restore-nested-test");
     let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
         .expect("create namespace");
@@ -330,13 +330,13 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
 
     // Recovering the ancestor revokes exactly its own deletion: the
     // independently deleted child stays hidden behind its own tombstone.
-    block_on(namespace.undelete_with_options(
+    block_on(namespace.restore_deleted_with_options(
         directory_inode,
         ancestor_deletion,
         &loonfs_test_support::test_actor(),
-        &undelete_at("/docs/notes"),
+        &restore_deleted_at("/docs/notes"),
     ))
-    .expect("undelete the ancestor");
+    .expect("restore the ancestor");
     assert_eq!(
         fs.read_file_blocking(&namespace_id, "/docs/notes/kept.txt")
             .expect("sibling is visible again")
@@ -351,15 +351,15 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
 }
 
 #[test]
-fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
+fn a_restore_survives_snapshots_and_reopen_in_both_orders() {
     let temp_dir = tempdir().expect("tempdir");
     let object_store = store(temp_dir.path());
     let namespace_id = namespace_id("demo");
 
-    // Order one: delete + undelete in the WAL tail, then checkpoint,
+    // Order one: delete + restore in the WAL tail, then snapshot,
     // then reopen cold from object storage.
     let deletion = {
-        let fs = open_runtime(object_store.clone(), "undelete-persist-a");
+        let fs = open_runtime(object_store.clone(), "restore-persist-a");
         fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
             .expect("create namespace");
         let namespace = fs
@@ -385,19 +385,19 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             )
             .expect("delete")
             .committed_seq;
-        block_on(namespace.undelete_with_options(
+        block_on(namespace.restore_deleted_with_options(
             inode_id,
             deletion,
             &loonfs_test_support::test_actor(),
-            &undelete_at("/docs/report.txt"),
+            &restore_deleted_at("/docs/report.txt"),
         ))
-        .expect("undelete before checkpoint");
+        .expect("restore before snapshot");
         // The default threshold (32 WAL objects) would answer NotNeeded for
         // this short history; force the fold so reopen reads Set and
         // Revoke rows out of durable segments, not WAL replay.
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
-            .expect("checkpoint the revoke into durable segments");
+            .expect("snapshot the revoke into durable segments");
         assert_matches!(
             step.wal_fold,
             Some(loonfs::FoldWalResponse {
@@ -410,15 +410,15 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         deletion
     };
     {
-        let fs = open_runtime(object_store.clone(), "undelete-persist-b");
+        let fs = open_runtime(object_store.clone(), "restore-persist-b");
         assert_eq!(
             fs.read_file_blocking(&namespace_id, "/docs/report.txt")
-                .expect("recovered file survives checkpoint and reopen")
+                .expect("recovered file survives snapshot and reopen")
                 .bytes,
             b"persisted"
         );
 
-        // Order two: delete, checkpoint, reopen, THEN undelete — the
+        // Order two: delete, snapshot, reopen, THEN restore — the
         // revoke must resolve a deletion that lives in durable segments,
         // not the WAL tail.
         let inode_id = fs
@@ -436,7 +436,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         assert!(second_deletion > deletion);
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
-            .expect("checkpoint the deletion");
+            .expect("snapshot the deletion");
         assert_matches!(
             step.wal_fold,
             Some(loonfs::FoldWalResponse {
@@ -446,21 +446,21 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             "step must materialize the tail, got {:?}",
             step.wal_fold
         );
-        let fs = open_runtime(object_store.clone(), "undelete-persist-c");
+        let fs = open_runtime(object_store.clone(), "restore-persist-c");
         let namespace = fs
             .writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        block_on(namespace.undelete_with_options(
+        block_on(namespace.restore_deleted_with_options(
             inode_id,
             second_deletion,
             &loonfs_test_support::test_actor(),
-            &undelete_at("/docs/report.txt"),
+            &restore_deleted_at("/docs/report.txt"),
         ))
-        .expect("undelete a checkpointed deletion after reopen");
+        .expect("restore a deletion the snapshot captured after reopen");
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
-            .expect("checkpoint the second revoke");
+            .expect("snapshot the second revoke");
         assert_matches!(
             step.wal_fold,
             Some(loonfs::FoldWalResponse {
@@ -471,7 +471,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             step.wal_fold
         );
     }
-    let fs = open_runtime(object_store, "undelete-persist-d");
+    let fs = open_runtime(object_store, "restore-persist-d");
     assert_eq!(
         fs.read_file_blocking(&namespace_id, "/docs/report.txt")
             .expect("recovered file survives the second cycle")
@@ -481,9 +481,9 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
 }
 
 #[test]
-fn change_feed_reports_the_deletion_position_an_undelete_takes() {
+fn change_feed_reports_the_deletion_position_a_restore_takes() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "undelete-feed-test");
+    let fs = runtime(temp_dir.path(), "restore-feed-test");
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
@@ -511,40 +511,40 @@ fn change_feed_reports_the_deletion_position_an_undelete_takes() {
         )
         .expect("delete")
         .committed_seq;
-    block_on(namespace_writer.undelete_with_options(
+    block_on(namespace_writer.restore_deleted_with_options(
         inode_id,
         deletion,
         &loonfs_test_support::test_actor(),
-        &undelete_at("/docs/report.txt"),
+        &restore_deleted_at("/docs/report.txt"),
     ))
-    .expect("undelete");
+    .expect("restore_deleted");
 
-    let changes = block_on(namespace.list_changes(ChangeSeq(0)).page()).expect("list changes");
+    let changes = block_on(namespace.list_changes(CommitSeq(0)).page()).expect("list changes");
     let mut deleted_seq = None;
-    let mut undeleted = None;
+    let mut restored = None;
     for change in &changes.changes {
         for event in &change.events {
             match event {
-                loonfs::FilesystemChange::Deleted {
+                loonfs::FilesystemEvent::Deleted {
                     inode_id: deleted_inode_id,
                     ..
                 } if *deleted_inode_id == inode_id => {
                     deleted_seq = Some(change.committed_seq);
                 }
-                loonfs::FilesystemChange::Undeleted {
-                    inode_id: undeleted_inode_id,
+                loonfs::FilesystemEvent::Restored {
+                    inode_id: restored_inode_id,
                     display_name,
                     ..
-                } if *undeleted_inode_id == inode_id => {
-                    undeleted = Some(display_name.as_str().to_owned());
+                } if *restored_inode_id == inode_id => {
+                    restored = Some(display_name.as_str().to_owned());
                 }
                 _ => {}
             }
         }
     }
-    // The change sequence can be copied directly into an undelete request.
+    // The change sequence can be copied directly into a restore request.
     assert_eq!(deleted_seq, Some(deletion));
-    assert_eq!(undeleted.as_deref(), Some("report.txt"));
+    assert_eq!(restored.as_deref(), Some("report.txt"));
 }
 
 #[test]
@@ -569,7 +569,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     )
     .expect("delete");
 
-    let changes = block_on(namespace.list_changes(ChangeSeq(0)).page()).expect("list changes");
+    let changes = block_on(namespace.list_changes(CommitSeq(0)).page()).expect("list changes");
 
     // A projection of the feed sees the spelling a person typed — on the
     // deletion as well as the creation — without a second lookup per entry.
@@ -578,7 +578,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
         .iter()
         .flat_map(|change| &change.events)
         .find_map(|event| match event {
-            loonfs::FilesystemChange::Deleted {
+            loonfs::FilesystemEvent::Deleted {
                 deleted_binding, ..
             } => Some(deleted_binding.display_name.as_str().to_owned()),
             _ => None,
@@ -587,9 +587,9 @@ fn the_feed_names_deleted_entries_and_their_writer() {
 }
 
 #[test]
-fn an_undelete_that_misses_the_active_deletion_reports_both_sequences() {
+fn a_restore_that_misses_the_trash_entry_reports_both_sequences() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "undelete-details-test");
+    let fs = runtime(temp_dir.path(), "restore-details-test");
     let namespace_id = namespace_id("demo");
     let actor = loonfs_test_support::test_actor();
     fs.create_namespace_blocking(&namespace_id, &actor)
@@ -609,12 +609,12 @@ fn an_undelete_that_misses_the_active_deletion_reports_both_sequences() {
         .expect("delete report")
         .committed_seq;
 
-    let later = ChangeSeq(100);
-    let error = block_on(namespace_writer.undelete_with_options(
+    let later = CommitSeq(100);
+    let error = block_on(namespace_writer.restore_deleted_with_options(
         report,
         later,
         &actor,
-        &undelete_at("/docs/again.txt"),
+        &restore_deleted_at("/docs/again.txt"),
     ))
     .expect_err("no deletion of the report is at a later sequence");
     let Error::Core(error) = &error else {
@@ -651,17 +651,17 @@ fn an_undelete_that_misses_the_active_deletion_reports_both_sequences() {
                         behavior: DeleteDirectoryBehavior::Recursive,
                         expected_inode_id: Some(fresh.inode_id),
                     },
-                    FilesystemOperation::Undelete {
+                    FilesystemOperation::RestoreDeleted {
                         inode_id: fresh.inode_id,
-                        deletion_seq: ChangeSeq(fresh.head_seq.0 + 1),
-                        destination: loonfs::UndeleteDestination::Path(
+                        deletion_seq: CommitSeq(fresh.head_seq.0 + 1),
+                        destination: loonfs::RestoreDeletedDestination::Path(
                             parse_mutation_path("/docs/back.txt").expect("valid mutation path"),
                         ),
                     },
                 ],
             },
         )
-        .expect_err("an undelete can't target a deletion from its own commit");
+        .expect_err("a restore can't target a deletion from its own commit");
     let Error::Core(error) = &error else {
         panic!("expected a core error, got {error:?}")
     };
@@ -745,11 +745,11 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
 }
 
 #[tokio::test]
-async fn a_deleted_file_keeps_its_newest_revision_at_the_floor_and_undelete_restores_it() {
+async fn a_deleted_file_keeps_its_newest_revision_at_the_floor_and_a_restore_brings_it_back() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_compacting_runtime_with_async(
         store(temp_dir.path()),
-        "undelete-floor-test",
+        "restore-floor-test",
         |builder| builder,
     )
     .await;
@@ -797,8 +797,8 @@ async fn a_deleted_file_keeps_its_newest_revision_at_the_floor_and_undelete_rest
         .await
         .expect("fold the deletion");
     // The floor stops just below the deletion, at the file's newest revision,
-    // so the deletion stays recoverable. The advance takes the writer epoch,
-    // so the undelete opens a new writer session.
+    // so the deletion stays in the trash. The advance takes the writer epoch,
+    // so the restore opens a new writer session.
     drop(namespace_writer);
     let advanced = fs
         .advance_retention_floor_with_options(
@@ -812,12 +812,12 @@ async fn a_deleted_file_keeps_its_newest_revision_at_the_floor_and_undelete_rest
     assert_eq!(advanced.retention_floor_seq, newest_seq);
     fs.namespace_writer(&namespace_id)
         .expect("open a new session")
-        .undelete(inode_id, deletion.committed_seq, &actor)
+        .restore_deleted(inode_id, deletion.committed_seq, &actor)
         .await
-        .expect("undelete the file");
+        .expect("restore the file");
     fs.create_snapshot(&namespace_id)
         .await
-        .expect("fold the undelete");
+        .expect("fold the restore");
     // The base compaction applies the floor: the file keeps its newest
     // revision at the floor and loses the older one.
     compact_until_done(&fs.maintenance, &namespace_id).await;

@@ -6,7 +6,7 @@ use loonfs_client::NamespacePath;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::ContentId;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef, ContentToken,
+    AbsolutePath, Commit, CommitId, CommitRequest, CommitSeq, ContentRef, ContentToken,
     DestinationBehavior, ErrorCode, ErrorResponse, FilesystemOperation,
 };
 use serde_json::json;
@@ -260,7 +260,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         send_commit(&harness.server_url, &namespace, &request).expect("covered ref is prepared");
     let response: Commit =
         serde_json::from_reader(response.into_reader()).expect("decode operation response");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
     assert_eq!(
         harness
             .client
@@ -330,7 +330,7 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
         send_commit_json(&harness.server_url, &namespace, &body).expect("bare operation body");
     let response: Commit =
         serde_json::from_reader(response.into_reader()).expect("decode response");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
     harness
         .client
         .stat(&NamespacePath::parse("demo", "/docs").expect("path"))

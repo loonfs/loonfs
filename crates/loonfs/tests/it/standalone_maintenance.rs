@@ -151,7 +151,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         .await
         .expect("future maintenance");
     let future = future_runtime.maintenance(loonfs_test_support::ids::writer_id("future"));
-    let checkpoint = future_runtime
+    let snapshot = future_runtime
         .open_namespace(&namespace_id)
         .expect("open namespace")
         .create_snapshot_with_options(
@@ -162,8 +162,8 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
         )
         .await
         .expect("snapshot");
-    assert_eq!(checkpoint.created_at_ms, clock.now_ms());
-    assert_eq!(checkpoint.expires_at_ms, Some(clock.now_ms() + 1_000));
+    assert_eq!(snapshot.created_at_ms, clock.now_ms());
+    assert_eq!(snapshot.expires_at_ms, Some(clock.now_ms() + 1_000));
     let derived = writer.maintenance(loonfs_test_support::ids::writer_id("derived"));
     for maintenance in [future, derived] {
         let object_key = loonfs_objectstore::keys::metadata_segment(

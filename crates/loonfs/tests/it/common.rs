@@ -3,7 +3,7 @@
 use loonfs::publish::{CommitCandidate, CommitIntent};
 use loonfs::test_support::maintenance_past_the_grace_window;
 use loonfs::{
-    ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, ChangeSeq, Commit,
+    ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Commit, CommitSeq,
     CompleteUploadBody, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
     FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs,
     LoonFsBuilder, MaintainMetadataOptions, MaintainMetadataReport, Maintenance, Namespace,
@@ -151,15 +151,15 @@ pub(crate) async fn collect_path_entries(
     Ok(response)
 }
 
-pub(crate) async fn collect_checkpoints(
+pub(crate) async fn collect_snapshot_records(
     maintenance: &Maintenance,
     namespace_id: &NamespaceId,
-) -> loonfs::Result<loonfs::ListCheckpointsResponse> {
-    let mut pager = maintenance.list_checkpoints(namespace_id);
+) -> loonfs::Result<loonfs::ListSnapshotRecordsResponse> {
+    let mut pager = maintenance.list_snapshot_records(namespace_id);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
-        response.checkpoints.extend(page.checkpoints);
+        response.snapshots.extend(page.snapshots);
         response.next_cursor = page.next_cursor;
     }
     Ok(response)
@@ -305,25 +305,21 @@ impl TestRuntime {
     /// Advances the namespace's retention floor toward `options.target`
     /// through [`maintenance_past_the_grace_window`].
     ///
-    /// That handle belongs to another runtime, so an advance that moves the
-    /// floor takes the namespace's writer epoch and fences this fixture's
-    /// writer session. The fixture drops its handle, so its next write opens
-    /// a new session. A test that keeps its own handle across an advance
-    /// drops it first.
+    /// That handle belongs to another runtime, which has no writer session
+    /// for the namespace, so an advance that moves the floor creates a floor
+    /// object at the WAL tip and then folds the namespace. The advance claims
+    /// no writer epoch, so this fixture's writer session isn't fenced. Its
+    /// next commit collides with the floor object and plans again against
+    /// the new floor.
     pub(crate) async fn advance_retention_floor_with_options(
         &self,
         namespace_id: &NamespaceId,
         options: &AdvanceRetentionFloorOptions,
     ) -> loonfs::Result<AdvanceRetentionResponse> {
-        let advanced = maintenance_past_the_grace_window(self.store.clone())
+        maintenance_past_the_grace_window(self.store.clone())
             .await
             .advance_retention_floor_with_options(namespace_id, options)
-            .await;
-        self.namespaces
-            .lock()
-            .expect("namespace writer map lock")
-            .remove(namespace_id);
-        advanced
+            .await
     }
 
     /// Returns the handle this fixture holds for `namespace_id`, opening it
@@ -430,7 +426,7 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<Snapshot> {
         self.namespace_writer(namespace_id)?
-            .create_snapshot("test-pin")
+            .create_snapshot("test-snapshot")
             .await
     }
 
@@ -661,7 +657,7 @@ impl TestRuntime {
     pub(crate) fn list_changes_blocking(
         &self,
         namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
     ) -> loonfs::Result<ListChangesResponse> {
         let namespace = self.reader.namespace(namespace_id);
         block_on(namespace.list_changes(after_seq).page())
@@ -769,11 +765,11 @@ impl RuntimeStoreProbe {
     }
 }
 
-/// Undelete options that restore the entry at `path`.
-pub(crate) fn undelete_at(path: &str) -> loonfs::UndeleteOptions {
-    loonfs::UndeleteOptions {
-        destination: loonfs::UndeleteDestination::Path(
-            loonfs::AbsolutePath::parse(path).expect("valid undelete destination"),
+/// Restore options that restore the entry at `path`.
+pub(crate) fn restore_deleted_at(path: &str) -> loonfs::RestoreDeletedOptions {
+    loonfs::RestoreDeletedOptions {
+        destination: loonfs::RestoreDeletedDestination::Path(
+            loonfs::AbsolutePath::parse(path).expect("valid restore destination"),
         ),
         ..Default::default()
     }

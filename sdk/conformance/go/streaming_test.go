@@ -106,12 +106,12 @@ func streamTestClient(t *testing.T, fixture streamCase, direct bool, content fun
 			if fixture.Range != nil {
 				access["headers"] = map[string]string{"range": *fixture.Range}
 			}
-			ranges := []any{map[string]any{"start_offset": 0, "length": fixture.SizeBytes, "access": access}}
+			ranges := []any{map[string]any{"start_offset": 0, "length": fixture.SizeBytes, "transfer": access}}
 			if fixture.Ranges != nil {
 				ranges = make([]any, 0, len(fixture.Ranges))
 				for index, part := range fixture.Ranges {
 					ranges = append(ranges, map[string]any{"start_offset": part.StartOffset, "length": part.Length,
-						"access": map[string]any{"kind": "presigned_url", "method": "GET", "url": "http://objects.test/object/" + strconv.Itoa(index), "headers": map[string]string{"range": part.Range}, "expires_at_ms": 2000000000000}})
+						"transfer": map[string]any{"kind": "presigned_url", "method": "GET", "url": "http://objects.test/object/" + strconv.Itoa(index), "headers": map[string]string{"range": part.Range}, "expires_at_ms": 2000000000000}})
 				}
 			}
 			json.NewEncoder(w).Encode(map[string]any{"namespace_id": "demo", "path": "/file", "revision_no": 1, "content_ref": claim, "ranges": ranges})

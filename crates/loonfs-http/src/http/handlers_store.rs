@@ -39,8 +39,8 @@ pub(super) async fn probe_store(
     let StoreProbeRequest {} = request.unwrap_or_default();
     // The run id scopes the objects this run writes, so two probes against
     // one store never collide, and a provider's own log names the run.
-    let run_id = loonfs_types::ProbeRunId::generate();
+    let probe_id = loonfs_types::ProbeId::generate();
     let store = state.runtime.object_store();
-    let report = run_store_contract_probe(store.as_ref(), &run_id).await;
+    let report = run_store_contract_probe(store.as_ref(), &probe_id).await;
     Ok(Json(report.into()))
 }

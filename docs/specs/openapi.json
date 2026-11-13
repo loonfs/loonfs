@@ -168,117 +168,6 @@
         ],
         "type": "object"
       },
-      "ChangeSeq": {
-        "description": "The sequence number of one namespace commit. Commits become visible in the order of these numbers.",
-        "format": "int64",
-        "maximum": 9007199254740991,
-        "minimum": 0,
-        "type": "integer"
-      },
-      "Checkpoint": {
-        "description": "One checkpoint, as its durable record stores it.",
-        "properties": {
-          "captured_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The namespace sequence that the checkpoint captured."
-          },
-          "checkpoint_id": {
-            "$ref": "#/components/schemas/PinId",
-            "description": "The checkpoint's durable ID. For a user pin, it's also the snapshot's `snapshot_id`."
-          },
-          "created_at_ms": {
-            "description": "The time the checkpoint record was created, in Unix milliseconds.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "expires_at_ms": {
-            "description": "The time the checkpoint expires, in Unix milliseconds. Garbage collection waits one more\ngrace window before it deletes the record.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "manifest_no": {
-            "$ref": "#/components/schemas/ManifestNo",
-            "description": "The manifest that the checkpoint pins."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that the checkpoint belongs to."
-          },
-          "owner": {
-            "$ref": "#/components/schemas/CheckpointOwner",
-            "description": "The checkpoint's owner. For a user pin, the owner includes the label."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "checkpoint_id",
-          "owner",
-          "created_at_ms",
-          "captured_seq",
-          "manifest_no"
-        ],
-        "type": "object"
-      },
-      "CheckpointOwner": {
-        "description": "The owner of a checkpoint record.",
-        "discriminator": {
-          "mapping": {
-            "fork": "#/components/schemas/CheckpointOwnerFork",
-            "user": "#/components/schemas/CheckpointOwnerUser"
-          },
-          "propertyName": "kind"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/CheckpointOwnerUser"
-          },
-          {
-            "$ref": "#/components/schemas/CheckpointOwnerFork"
-          }
-        ]
-      },
-      "CheckpointOwnerFork": {
-        "description": "A pin that keeps the source state that one fork attempt starts from.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "fork"
-            ],
-            "type": "string"
-          },
-          "target_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The fork's target namespace. Garbage collection keeps this checkpoint while that\nnamespace exists."
-          }
-        },
-        "required": [
-          "target_namespace_id",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "CheckpointOwnerUser": {
-        "description": "A snapshot, which a caller created. It's deleted by its ID or after it expires.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "user"
-            ],
-            "type": "string"
-          },
-          "name": {
-            "description": "The label that the creator recorded. Labels don't need to be unique.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "kind"
-        ],
-        "type": "object"
-      },
       "Checksum": {
         "additionalProperties": false,
         "description": "A checksum algorithm and the checksum's canonical lowercase hexadecimal value.",
@@ -324,13 +213,13 @@
             "description": "The actor responsible for the commit, as the application supplied it."
           },
           "committed_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence at which the commit became visible."
           },
           "events": {
             "description": "The semantic filesystem changes that the commit applied, in request order.",
             "items": {
-              "$ref": "#/components/schemas/FilesystemChange"
+              "$ref": "#/components/schemas/FilesystemEvent"
             },
             "type": "array"
           },
@@ -358,8 +247,8 @@
         "type": "object"
       },
       "CommitId": {
-        "description": "The client's idempotency key for one logical commit.\n\nReuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `c_` followed by 26 lowercase Crockford base 32\ncharacters, but callers can supply any value that follows these rules.",
-        "example": "c_7kn71d9dq885x91hejz3gvf9p0",
+        "description": "The client's idempotency key for one logical commit.\n\nReuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `cmt_` followed by 26 lowercase Crockford base 32\ncharacters, but callers can supply any value that follows these rules.",
+        "example": "cmt_7kn71d9dq885x91hejz3gvf9p0",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"
       },
@@ -534,7 +423,7 @@
         "description": "A requirement that the head sequence before the commit equals `expected_head_seq`.",
         "properties": {
           "expected_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The head sequence that the caller observed when it read its inputs."
           },
           "kind": {
@@ -638,6 +527,13 @@
           "operations"
         ],
         "type": "object"
+      },
+      "CommitSeq": {
+        "description": "The sequence number of one namespace commit. Commits become visible in the order of these numbers.",
+        "format": "int64",
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
       },
       "CompleteUploadBody": {
         "description": "A request to complete an upload, in the mode that started it.",
@@ -766,7 +662,7 @@
           },
           "content_id": {
             "$ref": "#/components/schemas/ContentId",
-            "description": "The immutable identity of the content. The content ID and the reading namespace's family\nroot together determine the object key."
+            "description": "The immutable identity of the content. The content ID and the reading namespace's pool\ntogether determine the object key."
           },
           "kind": {
             "$ref": "#/components/schemas/ContentRefKind",
@@ -829,11 +725,11 @@
             "type": "integer"
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "A snapshot to read the file from. The download reads the revision that the snapshot\ncaptured."
           },
           "start_offset": {
-            "description": "The first byte that the grant reads. It defaults to 0 and must be less than the file's size.\nFor a file of zero bytes, it must be 0.",
+            "description": "The first byte that the download reads. It defaults to 0 and must be less than the file's size.\nFor a file of zero bytes, it must be 0.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -842,7 +738,7 @@
         "type": "object"
       },
       "CreateDownloadByInodeResponse": {
-        "description": "A short-lived capability to read one revision of an inode.",
+        "description": "The signed object ranges for one revision of an inode.",
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
@@ -901,11 +797,11 @@
             "description": "The revision to read. Omit it to read the path's current revision. It can't be combined with\n`snapshot_id`."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "A snapshot to read the file from. The download reads the revision that the snapshot\ncaptured. It can't be combined with `revision_no`."
           },
           "start_offset": {
-            "description": "The first byte that the grant reads. The grant covers the revision's bytes from\n`start_offset` up to `size_bytes`, so a client that resumes a download asks for a new grant\nthat starts after the bytes it already has. The offset must be less than the revision's\nsize. For a revision of zero bytes, it must be 0.",
+            "description": "The first byte that the download reads. The download covers the revision's bytes from\n`start_offset` up to `size_bytes`, so a client that resumes a download asks for a new download\nthat starts after the bytes it already has. The offset must be less than the revision's\nsize. For a revision of zero bytes, it must be 0.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -940,7 +836,7 @@
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "The revision that the capability reads, as resolved from the request."
+            "description": "The revision that the download reads, as resolved from the request."
           }
         },
         "required": [
@@ -962,18 +858,15 @@
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The durable ID of the new namespace."
+            "description": "The durable ID of the new namespace. Without this field, LoonFS generates an ID. The\nresponse's `namespace_id` is the new namespace's ID."
           },
           "retention_window_ms": {
-            "description": "The namespace's retention window, in milliseconds, which must be positive. The reference\nserver's maintenance sweep then uses this window for the namespace instead of the server's\n`retention_window_ms` setting. A `retention_window` maintenance run can change or clear the\nwindow later.",
+            "description": "The namespace's retention window, in milliseconds, which must be positive. The reference\nserver's maintenance sweep uses this window for the namespace. Without this field, the\nnamespace's window is the server's `retention_window_ms` setting, if the server has that\nsetting. A `retention_window` maintenance job can change or clear the window later.",
             "format": "int64",
             "minimum": 1,
             "type": "integer"
           }
         },
-        "required": [
-          "namespace_id"
-        ],
         "type": "object"
       },
       "CreateRevisionDownloadByInodeRequest": {
@@ -992,7 +885,7 @@
             "type": "integer"
           },
           "start_offset": {
-            "description": "The first byte that the grant reads. It defaults to 0 and must be less than the revision's\nsize. For a revision of zero bytes, it must be 0.",
+            "description": "The first byte that the download reads. It defaults to 0 and must be less than the revision's\nsize. For a revision of zero bytes, it must be 0.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1111,7 +1004,7 @@
         "description": "The result of deleting a namespace.",
         "properties": {
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The last committed sequence before the namespace was deleted."
           },
           "namespace_id": {
@@ -1133,7 +1026,7 @@
             "description": "The namespace that the snapshot belonged to."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "The ID of the deleted snapshot record."
           }
         },
@@ -1143,75 +1036,29 @@
         ],
         "type": "object"
       },
-      "DeletedCheckpointsByOwner": {
-        "description": "The number of checkpoint records that one garbage collection pass deleted, grouped by owner.",
-        "properties": {
-          "fork": {
-            "description": "The fork pins that the pass deleted because their target namespaces no longer exist.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "user": {
-            "description": "The user pins that the pass deleted after they expired or their namespace was deleted.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "user",
-          "fork"
-        ],
-        "type": "object"
-      },
       "DeletedObjectCounts": {
-        "description": "The number of objects that one garbage collection pass deleted, grouped by object family.",
+        "description": "The number of objects that one garbage collection of a namespace deleted, grouped by\nobject family.",
         "properties": {
-          "content_objects": {
-            "description": "The content objects the pass deleted because no retained view referenced them and they were\nolder than the grace window.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "extension_segments": {
-            "description": "The unreferenced extension segments, such as the grep index's segments, that the pass\ndeleted.",
+            "description": "The unreferenced extension segments, such as the grep index's segments, that the collection\ndeleted.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "manifests": {
-            "description": "The unreferenced manifests that the pass deleted.",
+            "description": "The unreferenced manifests that the collection deleted.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "metadata_segments": {
-            "description": "The unreferenced metadata segments that the pass deleted.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "retired_content_objects": {
-            "description": "The content objects that the pass listed under a retired namespace and deleted.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "temporary_objects": {
-            "description": "The store's temporary objects that the pass deleted because they were older than the grace\nwindow.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "upload_sessions": {
-            "description": "The upload session records that the pass deleted after their grace windows passed.",
+            "description": "The unreferenced metadata segments that the collection deleted.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "wal_objects": {
-            "description": "The unreferenced WAL objects that the pass deleted.",
+            "description": "The unreferenced WAL objects that the collection deleted.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1221,11 +1068,29 @@
           "wal_objects",
           "metadata_segments",
           "extension_segments",
-          "manifests",
-          "upload_sessions",
-          "content_objects",
-          "retired_content_objects",
-          "temporary_objects"
+          "manifests"
+        ],
+        "type": "object"
+      },
+      "DeletedSnapshotsByOwner": {
+        "description": "The number of snapshot records that one garbage collection deleted, grouped by owner.",
+        "properties": {
+          "fork": {
+            "description": "The fork snapshots that the collection deleted because their target namespaces no longer exist.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "user": {
+            "description": "The user snapshots that the collection deleted after they expired or their namespace was deleted.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "user",
+          "fork"
         ],
         "type": "object"
       },
@@ -1274,7 +1139,7 @@
           },
           "revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
-            "description": "The file's revision at `to_seq`. A `created` or `undeleted` file has it, and a `changed` or\n`moved` file has it when its revision differs between the two sequences."
+            "description": "The file's revision at `to_seq`. A `created` or `restored` file has it, and a `changed` or\n`moved` file has it when its revision differs between the two sequences."
           }
         },
         "required": [
@@ -1288,7 +1153,7 @@
         "description": "How an inode's visible state at the end of a diff differs from its state at the start.\n\nA newer server can return a kind that isn't listed here. Clients should skip an entry whose\nkind they don't recognize.",
         "enum": [
           "created",
-          "undeleted",
+          "restored",
           "deleted",
           "moved",
           "changed"
@@ -1299,7 +1164,7 @@
         "description": "One page of a diff: the inodes whose visible state at `to_seq` differs from their state at\n`from_seq`.\n\nA page reads the commits after `after_seq` in sequence order, and reports each inode at the\nlast commit in the range that changed it, so an inode appears on one page only.",
         "properties": {
           "after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that this page's scan starts after. It's the request's `after_seq`, or\n`from_seq` when the request leaves `after_seq` out."
           },
           "entries": {
@@ -1310,7 +1175,7 @@
             "type": "array"
           },
           "from_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that the diff starts after. Each entry compares an inode's state at this\nsequence with its state at `to_seq`."
           },
           "namespace_id": {
@@ -1318,7 +1183,7 @@
             "description": "The namespace that was read."
           },
           "next_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the\npage that reaches `to_seq`. When the page ends inside a commit, it's that commit's\nsequence."
           },
           "next_event_index": {
@@ -1328,11 +1193,11 @@
             "type": "integer"
           },
           "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace's retention floor when this page was read."
           },
           "to_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that the diff ends at, inclusive. When the request leaves out `to_seq`, it's\nthe head that the page read, and the next page's request passes it back."
           }
         },
@@ -1377,10 +1242,6 @@
       "DownloadRange": {
         "description": "One contiguous run of a revision's bytes, which the client reads from one object.",
         "properties": {
-          "access": {
-            "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "A short-lived read capability for exactly this range's bytes."
-          },
           "length": {
             "description": "The number of bytes in the run.",
             "format": "int64",
@@ -1392,12 +1253,16 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "transfer": {
+            "$ref": "#/components/schemas/ObjectTransfer",
+            "description": "A short-lived presigned URL that reads exactly this range's bytes."
           }
         },
         "required": [
           "start_offset",
           "length",
-          "access"
+          "transfer"
         ],
         "type": "object"
       },
@@ -1423,7 +1288,7 @@
             "description": "The access revision that is actually current for the inode."
           },
           "actual_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork sequence that the merge started after."
           },
           "actual_attributes_revision_no": {
@@ -1435,11 +1300,11 @@
             "description": "The current binding token."
           },
           "actual_deletion_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The deletion sequence that is actually active for the inode."
           },
           "actual_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace's actual head sequence."
           },
           "actual_inode_id": {
@@ -1451,7 +1316,7 @@
             "description": "The revision that is actually current. It's absent when the inode has no current revision."
           },
           "after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The `after_seq` value from the change feed request."
           },
           "commit_id": {
@@ -1463,7 +1328,7 @@
             "type": "string"
           },
           "committed_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that `commit_id` was already committed at. The server includes it when a\ndurable commit receipt records that commit."
           },
           "conflict": {
@@ -1481,7 +1346,7 @@
             "description": "The access revision that the request expected to be current."
           },
           "expected_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork sequence that the merge had to start after: the end of the previous merge's range,\nor the fork point for the fork's first merge."
           },
           "expected_attributes_revision_no": {
@@ -1493,11 +1358,11 @@
             "description": "The opaque binding token that the request supplied."
           },
           "expected_deletion_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The deletion sequence that the undelete expected to be active."
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The deletion sequence that the restore expected to be active."
           },
           "expected_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The head sequence that the request required."
           },
           "expected_inode_id": {
@@ -1513,11 +1378,11 @@
             "description": "The epoch of the failed writer session at the time another writer displaced it."
           },
           "fork_point_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork point of the fork whose commits a merge applies, which is the sequence of this\nnamespace that the fork was made at."
           },
           "from_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The `from_seq` value from the diff request."
           },
           "inode_id": {
@@ -1545,7 +1410,7 @@
             "type": "integer"
           },
           "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace's retention floor. A change feed request can set `after_seq` to this sequence\nor any later one, and the feed returns the changes committed after it. A diff request can\nset `from_seq` to this sequence or any later one."
           },
           "size_bytes": {
@@ -1555,7 +1420,7 @@
             "type": "integer"
           },
           "source_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork sequence that a merge's range starts after, when that start is below the fork's\nown retention floor."
           },
           "source_namespace_id": {
@@ -1563,7 +1428,7 @@
             "description": "The fork of a refused merge: the fork whose range conflicts, or whose range starts below\nits own retention floor."
           },
           "split_at_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The split hint of a merge that exceeded a bound: a fork sequence such that a merge of the\nfork's commits through it fits. It's absent when no shorter range fits."
           }
         },
@@ -1637,7 +1502,7 @@
             "description": "The actor responsible for this revision, as the application supplied it."
           },
           "committed_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace sequence of the commit that created this revision."
           },
           "content_ref": {
@@ -1664,49 +1529,49 @@
         ],
         "type": "object"
       },
-      "FilesystemChange": {
+      "FilesystemEvent": {
         "description": "One filesystem change within a commit.\n\nOne request operation can produce several changes.\n\nA newer server can return a change kind that isn't listed here. Clients should skip a change\nwhose kind they don't recognize.",
         "discriminator": {
           "mapping": {
-            "access_changed": "#/components/schemas/FilesystemChangeAccessChanged",
-            "attributes_changed": "#/components/schemas/FilesystemChangeAttributesChanged",
-            "content_changed": "#/components/schemas/FilesystemChangeContentChanged",
-            "deleted": "#/components/schemas/FilesystemChangeDeleted",
-            "directory_created": "#/components/schemas/FilesystemChangeDirectoryCreated",
-            "file_created": "#/components/schemas/FilesystemChangeFileCreated",
-            "moved": "#/components/schemas/FilesystemChangeMoved",
-            "undeleted": "#/components/schemas/FilesystemChangeUndeleted"
+            "access_changed": "#/components/schemas/FilesystemEventAccessChanged",
+            "attributes_changed": "#/components/schemas/FilesystemEventAttributesChanged",
+            "content_changed": "#/components/schemas/FilesystemEventContentChanged",
+            "deleted": "#/components/schemas/FilesystemEventDeleted",
+            "directory_created": "#/components/schemas/FilesystemEventDirectoryCreated",
+            "file_created": "#/components/schemas/FilesystemEventFileCreated",
+            "moved": "#/components/schemas/FilesystemEventMoved",
+            "restored": "#/components/schemas/FilesystemEventRestored"
           },
           "propertyName": "kind"
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/FilesystemChangeDirectoryCreated"
+            "$ref": "#/components/schemas/FilesystemEventDirectoryCreated"
           },
           {
-            "$ref": "#/components/schemas/FilesystemChangeFileCreated"
+            "$ref": "#/components/schemas/FilesystemEventFileCreated"
           },
           {
-            "$ref": "#/components/schemas/FilesystemChangeContentChanged"
+            "$ref": "#/components/schemas/FilesystemEventContentChanged"
           },
           {
-            "$ref": "#/components/schemas/FilesystemChangeMoved"
+            "$ref": "#/components/schemas/FilesystemEventMoved"
           },
           {
-            "$ref": "#/components/schemas/FilesystemChangeDeleted"
+            "$ref": "#/components/schemas/FilesystemEventDeleted"
           },
           {
-            "$ref": "#/components/schemas/FilesystemChangeUndeleted"
+            "$ref": "#/components/schemas/FilesystemEventRestored"
           },
           {
-            "$ref": "#/components/schemas/FilesystemChangeAttributesChanged"
+            "$ref": "#/components/schemas/FilesystemEventAttributesChanged"
           },
           {
-            "$ref": "#/components/schemas/FilesystemChangeAccessChanged"
+            "$ref": "#/components/schemas/FilesystemEventAccessChanged"
           }
         ]
       },
-      "FilesystemChangeAccessChanged": {
+      "FilesystemEventAccessChanged": {
         "description": "An inode's access row was replaced.\n\n`grants` is the complete direct grant map after the update.",
         "properties": {
           "access_revision_no": {
@@ -1741,7 +1606,7 @@
         ],
         "type": "object"
       },
-      "FilesystemChangeAttributesChanged": {
+      "FilesystemEventAttributesChanged": {
         "description": "An inode's attributes changed.",
         "properties": {
           "attributes": {
@@ -1771,7 +1636,7 @@
         ],
         "type": "object"
       },
-      "FilesystemChangeContentChanged": {
+      "FilesystemEventContentChanged": {
         "description": "A file received a new current revision from a put, a copy, an append, or a revision\nrestore.",
         "properties": {
           "append_offset": {
@@ -1807,7 +1672,7 @@
         ],
         "type": "object"
       },
-      "FilesystemChangeDeleted": {
+      "FilesystemEventDeleted": {
         "description": "A file or directory subtree was deleted.",
         "properties": {
           "deleted_binding": {
@@ -1832,7 +1697,7 @@
         ],
         "type": "object"
       },
-      "FilesystemChangeDirectoryCreated": {
+      "FilesystemEventDirectoryCreated": {
         "description": "A directory was created.",
         "properties": {
           "binding_version": {
@@ -1867,7 +1732,7 @@
         ],
         "type": "object"
       },
-      "FilesystemChangeFileCreated": {
+      "FilesystemEventFileCreated": {
         "description": "A file and its first revision were created.",
         "properties": {
           "binding_version": {
@@ -1912,7 +1777,7 @@
         ],
         "type": "object"
       },
-      "FilesystemChangeMoved": {
+      "FilesystemEventMoved": {
         "description": "An inode moved to a new parent directory or name.",
         "properties": {
           "binding_version": {
@@ -1957,7 +1822,7 @@
         ],
         "type": "object"
       },
-      "FilesystemChangeUndeleted": {
+      "FilesystemEventRestored": {
         "description": "A deleted inode was recovered and re-bound.",
         "properties": {
           "binding_version": {
@@ -1974,7 +1839,7 @@
           },
           "kind": {
             "enum": [
-              "undeleted"
+              "restored"
             ],
             "type": "string"
           },
@@ -2009,9 +1874,9 @@
             "move_path": "#/components/schemas/FilesystemOperationMovePath",
             "put_file": "#/components/schemas/FilesystemOperationPutFile",
             "put_file_revision_by_inode": "#/components/schemas/FilesystemOperationPutFileRevisionByInode",
+            "restore_deleted": "#/components/schemas/FilesystemOperationRestoreDeleted",
             "restore_revision": "#/components/schemas/FilesystemOperationRestoreRevision",
             "restore_revision_by_inode": "#/components/schemas/FilesystemOperationRestoreRevisionByInode",
-            "undelete": "#/components/schemas/FilesystemOperationUndelete",
             "update_access": "#/components/schemas/FilesystemOperationUpdateAccess",
             "update_access_by_inode": "#/components/schemas/FilesystemOperationUpdateAccessByInode",
             "update_attributes": "#/components/schemas/FilesystemOperationUpdateAttributes",
@@ -2060,7 +1925,7 @@
             "$ref": "#/components/schemas/FilesystemOperationCopyByInode"
           },
           {
-            "$ref": "#/components/schemas/FilesystemOperationUndelete"
+            "$ref": "#/components/schemas/FilesystemOperationRestoreDeleted"
           },
           {
             "$ref": "#/components/schemas/FilesystemOperationRestoreRevision"
@@ -2524,6 +2389,43 @@
         ],
         "type": "object"
       },
+      "FilesystemOperationRestoreDeleted": {
+        "description": "An operation that restores the deletion that `inode_id` and `deletion_seq` identify.\n\nTo choose the destination, set `destination_path`, or set `destination_parent_inode_id` and\n`destination_display_name`. If you set neither, the restore uses the parent and name\nrecorded with the deletion.",
+        "properties": {
+          "deletion_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The deletion sequence that the caller observed. It prevents the restore from cancelling\na newer deletion of the inode."
+          },
+          "destination_display_name": {
+            "$ref": "#/components/schemas/DisplayName",
+            "description": "The inode's name in `destination_parent_inode_id`."
+          },
+          "destination_parent_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "The directory to restore the inode into. It requires `destination_display_name`."
+          },
+          "destination_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "The absolute path to restore the inode to. It can't be combined with\n`destination_parent_inode_id`."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "The deleted inode to make reachable again."
+          },
+          "kind": {
+            "enum": [
+              "restore_deleted"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "inode_id",
+          "deletion_seq",
+          "kind"
+        ],
+        "type": "object"
+      },
       "FilesystemOperationRestoreRevision": {
         "description": "An operation that restores an older revision as the current revision of the file at a path.",
         "properties": {
@@ -2570,43 +2472,6 @@
         "required": [
           "inode_id",
           "source_revision_no",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "FilesystemOperationUndelete": {
-        "description": "An operation that restores the deletion that `inode_id` and `deletion_seq` identify.\n\nTo choose the destination, set `destination_path`, or set `destination_parent_inode_id` and\n`destination_display_name`. If you set neither, the undelete uses the parent and name\nrecorded with the deletion.",
-        "properties": {
-          "deletion_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The deletion sequence that the caller observed. It prevents the undelete from cancelling\na newer deletion of the inode."
-          },
-          "destination_display_name": {
-            "$ref": "#/components/schemas/DisplayName",
-            "description": "The inode's name in `destination_parent_inode_id`."
-          },
-          "destination_parent_inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "The directory to restore the inode into. It requires `destination_display_name`."
-          },
-          "destination_path": {
-            "$ref": "#/components/schemas/AbsolutePath",
-            "description": "The absolute path to restore the inode to. It can't be combined with\n`destination_parent_inode_id`."
-          },
-          "inode_id": {
-            "$ref": "#/components/schemas/InodeId",
-            "description": "The deleted inode to make reachable again."
-          },
-          "kind": {
-            "enum": [
-              "undelete"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "inode_id",
-          "deletion_seq",
           "kind"
         ],
         "type": "object"
@@ -2773,23 +2638,46 @@
         ],
         "type": "object"
       },
+      "ForkNamespaceForRebaseRequest": {
+        "additionalProperties": false,
+        "description": "A request to create a rebase's new fork: a new fork of the namespace that a fork was forked\nfrom, which the fork's unmerged commits are then replayed into.",
+        "properties": {
+          "new_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The durable ID of the new fork. Without this field, LoonFS generates an ID. The response's\n`namespace_id` is the new fork's ID."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose unmerged commits the new fork's replay commits replay. It has to be a fork\nof the namespace that the request identifies in its path."
+          }
+        },
+        "required": [
+          "source_namespace_id"
+        ],
+        "type": "object"
+      },
       "ForkNamespaceRequest": {
         "additionalProperties": false,
         "description": "A request to fork a namespace.",
         "properties": {
           "new_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The durable ID of the new namespace that the fork creates."
+            "description": "The durable ID of the new namespace that the fork creates. Without this field, LoonFS\ngenerates an ID. The response's `namespace_id` is the new namespace's ID."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "An unexpired snapshot to fork from. Without it, the fork starts from the current head."
           }
         },
-        "required": [
-          "new_namespace_id"
-        ],
         "type": "object"
+      },
+      "GcSkippedWork": {
+        "description": "A part of a collection of a pool that the collection skipped.",
+        "enum": [
+          "content_deletion_pool_budget",
+          "content_deletion_unreadable_member"
+        ],
+        "type": "string"
       },
       "GrepIndex": {
         "description": "The maintenance status of a namespace's grep index.",
@@ -2817,7 +2705,7 @@
         "description": "An index that follows the change feed and can be searched through its watermark.",
         "properties": {
           "built_through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence of the commit at the index cursor."
           },
           "namespace_id": {
@@ -2851,15 +2739,11 @@
         "type": "object"
       },
       "GrepIndexStatusBackfilling": {
-        "description": "An index that is running its initial scan of a pinned checkpoint and can't be searched yet.",
+        "description": "An index that is running its initial scan of a snapshot and can't be searched yet.",
         "properties": {
           "captured_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace sequence that completes the backfill when the index reaches it."
-          },
-          "checkpoint_id": {
-            "$ref": "#/components/schemas/PinId",
-            "description": "The checkpoint that pins the state being scanned."
           },
           "cursor_inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -2873,6 +2757,10 @@
             "description": "Whether a partitioned segment reorganization is in progress.",
             "type": "boolean"
           },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "The snapshot that keeps the state being scanned."
+          },
           "status": {
             "enum": [
               "backfilling"
@@ -2882,7 +2770,7 @@
         },
         "required": [
           "captured_seq",
-          "checkpoint_id",
+          "snapshot_id",
           "status",
           "namespace_id",
           "reorganize_pending"
@@ -2965,11 +2853,11 @@
         "description": "One page of content search results.",
         "properties": {
           "built_through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The last sequence that the index covers. The server searched the commits at or below this\nsequence through the index."
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that the server read the namespace at for this page. A first page reads at\nthe namespace's head, and a later page reads at the first page's `head_seq`."
           },
           "matches": {
@@ -3011,7 +2899,7 @@
         "description": "The kind of a filesystem item, which is a file or a directory.",
         "enum": [
           "file",
-          "dir"
+          "directory"
         ],
         "type": "string"
       },
@@ -3019,7 +2907,7 @@
         "description": "The commits after a change feed cursor.",
         "properties": {
           "after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The exclusive cursor that this page starts after. It's the cursor that the caller supplied,\nor the endpoint's initial position."
           },
           "changes": {
@@ -3030,7 +2918,7 @@
             "type": "array"
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace head sequence that this page was read at."
           },
           "namespace_id": {
@@ -3038,7 +2926,7 @@
             "description": "The namespace whose change feed was read."
           },
           "next_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The cursor for the next page, when another page remains. It's absent on the page that\nreaches `head_seq`. When the page ends inside a commit, it's that commit's sequence."
           },
           "next_event_index": {
@@ -3056,36 +2944,11 @@
         ],
         "type": "object"
       },
-      "ListCheckpointsResponse": {
-        "description": "One page of checkpoint records, including expired records that garbage collection hasn't deleted\nyet.",
-        "properties": {
-          "checkpoints": {
-            "description": "The records, in ascending checkpoint ID order.",
-            "items": {
-              "$ref": "#/components/schemas/Checkpoint"
-            },
-            "type": "array"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that the records belong to."
-          },
-          "next_cursor": {
-            "description": "An opaque cursor for the next page.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "namespace_id",
-          "checkpoints"
-        ],
-        "type": "object"
-      },
       "ListFileRevisionsResponse": {
         "description": "One page of a file's revisions.",
         "properties": {
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace head sequence that the read used."
           },
           "inode_id": {
@@ -3127,7 +2990,7 @@
             "type": "array"
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace head sequence that this listing was read at."
           },
           "namespace_id": {
@@ -3162,7 +3025,7 @@
             "type": "array"
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace head sequence that this listing was read at."
           },
           "namespace_id": {
@@ -3183,6 +3046,31 @@
           "path",
           "head_seq",
           "entries"
+        ],
+        "type": "object"
+      },
+      "ListSnapshotRecordsResponse": {
+        "description": "One page of snapshot records, including expired records that garbage collection hasn't deleted\nyet.",
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that the records belong to."
+          },
+          "next_cursor": {
+            "description": "An opaque cursor for the next page.",
+            "type": "string"
+          },
+          "snapshots": {
+            "description": "The records, in ascending snapshot ID order.",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "namespace_id",
+          "snapshots"
         ],
         "type": "object"
       },
@@ -3212,17 +3100,17 @@
         "type": "object"
       },
       "ListTrashResponse": {
-        "description": "One page of the namespace's recoverable deletions.",
+        "description": "One page of the namespace's trash.",
         "properties": {
           "entries": {
-            "description": "The recoverable deletions, oldest first.",
+            "description": "The trash entries, oldest deletion first.",
             "items": {
               "$ref": "#/components/schemas/TrashEntry"
             },
             "type": "array"
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The head sequence that this page was evaluated at."
           },
           "namespace_id": {
@@ -3252,7 +3140,7 @@
         "description": "The fork and the range of the fork's commits that a merge applied.\n\nThe range follows the change feed's cursor convention, so reading the fork's change feed after\n`source_after_seq` through `source_through_seq` returns the commits that the merge applied.",
         "properties": {
           "source_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's commits above this sequence were applied. For a fork's first merge, it's the\nsequence that the fork was made at."
           },
           "source_namespace_id": {
@@ -3260,7 +3148,7 @@
             "description": "The fork whose commits the merge applied."
           },
           "source_through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's commits at or below this sequence were applied."
           }
         },
@@ -3362,7 +3250,7 @@
             "description": "The fork whose commits the merge applies. It has to be a fork of the namespace that the\nrequest merges into."
           },
           "through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork sequence that the merge applies the fork's commits through. Without it, the merge\napplies them through the fork's head."
           }
         },
@@ -3377,6 +3265,13 @@
         "enum": [
           "caught_up",
           "due"
+        ],
+        "type": "string"
+      },
+      "MetadataSkippedWork": {
+        "description": "A part of a metadata maintenance job that the job skipped.",
+        "enum": [
+          "expired_row_removal_walk_limit"
         ],
         "type": "string"
       },
@@ -3518,7 +3413,7 @@
             "description": "The namespace and sequence this namespace was forked from. Only a forked namespace has this\nfield."
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence of the namespace's newest visible commit."
           },
           "live_snapshots": {
@@ -3532,7 +3427,7 @@
             "description": "The namespace ID."
           },
           "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace's retention floor. A change feed request can set `after_seq` to this sequence\nor any later one, and the feed returns the changes committed after it."
           },
           "wal_tail_objects": {
@@ -3556,27 +3451,27 @@
       "NamespaceForkBasis": {
         "description": "The source namespace and sequence that a forked namespace started from.",
         "properties": {
+          "fork_point_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The source namespace's sequence that the fork captured."
+          },
           "rebased_from": {
             "$ref": "#/components/schemas/NamespaceRebasedFrom",
             "description": "The fork whose unmerged commits a rebase replays into this namespace. Only a namespace that\na rebase created has this field."
-          },
-          "source_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The source namespace's sequence that the fork captured."
           },
           "source_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace that the fork was taken from."
           },
-          "source_pin_id": {
-            "$ref": "#/components/schemas/PinId",
-            "description": "The fork pin that keeps the source's state at `source_head_seq` readable. A read of the\nsource namespace accepts it as `snapshot_id`."
+          "source_snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "The fork snapshot that keeps the source's state at `fork_point_seq` readable. A read of the\nsource namespace accepts it as `snapshot_id`."
           }
         },
         "required": [
           "source_namespace_id",
-          "source_head_seq",
-          "source_pin_id"
+          "fork_point_seq",
+          "source_snapshot_id"
         ],
         "type": "object"
       },
@@ -3603,28 +3498,28 @@
             "$ref": "#/components/schemas/ActorId",
             "description": "The actor that created the namespace, as the application supplied it."
           },
-          "family_root_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace whose prefix stores the content of this namespace's fork family. For a\nnamespace that wasn't created by a fork, this is the namespace itself. A fork has the same\nfamily root as its source."
-          },
           "fork_basis": {
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "The namespace and sequence this namespace was forked from. Only a forked namespace has this\nfield."
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence of the namespace's newest visible commit."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace ID."
           },
+          "pool_id": {
+            "$ref": "#/components/schemas/PoolId",
+            "description": "The pool that stores the namespace's content objects and upload records. A fork has the\nsame pool as its source."
+          },
           "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace's retention floor. A change feed request can set `after_seq` to this sequence\nor any later one, and the feed returns the changes committed after it."
           },
           "retention_window_ms": {
-            "description": "The namespace's retention window, in milliseconds. Only a namespace with its own window has\nthis field. The reference server's maintenance sweep uses the server's `retention_window_ms`\nsetting for a namespace that has no window of its own.",
+            "description": "The namespace's retention window, in milliseconds. Only a namespace with a window has this\nfield. The reference server's maintenance sweep doesn't advance the floor of a namespace\nwithout a window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -3635,7 +3530,7 @@
           "namespace_id",
           "created_at_ms",
           "created_by",
-          "family_root_id",
+          "pool_id",
           "head_seq",
           "retention_floor_seq"
         ],
@@ -3645,7 +3540,7 @@
         "description": "The fork whose unmerged commits a rebase replays into the namespace that the rebase created.",
         "properties": {
           "resume_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork sequence that the fork's next merge would have started after when the rebase\ncreated the namespace. The namespace's first replay commit starts after it."
           },
           "source_namespace_id": {
@@ -3660,10 +3555,10 @@
         "type": "object"
       },
       "NextMergeRangeOutcomeForkPointBelowFloor": {
-        "description": "The fork point is below the namespace's retention floor, so a merge of the fork returns\n`rebootstrap_required`. The outcome doesn't say where the next merge would start, because\na compaction might have removed the fork's newest merge from the namespace's merge index.",
+        "description": "The fork point is below the namespace's retention floor, so a merge of the fork returns\n`below_retention_floor`. The outcome doesn't say where the next merge would start, because\na compaction might have removed the fork's newest merge from the namespace's merge index.",
         "properties": {
           "fork_point_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of\nthe namespace that the rebase forked."
           },
           "outcome": {
@@ -3674,11 +3569,11 @@
             "type": "string"
           },
           "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace's retention floor, which is above the fork point (for a rebase's new\nfork, above the new fork's own fork point)."
           },
           "source_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's head sequence when the server read it."
           }
         },
@@ -3694,7 +3589,7 @@
         "description": "The floors allow the next merge.",
         "properties": {
           "fork_point_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of\nthe namespace that the rebase forked."
           },
           "merge": {
@@ -3702,7 +3597,7 @@
             "description": "The fork's newest merge into the namespace, which the next merge continues. It's\nabsent before the fork's first merge. In a rebase's new fork, it's the fork's newest\nreplay commit, never a merge that the new fork inherited."
           },
           "next_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork sequence that the next merge starts after: the newest merge's\n`source_through_seq`, or the fork point before the fork's first merge. In a rebase's\nnew fork, it's the new fork's `resume_after_seq` before the first replay commit."
           },
           "outcome": {
@@ -3713,7 +3608,7 @@
             "type": "string"
           },
           "source_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's head sequence when the server read it."
           }
         },
@@ -3726,10 +3621,10 @@
         "type": "object"
       },
       "NextMergeRangeOutcomeRangeStartBelowFloor": {
-        "description": "The range starts below the fork's own retention floor, so a merge of the fork returns\n`rebootstrap_required`, because the fork no longer keeps the history that the merge's net\nchange needs.",
+        "description": "The range starts below the fork's own retention floor, so a merge of the fork returns\n`below_retention_floor`, because the fork no longer keeps the history that the merge's net\nchange needs.",
         "properties": {
           "fork_point_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of\nthe namespace that the rebase forked."
           },
           "merge": {
@@ -3737,7 +3632,7 @@
             "description": "The fork's newest merge into the namespace, as for `open`. It's absent before the\nfork's first merge."
           },
           "next_after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork sequence that the next merge would start after, as for `open`."
           },
           "outcome": {
@@ -3748,11 +3643,11 @@
             "type": "string"
           },
           "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's retention floor, which is above `next_after_seq`."
           },
           "source_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's head sequence when the server read it."
           }
         },
@@ -3787,21 +3682,21 @@
           }
         ]
       },
-      "ObjectTransferAccess": {
-        "description": "A capability that lets a client transfer bytes directly to or from object storage.",
+      "ObjectTransfer": {
+        "description": "How a client transfers bytes directly to or from object storage.",
         "discriminator": {
           "mapping": {
-            "presigned_url": "#/components/schemas/ObjectTransferAccessPresignedUrl"
+            "presigned_url": "#/components/schemas/ObjectTransferPresignedUrl"
           },
           "propertyName": "kind"
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/ObjectTransferAccessPresignedUrl"
+            "$ref": "#/components/schemas/ObjectTransferPresignedUrl"
           }
         ]
       },
-      "ObjectTransferAccessPresignedUrl": {
+      "ObjectTransferPresignedUrl": {
         "description": "A short-lived URL, with the headers that one object store read or write requires.",
         "properties": {
           "expires_at_ms": {
@@ -3848,7 +3743,7 @@
         "description": "The metadata for one path, as stat and directory listings return it.\n\nThe response includes attribute fields only when the request asks for them.\n\nA newer server can return an inode kind that isn't listed here. Clients should read only the\nfields that every entry includes.",
         "discriminator": {
           "mapping": {
-            "dir": "#/components/schemas/PathEntryDirectory",
+            "directory": "#/components/schemas/PathEntryDirectory",
             "file": "#/components/schemas/PathEntryFile"
           },
           "propertyName": "inode_kind"
@@ -3902,7 +3797,7 @@
             "description": "The stored display name of this path component. It's absent for the root, which has no name."
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace head sequence that this response was read at."
           },
           "inode_id": {
@@ -3912,7 +3807,7 @@
           "inode_kind": {
             "description": "Whether the entry is a file or a directory.",
             "enum": [
-              "dir"
+              "directory"
             ],
             "type": "string"
           },
@@ -3984,7 +3879,7 @@
             "description": "The stored display name of this path component. It's absent for the root, which has no name."
           },
           "head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace head sequence that this response was read at."
           },
           "inode_id": {
@@ -4046,99 +3941,44 @@
         ],
         "type": "object"
       },
-      "PinId": {
-        "description": "The durable ID of one pin.\n\nThe manifest number in the ID determines which namespace manifest the pin protects.",
-        "example": "pin_00000000000000000001-0000000000000002",
-        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
-        "type": "string"
-      },
-      "PrincipalId": {
-        "description": "A stable, opaque principal ID of 1 to 256 visible ASCII characters other than the comma.",
-        "example": "prn_8f3c",
-        "pattern": "^[\\x21-\\x2B\\x2D-\\x7E]{1,256}$",
-        "type": "string"
-      },
-      "PrincipalScope": {
-        "description": "An opaque identity domain ID of 1 to 256 visible ASCII characters other than the comma.",
-        "example": "org_acme",
-        "pattern": "^[\\x21-\\x2B\\x2D-\\x7E]{1,256}$",
-        "type": "string"
-      },
-      "ProbeRunId": {
-        "description": "The ID of one run of the store contract probe.\n\nThe probe stores its temporary objects under a key prefix that includes this ID.",
-        "example": "probe_3w7td1ypsd9hq8m3rv7nf7s6hb",
-        "pattern": "^probe_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-        "type": "string"
-      },
-      "ReadConsistency": {
-        "description": "How recently a live read confirms the namespace head, without a maximum\nstaleness.\n\nA runtime's default consistency and the `consistency` field of a download\nrequest take one of these values. `eventual` reads at the head that was\nconfirmed last while that confirmation is younger than the maximum\nstaleness, and `strong` confirms the head before the read.",
-        "enum": [
-          "eventual",
-          "strong"
-        ],
-        "type": "string"
-      },
-      "RebaseForkRequest": {
-        "additionalProperties": false,
-        "description": "A request to rebase a fork: to replay its unmerged commits into a new fork of the namespace\nthat it was forked from, as one replay commit.",
+      "PoolDeletedObjectCounts": {
+        "description": "The number of objects that one garbage collection of a pool deleted, grouped by object\nfamily.",
         "properties": {
-          "commit_id": {
-            "$ref": "#/components/schemas/CommitId",
-            "description": "The caller's idempotency key for the replay commit."
-          },
-          "message": {
-            "description": "An annotation from the caller. The message is part of the replay commit's identity.",
-            "type": "string"
-          },
-          "new_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The new fork that the replay commit commits into. The first rebase of the fork creates it\nfrom the namespace's head, and a later rebase continues into it."
-          },
-          "source_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The fork whose unmerged commits the rebase replays. It has to be a fork of the namespace\nthat the request names in its path."
-          },
-          "through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The fork sequence that the replay commit replays the fork's commits through. Without it,\nthe replay commit replays them through the fork's head."
-          }
-        },
-        "required": [
-          "source_namespace_id",
-          "new_namespace_id",
-          "commit_id"
-        ],
-        "type": "object"
-      },
-      "RebaseForkResponse": {
-        "description": "The result of a rebase: the new fork, and the changes that the replay commit left out.",
-        "properties": {
-          "conflicts": {
-            "description": "The replay commit's conflict report, with one entry for each inode whose change the replay\ncommit didn't apply. It's absent when the request's commit ID identifies a replay commit\nthat an earlier request committed, because only the response that committed the replay\ncommit has its report.",
-            "items": {
-              "$ref": "#/components/schemas/MergeConflict"
-            },
-            "type": "array"
-          },
-          "namespace": {
-            "$ref": "#/components/schemas/NamespaceMetadata",
-            "description": "The new fork after the replay commit."
-          }
-        },
-        "required": [
-          "namespace"
-        ],
-        "type": "object"
-      },
-      "RetainedCandidates": {
-        "description": "The candidates that one garbage collection pass inspected but didn't delete, counted by reason.",
-        "properties": {
-          "checkpoint_not_deletable": {
-            "description": "The checkpoint records that the pass couldn't delete because of their owner or their grace\nwindow.",
+          "content_objects": {
+            "description": "The content objects the collection deleted because no member's retained view referenced them\nand they were older than the grace window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
+          "temporary_objects": {
+            "description": "The temporary objects that the collection deleted because they were older than the grace\nwindow.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upload_sessions": {
+            "description": "The upload sessions whose records the collection deleted after their grace windows passed.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "content_objects",
+          "upload_sessions",
+          "temporary_objects"
+        ],
+        "type": "object"
+      },
+      "PoolId": {
+        "description": "The ID of one pool, the set of namespaces that share one set of content objects. See\n[Pools](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md).",
+        "example": "pool_3s0drmj8em84yb4mnetqkz2j0x",
+        "pattern": "^pool_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
+      },
+      "PoolRetainedCandidates": {
+        "description": "The candidates that one garbage collection of a pool inspected but didn't delete, counted\nby reason.",
+        "properties": {
           "no_provider_timestamp": {
             "description": "The unreferenced candidates that had no provider timestamp, so their age was unknown.",
             "format": "int64",
@@ -4146,19 +3986,19 @@
             "type": "integer"
           },
           "referenced": {
-            "description": "The candidates that a current root protected, or that manifest discovery needed. A content\nobject is protected when an extent filter of a rooted layout segment matches it, and a false\nmatch keeps the object until no rooted view lists that segment.",
+            "description": "The content objects that the roots of a pool member protected. A content object is\nprotected when an extent filter of a rooted layout segment matches it, and a false match\nkeeps the object until no rooted view lists that segment.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "unrecognized_key": {
-            "description": "The keys that garbage collection didn't recognize in the object families it scanned. The\npass keeps these objects.",
+            "description": "The keys that garbage collection didn't recognize in the object families it scanned. The\ncollection keeps these objects.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "upload_session_undecided": {
-            "description": "The upload sessions that the pass couldn't prove safe to delete.",
+            "description": "The upload sessions that the collection couldn't prove safe to delete.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4181,9 +4021,124 @@
           "within_grace_window",
           "no_provider_timestamp",
           "unrecognized_key",
-          "checkpoint_not_deletable",
           "upload_session_window",
           "upload_session_undecided"
+        ],
+        "type": "object"
+      },
+      "PrincipalId": {
+        "description": "A stable, opaque principal ID of 1 to 256 visible ASCII characters other than the comma.",
+        "example": "prn_8f3c",
+        "pattern": "^[\\x21-\\x2B\\x2D-\\x7E]{1,256}$",
+        "type": "string"
+      },
+      "PrincipalScope": {
+        "description": "An opaque identity domain ID of 1 to 256 visible ASCII characters other than the comma.",
+        "example": "org_acme",
+        "pattern": "^[\\x21-\\x2B\\x2D-\\x7E]{1,256}$",
+        "type": "string"
+      },
+      "ProbeId": {
+        "description": "The ID of one run of the store contract probe.\n\nThe probe stores its temporary objects under a key prefix that includes this ID.",
+        "example": "probe_3w7td1ypsd9hq8m3rv7nf7s6hb",
+        "pattern": "^probe_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
+      },
+      "ReadConsistency": {
+        "description": "How recently a live read confirms the namespace head, without a maximum\nstaleness.\n\nA runtime's default consistency and the `consistency` field of a download\nrequest take one of these values. `eventual` reads at the head that was\nconfirmed last while that confirmation is younger than the maximum\nstaleness, and `strong` confirms the head before the read.",
+        "enum": [
+          "eventual",
+          "strong"
+        ],
+        "type": "string"
+      },
+      "ReplayForkRequest": {
+        "additionalProperties": false,
+        "description": "A request to replay a fork's unmerged commits into a rebase's new fork as one replay commit.",
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "The caller's idempotency key for the replay commit."
+          },
+          "message": {
+            "description": "An annotation from the caller. The message is part of the replay commit's identity.",
+            "type": "string"
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose unmerged commits the replay commit replays. The namespace that the request\nidentifies in its path has to be a rebase's new fork for this fork."
+          },
+          "through_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The fork sequence that the replay commit replays the fork's commits through. Without it,\nthe replay commit replays them through the fork's head."
+          }
+        },
+        "required": [
+          "source_namespace_id",
+          "commit_id"
+        ],
+        "type": "object"
+      },
+      "ReplayForkResponse": {
+        "description": "The result of a replay commit: the new fork, and the changes that the replay commit left out.",
+        "properties": {
+          "conflicts": {
+            "description": "The replay commit's conflict report, with one entry for each inode whose change the replay\ncommit didn't apply. It's absent when the request's commit ID identifies a replay commit\nthat an earlier request committed, because only the response that committed the replay\ncommit has its report.",
+            "items": {
+              "$ref": "#/components/schemas/MergeConflict"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "$ref": "#/components/schemas/NamespaceMetadata",
+            "description": "The new fork after the replay commit."
+          }
+        },
+        "required": [
+          "namespace"
+        ],
+        "type": "object"
+      },
+      "RetainedCandidates": {
+        "description": "The candidates that one garbage collection of a namespace inspected but didn't delete,\ncounted by reason.",
+        "properties": {
+          "no_provider_timestamp": {
+            "description": "The unreferenced candidates that had no provider timestamp, so their age was unknown.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "referenced": {
+            "description": "The candidates that a current root protected, or that manifest discovery needed.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snapshot_not_deletable": {
+            "description": "The snapshot records that the collection couldn't delete because of their owner or their\ngrace window.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unrecognized_key": {
+            "description": "The keys that garbage collection didn't recognize in the object families it scanned. The\ncollection keeps these objects.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "within_grace_window": {
+            "description": "The unreferenced candidates that were younger than the grace window, according to their\nprovider timestamps.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "referenced",
+          "within_grace_window",
+          "no_provider_timestamp",
+          "unrecognized_key",
+          "snapshot_not_deletable"
         ],
         "type": "object"
       },
@@ -4194,41 +4149,41 @@
         "minimum": 0,
         "type": "integer"
       },
-      "RunMaintenanceRequest": {
+      "RunMaintenanceJobRequest": {
         "description": "One maintenance job for one namespace.",
         "discriminator": {
           "mapping": {
-            "gc": "#/components/schemas/RunMaintenanceRequestGc",
-            "metadata": "#/components/schemas/RunMaintenanceRequestMetadata",
-            "recover_administrator": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator",
-            "retention": "#/components/schemas/RunMaintenanceRequestRetention",
-            "retention_window": "#/components/schemas/RunMaintenanceRequestRetentionWindow"
+            "gc": "#/components/schemas/RunMaintenanceJobRequestGc",
+            "metadata": "#/components/schemas/RunMaintenanceJobRequestMetadata",
+            "recover_administrator": "#/components/schemas/RunMaintenanceJobRequestRecoverAdministrator",
+            "retention": "#/components/schemas/RunMaintenanceJobRequestRetention",
+            "retention_window": "#/components/schemas/RunMaintenanceJobRequestRetentionWindow"
           },
           "propertyName": "kind"
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/RunMaintenanceRequestMetadata"
+            "$ref": "#/components/schemas/RunMaintenanceJobRequestMetadata"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceRequestGc"
+            "$ref": "#/components/schemas/RunMaintenanceJobRequestGc"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceRequestRetention"
+            "$ref": "#/components/schemas/RunMaintenanceJobRequestRetention"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceRequestRetentionWindow"
+            "$ref": "#/components/schemas/RunMaintenanceJobRequestRetentionWindow"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceRequestRecoverAdministrator"
+            "$ref": "#/components/schemas/RunMaintenanceJobRequestRecoverAdministrator"
           }
         ]
       },
-      "RunMaintenanceRequestGc": {
+      "RunMaintenanceJobRequestGc": {
         "description": "A garbage collection job for aged, unreferenced objects, which also collects the grep\nindex's objects when the deployment maintains a grep index.",
         "properties": {
           "grace_window_ms": {
-            "description": "The minimum age, in milliseconds, that an object must reach before the pass can delete it.\nThe value must be at least the server's advertised safety floor. The grep index's collector\nkeeps its own age rules, so this value doesn't change them.",
+            "description": "The minimum age, in milliseconds, that an object must reach before the collection can delete\nit. The value must be at least the server's advertised safety floor. The grep index's\ncollector keeps its own age rules, so this value doesn't change them.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4245,7 +4200,7 @@
         ],
         "type": "object"
       },
-      "RunMaintenanceRequestMetadata": {
+      "RunMaintenanceJobRequestMetadata": {
         "description": "A job that folds the WAL tail and compacts metadata until nothing is due, or until the job\nreaches its work limit.",
         "properties": {
           "kind": {
@@ -4266,7 +4221,7 @@
         ],
         "type": "object"
       },
-      "RunMaintenanceRequestRecoverAdministrator": {
+      "RunMaintenanceJobRequestRecoverAdministrator": {
         "description": "A job that restores a root administrator.",
         "properties": {
           "kind": {
@@ -4286,7 +4241,7 @@
         ],
         "type": "object"
       },
-      "RunMaintenanceRequestRetention": {
+      "RunMaintenanceJobRequestRetention": {
         "description": "A job that advances the retention floor toward the folded manifest head, or toward the\ntarget that the request sets.\n\nThe floor doesn't pass a commit that's less than one hour old.",
         "properties": {
           "cutoff_at_ms": {
@@ -4302,7 +4257,7 @@
             "type": "string"
           },
           "to_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence to advance the floor to. If the folded manifest head is lower, the floor\nadvances to the head instead. This field can't be combined with `cutoff_at_ms`."
           }
         },
@@ -4311,7 +4266,7 @@
         ],
         "type": "object"
       },
-      "RunMaintenanceRequestRetentionWindow": {
+      "RunMaintenanceJobRequestRetentionWindow": {
         "description": "A job that sets or clears the namespace's retention window.",
         "properties": {
           "kind": {
@@ -4321,7 +4276,7 @@
             "type": "string"
           },
           "retention_window_ms": {
-            "description": "The namespace's new retention window, in milliseconds, which must be positive. Without it,\nthe job clears the namespace's window, and the reference server's `retention_window_ms`\nsetting applies to the namespace again.",
+            "description": "The namespace's new retention window, in milliseconds, which must be positive. Without it,\nthe job clears the namespace's window, and the reference server's maintenance sweep no\nlonger advances the namespace's floor.",
             "format": "int64",
             "minimum": 1,
             "type": "integer"
@@ -4332,46 +4287,46 @@
         ],
         "type": "object"
       },
-      "RunMaintenanceResponse": {
+      "RunMaintenanceJobResponse": {
         "description": "The result of one maintenance job.\n\nThe `kind` matches the request.",
         "discriminator": {
           "mapping": {
-            "gc": "#/components/schemas/RunMaintenanceResponseGc",
-            "metadata": "#/components/schemas/RunMaintenanceResponseMetadata",
-            "recover_administrator": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator",
-            "retention": "#/components/schemas/RunMaintenanceResponseRetention",
-            "retention_window": "#/components/schemas/RunMaintenanceResponseRetentionWindow"
+            "gc": "#/components/schemas/RunMaintenanceJobResponseGc",
+            "metadata": "#/components/schemas/RunMaintenanceJobResponseMetadata",
+            "recover_administrator": "#/components/schemas/RunMaintenanceJobResponseRecoverAdministrator",
+            "retention": "#/components/schemas/RunMaintenanceJobResponseRetention",
+            "retention_window": "#/components/schemas/RunMaintenanceJobResponseRetentionWindow"
           },
           "propertyName": "kind"
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/RunMaintenanceResponseMetadata"
+            "$ref": "#/components/schemas/RunMaintenanceJobResponseMetadata"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceResponseGc"
+            "$ref": "#/components/schemas/RunMaintenanceJobResponseGc"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceResponseRetention"
+            "$ref": "#/components/schemas/RunMaintenanceJobResponseRetention"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceResponseRetentionWindow"
+            "$ref": "#/components/schemas/RunMaintenanceJobResponseRetentionWindow"
           },
           {
-            "$ref": "#/components/schemas/RunMaintenanceResponseRecoverAdministrator"
+            "$ref": "#/components/schemas/RunMaintenanceJobResponseRecoverAdministrator"
           }
         ]
       },
-      "RunMaintenanceResponseGc": {
+      "RunMaintenanceJobResponseGc": {
         "description": "The counts and deadlines from one garbage collection call.",
         "properties": {
           "deleted": {
             "$ref": "#/components/schemas/DeletedObjectCounts",
-            "description": "The objects that the pass deleted, counted by object family."
+            "description": "The objects that the collection deleted, counted by object family."
           },
-          "deleted_checkpoints_by_owner": {
-            "$ref": "#/components/schemas/DeletedCheckpointsByOwner",
-            "description": "The checkpoint records that the pass deleted, counted by owner."
+          "deleted_snapshots_by_owner": {
+            "$ref": "#/components/schemas/DeletedSnapshotsByOwner",
+            "description": "The snapshot records that the collection deleted, counted by owner."
           },
           "kind": {
             "enum": [
@@ -4380,47 +4335,47 @@
             "type": "string"
           },
           "listed_bytes": {
-            "description": "The bytes of every object that the pass listed under the namespace, each object once, before\nthe pass's deletes.",
+            "description": "The bytes of every object that the collection listed under the namespace, each object once,\nbefore the collection's deletes.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that the pass ran against."
+            "description": "The namespace that the collection ran against."
           },
           "next_reclamation_at_ms": {
-            "description": "The earliest future retirement deadline, pin deletion time, or upload cleanup time.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "reclaimable_at_ms": {
-            "description": "The deletion time of the current tombstone plus the configured retirement grace.",
+            "description": "The earliest future retirement deadline or snapshot deletion time.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "retained": {
             "$ref": "#/components/schemas/RetainedCandidates",
-            "description": "The candidates that the pass kept at deletion time, counted by reason."
+            "description": "The candidates that the collection kept at deletion time, counted by reason."
+          },
+          "retires_at_ms": {
+            "description": "The deletion time of the current tombstone plus the configured retirement grace.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "namespace_id",
           "deleted",
-          "deleted_checkpoints_by_owner",
+          "deleted_snapshots_by_owner",
           "retained",
           "listed_bytes",
           "kind"
         ],
         "type": "object"
       },
-      "RunMaintenanceResponseMetadata": {
+      "RunMaintenanceJobResponseMetadata": {
         "description": "Whether metadata maintenance is caught up, and the compaction units that the job published.",
         "properties": {
           "compaction_units": {
-            "description": "The compaction units that this run published. A unit compacts one family group's window.",
+            "description": "The compaction units that this job published. A unit compacts one family group's window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4433,11 +4388,18 @@
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that this run maintained."
+            "description": "The namespace that this job maintained."
           },
           "outcome": {
             "$ref": "#/components/schemas/MetadataMaintenanceOutcome",
-            "description": "Whether work is still due when the run returns."
+            "description": "Whether work is still due when the job returns."
+          },
+          "skipped": {
+            "description": "The work that this job skipped at a limit, by reason. Empty when the job skipped nothing.",
+            "items": {
+              "$ref": "#/components/schemas/MetadataSkippedWork"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -4448,7 +4410,7 @@
         ],
         "type": "object"
       },
-      "RunMaintenanceResponseRecoverAdministrator": {
+      "RunMaintenanceJobResponseRecoverAdministrator": {
         "description": "The committed administrator recovery.",
         "properties": {
           "access_revision_no": {
@@ -4460,7 +4422,7 @@
             "description": "The ID of the recovery commit."
           },
           "committed_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence of the recovery commit."
           },
           "kind": {
@@ -4483,7 +4445,7 @@
         ],
         "type": "object"
       },
-      "RunMaintenanceResponseRetention": {
+      "RunMaintenanceJobResponseRetention": {
         "description": "The result of advancing the retention floor.",
         "properties": {
           "kind": {
@@ -4497,7 +4459,7 @@
             "description": "The namespace whose retention floor was advanced."
           },
           "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The retention floor that the advance reached, which is the minimum sequence for incremental\nreplay. It's below the target when LoonFS reads a commit that's less than one hour old\nbefore it reaches the target."
           }
         },
@@ -4508,7 +4470,7 @@
         ],
         "type": "object"
       },
-      "RunMaintenanceResponseRetentionWindow": {
+      "RunMaintenanceJobResponseRetentionWindow": {
         "description": "The namespace's retention window after the job.",
         "properties": {
           "kind": {
@@ -4522,7 +4484,7 @@
             "description": "The namespace whose retention window the job set or cleared."
           },
           "retention_window_ms": {
-            "description": "The namespace's retention window, in milliseconds. It's absent when the namespace has no\nwindow of its own.",
+            "description": "The namespace's retention window, in milliseconds. It's absent when the namespace has no\nwindow.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4530,6 +4492,105 @@
         },
         "required": [
           "namespace_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RunPoolMaintenanceJobRequest": {
+        "description": "One maintenance job for one pool.",
+        "discriminator": {
+          "mapping": {
+            "gc": "#/components/schemas/RunPoolMaintenanceJobRequestGc"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RunPoolMaintenanceJobRequestGc"
+          }
+        ]
+      },
+      "RunPoolMaintenanceJobRequestGc": {
+        "description": "A garbage collection job for the pool's aged, unreferenced content objects, upload records,\nand temporary objects.",
+        "properties": {
+          "grace_window_ms": {
+            "description": "The minimum age, in milliseconds, that an object must reach before the collection can delete\nit. The value must be at least the server's advertised safety floor. The grep index's\ncollector keeps its own age rules, so this value doesn't change them.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "gc"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RunPoolMaintenanceJobResponse": {
+        "description": "The result of one maintenance job on a pool.\n\nThe `kind` matches the request.",
+        "discriminator": {
+          "mapping": {
+            "gc": "#/components/schemas/RunPoolMaintenanceJobResponseGc"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RunPoolMaintenanceJobResponseGc"
+          }
+        ]
+      },
+      "RunPoolMaintenanceJobResponseGc": {
+        "description": "The counts and deadlines from one garbage collection call on the pool.",
+        "properties": {
+          "deleted": {
+            "$ref": "#/components/schemas/PoolDeletedObjectCounts",
+            "description": "The objects that the collection deleted, counted by object family."
+          },
+          "kind": {
+            "enum": [
+              "gc"
+            ],
+            "type": "string"
+          },
+          "listed_bytes": {
+            "description": "The bytes of every object that the collection listed under the pool, each object once,\nbefore the collection's deletes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_reclamation_at_ms": {
+            "description": "The earliest future upload cleanup time, or the end of the pool record's creation grace.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pool_id": {
+            "$ref": "#/components/schemas/PoolId",
+            "description": "The pool that the collection ran against."
+          },
+          "retained": {
+            "$ref": "#/components/schemas/PoolRetainedCandidates",
+            "description": "The candidates that the collection kept at deletion time, counted by reason."
+          },
+          "skipped": {
+            "description": "The work that this collection skipped at a limit, by reason. Empty when the collection\nskipped nothing.",
+            "items": {
+              "$ref": "#/components/schemas/GcSkippedWork"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "pool_id",
+          "deleted",
+          "retained",
+          "listed_bytes",
           "kind"
         ],
         "type": "object"
@@ -4552,7 +4613,7 @@
         "type": "object"
       },
       "SignUploadPartsResponse": {
-        "description": "One capability for each requested part.",
+        "description": "One presigned URL for each requested part.",
         "properties": {
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -4580,20 +4641,20 @@
       "SignedUploadPart": {
         "description": "One authorized part upload.",
         "properties": {
-          "access": {
-            "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "A short-lived write capability for this part."
-          },
           "part_number": {
-            "description": "The part number that this capability writes.",
+            "description": "The part number that this presigned URL writes.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "transfer": {
+            "$ref": "#/components/schemas/ObjectTransfer",
+            "description": "A short-lived presigned URL that writes this part."
           }
         },
         "required": [
           "part_number",
-          "access"
+          "transfer"
         ],
         "type": "object"
       },
@@ -4601,7 +4662,7 @@
         "description": "A snapshot, which keeps one version of a namespace readable until it's deleted or expires.",
         "properties": {
           "captured_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace sequence that the snapshot captured."
           },
           "created_at_ms": {
@@ -4625,7 +4686,7 @@
             "description": "The namespace whose state the snapshot captured."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "The snapshot ID."
           }
         },
@@ -4635,6 +4696,116 @@
           "name",
           "captured_seq",
           "created_at_ms"
+        ],
+        "type": "object"
+      },
+      "SnapshotId": {
+        "description": "The durable ID of one snapshot.\n\nThe manifest number in the ID determines which namespace manifest the snapshot protects.",
+        "example": "snp_00000000000000000001-00000000000000000000000002",
+        "pattern": "^snp_[0-9]{20}-[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
+      },
+      "SnapshotRecord": {
+        "description": "One snapshot, as its durable record stores it.",
+        "properties": {
+          "captured_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The namespace sequence that the snapshot captured."
+          },
+          "created_at_ms": {
+            "description": "The time the snapshot record was created, in Unix milliseconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expires_at_ms": {
+            "description": "The time the snapshot expires, in Unix milliseconds. Garbage collection waits one more\ngrace window before it deletes the record.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "manifest_no": {
+            "$ref": "#/components/schemas/ManifestNo",
+            "description": "The manifest that the snapshot keeps."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that the snapshot belongs to."
+          },
+          "owner": {
+            "$ref": "#/components/schemas/SnapshotRecordOwner",
+            "description": "The snapshot's owner. For a user snapshot, the owner includes the label."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "The snapshot's durable ID."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "snapshot_id",
+          "owner",
+          "created_at_ms",
+          "captured_seq",
+          "manifest_no"
+        ],
+        "type": "object"
+      },
+      "SnapshotRecordOwner": {
+        "description": "The owner of a snapshot record.",
+        "discriminator": {
+          "mapping": {
+            "fork": "#/components/schemas/SnapshotRecordOwnerFork",
+            "user": "#/components/schemas/SnapshotRecordOwnerUser"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SnapshotRecordOwnerUser"
+          },
+          {
+            "$ref": "#/components/schemas/SnapshotRecordOwnerFork"
+          }
+        ]
+      },
+      "SnapshotRecordOwnerFork": {
+        "description": "A snapshot that keeps the source state that one fork attempt starts from.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "fork"
+            ],
+            "type": "string"
+          },
+          "target_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork's target namespace. Garbage collection keeps this snapshot while that\nnamespace exists."
+          }
+        },
+        "required": [
+          "target_namespace_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "SnapshotRecordOwnerUser": {
+        "description": "A snapshot, which a caller created. It's deleted by its ID or after it expires.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "user"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "description": "The label that the creator recorded. Labels don't need to be unique.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind"
         ],
         "type": "object"
       },
@@ -4743,19 +4914,19 @@
             },
             "type": "array"
           },
-          "run_id": {
-            "$ref": "#/components/schemas/ProbeRunId",
+          "probe_id": {
+            "$ref": "#/components/schemas/ProbeId",
             "description": "The ID of this probe run. The server generates the ID and writes the probe's temporary\nobjects under it."
           }
         },
         "required": [
-          "run_id",
+          "probe_id",
           "checks"
         ],
         "type": "object"
       },
       "TrashEntry": {
-        "description": "One recoverable deletion and the directory binding that it removed.",
+        "description": "One trash entry: a deletion and the directory binding that it removed.",
         "properties": {
           "deleted_at_ms": {
             "description": "The time of the deletion, in Unix milliseconds.",
@@ -4772,7 +4943,7 @@
             "description": "The actor responsible for the deletion."
           },
           "deletion_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
+            "$ref": "#/components/schemas/CommitSeq",
             "description": "The commit sequence that identifies this deletion."
           },
           "inode_id": {
@@ -4961,10 +5132,6 @@
       "UploadSessionStatusOpen": {
         "description": "A session that accepts content until its lease ends.",
         "properties": {
-          "access": {
-            "$ref": "#/components/schemas/ObjectTransferAccess",
-            "description": "The capability for the direct PUT. It's present for `direct_put` sessions, and the\nserver creates a new one on every read."
-          },
           "checksum_algorithm": {
             "$ref": "#/components/schemas/ChecksumAlgorithm",
             "description": "The checksum algorithm that the store uses for content."
@@ -4999,6 +5166,10 @@
               "open"
             ],
             "type": "string"
+          },
+          "transfer": {
+            "$ref": "#/components/schemas/ObjectTransfer",
+            "description": "The presigned URL for the direct PUT. It's present for `direct_put` sessions, and the\nserver creates a new one on every read."
           },
           "upload_id": {
             "$ref": "#/components/schemas/UploadId",
@@ -5188,188 +5359,6 @@
         ],
         "x-fern-sdk-group-name": [
           "capabilities"
-        ],
-        "x-fern-sdk-method-name": "retrieve",
-        "x-loonfs-retry": "idempotent"
-      }
-    },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints": {
-      "get": {
-        "description": "Lists every pin, snapshots and fork pins, in checkpoint ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of pins.",
-        "operationId": "list_checkpoints",
-        "parameters": [
-          {
-            "description": "The namespace ID.",
-            "in": "path",
-            "name": "namespace_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The maximum page size.",
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 1000,
-              "format": "int32",
-              "maximum": 1000,
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "The opaque cursor that the previous page returned.",
-            "in": "query",
-            "name": "cursor",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListCheckpointsResponse"
-                }
-              }
-            },
-            "description": "Existing checkpoint objects"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid namespace ID, limit, or cursor"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace not found"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "List checkpoints",
-        "tags": [
-          "maintenance"
-        ],
-        "x-fern-pagination": {
-          "cursor": "$request.cursor",
-          "next_cursor": "$response.next_cursor",
-          "results": "$response.checkpoints"
-        },
-        "x-fern-request-name": "ListCheckpointsRequest",
-        "x-fern-sdk-group-name": [
-          "maintenance",
-          "checkpoints"
-        ],
-        "x-fern-sdk-method-name": "list",
-        "x-loonfs-retry": "idempotent"
-      }
-    },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}": {
-      "get": {
-        "description": "Returns one existing pin, as the checkpoint listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
-        "operationId": "get_checkpoint",
-        "parameters": [
-          {
-            "description": "The namespace ID.",
-            "in": "path",
-            "name": "namespace_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The checkpoint ID.",
-            "in": "path",
-            "name": "checkpoint_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Checkpoint"
-                }
-              }
-            },
-            "description": "Existing checkpoint"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid namespace or checkpoint ID"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace or checkpoint not found"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "Retrieve checkpoint",
-        "tags": [
-          "maintenance"
-        ],
-        "x-fern-request-name": "GetCheckpointRequest",
-        "x-fern-sdk-group-name": [
-          "maintenance",
-          "checkpoints"
         ],
         "x-fern-sdk-method-name": "retrieve",
         "x-loonfs-retry": "idempotent"
@@ -5646,7 +5635,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable": {
       "post": {
-        "description": "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        "description": "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill at the next maintenance interval and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its snapshot captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         "operationId": "enable_grep_index",
         "parameters": [
           {
@@ -5747,10 +5736,10 @@
         "x-loonfs-retry": "idempotent"
       }
     },
-    "/v0/maintenance/namespaces/{namespace_id}/runs": {
+    "/v0/maintenance/namespaces/{namespace_id}/jobs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end, including the segments of extensions such as the grep index. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
-        "operationId": "run_maintenance",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
+        "operationId": "run_maintenance_job",
         "parameters": [
           {
             "description": "The namespace ID.",
@@ -5766,7 +5755,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RunMaintenanceRequest"
+                "$ref": "#/components/schemas/RunMaintenanceJobRequest"
               }
             }
           },
@@ -5778,7 +5767,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunMaintenanceResponse"
+                  "$ref": "#/components/schemas/RunMaintenanceJobResponse"
                 }
               }
             },
@@ -5847,7 +5836,286 @@
         },
         "x-fern-sdk-group-name": [
           "maintenance",
-          "runs"
+          "jobs"
+        ],
+        "x-fern-sdk-method-name": "create",
+        "x-loonfs-retry": "not_idempotent"
+      }
+    },
+    "/v0/maintenance/namespaces/{namespace_id}/snapshots": {
+      "get": {
+        "description": "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
+        "operationId": "list_snapshot_records",
+        "parameters": [
+          {
+            "description": "The namespace ID.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The maximum page size.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "format": "int32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The opaque cursor that the previous page returned.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSnapshotRecordsResponse"
+                }
+              }
+            },
+            "description": "Existing snapshot objects"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid namespace ID, limit, or cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace not found"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "List snapshot records",
+        "tags": [
+          "maintenance"
+        ],
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.snapshots"
+        },
+        "x-fern-request-name": "ListSnapshotRecordsRequest",
+        "x-fern-sdk-group-name": [
+          "maintenance",
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "list",
+        "x-loonfs-retry": "idempotent"
+      }
+    },
+    "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
+      "get": {
+        "description": "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
+        "operationId": "get_snapshot_record",
+        "parameters": [
+          {
+            "description": "The namespace ID.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The snapshot ID.",
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotRecord"
+                }
+              }
+            },
+            "description": "Existing snapshot"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid namespace or snapshot ID"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace or snapshot not found"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Retrieve snapshot record",
+        "tags": [
+          "maintenance"
+        ],
+        "x-fern-request-name": "GetSnapshotRecordRequest",
+        "x-fern-sdk-group-name": [
+          "maintenance",
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-retry": "idempotent"
+      }
+    },
+    "/v0/maintenance/pools/{pool_id}/jobs": {
+      "post": {
+        "description": "Runs one maintenance job for the pool. The body's `kind` selects the job, which is `gc`. The response includes the same `kind` and the job's result. A `gc` job reads the pool record, lists the pool's upload sessions, reads the roots of every member of the pool, and then sweeps the pool's content objects, upload records, and temporary objects to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from.",
+        "operationId": "run_pool_maintenance_job",
+        "parameters": [
+          {
+            "description": "The pool ID.",
+            "in": "path",
+            "name": "pool_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunPoolMaintenanceJobRequest"
+              }
+            }
+          },
+          "description": "The maintenance job to run",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPoolMaintenanceJobResponse"
+                }
+              }
+            },
+            "description": "Maintenance job completed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid pool ID or options"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Pool not found"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Run one maintenance job on a pool",
+        "tags": [
+          "maintenance"
+        ],
+        "x-fern-retries": {
+          "disabled": true
+        },
+        "x-fern-sdk-group-name": [
+          "maintenance",
+          "pools",
+          "jobs"
         ],
         "x-fern-sdk-method-name": "create",
         "x-loonfs-retry": "not_idempotent"
@@ -5930,7 +6198,7 @@
     },
     "/v0/namespaces": {
       "post": {
-        "description": "Creates a new empty namespace.",
+        "description": "Creates a new empty namespace. Without `namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         "operationId": "create_namespace",
         "requestBody": {
           "content": {
@@ -6042,7 +6310,7 @@
             "name": "expected_head_seq",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ChangeSeq"
+              "$ref": "#/components/schemas/CommitSeq"
             }
           }
         ],
@@ -6226,7 +6494,7 @@
             "name": "after_seq",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/ChangeSeq"
+              "$ref": "#/components/schemas/CommitSeq"
             }
           },
           {
@@ -6270,7 +6538,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -6514,7 +6782,7 @@
             "name": "from_seq",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/ChangeSeq"
+              "$ref": "#/components/schemas/CommitSeq"
             }
           },
           {
@@ -6523,7 +6791,7 @@
             "name": "to_seq",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ChangeSeq"
+              "$ref": "#/components/schemas/CommitSeq"
             }
           },
           {
@@ -6541,7 +6809,7 @@
             "name": "after_seq",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ChangeSeq"
+              "$ref": "#/components/schemas/CommitSeq"
             }
           },
           {
@@ -6716,7 +6984,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -6881,7 +7149,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/downloads": {
       "post": {
-        "description": "Returns ordered, signed object ranges that cover exactly `[start_offset, size_bytes)` of the selected revision. Each range includes its signed headers in `access.headers`, and the client sends them unchanged. The client checks each range's length and the complete revision's checksum. To resume a download, a client asks for a new grant from its current offset. A deployment that can't presign URLs returns 501 `not_supported`. The proxied `GET /filesystem/content` route is still available, up to the `download.service_proxied.max_content_bytes` limit.",
+        "description": "Returns ordered, signed object ranges that cover exactly `[start_offset, size_bytes)` of the selected revision. Each range includes its signed headers in `transfer.headers`, and the client sends them unchanged. The client checks each range's length and the complete revision's checksum. To resume a download, a client asks for a new download from its current offset. A deployment that can't presign URLs returns 501 `not_supported`. The proxied `GET /filesystem/content` route is still available, up to the `download.service_proxied.max_content_bytes` limit.",
         "operationId": "create_download",
         "parameters": [
           {
@@ -7061,7 +7329,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -7197,7 +7465,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -7430,7 +7698,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/trash": {
       "get": {
-        "description": "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's undeleted, or when the namespace's writer expires it after the retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that an undelete needs, and the directory binding that the delete removed.",
+        "description": "Returns the namespace's trash entries, oldest deletion first. An entry leaves the trash when it's restored, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that a restore needs, and the directory binding that the delete removed.",
         "operationId": "list_trash",
         "parameters": [
           {
@@ -7495,7 +7763,7 @@
                 }
               }
             },
-            "description": "Recoverable deletions"
+            "description": "Trash entries"
           },
           "400": {
             "content": {
@@ -7541,7 +7809,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "summary": "List recoverable deletions",
+        "summary": "List the trash",
         "tags": [
           "filesystem"
         ],
@@ -7560,7 +7828,7 @@
     },
     "/v0/namespaces/{namespace_id}/forks": {
       "post": {
-        "description": "Creates a new namespace from the source namespace's current head or from an unexpired snapshot.",
+        "description": "Creates a new namespace from the source namespace's current head or from an unexpired snapshot. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         "operationId": "fork_namespace",
         "parameters": [
           {
@@ -7912,7 +8180,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -8077,7 +8345,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -8215,7 +8483,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -8390,7 +8658,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that an unexpired snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
+        "description": "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that an unexpired snapshot captured. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         "operationId": "create_download_by_inode",
         "parameters": [
           {
@@ -8673,7 +8941,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {
       "get": {
-        "description": "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork pin keeps. A `Range` header asks for one byte range of the revision instead.",
+        "description": "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork snapshot keeps. A `Range` header asks for one byte range of the revision instead.",
         "operationId": "get_file_revision_content_by_inode",
         "parameters": [
           {
@@ -8706,12 +8974,12 @@
             }
           },
           {
-            "description": "A snapshot, or one of the namespace's fork pins, whose pinned state to find the revision\nin. The pinned manifest keeps the revision after the namespace's retention floor passes it.",
+            "description": "A snapshot, or one of the namespace's fork snapshots, whose state to find the revision\nin. The snapshot's manifest keeps the revision after the namespace's retention floor passes it.",
             "in": "query",
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -8886,7 +9154,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
+        "description": "Authorizes a direct read of one retained inode revision. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         "operationId": "create_revision_download_by_inode",
         "parameters": [
           {
@@ -9027,7 +9295,7 @@
     },
     "/v0/namespaces/{namespace_id}/merges": {
       "get": {
-        "description": "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `rebootstrap_required`, the response's `outcome` says which floor instead of failing.",
+        "description": "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `below_retention_floor`, the response's `outcome` says which floor instead of failing.",
         "operationId": "get_next_merge_range",
         "parameters": [
           {
@@ -9098,7 +9366,7 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which"
           },
           "410": {
             "content": {
@@ -9108,7 +9376,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which"
           },
           "501": {
             "content": {
@@ -9136,7 +9404,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "post": {
-        "description": "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. After the commit, the server folds the namespace's WAL tail through it, unless the merge has already run for half of the request deadline, in which case the tail waits for the fold trigger like any other tail.",
+        "description": "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. The merge's WAL object counts toward the namespace's fold triggers like any commit.",
         "operationId": "merge_fork",
         "parameters": [
           {
@@ -9208,7 +9476,7 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which"
           },
           "409": {
             "content": {
@@ -9228,7 +9496,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which"
           },
           "413": {
             "content": {
@@ -9268,8 +9536,8 @@
     },
     "/v0/namespaces/{namespace_id}/rebases": {
       "post": {
-        "description": "Replays a fork's unmerged commits into a new fork of the namespace as one replay commit, which applies the changes that don't conflict with the namespace and reports the ones that do. The first rebase of a fork creates the new fork from the namespace's head, and a later rebase continues into it. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
-        "operationId": "rebase_fork",
+        "description": "Creates a rebase's new fork from the namespace's head, for a fork of the namespace whose unmerged commits the replay route then replays into the new fork. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new fork's ID, and its `fork_basis.rebased_from` identifies the fork. A request whose new fork already exists returns `namespace_exists`.",
+        "operationId": "fork_namespace_for_rebase",
         "parameters": [
           {
             "description": "The namespace that the fork was forked from.",
@@ -9285,7 +9553,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RebaseForkRequest"
+                "$ref": "#/components/schemas/ForkNamespaceForRebaseRequest"
               }
             }
           },
@@ -9296,11 +9564,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RebaseForkResponse"
+                  "$ref": "#/components/schemas/NamespaceMetadata"
                 }
               }
             },
-            "description": "Fork rebased"
+            "description": "New fork created"
           },
           "400": {
             "content": {
@@ -9310,7 +9578,7 @@
                 }
               }
             },
-            "description": "Invalid request, the source isn't a fork of this namespace, or the new namespace isn't a rebase of the fork"
+            "description": "Invalid request, or the source isn't a fork of this namespace"
           },
           "401": {
             "content": {
@@ -9340,7 +9608,142 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The new fork already exists, or history is below a retention floor"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The namespace or the fork was deleted, or the new fork's ID was deleted and can't be used again, and `details.namespace_id` identifies which"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Merges are disabled"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Fork a namespace for a rebase",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-retries": {
+          "disabled": true
+        },
+        "x-fern-sdk-group-name": [
+          "namespaces"
+        ],
+        "x-fern-sdk-method-name": "forkForRebase",
+        "x-loonfs-actor": "required",
+        "x-loonfs-retry": "not_idempotent"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/replays": {
+      "post": {
+        "description": "Replays a fork's unmerged commits into the namespace, a rebase's new fork for the fork, as one replay commit, which applies the changes that don't conflict with the new fork and reports the ones that do. Each request continues after the new fork's previous replay commit. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
+        "operationId": "replay_fork",
+        "parameters": [
+          {
+            "description": "The rebase's new fork, which the replay commit commits into.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayForkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayForkResponse"
+                }
+              }
+            },
+            "description": "Fork replayed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request, or the namespace isn't a rebase's new fork for the fork"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The new fork or the fork doesn't exist, and `details.namespace_id` identifies which"
           },
           "409": {
             "content": {
@@ -9360,7 +9763,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "The new fork or the fork was deleted, and `details.namespace_id` identifies which"
           },
           "413": {
             "content": {
@@ -9386,21 +9789,21 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "summary": "Rebase a fork",
+        "summary": "Replay a fork into a rebase's new fork",
         "tags": [
           "namespaces"
         ],
         "x-fern-sdk-group-name": [
           "namespaces"
         ],
-        "x-fern-sdk-method-name": "rebase",
+        "x-fern-sdk-method-name": "replay",
         "x-loonfs-actor": "required",
         "x-loonfs-retry": "replayable"
       }
     },
     "/v0/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork pins, which the maintenance checkpoint inventory lists.",
+        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance snapshot inventory lists.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -9601,7 +10004,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
       "delete": {
-        "description": "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork pin returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
+        "description": "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
         "operationId": "delete_snapshot",
         "parameters": [
           {
@@ -9619,7 +10022,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -9662,7 +10065,7 @@
                 }
               }
             },
-            "description": "Namespace not found, or the ID belongs to a fork pin"
+            "description": "Namespace not found, or the ID belongs to a fork snapshot"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -9680,7 +10083,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "get": {
-        "description": "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork pin, returns `snapshot_not_found`.",
+        "description": "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork snapshot, returns `snapshot_not_found`.",
         "operationId": "get_snapshot",
         "parameters": [
           {
@@ -9698,7 +10101,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -9779,7 +10182,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -9861,7 +10264,7 @@
     },
     "/v0/namespaces/{namespace_id}/uploads": {
       "post": {
-        "description": "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned upload capability.",
+        "description": "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned URL for the upload.",
         "operationId": "create_upload",
         "parameters": [
           {
@@ -9976,7 +10379,7 @@
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}": {
       "get": {
-        "description": "Returns an upload session. An open `direct_put` session includes a newly signed upload capability. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
+        "description": "Returns an upload session. An open `direct_put` session includes a new presigned URL for the upload. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
         "operationId": "get_upload",
         "parameters": [
           {
@@ -10415,7 +10818,7 @@
     },
     "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts": {
       "post": {
-        "description": "Returns one short-lived upload capability for each requested part of an open `direct_multipart` session. Each capability is bound to the part's checksum. To retry a part, a client asks for its capability again.",
+        "description": "Returns one short-lived presigned URL for each requested part of an open `direct_multipart` session. Each presigned URL is bound to the part's checksum. To retry a part, a client asks for its presigned URL again.",
         "operationId": "sign_upload_parts",
         "parameters": [
           {

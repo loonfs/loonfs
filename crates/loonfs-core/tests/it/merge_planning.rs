@@ -13,7 +13,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
-    AbsolutePath, AccessGrants, AccessRight, AccessRights, ChangeSeq, Commit, CommitId, ErrorCode,
+    AbsolutePath, AccessGrants, AccessRight, AccessRights, Commit, CommitId, CommitSeq, ErrorCode,
     InodeId, Merge, MergeConflictKind, NamespaceAccess, NamespaceId, NextMergeRangeOutcome,
     NextMergeRangeResponse, PathEntry, PrincipalId, PrincipalScope, Subject,
 };
@@ -44,10 +44,7 @@ impl Family {
             fork: namespace_id("main-fork"),
             writer: default_writer(),
             subject,
-            allowance: MergeAllowance {
-                max_bytes: usize::MAX,
-                peak_per_planned_byte: 3,
-            },
+            allowance: MergeAllowance::unshared(usize::MAX, 3),
         }
     }
 
@@ -150,7 +147,7 @@ impl Family {
         self.commit_all(namespace_id, vec![operation]).await
     }
 
-    fn request(&self, commit_id: &str, through_seq: Option<ChangeSeq>) -> MergeRequest {
+    fn request(&self, commit_id: &str, through_seq: Option<CommitSeq>) -> MergeRequest {
         MergeRequest {
             source_namespace_id: self.fork.clone(),
             through_seq,
@@ -165,7 +162,7 @@ impl Family {
     async fn merge(
         &self,
         commit_id: &str,
-        through_seq: Option<ChangeSeq>,
+        through_seq: Option<CommitSeq>,
     ) -> Result<Commit, CoreError> {
         self.merge_as(&self.request(commit_id, through_seq), self.subject.as_ref())
             .await
@@ -193,7 +190,7 @@ impl Family {
                 &fork_context,
                 request,
                 self.writer.now_ms,
-                self.allowance,
+                self.allowance.clone(),
             )
             .await?
             .into_candidate()?;
@@ -207,7 +204,7 @@ impl Family {
     /// Plans a merge of the fork's commits into `main` through `through_seq`,
     /// after the fork's fold, as [`Self::merge_as`] does, without committing
     /// it.
-    async fn plan(&self, through_seq: Option<ChangeSeq>) -> Result<MergePlan, CoreError> {
+    async fn plan(&self, through_seq: Option<CommitSeq>) -> Result<MergePlan, CoreError> {
         let fork = self.engine(&self.fork, self.subject.as_ref());
         fork.fold_wal().await?;
         self.engine(&self.main, self.subject.as_ref())
@@ -217,7 +214,7 @@ impl Family {
                 &read_context(&self.store, &self.fork).await,
                 &self.request("plan", through_seq),
                 self.writer.now_ms,
-                self.allowance,
+                self.allowance.clone(),
             )
             .await
     }
@@ -288,7 +285,7 @@ impl Family {
 
     /// Advances `namespace_id`'s retention floor to its folded head, and
     /// returns the floor.
-    async fn advance_floor(&self, namespace_id: &NamespaceId) -> ChangeSeq {
+    async fn advance_floor(&self, namespace_id: &NamespaceId) -> CommitSeq {
         let engine = namespace_engine(&self.store, namespace_id, &self.writer);
         engine.fold_wal().await.expect("fold");
         engine
@@ -634,28 +631,28 @@ async fn a_create_that_needs_a_conflicting_inodes_name_conflicts_too() {
 
 /// Undoes the fork's deletion of `inode_id`, whose commit was `deleted`, so
 /// the inode comes back where it was.
-async fn undelete_in_the_fork(family: &Family, inode_id: InodeId, deleted: &Commit) {
+async fn restore_deleted_in_the_fork(family: &Family, inode_id: InodeId, deleted: &Commit) {
     family
         .fork()
         .submit_operation(
             CommitId::generate(),
-            FilesystemOperation::Undelete {
+            FilesystemOperation::RestoreDeleted {
                 inode_id,
                 deletion_seq: deleted.committed_seq,
-                destination: loonfs_types::options::UndeleteDestination::Recorded,
+                destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
             },
             Vec::new(),
         )
         .await
-        .expect("undelete in the fork");
+        .expect("restore in the fork");
 }
 
 /// Checks that a deletion that an earlier merge of the fork made, and that
-/// the fork then undid, merges as an undelete. The fork deletes `a.txt`, the
-/// merge deletes it in `main`, the fork undeletes it, and the next merge
-/// undeletes it in `main` under the same inode ID.
+/// the fork then undid, merges as a restore. The fork deletes `a.txt`, the
+/// merge deletes it in `main`, the fork restores it, and the next merge
+/// restores it in `main` under the same inode ID.
 #[tokio::test]
-async fn a_file_that_the_fork_undeleted_after_a_merge_merges() {
+async fn a_file_that_the_fork_restored_after_a_merge_merges() {
     let family = Family::new().await;
     let inode_id = family.inode(&family.main, "/docs/a.txt").await;
     let deleted = family
@@ -668,12 +665,12 @@ async fn a_file_that_the_fork_undeleted_after_a_merge_merges() {
         .await
         .expect("merge the delete");
     assert!(family.entry(&family.main, "/docs/a.txt").await.is_none());
-    undelete_in_the_fork(&family, inode_id, &deleted).await;
+    restore_deleted_in_the_fork(&family, inode_id, &deleted).await;
 
     family
-        .merge("undelete", None)
+        .merge("restore_deleted", None)
         .await
-        .expect("merge the undelete");
+        .expect("merge the restore");
     assert_eq!(family.inode(&family.main, "/docs/a.txt").await, inode_id);
     assert_eq!(
         family.main_bytes("/docs/a.txt").await.as_deref(),
@@ -681,10 +678,10 @@ async fn a_file_that_the_fork_undeleted_after_a_merge_merges() {
     );
 }
 
-/// Checks the undelete of a directory. The items below it come back with it,
+/// Checks the restore of a directory. The items below it come back with it,
 /// with no change of their own.
 #[tokio::test]
-async fn a_directory_that_the_fork_undeleted_after_a_merge_merges() {
+async fn a_directory_that_the_fork_restored_after_a_merge_merges() {
     let family = Family::new().await;
     let inode_id = family.inode(&family.main, "/old").await;
     let deleted = family
@@ -696,12 +693,12 @@ async fn a_directory_that_the_fork_undeleted_after_a_merge_merges() {
         .merge("delete", None)
         .await
         .expect("merge the delete");
-    undelete_in_the_fork(&family, inode_id, &deleted).await;
+    restore_deleted_in_the_fork(&family, inode_id, &deleted).await;
 
     family
-        .merge("undelete", None)
+        .merge("restore_deleted", None)
         .await
-        .expect("merge the undelete");
+        .expect("merge the restore");
     assert_eq!(
         family.main_bytes("/old/x.txt").await.as_deref(),
         Some(&b"/old/x.txt"[..])
@@ -843,7 +840,7 @@ async fn the_plan_returns_the_writers_error_for_the_subjects_missing_rights() {
             &read_context(&family.store, &family.fork).await,
             &family.request("hidden", None),
             family.writer.now_ms,
-            family.allowance,
+            family.allowance.clone(),
         )
         .await
         .expect_err("the plan checks the subject's rights");
@@ -993,10 +990,7 @@ async fn a_merge_over_the_allowance_is_too_large_before_its_conflicts() {
     let mut family = Family::new().await;
     // A file create plans about 4,850 bytes, which the allowance is charged
     // three times, so 64 KiB admits only a few creates.
-    family.allowance = MergeAllowance {
-        max_bytes: 64 * 1024,
-        peak_per_planned_byte: 3,
-    };
+    family.allowance = MergeAllowance::unshared(64 * 1024, 3);
     for index in 0..16 {
         family
             .fork()
@@ -1042,10 +1036,7 @@ async fn a_first_commit_over_the_allowance_has_no_split_hint() {
     let mut family = Family::new().await;
     // A directory's attribute update bounds about 66 KB, and the allowance is
     // charged three times that.
-    family.allowance = MergeAllowance {
-        max_bytes: 64 * 1024,
-        peak_per_planned_byte: 3,
-    };
+    family.allowance = MergeAllowance::unshared(64 * 1024, 3);
     family
         .commit_all(
             &family.fork,
@@ -1118,7 +1109,7 @@ async fn a_merge_over_the_allowance_by_its_temporary_move_has_a_split_hint() {
 
 /// Checks that the split hint measures a range as the planner plans a merge
 /// of it, when `main`'s rows are the fork's own at the range's start. After
-/// a first merge, three commits of the fork undelete, move, and delete a
+/// a first merge, three commits of the fork restore, move, and delete a
 /// file each, update an attribute and a file's content, and create a
 /// directory and a file, and three more commits each create a file. With an
 /// allowance of exactly the planned bytes of a merge of the first three
@@ -1127,7 +1118,7 @@ async fn a_merge_over_the_allowance_by_its_temporary_move_has_a_split_hint() {
 #[tokio::test]
 async fn the_split_hint_measures_a_range_as_the_planner_plans_it() {
     let mut family = Family::new().await;
-    let undeleted = family.inode(&family.fork, "/old/x.txt").await;
+    let restored = family.inode(&family.fork, "/old/x.txt").await;
     let deleted = family
         .fork()
         .delete_path("/old/x.txt", None)
@@ -1139,10 +1130,10 @@ async fn the_split_hint_measures_a_range_as_the_planner_plans_it() {
         .expect("merge the delete");
     let path = |path: &str| AbsolutePath::parse(path).expect("path");
     let bindings = vec![
-        FilesystemOperation::Undelete {
-            inode_id: undeleted,
+        FilesystemOperation::RestoreDeleted {
+            inode_id: restored,
             deletion_seq: deleted.committed_seq,
-            destination: loonfs_types::options::UndeleteDestination::Recorded,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
         },
         FilesystemOperation::MovePath {
             source_path: path("/docs/a.txt"),
@@ -1826,7 +1817,7 @@ async fn a_through_seq_outside_the_forks_range_is_an_invalid_request() {
         .await
         .expect("fork");
     let ahead = family
-        .merge("ahead", Some(ChangeSeq(fork_point.0 + 5)))
+        .merge("ahead", Some(CommitSeq(fork_point.0 + 5)))
         .await
         .expect_err("ahead of the head");
     let at_start = family
@@ -1884,12 +1875,12 @@ async fn a_reused_commit_id_with_another_request_conflicts() {
 }
 
 /// Checks that a merge that needs history below a retention floor returns
-/// `rebootstrap_required`, and that the details say which floor: `main`'s
+/// `below_retention_floor`, and that the details say which floor: `main`'s
 /// floor above the fork point, or the fork's own floor above the range's
 /// start. The next-range query reports which floor refuses the merge, and
 /// no start when the fork point is below `main`'s floor.
 #[tokio::test]
-async fn a_merge_below_either_floor_needs_a_rebootstrap() {
+async fn a_merge_below_either_floor_returns_below_retention_floor() {
     let family = Family::new().await;
     let fork_point = resolve_path(&family.store, &family.main, "/")
         .await
@@ -1911,7 +1902,7 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
         .merge("main-floor", None)
         .await
         .expect_err("main's floor");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
     let details = error.details().expect("details");
     assert_eq!(details.fork_point_seq, Some(fork_point));
     assert_eq!(details.retention_floor_seq, Some(floor));
@@ -1940,7 +1931,7 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
         .merge("fork-floor", None)
         .await
         .expect_err("fork's floor");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
     let details = error.details().expect("details");
     assert_eq!(details.source_namespace_id, Some(family.fork.clone()));
     assert_eq!(details.source_after_seq, Some(fork_point));
@@ -1983,7 +1974,7 @@ async fn a_namespace_that_isnt_a_fork_of_main_is_refused() {
             &read_context(&family.store, &other).await,
             &request,
             family.writer.now_ms,
-            family.allowance,
+            family.allowance.clone(),
         )
         .await
         .expect_err("not a fork");

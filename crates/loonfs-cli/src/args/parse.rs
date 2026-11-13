@@ -1,7 +1,7 @@
 //! Value parsers for the IDs and ordinals that flags accept.
 
 use loonfs_types::{
-    AccessRevisionNo, AttributesRevisionNo, ChangeSeq, InodeId, PublicOrdinalRangeError, RevisionNo,
+    AccessRevisionNo, AttributesRevisionNo, CommitSeq, InodeId, PublicOrdinalRangeError, RevisionNo,
 };
 
 pub(crate) fn parse_public_inode_id(value: &str) -> Result<InodeId, String> {
@@ -17,8 +17,8 @@ fn parse_public_ordinal<T>(
     constructor(value).map_err(|error| error.to_string())
 }
 
-pub(crate) fn parse_change_seq(value: &str) -> Result<ChangeSeq, String> {
-    parse_public_ordinal(value, ChangeSeq::parse)
+pub(crate) fn parse_change_seq(value: &str) -> Result<CommitSeq, String> {
+    parse_public_ordinal(value, CommitSeq::parse)
 }
 
 pub(crate) fn parse_revision_no(value: &str) -> Result<RevisionNo, String> {

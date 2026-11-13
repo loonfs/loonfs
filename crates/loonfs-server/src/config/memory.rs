@@ -1,4 +1,4 @@
-//! Memory sizing: the fixed costs, the headroom, and the pools that the
+//! Memory sizing: the fixed costs, the headroom, and the budgets that the
 //! server sizes under its memory limit.
 
 use super::validate::validate_positive;
@@ -23,7 +23,7 @@ const MIB: usize = 1024 * 1024;
 /// turns, 323 MiB against 256 MiB for the app drive, and 298 MiB against
 /// 226 MiB for the sandbox). With glibc's defaults (`20261020T024314Z`), those
 /// four phases reached 307, 153, 769, and 715 MiB. The headroom is this floor
-/// plus a quarter of the pools, which covers each of those peaks.
+/// plus a quarter of the budgets, which covers each of those peaks.
 const ALLOCATOR_HEADROOM_FLOOR: usize = 200 * MIB;
 
 // The label of the SSD tier's term in `fixed` states these three values.
@@ -167,12 +167,12 @@ impl MemorySizing {
             return Ok(());
         };
         let fixed: u128 = self.fixed.iter().map(|(_, bytes)| bytes).sum();
-        let pools = self.terms().iter().fold(0u128, |total, (term, count)| {
+        let budgets = self.terms().iter().fold(0u128, |total, (term, count)| {
             total.saturating_add(term.bytes as u128 * *count as u128)
         });
         let total = fixed
             .saturating_add(self.headroom as u128)
-            .saturating_add(pools);
+            .saturating_add(budgets);
         if self.managed >= 256 * MIB && total <= limit.bytes as u128 {
             return Ok(());
         }
@@ -196,9 +196,9 @@ impl MemorySizing {
 }
 
 impl ServerConfig {
-    /// Sizes the server's memory pools under `memory_limit_bytes`, or
+    /// Sizes the server's memory budgets under `memory_limit_bytes`, or
     /// under `cgroup_limit` when the config sets no limit, and checks that
-    /// the pools fit.
+    /// the budgets fit.
     pub(super) fn memory_sizing(&self, cgroup_limit: Option<usize>) -> Result<MemorySizing> {
         let limit = self.memory_limit_bytes.or(cgroup_limit);
         let folds = self
@@ -215,9 +215,9 @@ impl ServerConfig {
             .get();
         let fixed = self.fixed_memory_terms(folds, compactions, content_writes);
         let fixed_bytes: u128 = fixed.iter().map(|(_, bytes)| bytes).sum();
-        // The pools share four fifths of what the limit has left after
+        // The budgets share four fifths of what the limit has left after
         // `fixed` and the floor, so the fifth that the headroom takes is a
-        // quarter of the pools.
+        // quarter of the budgets.
         let headroom = limit.map_or(0, |limit| {
             let rest =
                 (limit as u128).saturating_sub(fixed_bytes + ALLOCATOR_HEADROOM_FLOOR as u128);

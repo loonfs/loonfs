@@ -12,7 +12,7 @@ use crate::metadata::{
 };
 use crate::Result;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+    AbsolutePath, CommitSeq, DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
 };
 use std::collections::BTreeSet;
 
@@ -48,7 +48,7 @@ pub struct ListedEntry<'a> {
 impl MetadataState {
     /// The inode, when it was created by `seq` and no tombstone that hides
     /// its subtree is rooted at it or at any ancestor.
-    pub fn visible_inode(&self, inode_id: InodeId, seq: ChangeSeq) -> Result<Option<&InodeRecord>> {
+    pub fn visible_inode(&self, inode_id: InodeId, seq: CommitSeq) -> Result<Option<&InodeRecord>> {
         let Some(inode) = self
             .inodes
             .iter()
@@ -66,7 +66,7 @@ impl MetadataState {
 
     /// Resolves `path` from the root, folding each component into its name
     /// key and following only bindings of visible children.
-    pub fn resolve_path(&self, path: &AbsolutePath, seq: ChangeSeq) -> Result<ResolvedPath<'_>> {
+    pub fn resolve_path(&self, path: &AbsolutePath, seq: CommitSeq) -> Result<ResolvedPath<'_>> {
         let Some(mut inode) = self.visible_inode(ROOT_INODE_ID, seq)? else {
             return Ok(ResolvedPath::NotFound {
                 absolute_path: absolute_path(&[]),
@@ -104,7 +104,7 @@ impl MetadataState {
     pub fn list_directory(
         &self,
         parent_inode_id: InodeId,
-        seq: ChangeSeq,
+        seq: CommitSeq,
     ) -> Result<Vec<ListedEntry<'_>>> {
         let name_keys: BTreeSet<&NameKey> = self
             .direntry_binds
@@ -125,7 +125,7 @@ impl MetadataState {
         &self,
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
-        seq: ChangeSeq,
+        seq: CommitSeq,
     ) -> Result<bool> {
         Ok(self.ancestry(new_parent_inode_id, seq)?.contains(&inode_id))
     }
@@ -134,7 +134,7 @@ impl MetadataState {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-        seq: ChangeSeq,
+        seq: CommitSeq,
     ) -> Result<Option<ListedEntry<'_>>> {
         let Some(binding) = self.slot_value(parent_inode_id, name_key, seq) else {
             return Ok(None);
@@ -153,7 +153,7 @@ impl MetadataState {
 
     /// Whether the newest tombstone event for `root_inode_id` at or below
     /// `seq` is a set.
-    fn is_hidden_root(&self, root_inode_id: InodeId, seq: ChangeSeq) -> bool {
+    fn is_hidden_root(&self, root_inode_id: InodeId, seq: CommitSeq) -> bool {
         self.subtree_tombstones
             .iter()
             .filter(|event| event.root_inode_id == root_inode_id && event.committed_seq <= seq)

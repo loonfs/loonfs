@@ -6,7 +6,9 @@ use super::parse::{
     parse_public_inode_id, parse_revision_no,
 };
 use clap::{ArgGroup, Args, Subcommand, ValueHint};
-use loonfs_types::{AccessRevisionNo, AttributesRevisionNo, ChangeSeq, InodeId, PinId, RevisionNo};
+use loonfs_types::{
+    AccessRevisionNo, AttributesRevisionNo, CommitSeq, InodeId, RevisionNo, SnapshotId,
+};
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemLsArgs {
@@ -16,7 +18,7 @@ pub(crate) struct FilesystemLsArgs {
     pub pagination: PaginationArgs,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 #[derive(Debug, Args)]
@@ -38,7 +40,7 @@ pub(crate) struct FilesystemStatArgs {
     pub inode: Option<InodeId>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -114,7 +116,7 @@ pub(crate) struct FilesystemRmArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Delete a directory and everything under it, as one commit. The whole
-    /// subtree stays recoverable through the printed undelete handle.
+    /// subtree goes to the trash, and the printed restore command brings it back.
     #[arg(short, long)]
     pub recursive: bool,
     #[command(flatten)]
@@ -151,7 +153,7 @@ pub(crate) struct FilesystemCatArgs {
     pub revision: Option<RevisionNo>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 #[derive(Debug, Args)]
@@ -197,7 +199,7 @@ pub(crate) struct FilesystemGetArgs {
     pub revision: Option<RevisionNo>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
     /// Overwrite existing local files.
     #[arg(long)]
     pub force: bool,
@@ -286,36 +288,39 @@ pub(crate) struct FilesystemTransferArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    override_usage = "loonfs restore <PATH> --revision <REVISION>\n       loonfs restore --inode <INODE> --deletion-seq <DELETION_SEQ> [--to <PATH>]",
+    group(
+        ArgGroup::new("restore_form")
+            .required(true)
+            .multiple(false)
+            .args(["revision", "inode"])
+    )
+)]
 pub(crate) struct FilesystemRestoreArgs {
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
-    #[arg(value_hint = ValueHint::Other)]
-    pub path: String,
-    #[arg(long, value_parser = parse_revision_no)]
-    pub revision: RevisionNo,
-    #[command(flatten)]
-    pub commit: CommitArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct FilesystemUndeleteArgs {
-    #[command(flatten)]
-    pub actor: ActorSelectorArgs,
-    /// Destination path for the recovered file or directory. Omit it to
+    /// The file whose prior revision to restore.
+    #[arg(value_hint = ValueHint::Other, requires = "revision", conflicts_with = "inode")]
+    pub path: Option<String>,
+    /// The prior revision to write as the file's next revision.
+    #[arg(long, requires = "path", value_parser = parse_revision_no)]
+    pub revision: Option<RevisionNo>,
+    /// Inode ID of the deleted item, as reported by `rm` and the change
+    /// feed.
+    #[arg(long, requires = "deletion_seq", value_parser = parse_public_inode_id)]
+    pub inode: Option<InodeId>,
+    /// Committed sequence of the delete being restored, as reported by
+    /// `rm` and the change feed. Scopes the restore to that exact deletion,
+    /// so a stale command can't cancel a later delete.
+    #[arg(long, requires = "inode", value_parser = parse_change_seq)]
+    pub deletion_seq: Option<CommitSeq>,
+    /// Destination path for the restored file or directory. Omit it to
     /// restore the item in place, under the parent and name recorded with
     /// its deletion. That works even if the enclosing directories were
     /// renamed since.
-    #[arg(value_hint = ValueHint::Other)]
-    pub destination_path: Option<String>,
-    /// Inode ID of the deleted item, as reported by `rm` and the change
-    /// feed.
-    #[arg(long, value_parser = parse_public_inode_id)]
-    pub inode: InodeId,
-    /// Committed sequence of the delete being recovered, as reported by
-    /// `rm` and the change feed. Scopes recovery to that exact deletion,
-    /// so a stale command can't cancel a later delete.
-    #[arg(long, value_parser = parse_change_seq)]
-    pub deletion_seq: ChangeSeq,
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::Other, requires = "inode")]
+    pub to: Option<String>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -331,10 +336,10 @@ pub(crate) struct ChangesArgs {
     /// Return committed changes after this sequence (defaults to 0, the
     /// start of retained history).
     #[arg(long, value_parser = parse_change_seq)]
-    pub after: Option<ChangeSeq>,
+    pub after: Option<CommitSeq>,
     #[command(flatten)]
     pub pagination: SeqPaginationArgs,
     /// End the change feed at this snapshot.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }

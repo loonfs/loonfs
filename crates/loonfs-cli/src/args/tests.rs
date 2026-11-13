@@ -23,7 +23,7 @@ fn global_selectors_work_before_between_and_after_subcommands() {
         "maintenance",
         "--profile",
         "prod",
-        "checkpoint",
+        "snapshot",
         "--namespace",
         "demo",
         "list",
@@ -79,6 +79,34 @@ fn stat_help_and_parser_show_both_exclusive_target_forms() {
         "ino_00000000000000000000000002",
     ])
     .expect("inode target");
+}
+
+#[test]
+fn restore_takes_either_a_revision_or_a_deleted_item() {
+    const INODE: &str = "ino_00000000000000000000000002";
+    for arguments in [
+        vec!["/doc", "--revision", "1"],
+        vec!["--inode", INODE, "--deletion-seq", "3"],
+        vec!["--inode", INODE, "--deletion-seq", "3", "--to", "/doc"],
+    ] {
+        let parsed =
+            Cli::try_parse_from(["loonfs", "restore"].into_iter().chain(arguments.clone()));
+        assert!(parsed.is_ok(), "{arguments:?}: {parsed:?}");
+    }
+    for arguments in [
+        vec![],
+        vec!["/doc"],
+        vec!["--revision", "1"],
+        vec!["--inode", INODE],
+        vec!["--deletion-seq", "3"],
+        vec!["/doc", "--inode", INODE, "--deletion-seq", "3"],
+        vec!["/doc", "--revision", "1", "--to", "/other"],
+        vec!["--revision", "1", "--inode", INODE, "--deletion-seq", "3"],
+    ] {
+        let parsed =
+            Cli::try_parse_from(["loonfs", "restore"].into_iter().chain(arguments.clone()));
+        assert!(parsed.is_err(), "{arguments:?} should be refused");
+    }
 }
 
 #[test]
@@ -216,7 +244,7 @@ fn every_paginated_listing_accepts_the_shared_flags() {
         &[
             "loonfs",
             "maintenance",
-            "checkpoint",
+            "snapshot",
             "list",
             "--limit",
             "5",
@@ -273,7 +301,7 @@ fn all_json_is_rejected_for_every_paginated_listing() {
             "loonfs",
             "--json",
             "maintenance",
-            "checkpoint",
+            "snapshot",
             "list",
             "--all",
             "--limit",
@@ -328,19 +356,21 @@ fn management_command_model_uses_noun_families() {
             "recover-administrator",
             "metadata",
             "fold",
-            "checkpoint",
+            "snapshot",
             "index",
             "retention",
             "gc",
+            "pool",
             "store",
         ],
     );
-    assert_subcommands(subcommand(maintenance, "checkpoint"), &["list"]);
+    assert_subcommands(subcommand(maintenance, "snapshot"), &["list"]);
     assert_subcommands(
         subcommand(maintenance, "index"),
         &["enable", "disable", "status"],
     );
     assert_subcommands(subcommand(maintenance, "retention"), &["advance", "window"]);
+    assert_subcommands(subcommand(maintenance, "pool"), &["gc"]);
     assert_subcommands(subcommand(maintenance, "store"), &["probe"]);
 }
 

@@ -259,7 +259,7 @@ async fn pages_after_the_first_read_at_the_cursors_head_sequence() {
 }
 
 #[tokio::test]
-async fn a_page_after_the_floor_passes_its_cursor_returns_rebootstrap_required() {
+async fn a_page_after_the_floor_passes_its_cursor_returns_below_retention_floor() {
     let fixture = ContentFixture::new("cursor-floor").await;
     fixture.put("/one.txt", b"floor needle one\n").await;
     fixture.put("/two.txt", b"floor needle two\n").await;
@@ -289,7 +289,7 @@ async fn a_page_after_the_floor_passes_its_cursor_returns_rebootstrap_required()
     )
     .await
     .expect_err("the floor passed the cursor's sequence");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
 }
 
 #[tokio::test]
@@ -337,10 +337,10 @@ async fn pages_combine_the_runs_values_in_content_order_as_they_walk_them() {
 }
 
 #[tokio::test]
-async fn a_file_deleted_at_the_cursors_sequence_stays_out_after_an_undelete() {
-    let fixture = ContentFixture::new("pages-undelete").await;
-    fixture.put("/a.txt", b"undelete needle a\n").await;
-    fixture.put("/b.txt", b"undelete needle b\n").await;
+async fn a_file_deleted_at_the_cursors_sequence_stays_out_after_a_restore() {
+    let fixture = ContentFixture::new("pages-restore").await;
+    fixture.put("/a.txt", b"restore needle a\n").await;
+    fixture.put("/b.txt", b"restore needle b\n").await;
     let [first, last] = in_walk_order(&fixture.namespace, ["/a.txt", "/b.txt"]).await;
     // The deleted file shares the last file's content, so its place in the
     // walk is after the first page's cursor.
@@ -362,19 +362,19 @@ async fn a_file_deleted_at_the_cursors_sequence_stays_out_after_an_undelete() {
         .await
         .expect("enable");
 
-    let page_one = fixture.page("undelete needle", None, 1).await;
+    let page_one = fixture.page("restore needle", None, 1).await;
     assert_eq!(page_one.matches[0].path, first.as_str());
     fixture
         .namespace
-        .undelete(
+        .restore_deleted(
             deleted,
             deletion.committed_seq,
             &loonfs_test_support::test_actor(),
         )
         .await
-        .expect("undelete");
+        .expect("restore_deleted");
     let page_two = fixture
-        .page("undelete needle", page_one.next_cursor, 10)
+        .page("restore needle", page_one.next_cursor, 10)
         .await;
     assert_eq!(
         page_two

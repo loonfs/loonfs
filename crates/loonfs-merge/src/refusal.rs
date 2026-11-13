@@ -2,17 +2,16 @@
 
 use crate::{PendingCommit, Result};
 use loonfs_client::ClientError;
-use loonfs_types::{u64_from_usize, ChangeSeq, ErrorCode, ErrorKind, ErrorResponse};
+use loonfs_types::{u64_from_usize, CommitSeq, ErrorCode, ErrorKind, ErrorResponse};
 
 /// The attempts that one merge or rebase request gets when it fails with a
 /// transient error: the first attempt and three more.
 ///
 /// A transient error is `commit_queue_full`, `server_busy`, or
-/// `shutting_down`, which the client has already retried with a backoff, or
-/// an error from a commit that failed because the namespace changed after
-/// the plan (see [`ErrorCode::is_stale_plan`]), which the server returns
-/// after it planned the merge four times. So a session that reaches this
-/// limit is merging into a namespace that doesn't stop changing.
+/// `shutting_down`, which the client has already retried with a backoff. An
+/// error from a commit that failed because the namespace changed after the
+/// plan (see [`ErrorCode::is_stale_plan`]) fails the session at once,
+/// because the server returns it after it planned the merge four times.
 pub const MAX_MERGE_ATTEMPTS: usize = 4;
 
 /// How the loop acts on an error that a merge or a rebase returned.
@@ -29,7 +28,7 @@ pub(crate) enum Refusal {
 pub(crate) enum NextRequest {
     /// The request was too large, and the next request goes through the
     /// error's split hint.
-    Split(ChangeSeq),
+    Split(CommitSeq),
     /// The request failed with a transient error, and the same request goes
     /// again.
     Retry,
@@ -65,7 +64,7 @@ pub(crate) fn refusal(request: &PendingCommit, error: &ErrorResponse) -> Refusal
             _ => Refusal::Fail,
         },
         ErrorCode::MergeConflict => Refusal::Conflict,
-        code if code.is_stale_plan() || code.retryable_without_operator_action() => {
+        code if code.retryable_without_operator_action() => {
             if request.failed_attempts + 1 < u64_from_usize(MAX_MERGE_ATTEMPTS) {
                 Refusal::Next(NextRequest::Retry)
             } else {

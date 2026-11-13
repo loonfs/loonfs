@@ -128,9 +128,10 @@ async fn a_fold_moves_the_read_position_to_its_manifest() {
 }
 
 /// Checks that a retention advance through maintenance runs in the
-/// namespace's session: it moves the position onto the advance's manifest,
-/// and the session's next commit publishes under the same epoch, validated
-/// against the advanced floor.
+/// namespace's session: its floor object moves the position's tip and floor,
+/// the fold after it moves the position onto the manifest that records the
+/// floor, and the session's next commit publishes under the same epoch,
+/// validated against the advanced floor.
 #[tokio::test]
 async fn an_advance_moves_the_sessions_position_onto_its_manifest() {
     let temp_dir = tempdir().expect("tempdir");
@@ -161,7 +162,7 @@ async fn an_advance_moves_the_sessions_position_onto_its_manifest() {
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
     maintenance.fold_wal(&namespace_id).await.expect("fold");
     let epoch = writer_epoch(&store, &namespace_id).await;
-    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let advanced = maintenance
         .advance_retention_floor(&namespace_id)
         .await
@@ -181,21 +182,21 @@ async fn an_advance_moves_the_sessions_position_onto_its_manifest() {
             .basis
             .manifest_no(),
         current_manifest_no(&store, &namespace_id).await,
-        "the advance moves the position onto its manifest"
+        "the advance's fold moves the position onto its manifest"
     );
 
     commit("after").await.expect("commit");
     assert_eq!(
         writer_epoch(&store, &namespace_id).await,
         epoch,
-        "the session advanced the floor under its own epoch"
+        "the advance claims no epoch"
     );
     assert_eq!(
         writer
             .core
             .writer_position(&namespace_id)
             .expect("a position after the commit")
-            .retention_floor_seq,
+            .retention_floor_seq(),
         before.committed_seq
     );
     writer.shutdown().await.expect("shutdown");
@@ -260,16 +261,16 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         .writer_position(&namespace_id)
         .expect("a position after a commit");
     store.block_next();
-    let (during, checkpoint) = futures::join!(
+    let (during, snapshot) = futures::join!(
         namespace.commit_candidate(CommitCandidate::new(create_directory_request(
             "during", "during"
         ))),
         async {
             store.wait_until_blocked().await;
-            let (checkpoint, ()) = futures::join!(
+            let (snapshot, ()) = futures::join!(
                 namespace.create_snapshot_with_options("during", &options),
                 async {
-                    // The checkpoint's manifest is durable, and its move of
+                    // The snapshot's manifest is durable, and its move of
                     // the position waits for the publish's engine.
                     bounded(Duration::from_secs(10), async {
                         let shared = store.clone() as SharedStore;
@@ -280,7 +281,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                         }
                     })
                     .await
-                    .expect("the checkpoint publishes its manifest");
+                    .expect("the snapshot publishes its manifest");
                     let kept = writer
                         .core
                         .writer_position(&namespace_id)
@@ -292,7 +293,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                     store.release();
                 }
             );
-            checkpoint.expect("checkpoint")
+            snapshot.expect("snapshot")
         }
     );
     let during = during.expect("the publish succeeds");
@@ -302,7 +303,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         .expect("a position after the publish");
     assert_eq!(
         after.read_basis.basis.manifest_no(),
-        checkpoint.snapshot_id.manifest_no()
+        snapshot.snapshot_id.manifest_no()
     );
     assert_eq!(after.read_basis.head.seq, during.committed_seq);
     writer.shutdown().await.expect("shutdown");

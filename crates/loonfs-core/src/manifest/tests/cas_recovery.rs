@@ -136,7 +136,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                 payload.namespace_id = NamespaceId::parse("fork").expect("namespace");
                 payload.fork_basis = Some(ForkBasis {
                     manifest: current.manifest(),
-                    source_pin_id: PinId::generate(ManifestNo(1)),
+                    source_snapshot_id: SnapshotId::generate(ManifestNo(1)),
                     rebased_from: None,
                 });
             } else {
@@ -162,10 +162,13 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             // A fork's first manifest is created, and any other manifest
             // is published over its predecessor.
             let outcome = if fork {
-                crate::test_support::namespace_store(&store, &payload.namespace_id)
-                    .create_manifest(payload, &deadline)
-                    .await
-                    .map(|()| None)
+                let namespace = crate::test_support::namespace_store(&store, &payload.namespace_id);
+                async {
+                    namespace.publish_first_hint().await?;
+                    namespace.publish_first_manifest(payload, &deadline).await
+                }
+                .await
+                .map(|()| None)
             } else {
                 publish_once_within(&store, encode_manifest(payload), &deadline)
                     .await
@@ -325,7 +328,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                 ManifestMetadataSource {
                     head: &projection.head,
                     basis_manifest_no: Some(predecessor),
-                    retention_floor_seq: ChangeSeq(0),
+                    retention_floor_seq: CommitSeq(0),
                     metadata_state: &projection.metadata_state,
                 },
                 MetadataRunPolicy::default(),
@@ -523,12 +526,13 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
     assert_eq!(store.counts().puts, 0);
 }
 
-/// Checks that an advance without a writer session claims the writer epoch,
-/// writes a fence, folds it, and publishes the floor, each with
-/// put-if-absent, that the floor's manifest changes nothing but the floor
-/// from the fold's, and that writers read the new floor.
+/// Checks that an advance without a writer session creates a floor object
+/// and then folds it, each with put-if-absent, and claims no epoch. The
+/// fold of a tail with the floor object and no commits publishes a manifest
+/// that changes nothing but the floor and the folded WAL number, and
+/// writers read the new floor.
 #[tokio::test]
-async fn an_advance_without_a_session_claims_folds_and_publishes_and_writers_read_it() {
+async fn an_advance_without_a_session_creates_a_floor_object_and_folds_it() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = RecordingStore::new(
@@ -566,27 +570,15 @@ async fn an_advance_without_a_session_claims_folds_and_publishes_and_writers_rea
     .await
     .expect("advance")
     .response;
-    // The claim, the fence, the fold, and the floor, and the advance leaves
-    // the hint for the runtime to raise.
-    assert_eq!(store.counts().create_if_absent_puts, 4);
+    // The floor object and the fold, and the advance leaves the hint for
+    // the runtime to raise.
+    assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let after = namespace.load_current_manifest().await.expect("current");
-    let folded = namespace
-        .load_manifest_by_no(ManifestNo(after.payload().manifest_no.0 - 1))
-        .await
-        .expect("load the fold's manifest")
-        .expect("the fold's manifest exists");
-    assert_eq!(
-        folded.payload().writer_epoch,
-        before
-            .payload()
-            .writer_epoch
-            .successor()
-            .expect("next epoch")
-    );
-    let mut expected = folded.payload().clone();
+    let mut expected = before.payload().clone();
     expected.manifest_no = expected.manifest_no.successor().expect("next");
+    expected.folded_wal_no = expected.folded_wal_no.successor().expect("next");
     expected.retention_floor_seq = before.payload().head_seq;
     assert_eq!(after.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, before.payload().head_seq);
@@ -791,7 +783,7 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
 }
 
 #[tokio::test]
-async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
+async fn a_snapshot_losing_manifest_publication_keeps_the_winner() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
@@ -810,23 +802,23 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
         OperationSelector::Put,
     );
     blocked.block_next();
-    let losing = create_checkpoint(&blocked, &namespace_id, &context);
+    let losing = create_snapshot(&blocked, &namespace_id, &context);
     let winning = async {
         blocked.wait_until_blocked().await;
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context).await;
+        let snapshot = create_snapshot(&store, &namespace_id, &context).await;
         blocked.release();
-        checkpoint
+        snapshot
     };
     let (losing, winning) = futures::join!(losing, winning);
-    let losing = losing.expect("losing publication still pins the winner");
+    let losing = losing.expect("losing publication still keeps the winner");
     let winning = winning.expect("winner");
     let losing = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&losing.checkpoint_id)
+        .load_snapshot_record(&losing.snapshot_id)
         .await
         .expect("record")
         .expect("present");
     let winning = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&winning.checkpoint_id)
+        .load_snapshot_record(&winning.snapshot_id)
         .await
         .expect("record")
         .expect("present");
@@ -938,9 +930,9 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&inner, &namespace_id, &context)
+    create_snapshot(&inner, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     crate::test_support::NamespaceFixture::new(
         &inner,
         &namespace_id,
@@ -963,8 +955,8 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .load_metadata()
         .await
         .expect("status reloads the stale head");
-    assert_eq!(namespace.head_seq, ChangeSeq(1));
-    assert_eq!(namespace.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(namespace.head_seq, CommitSeq(1));
+    assert_eq!(namespace.retention_floor_seq, CommitSeq(1));
 
     let feed_store = StaleObjectOnceStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("change-feed store"),
@@ -978,13 +970,13 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .expect("load feed view");
     let changes = list_changes_after(
         &view,
-        loonfs_types::ChangeFeedPosition::after(ChangeSeq(1)),
+        loonfs_types::ChangeFeedPosition::after(CommitSeq(1)),
         EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
         loonfs_types::options::CommitSplitting::Whole,
     )
     .await
     .expect("change feed reloads the stale head");
-    assert_eq!(changes.head_seq, ChangeSeq(1));
+    assert_eq!(changes.head_seq, CommitSeq(1));
     assert!(changes.changes.is_empty());
 }
 

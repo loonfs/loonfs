@@ -441,8 +441,8 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatal("created upload session is not open")
 	}
 	directPut := begin.Open
-	if directPut.Access == nil {
-		t.Fatal("direct_put session lacks access")
+	if directPut.Transfer == nil {
+		t.Fatal("direct_put session lacks a presigned URL")
 	}
 	if begin.Status != expected.BeginStatus {
 		t.Errorf("begin status = %q, want %q", begin.Status, expected.BeginStatus)
@@ -454,7 +454,7 @@ func runDirectPut(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Errorf("direct PUT checksum_algorithm = %q, want %q", directPut.ChecksumAlgorithm, expected.ChecksumAlgorithm)
 	}
 
-	putPresigned(t, directPut.Access, payload, false)
+	putPresigned(t, directPut.Transfer, payload, false)
 	claim := &loonfs.UploadContentClaim{
 		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
 		SizeBytes: int64(len(payload)),
@@ -587,7 +587,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		if partNumber < 1 || partNumber > len(parts) {
 			t.Fatalf("signed invalid part number %d", partNumber)
 		}
-		etag := putPresigned(t, signedPart.Access, parts[partNumber-1], true)
+		etag := putPresigned(t, signedPart.Transfer, parts[partNumber-1], true)
 		completedParts = append(completedParts, &loonfs.CompletedUploadPart{
 			Checksum:   claims[partNumber-1].Checksum,
 			Etag:       etag,
@@ -787,7 +787,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 		t.Fatalf("begin direct download: %v", err)
 	}
 	if grant == nil || grant.ContentRef == nil {
-		t.Fatal("download grant has no content_ref")
+		t.Fatal("download has no content_ref")
 	}
 	assertContentRefEqual(t, file.ContentRef, grant.ContentRef)
 	if grant.ContentRef.SizeBytes != expected.SizeBytes {
@@ -796,7 +796,7 @@ func runDownload(t *testing.T, h *harness, testCase conformanceCase) {
 	if grant.ContentRef.Checksum == nil || string(grant.ContentRef.Checksum.Algorithm) != expected.ChecksumAlgorithm {
 		t.Errorf("download checksum = %#v, want algorithm %q", grant.ContentRef.Checksum, expected.ChecksumAlgorithm)
 	}
-	readback := getPresigned(t, grant.Ranges[0].Access)
+	readback := getPresigned(t, grant.Ranges[0].Transfer)
 	if int64(len(readback)) != grant.ContentRef.SizeBytes {
 		t.Errorf("downloaded bytes = %d, want %d", len(readback), grant.ContentRef.SizeBytes)
 	}
@@ -1063,7 +1063,7 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 	if grant.ContentRef.SizeBytes != expected.PreviousSizeBytes {
 		t.Errorf("previous size_bytes = %d, want %d", grant.ContentRef.SizeBytes, expected.PreviousSizeBytes)
 	}
-	if signed := signedRange(grant.Ranges[0].Access); signed != expected.PreviousRange {
+	if signed := signedRange(grant.Ranges[0].Transfer); signed != expected.PreviousRange {
 		t.Errorf("previous signed range = %q, want %q", signed, expected.PreviousRange)
 	}
 	previous, err := h.client.Files.Download(ctx, files.DownloadInput{NamespaceID: namespaceID, Path: path, RevisionNo: &previousRevision})
@@ -1081,13 +1081,13 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("grant the appended bytes: %v", err)
 	}
-	if signed := signedRange(resumed.Ranges[0].Access); signed != expected.ResumedRange {
+	if signed := signedRange(resumed.Ranges[0].Transfer); signed != expected.ResumedRange {
 		t.Errorf("resumed signed range = %q, want %q", signed, expected.ResumedRange)
 	}
 	if len(resumed.Ranges) != 1 || resumed.Ranges[0].StartOffset != startOffset {
 		t.Fatal("invalid resumed ranges")
 	}
-	rest := getPresigned(t, resumed.Ranges[0].Access)
+	rest := getPresigned(t, resumed.Ranges[0].Transfer)
 	whole := bytes.Join([][]byte{content, appended}, nil)
 	if !bytes.Equal(rest, whole[startOffset:]) {
 		t.Fatalf("resumed download = %q", rest)
@@ -1123,7 +1123,7 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 	if emptyGrant.ContentRef.SizeBytes != 0 {
 		t.Errorf("empty size_bytes = %d", emptyGrant.ContentRef.SizeBytes)
 	}
-	if signed := signedRange(emptyGrant.Ranges[0].Access); signed != "" {
+	if signed := signedRange(emptyGrant.Ranges[0].Transfer); signed != "" {
 		t.Errorf("empty grant signs range %q", signed)
 	}
 	if empty := downloadFile(t, h.client, request.NamespaceID, request.EmptyPath); len(empty.Content) != 0 {
@@ -1156,7 +1156,7 @@ func runAppend(t *testing.T, h *harness, testCase conformanceCase) {
 	assertContentRefEqual(t, stillEmpty.ContentRef, emptyGrant.ContentRef)
 }
 
-func signedRange(access *loonfs.ObjectTransferAccess) string {
+func signedRange(access *loonfs.ObjectTransfer) string {
 	if access == nil || access.PresignedURL == nil {
 		return ""
 	}
@@ -1767,7 +1767,7 @@ func runInodeMutations(t *testing.T, h *harness, testCase conformanceCase) {
 	limit := 1
 	feed, err := h.client.Changes.List(context.Background(), &loonfs.ListChangesRequest{
 		NamespaceID: request.NamespaceID,
-		AfterSeq:    loonfs.ChangeSeq(expected.MovedCommittedSeq - 1),
+		AfterSeq:    loonfs.CommitSeq(expected.MovedCommittedSeq - 1),
 		Limit:       &limit,
 	})
 	if err != nil {
@@ -2063,10 +2063,10 @@ func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
 	restoredName := request.RestoredFileName
 	applyCommit(t, h.client, &loonfs.CommitRequest{
 		NamespaceID: request.NamespaceID,
-		CommitID:    loonfs.CommitID("conf-inode-addressing-undelete"),
+		CommitID:    loonfs.CommitID("conf-inode-addressing-restore-deleted"),
 		Operations: []*loonfs.FilesystemOperation{
 			{
-				Undelete: &loonfs.FilesystemOperationUndelete{
+				RestoreDeleted: &loonfs.FilesystemOperationRestoreDeleted{
 					InodeID:                  copyEntry.inodeID,
 					DeletionSeq:              deletion.CommittedSeq,
 					DestinationParentInodeID: &parentInodeID,
@@ -2075,9 +2075,9 @@ func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
 			},
 		},
 	}, request.ActorID)
-	undeleted := identityOf(statPath(t, h.client, request.NamespaceID, childPath(request.RestoredFileName)))
-	if undeleted.inodeID != copyEntry.inodeID {
-		t.Errorf("undeleted inode_id = %q, want %q", undeleted.inodeID, copyEntry.inodeID)
+	restoredDeleted := identityOf(statPath(t, h.client, request.NamespaceID, childPath(request.RestoredFileName)))
+	if restoredDeleted.inodeID != copyEntry.inodeID {
+		t.Errorf("restored inode_id = %q, want %q", restoredDeleted.inodeID, copyEntry.inodeID)
 	}
 
 	applyCommit(t, h.client, &loonfs.CommitRequest{
@@ -2325,7 +2325,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	limit := 100
 	feed, err := h.client.Changes.List(ctx, &loonfs.ListChangesRequest{
 		NamespaceID: request.NamespaceID,
-		AfterSeq:    loonfs.ChangeSeq(0),
+		AfterSeq:    loonfs.CommitSeq(0),
 		Limit:       &limit,
 		SnapshotID:  &snapshotID,
 	})
@@ -2371,16 +2371,16 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if retrieved.SnapshotID != snapshotID || retrieved.ExpiresAtMs == nil || *retrieved.ExpiresAtMs != *extended.ExpiresAtMs {
 		t.Errorf("retrieved snapshot = %#v, want the extended snapshot %#v", retrieved, extended)
 	}
-	checkpoint, err := h.client.Maintenance.Checkpoints.Retrieve(ctx, &maintenance.GetCheckpointRequest{
-		NamespaceID:  request.NamespaceID,
-		CheckpointID: snapshotID,
+	record, err := h.client.Maintenance.Snapshots.Retrieve(ctx, &maintenance.GetSnapshotRecordRequest{
+		NamespaceID: request.NamespaceID,
+		SnapshotID:  snapshotID,
 	})
 	if err != nil {
-		t.Fatalf("retrieve the snapshot's checkpoint: %v", err)
+		t.Fatalf("retrieve the snapshot's record: %v", err)
 	}
-	if checkpoint.CheckpointID != snapshotID || int64(checkpoint.CapturedSeq) != expected.SnapshotHeadSeq ||
-		checkpoint.ExpiresAtMs == nil || *checkpoint.ExpiresAtMs != *extended.ExpiresAtMs {
-		t.Errorf("retrieved checkpoint = %#v, want the snapshot's pin", checkpoint)
+	if record.SnapshotID != snapshotID || int64(record.CapturedSeq) != expected.SnapshotHeadSeq ||
+		record.ExpiresAtMs == nil || *record.ExpiresAtMs != *extended.ExpiresAtMs {
+		t.Errorf("retrieved snapshot record = %#v, want the snapshot", record)
 	}
 
 	listed, err := h.client.Snapshots.List(ctx, &loonfs.ListSnapshotsRequest{
@@ -2431,7 +2431,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	})
 	assertNotFoundError(t, err, expected.SnapshotNotFound)
 
-	unknownSnapshotID := loonfs.PinID(request.UnknownSnapshotID)
+	unknownSnapshotID := loonfs.SnapshotID(request.UnknownSnapshotID)
 	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),
@@ -2838,10 +2838,10 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	directUploadID := string(directBegin.Open.UploadID)
 	directPut := directBegin.Open
-	if directPut.Access == nil {
-		t.Fatal("direct_put session lacks access")
+	if directPut.Transfer == nil {
+		t.Fatal("direct_put session lacks a presigned URL")
 	}
-	putPresigned(t, directPut.Access, payload, false)
+	putPresigned(t, directPut.Transfer, payload, false)
 	directClaim := &loonfs.UploadContentClaim{
 		Checksum:  mustChecksum(t, directPut.ChecksumAlgorithm, payload),
 		SizeBytes: sizeBytes,
@@ -2949,7 +2949,7 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 	}
 	feed, err := h.client.Changes.List(context.Background(), &loonfs.ListChangesRequest{
 		NamespaceID: request.NamespaceID,
-		AfterSeq:    loonfs.ChangeSeq(expected.DirectCommittedSeq),
+		AfterSeq:    loonfs.CommitSeq(expected.DirectCommittedSeq),
 	})
 	if err != nil {
 		t.Fatalf("list stamped changes: %v", err)
@@ -3264,7 +3264,7 @@ func runChanges(t *testing.T, h *harness, testCase conformanceCase) {
 		context.Background(),
 		&loonfs.ListChangesRequest{
 			NamespaceID: request.NamespaceID,
-			AfterSeq:    loonfs.ChangeSeq(request.AfterSeq),
+			AfterSeq:    loonfs.CommitSeq(request.AfterSeq),
 		},
 	)
 	if err != nil {
@@ -3314,7 +3314,7 @@ func runUnknownEventKinds(t *testing.T, testCase conformanceCase) {
 		context.Background(),
 		&loonfs.ListChangesRequest{
 			NamespaceID: request.NamespaceID,
-			AfterSeq:    loonfs.ChangeSeq(request.AfterSeq),
+			AfterSeq:    loonfs.CommitSeq(request.AfterSeq),
 		},
 	)
 	if err != nil {
@@ -3525,7 +3525,7 @@ func assertContentRefEqual(t *testing.T, actual, expected *loonfs.ContentRef) {
 
 func putPresigned(
 	t *testing.T,
-	access *loonfs.ObjectTransferAccess,
+	access *loonfs.ObjectTransfer,
 	payload []byte,
 	requireETag bool,
 ) string {
@@ -3541,7 +3541,7 @@ func putPresigned(
 	return etag
 }
 
-func getPresigned(t *testing.T, access *loonfs.ObjectTransferAccess) []byte {
+func getPresigned(t *testing.T, access *loonfs.ObjectTransfer) []byte {
 	t.Helper()
 	response := sendPresigned(t, access, http.MethodGet, nil)
 	defer response.Body.Close()
@@ -3555,13 +3555,13 @@ func getPresigned(t *testing.T, access *loonfs.ObjectTransferAccess) []byte {
 
 func sendPresigned(
 	t *testing.T,
-	access *loonfs.ObjectTransferAccess,
+	access *loonfs.ObjectTransfer,
 	expectedMethod string,
 	body io.Reader,
 ) *http.Response {
 	t.Helper()
 	if access == nil || access.PresignedURL == nil {
-		t.Fatal("object transfer access is not a presigned URL")
+		t.Fatal("object transfer is not a presigned URL")
 	}
 	presigned := access.PresignedURL
 	if presigned.Method != expectedMethod {
@@ -3649,12 +3649,12 @@ func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
 	if entry == nil {
 		return pathEntryIdentity{}
 	}
-	if entry.Dir != nil {
+	if entry.Directory != nil {
 		return pathEntryIdentity{
-			path:           string(entry.Dir.Path),
-			inodeID:        string(entry.Dir.InodeID),
-			displayName:    optionalString(entry.Dir.DisplayName),
-			bindingVersion: optionalString(entry.Dir.BindingVersion),
+			path:           string(entry.Directory.Path),
+			inodeID:        string(entry.Directory.InodeID),
+			displayName:    optionalString(entry.Directory.DisplayName),
+			bindingVersion: optionalString(entry.Directory.BindingVersion),
 		}
 	}
 	if entry.File != nil {
@@ -3768,7 +3768,7 @@ func listChanges(t *testing.T, sdk *server.Client, namespaceID string) *loonfs.L
 	t.Helper()
 	changes, err := sdk.Changes.List(context.Background(), &loonfs.ListChangesRequest{
 		NamespaceID: namespaceID,
-		AfterSeq:    loonfs.ChangeSeq(0),
+		AfterSeq:    loonfs.CommitSeq(0),
 	})
 	if err != nil {
 		t.Fatalf("list changes: %v", err)
@@ -3778,9 +3778,10 @@ func listChanges(t *testing.T, sdk *server.Client, namespaceID string) *loonfs.L
 
 func createNamespace(t *testing.T, sdk *server.Client, namespaceID string, actorID loonfs.ActorID) {
 	t.Helper()
+	id := loonfs.NamespaceID(namespaceID)
 	_, err := sdk.Namespaces.Create(
 		context.Background(),
-		&loonfs.CreateNamespaceRequest{NamespaceID: loonfs.NamespaceID(namespaceID)},
+		&loonfs.CreateNamespaceRequest{NamespaceID: &id},
 		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(actorID)}}),
 	)
 	if err != nil {

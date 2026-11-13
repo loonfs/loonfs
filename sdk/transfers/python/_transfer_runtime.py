@@ -91,7 +91,7 @@ class _DownloadVerification:
 
 def _validate_download_ranges(ranges, size_bytes):
     if not ranges or (size_bytes == 0 and len(ranges) != 1):
-        raise RuntimeError("download grant has invalid ranges")
+        raise RuntimeError("download has invalid ranges")
     offset = 0
     for part in ranges:
         if (
@@ -100,19 +100,19 @@ def _validate_download_ranges(ranges, size_bytes):
             or part.length > size_bytes - offset
             or (part.length == 0 and size_bytes != 0)
         ):
-            raise RuntimeError("download grant has invalid ranges")
-        if part.access.method != "GET":
-            raise RuntimeError("download grant must use GET")
+            raise RuntimeError("download has invalid ranges")
+        if part.transfer.method != "GET":
+            raise RuntimeError("download presigned URL must use GET")
         offset += part.length
     if offset != size_bytes:
-        raise RuntimeError("download grant has invalid ranges")
+        raise RuntimeError("download has invalid ranges")
 
 
 def _download_range_request(part, timeout):
     return httpx.Request(
         "GET",
-        part.access.url,
-        headers=part.access.headers or {},
+        part.transfer.url,
+        headers=part.transfer.headers or {},
         extensions={"timeout": httpx.Timeout(timeout).as_dict()},
     )
 
@@ -329,7 +329,7 @@ class _AsyncUploadSource(_UploadState):
 
 def _upload_request(access, content, timeout, size_bytes):
     if access.method != "PUT":
-        raise RuntimeError("upload grant must use PUT")
+        raise RuntimeError("upload presigned URL must use PUT")
     headers = httpx.Headers(access.headers or {})
     if size_bytes is not None:
         headers["Content-Length"] = str(size_bytes)

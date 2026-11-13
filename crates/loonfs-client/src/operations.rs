@@ -77,14 +77,16 @@ pub(crate) const GET_SNAPSHOT: Operation = Operation::retry(Method::GET);
 pub(crate) const EXTEND_SNAPSHOT: Operation = Operation::retry(Method::POST);
 pub(crate) const DELETE_SNAPSHOT: Operation = Operation::retry(Method::DELETE);
 pub(crate) const FORK_NAMESPACE: Operation = Operation::once(Method::POST);
+pub(crate) const FORK_NAMESPACE_FOR_REBASE: Operation = Operation::once(Method::POST);
 pub(crate) const MERGE_FORK: Operation = Operation::retry(Method::POST);
 pub(crate) const GET_NEXT_MERGE_RANGE: Operation = Operation::retry(Method::GET);
-pub(crate) const REBASE_FORK: Operation = Operation::retry(Method::POST);
+pub(crate) const REPLAY_FORK: Operation = Operation::retry(Method::POST);
 pub(crate) const DELETE_NAMESPACE: Operation = Operation::once(Method::DELETE);
 pub(crate) const GET_NAMESPACE_DIAGNOSTICS: Operation = Operation::retry(Method::GET);
-pub(crate) const LIST_CHECKPOINTS: Operation = Operation::retry(Method::GET);
-pub(crate) const GET_CHECKPOINT: Operation = Operation::retry(Method::GET);
-pub(crate) const RUN_MAINTENANCE: Operation = Operation::once(Method::POST);
+pub(crate) const LIST_SNAPSHOT_RECORDS: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_SNAPSHOT_RECORD: Operation = Operation::retry(Method::GET);
+pub(crate) const RUN_MAINTENANCE_JOB: Operation = Operation::once(Method::POST);
+pub(crate) const RUN_POOL_MAINTENANCE_JOB: Operation = Operation::once(Method::POST);
 pub(crate) const PROBE_STORE: Operation = Operation::once(Method::POST);
 pub(crate) const GREP: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_GREP_INDEX: Operation = Operation::retry(Method::GET);
@@ -137,14 +139,16 @@ mod tests {
         ("extend_snapshot", EXTEND_SNAPSHOT),
         ("delete_snapshot", DELETE_SNAPSHOT),
         ("fork_namespace", FORK_NAMESPACE),
+        ("fork_namespace_for_rebase", FORK_NAMESPACE_FOR_REBASE),
         ("merge_fork", MERGE_FORK),
         ("get_next_merge_range", GET_NEXT_MERGE_RANGE),
-        ("rebase_fork", REBASE_FORK),
+        ("replay_fork", REPLAY_FORK),
         ("delete_namespace", DELETE_NAMESPACE),
         ("get_namespace_diagnostics", GET_NAMESPACE_DIAGNOSTICS),
-        ("list_checkpoints", LIST_CHECKPOINTS),
-        ("get_checkpoint", GET_CHECKPOINT),
-        ("run_maintenance", RUN_MAINTENANCE),
+        ("list_snapshot_records", LIST_SNAPSHOT_RECORDS),
+        ("get_snapshot_record", GET_SNAPSHOT_RECORD),
+        ("run_maintenance_job", RUN_MAINTENANCE_JOB),
+        ("run_pool_maintenance_job", RUN_POOL_MAINTENANCE_JOB),
         ("probe_store", PROBE_STORE),
         ("grep", GREP),
         ("get_grep_index", GET_GREP_INDEX),

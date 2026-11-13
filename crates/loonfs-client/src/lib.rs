@@ -44,7 +44,7 @@ use transport::{StdMonotonicTimer, TransportRetryPolicy, DEFAULT};
 pub use body::Body;
 pub use config::ClientConfig;
 pub use error::ClientError;
-pub use maintenance::CheckpointsPager;
+pub use maintenance::SnapshotRecordsPager;
 pub use payload::{PayloadSource, PayloadStream};
 pub use query::GrepPager;
 pub use ranged_reads::FileRangeStream;
@@ -62,8 +62,8 @@ pub use loonfs_types::options::{
     CreateSnapshotOptions, DeleteByInodeOptions, DeleteNamespaceOptions, DeleteOptions,
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, GcOptions,
     ListChangesOptions, ListFileRevisionsOptions, ListOptions, ListTrashOptions, MergeForkOptions,
-    MoveOptions, PutFileOptions, ReadAt, ReadFileOptions, ReadRange, StatOptions,
-    UndeleteDestination, UndeleteOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    MoveOptions, PutFileOptions, ReadAt, ReadFileOptions, ReadRange, RestoreDeletedDestination,
+    RestoreDeletedOptions, StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
     UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 

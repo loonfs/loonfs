@@ -27,7 +27,7 @@ impl WalPublishError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::NumberTaken | Self::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
-            Self::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
+            Self::OutcomeUnknown(_) => ErrorCode::OutcomeUnknown,
             Self::Write { kind, .. } => crate::error::classify_store_failure(*kind),
         }
     }

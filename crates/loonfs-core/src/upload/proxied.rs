@@ -17,7 +17,7 @@ use crate::time::OperationClock;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteStream, ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{UploadSessionMode, UploadSessionPayload};
-use loonfs_types::{ContentRef, ContentRefKind, NamespaceId, Subject, UploadId, UploadSession};
+use loonfs_types::{ContentRef, ContentRefKind, PoolId, Subject, UploadId, UploadSession};
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Uploads whole-file content into an upload session.
@@ -78,7 +78,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<UploadSession> {
         let catalog = self.ensure_upload_namespace_available().await?;
-        let family_root_id = catalog.family_root_id();
+        let pool_id = catalog.pool_id();
         authorize_upload_subject(&self.namespace_id, catalog.access(), subject)?;
         let loaded = self
             .load_open_proxied_session(&catalog, upload_id, subject, clock)
@@ -87,14 +87,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let owner = ContentKeyOwner::ProxiedSession(upload_id);
         let content_ref = match payload {
             ProxiedPayload::Bytes(bytes) => {
-                stage_bytes_under_content_id(&self.store, family_root_id, content_id, bytes, owner)
+                stage_bytes_under_content_id(&self.store, pool_id, content_id, bytes, owner)
                     .await?
                     .content_ref
             }
             ProxiedPayload::Stream(body) => {
                 stage_streamed_under_content_id(
                     &self.store,
-                    family_root_id,
+                    pool_id,
                     content_id,
                     body,
                     owner,
@@ -140,7 +140,7 @@ pub(crate) enum ProxiedPayload<'a> {
 }
 
 /// Builds the reference of a proxied session's content object, under the
-/// prefix of `family_root_id`, from the object's stored size and checksum, or
+/// prefix of `pool_id`, from the object's stored size and checksum, or
 /// returns `None` if no upload has written it yet.
 ///
 /// Only this session writes the object, with a create that the store makes
@@ -148,10 +148,10 @@ pub(crate) enum ProxiedPayload<'a> {
 /// uploaded.
 pub(crate) async fn find_proxied_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     session: &UploadSessionPayload,
 ) -> Result<Option<ContentRef>> {
-    let object_key = content_blob(family_root_id, &session.content_id);
+    let object_key = content_blob(pool_id, &session.content_id);
     let Some(stored) = store
         .head(&object_key)
         .await

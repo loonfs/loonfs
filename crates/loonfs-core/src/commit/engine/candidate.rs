@@ -15,7 +15,7 @@ use loonfs_types::format::wal::{
     MergeRecord, MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
 use loonfs_types::{
-    ChangeSeq, CommitId, ContentId, ContentRef, FileContent, InlineContentIdentity, InodeId,
+    CommitId, CommitSeq, ContentId, ContentRef, FileContent, InlineContentIdentity, InodeId,
     NamespaceId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -42,9 +42,9 @@ pub(crate) struct MergeIntent {
     /// The fork and the range of its commits that the merge applies.
     pub(crate) record: MergeRecord,
     /// The sequence of this namespace that the fork was made at, from the
-    /// fork's manifest (`fork_basis.source_head_seq`). The fork's first merge
+    /// fork's manifest (`fork_basis.manifest.head_seq`). The fork's first merge
     /// starts after it.
-    pub(crate) fork_point_seq: ChangeSeq,
+    pub(crate) fork_point_seq: CommitSeq,
     /// The fork's ID of the inode that each create operation makes, by the
     /// operation's index. A merge creates each inode under its ID in the
     /// fork, so an inode has one ID in both namespaces.
@@ -191,7 +191,7 @@ impl CommitCandidate {
     pub(crate) fn with_merge(
         mut self,
         record: MergeRecord,
-        fork_point_seq: ChangeSeq,
+        fork_point_seq: CommitSeq,
         created_inode_ids: BTreeMap<usize, InodeId>,
     ) -> Self {
         self.merge = Some(MergeIntent {

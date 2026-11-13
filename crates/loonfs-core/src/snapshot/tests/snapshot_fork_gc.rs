@@ -1,12 +1,12 @@
-//! Snapshot-to-fork pin handoff while collection retains a captured root set.
+//! The handoff from a user snapshot to a fork snapshot while collection retains a captured root set.
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::GcOptions;
-use loonfs_objectstore::keys::{pin, pin_prefix};
+use loonfs_objectstore::keys::{snapshot_prefix, snapshot_record};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{MetadataMapStore, OperationKind};
-use loonfs_types::format::control::{PinOwner, PinPayload};
+use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
 use loonfs_types::options::AttributeInclusion;
 use std::assert_matches;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,7 +16,7 @@ struct Fixture {
     store: Arc<MetadataMapStore<LocalFsStore>>,
     source: NamespaceId,
     target: NamespaceId,
-    snapshot: PinPayload,
+    snapshot: SnapshotPayload,
     replaced: Vec<String>,
     context: WriterAt,
 }
@@ -46,8 +46,8 @@ impl Fixture {
         }
         let namespace = crate::test_support::namespace_store(&store, &source);
         let snapshot = namespace
-            .create_pin(
-                PinOwner::User {
+            .create_snapshot_record(
+                SnapshotOwner::User {
                     name: "historical".into(),
                     expires_at_ms: Some(u64::MAX),
                 },
@@ -112,7 +112,7 @@ impl Fixture {
             target,
             snapshot,
             replaced,
-            // Old objects can be collected, but a fork pin created by this
+            // Old objects can be collected, but a fork snapshot created by this
             // attempt is still inside its installation grace.
             context: writer_at(
                 "fork",
@@ -128,7 +128,7 @@ impl Fixture {
             &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
-        .delete_snapshot(&self.snapshot.pin_id)
+        .delete_snapshot(&self.snapshot.snapshot_id)
         .await
         .expect("delete snapshot");
     }
@@ -160,21 +160,21 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
     fork_gate.block_next();
     let collect = async {
         crate::test_support::namespace_store(&gc_gate, &fixture.source)
-            .gc(None, &GcOptions::default(), &fixture.context.clock())
+            .gc(&GcOptions::default(), &fixture.context.clock())
             .await
             .expect("old collector keeps its captured snapshot root");
         fixture.assert_replaced_present(true).await;
         fork_gate.release();
     };
     let fork = async {
-        // The collector has captured its pins before this attempt creates one.
+        // The collector has captured its snapshots before this attempt creates one.
         gc_gate.wait_until_blocked().await;
         crate::test_support::NamespaceFixture::new(&fork_gate, &fixture.source, &fixture.context)
             .engine()
             .fork_namespace_at_snapshot(
                 &fixture.target,
                 &loonfs_test_support::test_actor(),
-                &fixture.snapshot.pin_id,
+                &fixture.snapshot.snapshot_id,
             )
             .await
             .expect("install historical fork")
@@ -186,7 +186,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
     };
     tokio::join!(collect, fork, release_snapshot);
     crate::test_support::namespace_store(&fixture.store, &fixture.source)
-        .gc(None, &GcOptions::default(), &fixture.context.clock())
+        .gc(&GcOptions::default(), &fixture.context.clock())
         .await
         .expect("new collector keeps the fork root");
     fixture.assert_replaced_present(true).await;
@@ -213,7 +213,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
 #[tokio::test]
 async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification() {
     let fixture = Fixture::new().await;
-    let key = pin(&fixture.source, &fixture.snapshot.pin_id);
+    let key = snapshot_record(&fixture.source, &fixture.snapshot.snapshot_id);
     let reads = AtomicUsize::new(0);
     let gate = BlockingStore::matching(fixture.store.clone(), move |operation| {
         operation.key() == key
@@ -226,23 +226,23 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
             .engine();
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.pin_id),
+        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.snapshot_id),
         async {
             gate.wait_until_blocked().await;
             assert_eq!(
                 fixture
                     .store
-                    .list_prefix(&pin_prefix(&fixture.source))
+                    .list_prefix(&snapshot_prefix(&fixture.source))
                     .await
-                    .expect("snapshot and tentative fork pin")
+                    .expect("snapshot and tentative fork snapshot")
                     .len(),
                 2
             );
             fixture.delete_snapshot().await;
             crate::test_support::namespace_store(&fixture.store, &fixture.source)
-                .gc(None, &GcOptions::default(), &fixture.context.clock())
+                .gc(&GcOptions::default(), &fixture.context.clock())
                 .await
-                .expect("tentative pin remains a root during verification");
+                .expect("tentative snapshot remains a root during verification");
             fixture.assert_replaced_present(true).await;
             gate.release();
         }
@@ -250,9 +250,9 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
     assert_matches!(fork, Err(CoreError::SnapshotNotFound { .. }));
     assert!(fixture
         .store
-        .list_prefix(&pin_prefix(&fixture.source))
+        .list_prefix(&snapshot_prefix(&fixture.source))
         .await
-        .expect("failed fork pin cleaned up")
+        .expect("failed fork snapshot cleaned up")
         .is_empty());
     assert!(fixture
         .store
@@ -261,7 +261,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         .expect("no target installed")
         .is_none());
     crate::test_support::namespace_store(&fixture.store, &fixture.source)
-        .gc(None, &GcOptions::default(), &fixture.context.clock())
+        .gc(&GcOptions::default(), &fixture.context.clock())
         .await
         .expect("later collection sees no historical root");
     fixture.assert_replaced_present(false).await;
@@ -276,7 +276,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
         .expect("writer");
     let gate = BlockingStore::new(
         fixture.store.clone(),
-        KeyPredicate::prefix(pin_prefix(&fixture.source)),
+        KeyPredicate::prefix(snapshot_prefix(&fixture.source)),
         OperationSelector::PutCreateIfAbsent,
     );
     gate.block_next();
@@ -285,13 +285,13 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
         crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
             .engine();
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.pin_id),
+        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.snapshot_id),
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
                 .delete_namespace(Default::default(), writer, None, &fixture.context.clock())
                 .await
-                .expect("delete source before the fork pin is written");
+                .expect("delete source before the fork snapshot is written");
             gate.release();
         }
     );
@@ -302,10 +302,13 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
     assert_eq!(
         fixture
             .store
-            .list_prefix(&pin_prefix(&fixture.source))
+            .list_prefix(&snapshot_prefix(&fixture.source))
             .await
-            .expect("pins"),
-        [pin(&fixture.source, &fixture.snapshot.pin_id)]
+            .expect("snapshots"),
+        [snapshot_record(
+            &fixture.source,
+            &fixture.snapshot.snapshot_id
+        )]
     );
     assert!(fixture
         .store
@@ -327,8 +330,8 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         .expect("bootstrap");
     let namespace = crate::test_support::namespace_store(&inner, &source);
     let snapshot = namespace
-        .create_pin(
-            PinOwner::User {
+        .create_snapshot_record(
+            SnapshotOwner::User {
                 name: "short".into(),
                 expires_at_ms: Some(context.now_ms + 10),
             },
@@ -342,8 +345,8 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     // The fork's first read of the snapshot blocks, and the snapshot expires
     // while it does.
     let store = BlockingStore::new(
-        RecordingStore::new(inner, KeyPredicate::prefix(pin_prefix(&source))),
-        KeyPredicate::exact(pin(&source, &snapshot.pin_id)),
+        RecordingStore::new(inner, KeyPredicate::prefix(snapshot_prefix(&source))),
+        KeyPredicate::exact(snapshot_record(&source, &snapshot.snapshot_id)),
         OperationSelector::Read,
     );
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
@@ -356,7 +359,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     }
     .engine();
     let (fork, ()) = tokio::join!(
-        namespace.fork_namespace_at_snapshot(&target, &actor, &snapshot.pin_id),
+        namespace.fork_namespace_at_snapshot(&target, &actor, &snapshot.snapshot_id),
         async {
             store.wait_until_blocked().await;
             clock.advance_ms(10);
@@ -367,6 +370,6 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     assert_eq!(
         store.inner().counts().create_if_absent_puts,
         0,
-        "the expiry check refuses before a fork pin is written"
+        "the expiry check refuses before a fork snapshot is written"
     );
 }

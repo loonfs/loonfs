@@ -73,10 +73,13 @@ pub struct ServerConfig {
     /// not yet settled, across every namespace. A merge isn't charged to it.
     /// Derived when sized, and otherwise 64 MiB.
     pub max_admitted_bytes: Option<NonZeroUsize>,
-    /// The merge allowance, which limits the estimated peak memory of
-    /// publishing the one merge that the server admits at a time, three
-    /// times the merge's planned WAL bytes. A merge whose estimate exceeds it
-    /// returns `merge_too_large`. Zero turns merges off, and the sizing
+    /// The merge allowance, which limits the estimated peak memory of the
+    /// merges that the server plans and publishes at once. A merge's
+    /// estimate is three times its planned WAL bytes, or the memory that
+    /// planning the merge uses, whichever is larger. A merge whose estimate
+    /// exceeds the allowance returns `merge_too_large`, and a merge whose
+    /// reservation doesn't fit beside other merges' reservations returns
+    /// `server_busy`. Zero turns merges off, and the sizing
     /// formula then reserves nothing for them. Defaults to the runtime's
     /// [`DEFAULT_MAX_MERGE_BYTES`](loonfs::DEFAULT_MAX_MERGE_BYTES), 512 MiB,
     /// with or without a memory limit.
@@ -84,10 +87,9 @@ pub struct ServerConfig {
     /// Maximum publication batches running at once. Defaults to 8.
     pub max_concurrent_publications: Option<NonZeroUsize>,
     /// The per-namespace admission limits of the server's runtime. The
-    /// write-stop wait and the merge's fold budget aren't keys of this table:
-    /// the server sets each to half of `request_deadline_ms`, so a commit that
-    /// waits for the whole wait returns `maintenance_required`, and a merge
-    /// returns without its fold, before the request returns
+    /// write-stop wait isn't a key of this table. The server sets the wait to
+    /// half of `request_deadline_ms`, so a commit that waits for the whole
+    /// wait returns `maintenance_required` before the request returns
     /// `deadline_exceeded`.
     #[serde(default)]
     pub publication: loonfs::PublicationPolicy,
@@ -192,14 +194,12 @@ pub struct ServerConfig {
     /// to 86400000 (24 hours).
     #[serde(default = "default_sweep_interval_ms")]
     pub sweep_interval_ms: NonZeroU64,
-    /// How long the server keeps a namespace's history before it advances
-    /// the namespace's retention floor past that history, in milliseconds,
-    /// for each namespace without a retention window of its own. Each sweep
+    /// Retention window, in milliseconds, that the server records in each
+    /// namespace that it creates without a window of its own. Each sweep
     /// advances every active namespace's floor to the last commit at or
-    /// before the current time minus the namespace's window, or minus this
-    /// setting for a namespace that has no window of its own. Absent, the
-    /// server advances only the floors of namespaces that have their own
-    /// window.
+    /// before the current time minus the namespace's window, and leaves the
+    /// floor of a namespace without a window where it is. Absent, a
+    /// namespace created without a window has no window.
     pub retention_window_ms: Option<NonZeroU64>,
     /// Idle milliseconds before a caught-up session with no request handle
     /// closes. A later write opens a new session. Defaults to 30 minutes.
@@ -386,7 +386,6 @@ impl ServerConfig {
             min_publish_interval_ms: self.min_publish_interval_ms,
             publication: loonfs::PublicationPolicy {
                 write_stop_wait_budget_ms: self.request_deadline_ms.get() / 2,
-                merge_fold_budget_ms: self.request_deadline_ms.get() / 2,
                 ..self.publication.clone()
             },
             inline_content: self.inline_content.clone(),
@@ -394,6 +393,7 @@ impl ServerConfig {
                 Some(idle_fold_after_ms) => NonZeroU64::new(idle_fold_after_ms),
                 None => defaults.idle_fold_after_ms,
             },
+            default_retention_window_ms: self.retention_window_ms,
         }
     }
 
@@ -405,7 +405,6 @@ impl ServerConfig {
             metadata_retry_interval_ms: self.metadata_retry_interval_ms.get(),
             gc_interval_ms: self.gc_interval_ms.get(),
             sweep_interval_ms: self.sweep_interval_ms.get(),
-            retention_window_ms: self.retention_window_ms,
             idle_session_close_after_ms: self.idle_session_close_after_ms.get(),
         }
     }

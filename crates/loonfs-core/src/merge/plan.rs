@@ -3,10 +3,11 @@
 //! commit commits into.
 
 use super::classify::Classifier;
+use super::memory::PlanningMemory;
 use super::operations::BindingChange;
 use super::order::MergeOperations;
 use super::replay::Replay;
-use super::size::{check_planned_bytes, with_split_hint};
+use super::size::with_split_hint;
 use super::state::StateReader;
 use super::{through_seq, MergeAllowance, MergeRequest};
 use crate::authorize::{Authorizer, CommitAuthority};
@@ -19,8 +20,9 @@ use crate::path::read::LoadedMetadataView;
 use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
-use loonfs_types::{u64_from_usize, ChangeSeq, CommitPrecondition, InodeKind, MergeConflict};
+use loonfs_types::{u64_from_usize, CommitPrecondition, CommitSeq, InodeKind, MergeConflict};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// The commit of a merge or of a replay commit, as one plan made it, with
 /// the conflicts that its classification found.
@@ -37,8 +39,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Plans the commit of a merge of `fork`, read as `fork_view`, into
     /// `main`, over the range that starts after `source_after_seq` of a fork
     /// made at `fork_point_seq`, or of a rebase's replay commit, when
-    /// `pinned` is the source that `main`, the rebase's new fork, was forked
-    /// from, read through its pin (see [`Self::plan_merge`] and
+    /// `snapshot` is the source that `main`, the rebase's new fork, was forked
+    /// from, read through its snapshot (see [`Self::plan_merge`] and
     /// [`Self::plan_replay`]).
     ///
     /// The commit expects `main`'s head when it deletes or moves a
@@ -50,21 +52,24 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// the classification, or when the ordered commit, with the temporary
     /// moves that the ordering adds, doesn't fit them. Either refusal has
     /// the split hint that the fork's net change over shorter ranges gives
-    /// (see [`with_split_hint`]).
+    /// (see [`with_split_hint`]). Each check grows the merge's reservation of
+    /// the allowance to cover the planned bytes and the memory that the plan
+    /// uses (see [`PlanningMemory`]), and returns `server_busy` when other
+    /// merges' reservations leave no room for the growth.
     #[allow(
         clippy::too_many_arguments,
-        reason = "a merge and a replay commit share every input, and a replay commit adds the pin"
+        reason = "a merge and a replay commit share every input, and a replay commit adds the snapshot"
     )]
     pub(super) async fn plan_merge_commit<'v, F>(
         &self,
         main: &'v LoadedMetadataView<'v, S>,
-        pinned: Option<&'v LoadedMetadataView<'v, S>>,
+        snapshot: Option<&'v LoadedMetadataView<'v, S>>,
         fork: &NamespaceEngine<S, F>,
         fork_view: &'v LoadedMetadataView<'v, S>,
-        (fork_point_seq, source_after_seq): (ChangeSeq, ChangeSeq),
+        (fork_point_seq, source_after_seq): (CommitSeq, CommitSeq),
         request: &MergeRequest,
         prepared_at_ms: u64,
-        allowance: MergeAllowance,
+        allowance: &MergeAllowance,
     ) -> Result<PlannedMergeCommit> {
         let fork_head = fork_view.head();
         let source_namespace_id = &fork_head.namespace_id;
@@ -85,12 +90,19 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             intent.message.as_deref(),
             Some(&record),
         );
+        let memory = PlanningMemory::new(allowance.clone());
         let mut classifier = Classifier {
             main,
-            theirs: StateReader::new(main.metadata_view()),
-            base: StateReader::new(pinned.unwrap_or(main).metadata_view_at(fork_point_seq)),
-            ours: StateReader::new(fork_view.metadata_view_at(record.source_through_seq)),
-            before: StateReader::new(fork_view.metadata_view_at(source_after_seq)),
+            theirs: StateReader::new(main.metadata_view(), &memory),
+            base: StateReader::new(
+                snapshot.unwrap_or(main).metadata_view_at(fork_point_seq),
+                &memory,
+            ),
+            ours: StateReader::new(
+                fork_view.metadata_view_at(record.source_through_seq),
+                &memory,
+            ),
+            before: StateReader::new(fork_view.metadata_view_at(source_after_seq), &memory),
             fork_authorizer: Authorizer::for_request(
                 source_namespace_id,
                 &fork_head.access,
@@ -98,7 +110,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             )?,
             record: &record,
             fork_point_seq,
-            allowance,
+            memory: Arc::clone(&memory),
             own_seqs: HashMap::new(),
             plans: Vec::new(),
             layouts: HashMap::new(),
@@ -106,8 +118,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             subtree_checks: Vec::new(),
             conflicted: HashSet::new(),
             first_conflict: None,
-            replay: pinned.map(|pinned| Replay {
-                pinned,
+            replay: snapshot.map(|snapshot| Replay {
+                snapshot,
                 report: Vec::new(),
             }),
         };
@@ -159,7 +171,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .drain()
             .filter(|(content_ref, _)| applied.contains(content_ref))
             .map(|(content_ref, layout)| {
-                PreparedContent::for_family_member(
+                PreparedContent::for_pool_member(
                     self.namespace.namespace_id.clone(),
                     content_ref,
                     layout,
@@ -177,7 +189,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .with_merge(record.clone(), fork_point_seq, created_inode_ids)
         .with_temporary_moves(temporary_moves);
         with_split_hint(
-            check_planned_bytes(candidate.wal_record_bytes_upper_bound(), allowance),
+            memory.check_planned(candidate.wal_record_bytes_upper_bound()),
             fork_view,
             range,
             fields_bytes,

@@ -7,12 +7,12 @@ mod handler_panics;
 mod hosted_content_ref_access;
 mod http_access;
 mod inline_commits;
-mod maintenance_runs;
+mod maintenance_jobs;
 mod namespaces;
-mod pin_deletion;
 mod ranged_reads;
 mod read_consistency;
 mod request_limit;
+mod snapshot_deletion;
 mod surface;
 mod usage;
 
@@ -39,7 +39,7 @@ use loonfs_types::{
     AttributesRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
 };
 use loonfs_types::{
-    CapabilityDocument, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    CapabilityDocument, CommitId, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior,
     GrepRequest, GrepScope, NamespaceId, RevisionNo, FEATURE_QUERY_GREP,
 };
 use std::path::Path;
@@ -84,8 +84,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "built_through_seq",
     "captured_seq",
     "caught_up",
-    "checkpoint_id",
-    "checkpoint_not_deletable",
+    "snapshot_id",
+    "snapshot_not_deletable",
     "checksum",
     "checksum_algorithm",
     "commit_id",
@@ -98,6 +98,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_changed",
     "content_objects",
     "content_ref",
+    "content_deletion_pool_budget",
+    "content_deletion_unreadable_member",
     "content_token",
     "content_tokens",
     "copy_by_inode",
@@ -113,7 +115,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "deleted_at_ms",
     "deleted_binding",
     "deleted_by",
-    "deleted_checkpoints_by_owner",
+    "deleted_snapshots_by_owner",
     "deletion_seq",
     "destination_display_name",
     "destination_exists",
@@ -130,6 +132,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "expected_head_seq",
     "expected_inode_id",
     "expected_revision_no",
+    "expired_row_removal_walk_limit",
     "expires_at_ms",
     "fenced_writer_epoch",
     "file_created",
@@ -189,6 +192,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "reorganize_pending",
     "request_deadline_ms",
     "request_id",
+    "restore_deleted",
     "restore_revision",
     "restore_revision_by_inode",
     "retained_candidates",
@@ -199,7 +203,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "revision_committed_by",
     "revision_no",
     "root_grants",
-    "run_id",
     "serve_and_maintain",
     "serve_only",
     "service_proxied",
@@ -400,7 +403,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         precondition_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
         committed: Some(loonfs_types::CommittedReceipt {
-            committed_seq: ChangeSeq::from(1),
+            committed_seq: CommitSeq::from(1),
             committed_fingerprint: loonfs_test_support::ids::commit_fingerprint("fingerprint"),
         }),
         operation_index: Some(0),
@@ -423,19 +426,19 @@ fn error_detail_fields_match_the_api_spec_table() {
         actual_attributes_revision_no: Some(AttributesRevisionNo::from(2)),
         expected_access_revision_no: Some(loonfs_types::AccessRevisionNo(1)),
         actual_access_revision_no: Some(loonfs_types::AccessRevisionNo(2)),
-        after_seq: Some(ChangeSeq::from(2)),
-        from_seq: Some(ChangeSeq::from(2)),
-        fork_point_seq: Some(ChangeSeq::from(2)),
-        retention_floor_seq: Some(ChangeSeq::from(3)),
-        expected_deletion_seq: Some(ChangeSeq::from(4)),
-        actual_deletion_seq: Some(ChangeSeq::from(5)),
+        after_seq: Some(CommitSeq::from(2)),
+        from_seq: Some(CommitSeq::from(2)),
+        fork_point_seq: Some(CommitSeq::from(2)),
+        retention_floor_seq: Some(CommitSeq::from(3)),
+        expected_deletion_seq: Some(CommitSeq::from(4)),
+        actual_deletion_seq: Some(CommitSeq::from(5)),
         source_namespace_id: Some(NamespaceId::parse("fork").expect("namespace id")),
-        expected_after_seq: Some(ChangeSeq::from(9)),
-        actual_after_seq: Some(ChangeSeq::from(10)),
-        source_after_seq: Some(ChangeSeq::from(10)),
+        expected_after_seq: Some(CommitSeq::from(9)),
+        actual_after_seq: Some(CommitSeq::from(10)),
+        source_after_seq: Some(CommitSeq::from(10)),
         conflict_count: Some(1),
         merge_bound: Some(loonfs_types::MergeBound::WalObject),
-        split_at_seq: Some(ChangeSeq::from(11)),
+        split_at_seq: Some(CommitSeq::from(11)),
         conflict: Some(loonfs_types::MergeConflict {
             inode_id: InodeId(4),
             kind: loonfs_types::MergeConflictKind::Content,
@@ -443,8 +446,8 @@ fn error_detail_fields_match_the_api_spec_table() {
             ours: None,
             theirs: None,
         }),
-        expected_head_seq: Some(ChangeSeq::from(6)),
-        actual_head_seq: Some(ChangeSeq::from(7)),
+        expected_head_seq: Some(CommitSeq::from(6)),
+        actual_head_seq: Some(CommitSeq::from(7)),
         size_bytes: Some(8),
     };
     let serialized = serde_json::to_value(populated).expect("serialize populated error details");
@@ -624,7 +627,7 @@ async fn invalid_presign_content_is_a_bad_request() {
 
     let response =
         super::handlers_uploads::presign_issuer_error(ObjectStoreError::InvalidRequest {
-            object_key: "namespaces/demo/content/con_1".to_owned(),
+            object_key: "pools/pool_00000000000000000000000001/content/con_1".to_owned(),
             message: "invalid checksum".to_owned(),
         })
         .into_response();
@@ -701,8 +704,8 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     let diagnostics: loonfs_types::NamespaceDiagnostics =
         serde_json::from_slice(&body).expect("namespace diagnostics response");
     assert_eq!(diagnostics.namespace_id, namespace_id);
-    assert_eq!(diagnostics.head_seq, ChangeSeq(1));
-    assert_eq!(diagnostics.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(diagnostics.head_seq, CommitSeq(1));
+    assert_eq!(diagnostics.retention_floor_seq, CommitSeq(0));
     assert_eq!(
         diagnostics.current_manifest_no,
         Some(loonfs_types::ManifestNo(2))
@@ -952,7 +955,7 @@ async fn grep_error_unreadable_entries_and_segments_are_index_corrupt_and_core_r
         &writer,
         &unknown_member,
         loonfs_types::format::manifest::ExtensionEntry::new(
-            2,
+            1,
             Vec::new(),
             state(serde_json::json!({ "status": active, "watermark": 1 })),
         ),
@@ -1227,7 +1230,8 @@ async fn http_delete_missing_path_returns_path_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_put_over_directory_and_move_into_existing_target_return_path_conflict() {
+async fn http_put_over_directory_returns_wrong_kind_and_move_into_existing_target_returns_path_conflict(
+) {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
@@ -1269,7 +1273,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
             )
             .await,
         409,
-        "path_conflict",
+        "wrong_kind",
         None,
     );
 
@@ -1519,7 +1523,7 @@ async fn http_path_mutation_retries_a_wal_put_collision() {
         )
         .await
         .expect("path write retries the WAL collision");
-    assert_eq!(result.committed_seq, ChangeSeq(1));
+    assert_eq!(result.committed_seq, CommitSeq(1));
     assert_eq!(failures.attempts(), 2);
 
     harness.server.abort();
@@ -1546,7 +1550,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
         )
         .await
         .expect("first write takes over the namespace");
-    assert_eq!(result.committed_seq, ChangeSeq(1));
+    assert_eq!(result.committed_seq, CommitSeq(1));
 
     let head =
         loonfs_core::test_support::namespace_store(store_for_check.as_ref(), &namespace_id("demo"))
@@ -1590,9 +1594,9 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
             "unauthorized",
             Some("missing or invalid bearer token"),
         );
-        // The checkpoint inventory names this deployment's garbage-collection
+        // The snapshot inventory names this deployment's garbage-collection
         // roots, so it answers behind the same token as everything else.
-        let mut pager = client.list_checkpoints(&namespace_id("demo"));
+        let mut pager = client.list_snapshot_records(&namespace_id("demo"));
         assert_error_response(
             pager.next().await.expect("a fresh pager has one page"),
             401,
@@ -1897,11 +1901,11 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     );
     assert_eq!(body["param"], "inode_id");
 
-    let runs_url = format!("http://{addr}/v0/maintenance/namespaces/demo/runs");
+    let jobs_url = format!("http://{addr}/v0/maintenance/namespaces/demo/jobs");
     expect_enveloped(
         || {
             raw_agent()
-                .post(&runs_url)
+                .post(&jobs_url)
                 .set("content-type", "application/json")
                 .send_string(r#"{"kind":"gc"}"#)
         },
@@ -2091,7 +2095,7 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
 
     let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
     let key = loonfs_objectstore::keys::content_blob(
-        &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_test_support::ids::numbered_pool_id(1),
         &loonfs_types::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
     );
     // Use HTTP-sized chunks so the store must regroup them.
@@ -2251,7 +2255,7 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
     // A cursor from a head ahead of the serving one was not issued for it.
     let mut future_cursor: loonfs_types::FileRevisionsPageCursor =
         loonfs_types::decode_cursor(&cursor).expect("decode revisions cursor");
-    future_cursor.head_seq = loonfs_types::ChangeSeq(future_cursor.head_seq.0 + 1000);
+    future_cursor.head_seq = loonfs_types::CommitSeq(future_cursor.head_seq.0 + 1000);
     let future_cursor = loonfs_types::encode_cursor(&future_cursor).expect("encode future cursor");
     let error = raw_agent()
         .get(&format!(
@@ -2732,7 +2736,7 @@ async fn publish_grep_entry(
         .await
         .expect("load the basis");
     let published = maintenance
-        .publish_extension(&basis, &grep_extension_name(), |base| (entry.clone(), base))
+        .publish_extension(&basis, &grep_extension_name(), entry)
         .await
         .expect("publish the entry");
     assert!(matches!(
@@ -2963,7 +2967,7 @@ mod direct_download {
     };
     use loonfs_objectstore::ByteRange;
     use loonfs_objectstore::ObjectStoreExtension;
-    use loonfs_types::ObjectTransferAccess;
+    use loonfs_types::ObjectTransfer;
     use loonfs_types::{
         Checksum, ChecksumAlgorithm, RevisionNo, UploadContentClaim, FEATURE_DOWNLOADS_DIRECT_GET,
         FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
@@ -3100,14 +3104,14 @@ mod direct_download {
                     continue;
                 }
                 let grant: serde_json::Value = serde_json::from_slice(&bytes).expect("grant");
-                assert!(grant.get("access").is_none());
+                assert!(grant.get("transfer").is_none());
                 let ranges = grant["ranges"].as_array().expect("ranges");
                 assert_eq!(ranges.len(), 1);
                 assert_eq!(ranges[0]["start_offset"], 0);
                 assert_eq!(ranges[0]["length"], value.len());
-                let access: loonfs_types::ObjectTransferAccess =
-                    serde_json::from_value(ranges[0]["access"].clone()).expect("access");
-                let loonfs_types::ObjectTransferAccess::PresignedUrl {
+                let access: loonfs_types::ObjectTransfer =
+                    serde_json::from_value(ranges[0]["transfer"].clone()).expect("transfer");
+                let loonfs_types::ObjectTransfer::PresignedUrl {
                     method,
                     url,
                     headers,
@@ -3153,7 +3157,7 @@ mod direct_download {
         )
         .await
         .expect("app");
-        let snapshot_id = "pin_00000000000000000001-0000000000000002";
+        let snapshot_id = "snp_00000000000000000001-00000000000000000000000002";
         let route = "/v0/namespaces/demo/filesystem/downloads";
         let inode_route = "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/downloads";
         let revision_route =
@@ -3237,7 +3241,7 @@ mod direct_download {
             .await
             .expect("put file");
         let inode_id = client.stat(&path).await.expect("stat").inode_id;
-        let checkpoint_id = client
+        let snapshot_id = client
             .create_snapshot(&namespace, "pinned")
             .await
             .expect("snapshot")
@@ -3246,8 +3250,8 @@ mod direct_download {
             start_offset: 99,
             ..DownloadOptions::default()
         };
-        let at_checkpoint = DownloadOptions {
-            at: loonfs_client::ReadAt::Snapshot(checkpoint_id),
+        let at_snapshot = DownloadOptions {
+            at: loonfs_client::ReadAt::Snapshot(snapshot_id),
             ..DownloadOptions::default()
         };
 
@@ -3261,7 +3265,7 @@ mod direct_download {
             ),
             (
                 client
-                    .create_revision_download_with_options(&path, RevisionNo(1), &at_checkpoint)
+                    .create_revision_download_with_options(&path, RevisionNo(1), &at_snapshot)
                     .await
                     .map(drop),
                 "/revision_no",
@@ -3682,10 +3686,7 @@ mod direct_download {
             None,
         );
 
-        let grant = client
-            .create_download(&target)
-            .await
-            .expect("download grant");
+        let grant = client.create_download(&target).await.expect("download");
         assert_eq!(grant.path.as_str(), "/big.bin");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
         assert_eq!(Some(&grant.content_ref), entry.content_ref());
@@ -3795,8 +3796,8 @@ mod direct_download {
         assert_eq!(pinned.content_ref, grant.content_ref);
     }
 
-    fn signed_headers(access: &ObjectTransferAccess) -> &BTreeMap<String, String> {
-        let ObjectTransferAccess::PresignedUrl { headers, .. } = access else {
+    fn signed_headers(access: &ObjectTransfer) -> &BTreeMap<String, String> {
+        let ObjectTransfer::PresignedUrl { headers, .. } = access else {
             panic!("expected a presigned URL");
         };
         headers
@@ -3906,9 +3907,9 @@ mod direct_download {
         assert_eq!(grant.ranges[0].length, 70_000 - held);
         assert_eq!(grant.ranges[1].start_offset, 70_000);
         assert_eq!(grant.ranges[1].length, 6);
-        assert_eq!(signed_headers(&grant.ranges[0].access), &signed);
+        assert_eq!(signed_headers(&grant.ranges[0].transfer), &signed);
         assert_eq!(
-            signed_headers(&grant.ranges[1].access)
+            signed_headers(&grant.ranges[1].transfer)
                 .get("range")
                 .map(String::as_str),
             Some("bytes=0-5")
@@ -3933,8 +3934,8 @@ mod direct_download {
                 assert_eq!(actual.start_offset, expected.start_offset);
                 assert_eq!(actual.length, expected.length);
                 assert_eq!(
-                    signed_headers(&actual.access),
-                    signed_headers(&expected.access)
+                    signed_headers(&actual.transfer),
+                    signed_headers(&expected.transfer)
                 );
             }
         }
@@ -3987,7 +3988,7 @@ mod direct_download {
             .expect("a grant of zero bytes");
         assert_eq!(grant.ranges.len(), 1);
         assert_eq!(grant.ranges[0].length, 0);
-        assert!(signed_headers(&grant.ranges[0].access).is_empty());
+        assert!(signed_headers(&grant.ranges[0].transfer).is_empty());
         let mut sink = Vec::new();
         assert_eq!(
             client
@@ -4151,7 +4152,7 @@ mod direct_download {
                 .expect("read open direct_put session");
             assert_eq!(session.mode, loonfs_types::UploadMode::DirectPut);
             let loonfs_types::UploadSessionStatus::Open {
-                access: Some(loonfs_types::ObjectTransferAccess::PresignedUrl { method, .. }),
+                transfer: Some(loonfs_types::ObjectTransfer::PresignedUrl { method, .. }),
                 ..
             } = session.status
             else {
@@ -4237,10 +4238,7 @@ mod direct_download {
             .await
             .expect("a large file goes straight to object storage under a crc32c claim");
 
-        let grant = client
-            .create_download(&target)
-            .await
-            .expect("download grant");
+        let grant = client.create_download(&target).await.expect("download");
         assert_eq!(
             grant.content_ref.checksum,
             Checksum::crc32c(&payload),
@@ -4302,10 +4300,7 @@ mod direct_download {
 
         // It came home through the grant, byte for byte, which proves the
         // object the presigned write created is the one the commit named.
-        let grant = client
-            .create_download(&target)
-            .await
-            .expect("download grant");
+        let grant = client.create_download(&target).await.expect("download");
         assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
         let mut received = Vec::new();
         client
@@ -4436,8 +4431,9 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
             let namespace = reader.namespace(&ns);
             let entry = namespace.stat("/large.bin").await.expect("entry");
 
+            let pool_id = loonfs_core::test_support::load_pool_id(&plain, &ns).await;
             let key = loonfs_objectstore::keys::content_blob(
-                &ns,
+                &pool_id,
                 &entry.content_ref().expect("file").content_id,
             );
             let mut changed = payload.clone();
@@ -4510,8 +4506,8 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
     assert_eq!(error.code, ErrorCode::StaleHead.as_str());
     let details = error.details.expect("details");
     assert_eq!(details.precondition_index, Some(0));
-    assert_eq!(details.expected_head_seq, Some(ChangeSeq(1)));
-    assert_eq!(details.actual_head_seq, Some(ChangeSeq(0)));
+    assert_eq!(details.expected_head_seq, Some(CommitSeq(1)));
+    assert_eq!(details.actual_head_seq, Some(CommitSeq(0)));
     assert_eq!(details.operation_index, None);
     state.runtime.shutdown().await.expect("shutdown");
 }

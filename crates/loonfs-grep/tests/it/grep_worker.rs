@@ -5,8 +5,8 @@ use crate::common::{
 };
 use bytes::Bytes;
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions, SharedObjectStore,
-    UndeleteDestination, UndeleteOptions,
+    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions,
+    RestoreDeletedDestination, RestoreDeletedOptions, SharedObjectStore,
 };
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::NamespaceReads;
@@ -14,7 +14,9 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
     GrepWorker,
 };
-use loonfs_objectstore::keys::{extension_segment_prefix, metadata_manifest_prefix, pin};
+use loonfs_objectstore::keys::{
+    extension_segment_prefix, metadata_manifest_prefix, snapshot_record,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
@@ -22,10 +24,10 @@ use loonfs_test_support::stores::{
     replace_object, FailStore, InjectedError, KeyPredicate, OperationContext, OperationSelector,
     RecordingStore,
 };
-use loonfs_types::format::control::PinOwner;
+use loonfs_types::format::control::SnapshotOwner;
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, GrepScope, IndexSegmentId, PageRequest,
+    AbsolutePath, CommitSeq, GrepRequest, GrepResponse, GrepScope, IndexSegmentId, PageRequest,
     RunNo, MAX_PUBLIC_INTEGER,
 };
 use std::assert_matches;
@@ -121,7 +123,7 @@ fn normalize_namespace(mut response: GrepResponse) -> GrepResponse {
 }
 
 #[tokio::test]
-async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
+async fn grep_worker_lifecycle_uses_and_releases_its_backfill_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -146,7 +148,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         namespace
             .put_file(
                 &format!("/before-{index}.txt"),
-                format!("checkpoint needle {index}\n").as_bytes(),
+                format!("snapshot needle {index}\n").as_bytes(),
                 &loonfs_test_support::test_actor(),
             )
             .await
@@ -164,10 +166,13 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     let manifest = crate::common::control::grep_entry(&store, &namespace_id)
         .await
         .expect("manifest exists");
-    let GrepIndexStatus::Backfilling { pin_id, .. } = manifest.status() else {
-        panic!("enable must publish checkpointed backfill: {:?}", manifest);
+    let GrepIndexStatus::Backfilling { snapshot_id, .. } = manifest.status() else {
+        panic!(
+            "enable must publish a backfill over a snapshot: {:?}",
+            manifest
+        );
     };
-    let pin_id = pin_id.clone();
+    let snapshot_id = snapshot_id.clone();
 
     let policy = GramIndexBuildPolicy {
         max_files_per_step: NonZeroUsize::MIN,
@@ -185,7 +190,11 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     drive_worker_to_current(&worker, &namespace_id, policy).await;
-    assert!(control::pin(&store, &namespace_id, &pin_id).await.is_none());
+    assert!(
+        control::snapshot_record(&store, &namespace_id, &snapshot_id)
+            .await
+            .is_none()
+    );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("materialized query");
@@ -266,13 +275,9 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
     let current = control::grep_entry(&store, &namespace_id)
         .await
         .expect("current entry");
-    crate::common::publish_grep_entry(
-        &host.maintenance,
-        &namespace_id,
-        current.encode(),
-        RunNo(MAX_PUBLIC_INTEGER),
-    )
-    .await;
+    let mut entry = current.encode();
+    entry.runs.last_mut().expect("a run").run_no = RunNo(MAX_PUBLIC_INTEGER);
+    crate::common::publish_grep_entry(&host.maintenance, &namespace_id, entry).await;
 
     namespace
         .put_file(
@@ -315,13 +320,6 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
     }
 
     assert_eq!(
-        control::metadata_manifest(&store, &namespace_id)
-            .await
-            .payload()
-            .next_run_no,
-        RunNo(MAX_PUBLIC_INTEGER)
-    );
-    assert_eq!(
         store
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
             .await
@@ -340,7 +338,7 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
 }
 
 #[tokio::test]
-async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
+async fn enable_creates_no_snapshot_when_the_manifest_load_fails() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -380,25 +378,25 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         .worker
         .enable(&namespace_id)
         .await
-        .expect_err("the manifest load fails before checkpoint creation");
+        .expect_err("the manifest load fails before snapshot creation");
     assert_eq!(error.code(), ErrorCode::ServerError, "{error:?}");
     assert_eq!(manifest_loads.load(Ordering::SeqCst), 1);
 
-    let mut pager = host.maintenance.list_checkpoints(&namespace_id);
-    let checkpoints = pager
+    let mut pager = host.maintenance.list_snapshot_records(&namespace_id);
+    let snapshots = pager
         .next()
         .await
         .expect("a fresh pager has one page")
-        .expect("list checkpoints after failed enable");
+        .expect("list snapshots after failed enable");
     assert!(
-        checkpoints.checkpoints.is_empty(),
-        "a failure before manifest publication must not leave an active checkpoint"
+        snapshots.snapshots.is_empty(),
+        "a failure before manifest publication must not leave an active snapshot"
     );
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
+async fn enable_confirms_its_snapshot_after_an_ambiguous_manifest_write() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -444,7 +442,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
 }
 
 #[tokio::test]
-async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
+async fn restart_confirms_its_snapshot_after_an_ambiguous_manifest_write() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -469,11 +467,11 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .enable(&namespace_id)
         .await
         .expect("enable grep");
-    let previous_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    let previous_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
     host.writer
         .open_namespace(&namespace_id)
         .expect("open namespace")
-        .delete_snapshot(&previous_checkpoint_id)
+        .delete_snapshot(&previous_snapshot_id)
         .await
         .expect("make the current backfill restart");
 
@@ -499,13 +497,13 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     assert_matches!(outcome, GrepBuildOutcome::BackfillRestarted { .. });
     assert_eq!(failing_store.attempts(), 1);
 
-    let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    assert_ne!(checkpoint_id, previous_checkpoint_id);
+    let snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    assert_ne!(snapshot_id, previous_snapshot_id);
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
+async fn retention_gap_and_vanished_snapshot_restart_fresh_backfill() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -546,7 +544,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .expect("write after watermark");
     let retention_floor_seq =
         fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
-    assert!(retention_floor_seq > ChangeSeq(0));
+    assert!(retention_floor_seq > CommitSeq(0));
     let indexed = crate::common::control::grep_entry(&store, &namespace_id)
         .await
         .expect("grep's entry")
@@ -561,7 +559,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("gap restart");
     assert_matches!(restart, GrepBuildOutcome::BackfillRestarted { .. });
-    let gap_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    let gap_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
     assert_eq!(
         crate::common::control::grep_entry(&store, &namespace_id)
             .await
@@ -571,24 +569,24 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         "a rebootstrap keeps the index's segments, whose postings stay valid"
     );
 
-    // The second trigger: the pinned checkpoint stops pinning its basis
+    // The second trigger: the snapshot stops keeping its basis
     // mid-backfill. The enumeration says so out loud instead of quietly
     // answering current state, and the worker starts over again.
     namespace
-        .delete_snapshot(&gap_checkpoint_id)
+        .delete_snapshot(&gap_snapshot_id)
         .await
-        .expect("remove checkpoint mid-backfill");
+        .expect("remove snapshot mid-backfill");
     let vanished = worker
         .steps(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy::default())
         .await
-        .expect("vanished checkpoint restart");
+        .expect("vanished snapshot restart");
     assert_matches!(vanished, GrepBuildOutcome::BackfillRestarted { .. });
     // A deleted record is finished for good, so the new attempt takes a
-    // pin of its own: a new id, pinning its basis, with the walk starting
+    // snapshot of its own: a new id, keeping its basis, with the walk starting
     // from nothing.
-    let fresh_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    assert_ne!(fresh_checkpoint_id, gap_checkpoint_id);
+    let fresh_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    assert_ne!(fresh_snapshot_id, gap_snapshot_id);
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = new_query(&store, &namespace_id, &request("needle"))
@@ -599,7 +597,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
 }
 
 #[tokio::test]
-async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() {
+async fn retention_passing_a_backfill_snapshot_never_serves_a_partial_query() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -638,11 +636,11 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
                 &loonfs_test_support::test_actor(),
             )
             .await
-            .expect("write checkpointed file");
+            .expect("write a file the snapshot captures");
     }
 
     // The maintenance handle is a separate runtime. The feed reads the
-    // retention floor from the reader's pinned manifest, so the worker must
+    // retention floor from the manifest of the reader's snapshot, so the worker must
     // revalidate on every read to observe the advance within this test.
     let worker = GrepHost::with_reader(&store, "grep-worker-tests", |builder| {
         builder.config(loonfs::RuntimeConfig {
@@ -690,7 +688,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
     assert!(retention_floor_seq > captured_seq);
 
-    // Checkpoint pages remain readable after retention passes their basis,
+    // Snapshot pages remain readable after retention passes their basis,
     // so the final page may still publish the snapshot watermark as active.
     // The change-feed boundary is authoritative: a query at that watermark
     // must fail explicitly instead of treating the missing tail as empty.
@@ -709,7 +707,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     let error = new_query(&store, &namespace_id, &request("handoff needle"))
         .await
         .expect_err("an expired handoff cursor cannot answer a query");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
 
     let restarted = worker
         .steps(&namespace_id, 0)
@@ -739,7 +737,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
 /// snapshot, deletes the expired one, and builds an index that serves the
 /// namespace's files.
 #[tokio::test]
-async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
+async fn an_expired_backfill_snapshot_restarts_the_backfill_from_a_fresh_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -770,19 +768,19 @@ async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
         .expect("write");
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
-    let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    let snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
 
-    // Expire the pin under the backfill without deleting it.
-    let key = pin(&namespace_id, &checkpoint_id);
-    let mut record = control::pin(&store, &namespace_id, &checkpoint_id)
+    // Expire the snapshot under the backfill without deleting it.
+    let key = snapshot_record(&namespace_id, &snapshot_id);
+    let mut record = control::snapshot_record(&store, &namespace_id, &snapshot_id)
         .await
-        .expect("backfill pin");
+        .expect("backfill snapshot");
     assert!(
         record.owner.expires_at_ms().is_some(),
-        "the backfill pin carries a ttl"
+        "the backfill snapshot carries a ttl"
     );
-    let PinOwner::User { expires_at_ms, .. } = &mut record.owner else {
-        panic!("the backfill pin is user-owned");
+    let SnapshotOwner::User { expires_at_ms, .. } = &mut record.owner else {
+        panic!("the backfill snapshot is user-owned");
     };
     *expires_at_ms = Some(record.created_at_ms);
     let expired = record;
@@ -791,7 +789,7 @@ async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
         &key,
         Bytes::from(
             loonfs_types::format::control::encode_control_state(
-                loonfs_types::format::control::ControlObjectKind::Pin,
+                loonfs_types::format::control::ControlObjectKind::Snapshot,
                 &expired,
             )
             .expect("encode record"),
@@ -801,40 +799,44 @@ async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
     .expect("write the expired record");
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    assert!(control::pin(&store, &namespace_id, &checkpoint_id)
-        .await
-        .is_none());
+    assert!(
+        control::snapshot_record(&store, &namespace_id, &snapshot_id)
+            .await
+            .is_none()
+    );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
-        .expect("query after a backfill on an expired pin");
+        .expect("query after a backfill on an expired snapshot");
     assert_eq!(response.matches.len(), 1);
     writer.shutdown().await.expect("shutdown");
 }
 
 /// Asserts the namespace's grep entry is at the start of a backfill attempt
-/// — nothing walked, an active checkpoint pinning its basis — and returns
-/// the checkpoint that attempt holds.
+/// — nothing walked, an active snapshot keeping its basis — and returns
+/// the snapshot that attempt holds.
 async fn assert_fresh_backfill_attempt(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> loonfs_types::PinId {
+) -> loonfs_types::SnapshotId {
     let manifest = crate::common::control::grep_entry(store, namespace_id)
         .await
         .expect("grep entry exists");
     let GrepIndexStatus::Backfilling {
         cursor_inode_id,
-        pin_id,
+        snapshot_id,
         ..
     } = manifest.status()
     else {
-        panic!("expected a checkpointed backfill: {:?}", manifest);
+        panic!("expected a backfill over a snapshot: {:?}", manifest);
     };
     assert_eq!(
         *cursor_inode_id, None,
         "a fresh backfill starts the walk from the beginning"
     );
-    assert!(control::pin(store, namespace_id, pin_id).await.is_some());
-    pin_id.clone()
+    assert!(control::snapshot_record(store, namespace_id, snapshot_id)
+        .await
+        .is_some());
+    snapshot_id.clone()
 }
 
 /// Every grep segment the namespace's manifest names, for asserting that an
@@ -854,7 +856,7 @@ async fn grep_segment_ids(
 async fn grep_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> ChangeSeq {
+) -> CommitSeq {
     crate::common::control::grep_entry(store, namespace_id)
         .await
         .expect("grep entry exists")
@@ -913,7 +915,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
     // One file per step, so the backfill is genuinely partway through the
-    // checkpointed file set when the commits below are made.
+    // snapshot's file set when the commits below are made.
     let policy = GramIndexBuildPolicy {
         max_files_per_step: NonZeroUsize::MIN,
         ..GramIndexBuildPolicy::default()
@@ -933,8 +935,8 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         first
     );
 
-    // Commits strictly after the pinned sequence: one new file, and a
-    // replacement of a file the checkpoint already pinned.
+    // Commits strictly after the snapshot's sequence: one new file, and a
+    // replacement of a file the snapshot already captured.
     namespace
         .put_file(
             "/during.txt",
@@ -954,7 +956,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
             },
         )
         .await
-        .expect("replace a checkpointed file during backfill");
+        .expect("replace a file the snapshot captured during backfill");
 
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
@@ -983,7 +985,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .expect("query the superseded revision");
     assert!(
         superseded.matches.is_empty(),
-        "a revision the checkpoint pinned but the feed replaced must not match"
+        "a revision the snapshot kept but the feed replaced must not match"
     );
     writer.shutdown().await.expect("shutdown");
 }
@@ -1052,11 +1054,11 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
 }
 
 #[tokio::test]
-async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
+async fn a_recursive_delete_hides_matches_and_a_restore_brings_them_back() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("delete-undelete").expect("namespace id");
+    let namespace_id = NamespaceId::parse("delete-restore").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("delete-writer"))
         .config(loonfs::RuntimeConfig {
@@ -1131,42 +1133,42 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     );
 
     namespace_writer
-        .undelete_with_options(
+        .restore_deleted_with_options(
             docs_inode_id,
             deleted.committed_seq,
             &loonfs_test_support::test_actor(),
-            &UndeleteOptions {
-                destination: UndeleteDestination::Path(
+            &RestoreDeletedOptions {
+                destination: RestoreDeletedDestination::Path(
                     AbsolutePath::parse("/docs").expect("valid destination path"),
                 ),
                 ..Default::default()
             },
         )
         .await
-        .expect("undelete the subtree");
+        .expect("restore the subtree");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let restored = new_query(&store, &namespace_id, &request("subtree needle"))
         .await
-        .expect("query after the undelete");
+        .expect("query after the restore");
     assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
     assert_eq!(
         grep_segment_ids(&store, &namespace_id).await,
         segments_before,
-        "an undelete must write no new postings"
+        "a restore must write no new postings"
     );
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
+async fn restoring_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("undelete-after-backfill").expect("namespace id");
+    let namespace_id = NamespaceId::parse("restore-after-backfill").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
-            "undelete-backfill-writer",
+            "restore-backfill-writer",
         ))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -1223,24 +1225,24 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     );
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
 
-    let undeleted = namespace_writer
-        .undelete_with_options(
+    let restored_deleted = namespace_writer
+        .restore_deleted_with_options(
             docs_inode_id,
             deleted.committed_seq,
             &loonfs_test_support::test_actor(),
-            &UndeleteOptions {
-                destination: UndeleteDestination::Path(
+            &RestoreDeletedOptions {
+                destination: RestoreDeletedDestination::Path(
                     AbsolutePath::parse("/docs").expect("valid destination path"),
                 ),
                 ..Default::default()
             },
         )
         .await
-        .expect("undelete subtree after backfill");
+        .expect("restore subtree after backfill");
 
     let restored = new_query(&store, &namespace_id, &request("restored needle"))
         .await
-        .expect("an exact query across the undelete");
+        .expect("an exact query across the restore");
     assert!(restored.tail_scanned);
     assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
 
@@ -1248,18 +1250,18 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         .steps(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy::default())
         .await
-        .expect("build step after undelete");
+        .expect("build step after restore");
     assert_matches!(
         step,
         GrepBuildOutcome::Indexed {
             segments_written: 0,
             ..
         },
-        "an undelete only advances the watermark: {step:?}"
+        "a restore only advances the watermark: {step:?}"
     );
     assert_eq!(
         grep_built_through_seq(&store, &namespace_id).await,
-        undeleted.committed_seq
+        restored_deleted.committed_seq
     );
     assert_eq!(
         grep_segment_ids(&store, &namespace_id).await,
@@ -1369,9 +1371,9 @@ async fn grep_entry_lifecycle_pins_not_materialized_error_surface() {
 }
 
 #[tokio::test]
-async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
+async fn a_backfill_snapshot_mismatch_is_corruption_without_writes() {
     let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("checkpoint-mismatch").expect("namespace");
+    let namespace_id = NamespaceId::parse("snapshot-mismatch").expect("namespace");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
@@ -1379,7 +1381,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
-            "checkpoint-mismatch-writer",
+            "snapshot-mismatch-writer",
         ))
         .build()
         .await
@@ -1388,7 +1390,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create");
-    let host = GrepHost::new(&store, "checkpoint-mismatch").await;
+    let host = GrepHost::new(&store, "snapshot-mismatch").await;
     let worker = &host.worker;
     worker.enable(&namespace_id).await.expect("enable");
     publish_edited_entry(&host, &namespace_id, |entry| {
@@ -1408,14 +1410,14 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
 }
 
 #[tokio::test]
-async fn a_backfilling_entry_without_a_pin_id_is_index_corrupt() {
+async fn a_backfilling_entry_without_a_snapshot_id_is_index_corrupt() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("missing-backfill-checkpoint").expect("namespace id");
+    let namespace_id = NamespaceId::parse("missing-backfill-snapshot").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
-            "missing-checkpoint-writer",
+            "missing-snapshot-writer",
         ))
         .build()
         .await
@@ -1424,7 +1426,7 @@ async fn a_backfilling_entry_without_a_pin_id_is_index_corrupt() {
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    let host = GrepHost::new(&store, "missing-checkpoint").await;
+    let host = GrepHost::new(&store, "missing-snapshot").await;
     host.worker
         .enable(&namespace_id)
         .await
@@ -1433,13 +1435,13 @@ async fn a_backfilling_entry_without_a_pin_id_is_index_corrupt() {
         entry["status"]
             .as_object_mut()
             .expect("backfilling status is an object")
-            .remove("pin_id")
-            .expect("a backfilling entry has a pin id");
+            .remove("snapshot_id")
+            .expect("a backfilling entry has a snapshot id");
     })
     .await;
 
     assert_corrupt_index_error(
-        "backfilling entry missing pin id",
+        "backfilling entry missing snapshot id",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
     writer.shutdown().await.expect("shutdown");
@@ -1511,10 +1513,12 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
             .expect("grep's entry");
         assert_matches!(disabled.status(), GrepIndexStatus::Disabled {}, "{case}");
         assert!(disabled.runs().is_empty(), "{case}");
-        if let GrepIndexStatus::Backfilling { pin_id, .. } = before.status() {
+        if let GrepIndexStatus::Backfilling { snapshot_id, .. } = before.status() {
             assert!(
-                control::pin(&store, &namespace_id, pin_id).await.is_some(),
-                "the invalid entry's backfill pin is left to expire"
+                control::snapshot_record(&store, &namespace_id, snapshot_id)
+                    .await
+                    .is_some(),
+                "the invalid entry's backfill snapshot is left to expire"
             );
         }
         assert_not_enabled_error(
@@ -1604,8 +1608,7 @@ async fn publish_edited_entry(
     let mut document = serde_json::to_value(current).expect("encode the entry");
     edit(&mut document);
     let entry: ExtensionEntry = serde_json::from_value(document).expect("core decodes the entry");
-    let next_run_no = manifest.payload().next_run_no;
-    crate::common::publish_grep_entry(&host.maintenance, namespace_id, entry, next_run_no).await;
+    crate::common::publish_grep_entry(&host.maintenance, namespace_id, entry).await;
 }
 
 /// Publishes grep's entry with a version this build doesn't read.
@@ -1689,7 +1692,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
 #[tokio::test]
 async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
     use loonfs::publish::{CommitIntent, FilesystemOperation};
-    use loonfs::{CommitId, FilesystemChange};
+    use loonfs::{CommitId, FilesystemEvent};
     use loonfs_types::{DisplayName, MAX_PATH_BYTES, ROOT_INODE_ID};
 
     let temp_dir = tempdir().expect("tempdir");
@@ -1733,7 +1736,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
             .await
             .expect("create a directory by inode");
         directory = match created.events.as_slice() {
-            [FilesystemChange::DirectoryCreated { inode_id, .. }] => *inode_id,
+            [FilesystemEvent::DirectoryCreated { inode_id, .. }] => *inode_id,
             other => panic!("expected one created directory, got {other:?}"),
         };
         directory_path = format!("{directory_path}/{}", name(level));
@@ -1843,7 +1846,7 @@ fn assert_unsupported_version_error<T: std::fmt::Debug>(
             assert_eq!(error.code(), ErrorCode::IndexCorrupt, "code for {case}");
             assert_eq!(
                 error.to_string(),
-                "grep index has format version `3`, and this build reads version `2`; query or \
+                "grep index has format version `3`, and this build reads version `1`; query or \
                  disable the index with a build that reads version `3`",
                 "error text for {case}"
             );
@@ -1984,7 +1987,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
             .matches
     );
     inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId::generate(
-        ChangeSeq(1_000),
+        CommitSeq(1_000),
         NonZeroU32::MIN,
     ));
     let error = new_query(&store, &namespace_id, &inode_scope)
@@ -2021,7 +2024,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
 }
 
 #[tokio::test]
-async fn checkpoint_backfill_matches_incremental_worker_results() {
+async fn snapshot_backfill_matches_incremental_worker_results() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -2141,10 +2144,10 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     assert_eq!(
         backfilling,
         loonfs_types::GrepIndexStatus::Backfilling {
-            captured_seq: ChangeSeq(1),
+            captured_seq: CommitSeq(1),
             cursor_inode_id: None,
-            checkpoint_id: match &state {
-                GrepIndexStatus::Backfilling { pin_id, .. } => pin_id.clone(),
+            snapshot_id: match &state {
+                GrepIndexStatus::Backfilling { snapshot_id, .. } => snapshot_id.clone(),
                 other => panic!("expected a backfill: {other:?}"),
             },
         }
@@ -2186,7 +2189,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     assert_eq!(
         active,
         loonfs_types::GrepIndexStatus::Active {
-            built_through_seq: ChangeSeq(1),
+            built_through_seq: CommitSeq(1),
             next_event_index: 0,
         }
     );

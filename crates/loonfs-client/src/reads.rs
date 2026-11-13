@@ -10,7 +10,7 @@ use loonfs_types::options::{
 };
 use loonfs_types::{ChangeFeedPosition, DiffResponse, ListChangesResponse};
 use loonfs_types::{
-    ChangeSeq, EffectiveLimit, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    CommitSeq, EffectiveLimit, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListTrashResponse, NamespaceId, PageRequest, Pager, PathEntry,
     RevisionNo,
 };
@@ -53,7 +53,7 @@ pub type PathEntriesPager = Pager<ListPathEntriesResponse, ClientError>;
 pub type InodeChildrenPager = Pager<ListInodeChildrenResponse, ClientError>;
 /// A pager over retained file revisions.
 pub type FileRevisionsPager = Pager<ListFileRevisionsResponse, ClientError>;
-/// A pager over recoverable deletions.
+/// A pager over the trash.
 pub type TrashPager = Pager<ListTrashResponse, ClientError>;
 /// A pager over committed changes.
 pub type ChangesPager = Pager<ListChangesResponse, ClientError>;
@@ -273,12 +273,12 @@ impl Client {
             .await
     }
 
-    /// Lists the namespace's recoverable deletions.
+    /// Lists the namespace's trash.
     pub fn list_trash(&self, namespace_id: &NamespaceId) -> TrashPager {
         self.list_trash_with_options(namespace_id, &ListTrashOptions::default())
     }
 
-    /// Lists the namespace's recoverable deletions, as `options` asks.
+    /// Lists the namespace's trash, as `options` asks.
     pub fn list_trash_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -306,7 +306,7 @@ impl Client {
     }
 
     /// Lists committed changes after `after_seq`.
-    pub fn list_changes(&self, namespace_id: &NamespaceId, after_seq: ChangeSeq) -> ChangesPager {
+    pub fn list_changes(&self, namespace_id: &NamespaceId, after_seq: CommitSeq) -> ChangesPager {
         self.list_changes_with_options(namespace_id, after_seq, &ListChangesOptions::default())
     }
 
@@ -315,7 +315,7 @@ impl Client {
     pub fn list_changes_with_options(
         &self,
         namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
         let start = ChangeFeedPosition {
@@ -358,7 +358,7 @@ impl Client {
     pub async fn diff(
         &self,
         namespace_id: &NamespaceId,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
     ) -> Result<DiffResponse> {
         self.diff_with_options(namespace_id, from_seq, &DiffOptions::default())
             .await
@@ -370,7 +370,7 @@ impl Client {
     pub async fn diff_with_options(
         &self,
         namespace_id: &NamespaceId,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
         options: &DiffOptions,
     ) -> Result<DiffResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/diff"));
@@ -595,11 +595,11 @@ impl Client {
     }
 
     /// Streams one retained file revision by inode identity through the
-    /// server, at the consistency or the pin that `options` sets.
+    /// server, at the consistency or the snapshot that `options` sets.
     ///
     /// See [`Self::read_file_stream_with_options`] for when the bytes are
     /// verified. Options that read a snapshot, or one of the namespace's fork
-    /// pins, read the revision that the pinned manifest keeps.
+    /// snapshots, read the revision that the snapshot's manifest keeps.
     pub async fn read_file_revision_stream_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -656,8 +656,8 @@ mod tests {
     use crate::scripted_transport::{self, Outcome};
     use crate::ClientConfig;
     use loonfs_types::options::Consistency;
-    use loonfs_types::FilesystemChange;
-    use loonfs_types::PinId;
+    use loonfs_types::FilesystemEvent;
+    use loonfs_types::SnapshotId;
     use loonfs_types::{ContentId, ContentRef, EntryInodeKind, PathEntryKind};
 
     fn client_for(transport: &scripted_transport::ScriptedTransport) -> Client {
@@ -781,8 +781,8 @@ mod tests {
     #[tokio::test]
     async fn reads_send_only_the_parameters_of_what_they_read_at() {
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
-        let snapshot_id =
-            PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot ID");
+        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
+            .expect("snapshot ID");
         let transport = scripted_transport::script([
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
@@ -942,13 +942,13 @@ mod tests {
             scripted_transport::script([Outcome::Success(feed.to_string().into_bytes())]);
 
         let page = client_for(&transport)
-            .list_changes(&namespace_id, ChangeSeq(418))
+            .list_changes(&namespace_id, CommitSeq(418))
             .next()
             .await
             .expect("one page")
             .expect("decoded feed");
         let events = &page.changes[0].events;
-        assert_eq!(events[0], FilesystemChange::Unknown);
+        assert_eq!(events[0], FilesystemEvent::Unknown);
         assert_eq!(
             serde_json::to_value(&events[1]).expect("serialize known event"),
             feed["changes"][0]["events"][1]

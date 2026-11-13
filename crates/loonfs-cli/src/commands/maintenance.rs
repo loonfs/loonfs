@@ -1,21 +1,22 @@
-//! `loonfs maintenance` commands: the checkpoint inventory, retention, GC,
+//! `loonfs maintenance` commands: the snapshot inventory, retention, GC,
 //! indexes, and the change feed.
 
 use super::context::{Invocation, NamespaceContext, ProfileContext};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceRan};
 use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
-    ChangesArgs, MaintenanceCheckpointCommand, MaintenanceCheckpointListArgs, MaintenanceCommand,
-    MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
-    MaintenanceMetadataArgs, MaintenanceRecoverAdministratorArgs, MaintenanceRetentionAdvanceArgs,
-    MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs, MaintenanceStoreCommand,
+    ChangesArgs, MaintenanceCommand, MaintenanceGcArgs, MaintenanceIndexCommand,
+    MaintenanceIndexEnableArgs, MaintenanceMetadataArgs, MaintenancePoolCommand,
+    MaintenancePoolGcArgs, MaintenanceRecoverAdministratorArgs, MaintenanceRetentionAdvanceArgs,
+    MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs, MaintenanceSnapshotCommand,
+    MaintenanceSnapshotListArgs, MaintenanceStoreCommand,
 };
 use crate::backend::StepBudget;
 use crate::error::Result;
 use loonfs_client::{GcOptions, ListChangesOptions, ReadAt};
 use loonfs_types::{
-    AdvanceRetentionRequest, ChangeSeq, GrepIndexStatus, MetadataMaintenanceRequest,
-    RunMaintenanceResponse,
+    AdvanceRetentionRequest, CommitSeq, GrepIndexStatus, MetadataMaintenanceRequest,
+    RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse,
 };
 
 pub(crate) async fn run_maintenance_command(
@@ -28,9 +29,9 @@ pub(crate) async fn run_maintenance_command(
         }
         MaintenanceCommand::Metadata(args) => run_maintenance_metadata(invocation, args).await,
         MaintenanceCommand::Fold => run_maintenance_fold(invocation).await,
-        MaintenanceCommand::Checkpoint { command } => match command {
-            MaintenanceCheckpointCommand::List(args) => {
-                run_maintenance_checkpoint_list(invocation, args).await
+        MaintenanceCommand::Snapshot { command } => match command {
+            MaintenanceSnapshotCommand::List(args) => {
+                run_maintenance_snapshot_list(invocation, args).await
             }
         },
         MaintenanceCommand::Index { command } => match command {
@@ -49,13 +50,19 @@ pub(crate) async fn run_maintenance_command(
             }
         },
         MaintenanceCommand::Gc(args) => run_maintenance_gc(invocation, args).await,
+        MaintenanceCommand::Pool { command } => match command {
+            MaintenancePoolCommand::Gc(args) => run_maintenance_pool_gc(invocation, args).await,
+        },
         MaintenanceCommand::Store { command } => match command {
             MaintenanceStoreCommand::Probe => run_maintenance_store_probe(invocation).await,
         },
     }
 }
 
-fn maintenance_ran(context: &NamespaceContext, response: RunMaintenanceResponse) -> CommandOutput {
+fn maintenance_ran(
+    context: &NamespaceContext,
+    response: RunMaintenanceJobResponse,
+) -> CommandOutput {
     context.output(CommandData::MaintenanceRan(MaintenanceRan::new(response)))
 }
 
@@ -73,7 +80,7 @@ async fn run_maintenance_recover_administrator(
         .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
-        RunMaintenanceResponse::RecoverAdministrator(response),
+        RunMaintenanceJobResponse::RecoverAdministrator(response),
     ))
 }
 
@@ -119,7 +126,7 @@ async fn maintain_metadata(
         .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
-        RunMaintenanceResponse::Metadata(response),
+        RunMaintenanceJobResponse::Metadata(response),
     ))
 }
 
@@ -140,13 +147,44 @@ async fn run_maintenance_gc(
     .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
-        RunMaintenanceResponse::Gc(response),
+        RunMaintenanceJobResponse::Gc(response),
     ))
 }
 
-async fn run_maintenance_checkpoint_list(
+async fn run_maintenance_pool_gc(
     invocation: &Invocation,
-    args: MaintenanceCheckpointListArgs,
+    args: MaintenancePoolGcArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = ProfileContext::resolve_as_subject(invocation).await?;
+    let client = &context.target.client;
+    let pool_id = match args.pool_id {
+        Some(pool_id) => pool_id,
+        None => {
+            let namespace = context.namespace(invocation.selectors.namespace.as_ref())?;
+            client
+                .get_namespace(&namespace)
+                .await
+                .map_err(|error| context.fail(error))?
+                .pool_id
+        }
+    };
+    let response = match args.gc.grace_window_ms {
+        Some(grace_window_ms) => {
+            client
+                .gc_pool_with_options(&pool_id, &GcOptions { grace_window_ms })
+                .await
+        }
+        None => client.gc_pool(&pool_id).await,
+    }
+    .map_err(|error| context.fail(error))?;
+    Ok(context.output(CommandData::PoolMaintenanceRan(
+        RunPoolMaintenanceJobResponse::Gc(response),
+    )))
+}
+
+async fn run_maintenance_snapshot_list(
+    invocation: &Invocation,
+    args: MaintenanceSnapshotListArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, None).await?;
     let listing = collect_or_stream_pages(
@@ -154,10 +192,10 @@ async fn run_maintenance_checkpoint_list(
             .profile
             .target
             .client
-            .list_checkpoints(context.namespace())
+            .list_snapshot_records(context.namespace())
             .cursor(args.pagination.cursor.clone()),
         &args.pagination.page_limits,
-        |_: &loonfs_types::ListCheckpointsResponse| {},
+        |_: &loonfs_types::ListSnapshotRecordsResponse| {},
     )
     .await
     .map_err(|error| context.fail(error))?;
@@ -165,7 +203,7 @@ async fn run_maintenance_checkpoint_list(
         return Ok(context.output(CommandData::StreamedToStdout));
     };
 
-    Ok(context.output(CommandData::CheckpointsListed(response)))
+    Ok(context.output(CommandData::SnapshotRecordsListed(response)))
 }
 
 async fn run_maintenance_retention_advance(
@@ -192,7 +230,7 @@ async fn run_maintenance_retention_advance(
 
     Ok(context.output(CommandData::MaintenanceRan(
         MaintenanceRan::after_retention(
-            RunMaintenanceResponse::Retention(response),
+            RunMaintenanceJobResponse::Retention(response),
             retention_floor_before,
         ),
     )))
@@ -212,7 +250,7 @@ async fn run_maintenance_retention_window(
         .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
-        RunMaintenanceResponse::RetentionWindow(response),
+        RunMaintenanceJobResponse::RetentionWindow(response),
     ))
 }
 
@@ -237,7 +275,7 @@ pub(crate) async fn run_changes(
     args: ChangesArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, None).await?;
-    let after_seq = args.after.unwrap_or(ChangeSeq(0));
+    let after_seq = args.after.unwrap_or(CommitSeq(0));
     let listing = collect_or_stream_pages(
         context.profile.target.client.list_changes_with_options(
             context.namespace(),
@@ -280,7 +318,7 @@ async fn run_maintenance_index_enable(
         // Nothing to wait for: the caller opted out, or the index is
         // disabled, which enable would have changed if it could.
         (true, _) | (_, GrepIndexStatus::Disabled | GrepIndexStatus::Unknown) => None,
-        // A backfill already names the namespace sequence its checkpoint
+        // A backfill already names the namespace sequence its snapshot
         // captured, and reaching it is what completes the backfill.
         (_, GrepIndexStatus::Backfilling { captured_seq, .. }) => Some(*captured_seq),
         // An active index is asked to catch up to where the namespace is

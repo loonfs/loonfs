@@ -19,7 +19,7 @@ use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, index_blocks_for_key_range,
     string_prefix_upper_bound, BuiltSegmentBlocks, SegmentBlocksBuilder,
 };
-use loonfs_types::{ChangeSeq, ContentId, IndexSegmentId, NamespaceId, RunNo};
+use loonfs_types::{CommitSeq, ContentId, IndexSegmentId, NamespaceId, RunNo};
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -135,8 +135,8 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         .expect("create the namespace");
     let entry = GrepEntry::new(
         GrepIndexStatus::Active {
-            captured_seq: ChangeSeq(0),
-            built_through_seq: ChangeSeq(0),
+            captured_seq: CommitSeq(0),
+            built_through_seq: CommitSeq(0),
             next_event_index: 0,
         },
         None,
@@ -151,8 +151,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
             .collect(),
     )
     .expect("valid entry");
-    crate::common::publish_grep_entry(&host.maintenance, &namespace_id, entry.encode(), RunNo(8))
-        .await;
+    crate::common::publish_grep_entry(&host.maintenance, &namespace_id, entry.encode()).await;
     if warm_cache {
         for (position, segment) in segments.iter().enumerate() {
             if position % 2 == 0 {

@@ -14,7 +14,7 @@ fn access_record(
     AccessRevisionRecord {
         inode_id: InodeId(7),
         access_revision_no: AccessRevisionNo(revision),
-        committed_seq: ChangeSeq(seq),
+        committed_seq: CommitSeq(seq),
         commit_id: CommitId::parse(format!("c_access_{seq}")).expect("commit id"),
         delta_index: 0,
         committed_by: loonfs_types::ActorId::loonfs(),
@@ -46,7 +46,7 @@ fn the_compaction_keeps_a_latest_empty_revision() {
     compact_rows_with_retention(
         MetadataFamilyGroup::Access,
         &mut rows_by_family,
-        ChangeSeq(9),
+        CommitSeq(9),
     )
     .expect("compact access");
 
@@ -101,7 +101,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         &store,
         &namespace_id,
         ManifestNo(1),
-        ChangeSeq(9),
+        CommitSeq(9),
         flatten_manifest_segments(segments),
     )
     .await;
@@ -115,7 +115,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         (6, &records[1]),
         (5, &records[0]),
     ] {
-        let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(visible_seq));
+        let view = MetadataView::over_manifest_segments(&verified, CommitSeq(visible_seq));
         assert_eq!(
             view.latest_access_revision(InodeId(7))
                 .await
@@ -124,14 +124,14 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
             "at seq {visible_seq}"
         );
     }
-    let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(2));
+    let view = MetadataView::over_manifest_segments(&verified, CommitSeq(2));
     assert_eq!(
         view.latest_access_revision(InodeId(7))
             .await
             .expect("read access"),
         None
     );
-    let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(9));
+    let view = MetadataView::over_manifest_segments(&verified, CommitSeq(9));
     assert_eq!(
         view.latest_access_revision(InodeId(8))
             .await
@@ -146,7 +146,7 @@ async fn every_metadata_source_resolves_the_same_effective_rights() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let state = access_fixture_state();
-    let visible_seq = ChangeSeq(10);
+    let visible_seq = CommitSeq(10);
     let segments = crate::NamespaceStore {
         run_policy: MetadataRunPolicy {
             max_rows_per_segment: NonZeroUsize::new(64).expect("segment row budget"),

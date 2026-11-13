@@ -82,7 +82,7 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "recover_administrator", self.namespace_id),
             async {
-                use loonfs_types::FilesystemChange;
+                use loonfs_types::FilesystemEvent;
                 use loonfs_types::{AccessGrants, AccessRight};
 
                 let crate::pinned_read::PinnedRead { engine, context } = self
@@ -125,7 +125,7 @@ impl Namespace<Writable> {
                     .events
                     .iter()
                     .find_map(|event| match event {
-                        FilesystemChange::AccessChanged {
+                        FilesystemEvent::AccessChanged {
                             access_revision_no, ..
                         } => Some(*access_revision_no),
                         _ => None,

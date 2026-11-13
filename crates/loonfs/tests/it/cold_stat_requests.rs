@@ -130,7 +130,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("load namespace catalog");
 
-    // Six commit batches, checkpointed one delta run each, with names
+    // Six commit batches, each folded into one delta run, with names
     // interleaved by stride so every run's direntry key range straddles the
     // whole directory span: range pruning alone cannot rule any run out of
     // a name lookup, which is exactly the shape a bulk-loaded backlog takes.

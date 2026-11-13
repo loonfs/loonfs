@@ -1,7 +1,7 @@
-//! The derived active-deletions family: its reducer, the compaction that collapses
+//! The derived trash family: its reducer, the compaction that collapses
 //! cancelled deletions, and the bounded trash listing it backs.
 //!
-//! The family is materialized by checkpoint publication, so it lives with the
+//! The family is materialized by snapshot publication, so it lives with the
 //! other manifest-family tests; the listing is its only consumer and is
 //! exercised here against real manifests rather than in isolation.
 
@@ -10,9 +10,7 @@ use crate::metadata::{
     hiding_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use crate::{NamespaceEngine, RuntimeReadContext};
-use loonfs_types::format::manifest::{
-    ActiveDeletionRowAction, DeletedBinding, DeltaPosition, InodeRecord,
-};
+use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, InodeRecord, TrashRowAction};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::DirectoryBinding;
 use loonfs_types::ROOT_INODE_ID;
@@ -22,7 +20,7 @@ use std::assert_matches;
 
 fn position(seq: u64) -> DeltaPosition {
     DeltaPosition {
-        seq: ChangeSeq(seq),
+        seq: CommitSeq(seq),
         delta_index: 0,
     }
 }
@@ -35,7 +33,7 @@ pub(super) fn tombstone_set(
 ) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         root_inode_id,
-        committed_seq: ChangeSeq(seq),
+        committed_seq: CommitSeq(seq),
         delta_index: 0,
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         committed_at_ms: 1_000 + seq,
@@ -54,7 +52,7 @@ pub(super) fn tombstone_set(
 fn tombstone_revoke(root_inode_id: InodeId, seq: u64, target_seq: u64) -> SubtreeTombstoneRecord {
     SubtreeTombstoneRecord {
         root_inode_id,
-        committed_seq: ChangeSeq(seq),
+        committed_seq: CommitSeq(seq),
         delta_index: 0,
         commit_id: CommitId::parse(format!("c_tombstone_{seq}")).expect("commit id"),
         committed_at_ms: 1_000 + seq,
@@ -75,7 +73,7 @@ fn state_from_tombstones(tombstones: Vec<SubtreeTombstoneRecord>) -> MetadataSta
         builder.push_inode(InodeRecord {
             inode_id,
             inode_kind: InodeKind::File,
-            committed_seq: ChangeSeq(0),
+            committed_seq: CommitSeq(0),
             commit_id: CommitId::parse("c_initial").expect("commit id"),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 1_000,
@@ -89,21 +87,21 @@ fn state_from_tombstones(tombstones: Vec<SubtreeTombstoneRecord>) -> MetadataSta
 
 /// The family's rows for a state, as `(row key, listed or removed)` pairs in
 /// scan order.
-fn active_deletion_rows(state: &MetadataState) -> Vec<(String, &'static str)> {
-    manifest_rows_for_family(state, ApiMetadataRowFamily::ActiveDeletions)
+fn trash_rows(state: &MetadataState) -> Vec<(String, &'static str)> {
+    manifest_rows_for_family(state, ApiMetadataRowFamily::Trash)
         .into_iter()
         .map(|row| {
-            let row_key = row.row_key_for_family(ApiMetadataRowFamily::ActiveDeletions);
+            let row_key = row.row_key_for_family(ApiMetadataRowFamily::Trash);
             let kind = match row {
-                MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
-                    action: ActiveDeletionRowAction::Listed { .. },
+                MetadataRow::Trash(crate::metadata::TrashRecord {
+                    action: TrashRowAction::Listed { .. },
                     ..
                 }) => "listed",
-                MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
-                    action: ActiveDeletionRowAction::Removed { .. },
+                MetadataRow::Trash(crate::metadata::TrashRecord {
+                    action: TrashRowAction::Removed { .. },
                     ..
                 }) => "removed",
-                other => panic!("unexpected row in the active-deletions family: {other:?}"),
+                other => panic!("unexpected row in the trash family: {other:?}"),
             };
             (row_key, kind)
         })
@@ -111,7 +109,7 @@ fn active_deletion_rows(state: &MetadataState) -> Vec<(String, &'static str)> {
 }
 
 #[test]
-fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
+fn a_delete_adds_a_row_a_restore_removes_it_and_a_redelete_adds_a_new_one() {
     let deleted = state_from_tombstones(vec![tombstone_set(
         InodeId(7),
         5,
@@ -119,33 +117,31 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
         InodeKind::File,
     )]);
     assert_eq!(
-        active_deletion_rows(&deleted),
+        trash_rows(&deleted),
         vec![(
-            "active-deletion-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
+            "trash-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
             "listed"
         )],
         "a delete adds exactly one listed row, keyed by its own position"
     );
 
-    let undeleted = state_from_tombstones(vec![
+    let restored = state_from_tombstones(vec![
         tombstone_set(InodeId(7), 5, "notes.txt", InodeKind::File),
         tombstone_revoke(InodeId(7), 9, 5),
     ]);
     assert_eq!(
-        active_deletion_rows(&undeleted),
+        trash_rows(&restored),
         vec![
             (
-                "active-deletion-00000000000000000005-00000000000000000000000007-0000000000"
-                    .to_owned(),
+                "trash-00000000000000000005-00000000000000000000000007-0000000000".to_owned(),
                 "removed"
             ),
             (
-                "active-deletion-00000000000000000005-00000000000000000000000007-0000000001"
-                    .to_owned(),
+                "trash-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
                 "listed"
             ),
         ],
-        "an undelete adds a removal that sorts ahead of the row it removes"
+        "a restore adds a removal that sorts ahead of the row it removes"
     );
 
     let redeleted = state_from_tombstones(vec![
@@ -154,36 +150,34 @@ fn a_delete_adds_a_row_an_undelete_removes_it_and_a_redelete_adds_a_new_one() {
         tombstone_set(InodeId(7), 12, "notes.txt", InodeKind::File),
     ]);
     assert_eq!(
-        active_deletion_rows(&redeleted)
+        trash_rows(&redeleted)
             .into_iter()
             .filter(|(_, kind)| *kind == "listed")
             .map(|(row_key, _)| row_key)
             .collect::<Vec<_>>(),
         vec![
-            "active-deletion-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
-            "active-deletion-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
+            "trash-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
+            "trash-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
         ],
         "a re-delete is committed at a new sequence and adds a new row"
     );
 }
 
 #[test]
-fn a_removal_carries_the_undeletes_sequence_so_it_is_written_to_that_commits_run() {
+fn a_removal_carries_the_restores_sequence_so_it_is_written_to_that_commits_run() {
     let state = state_from_tombstones(vec![
         tombstone_set(InodeId(7), 5, "notes.txt", InodeKind::File),
         tombstone_revoke(InodeId(7), 9, 5),
     ]);
     assert_eq!(
-        active_deletion_rows(&state),
+        trash_rows(&state),
         vec![
             (
-                "active-deletion-00000000000000000005-00000000000000000000000007-0000000000"
-                    .to_owned(),
+                "trash-00000000000000000005-00000000000000000000000007-0000000000".to_owned(),
                 "removed"
             ),
             (
-                "active-deletion-00000000000000000005-00000000000000000000000007-0000000001"
-                    .to_owned(),
+                "trash-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
                 "listed"
             ),
         ],
@@ -191,8 +185,8 @@ fn a_removal_carries_the_undeletes_sequence_so_it_is_written_to_that_commits_run
     );
     let delta_rows = crate::segment::row::manifest_rows_for_family_after_seq(
         &state,
-        ApiMetadataRowFamily::ActiveDeletions,
-        ChangeSeq(5),
+        ApiMetadataRowFamily::Trash,
+        CommitSeq(5),
     );
     assert_eq!(
         delta_rows.len(),
@@ -201,10 +195,10 @@ fn a_removal_carries_the_undeletes_sequence_so_it_is_written_to_that_commits_run
     );
     assert_matches!(
         &delta_rows[0],
-        MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
-            action: ActiveDeletionRowAction::Removed { removed_seq },
+        MetadataRow::Trash (crate::metadata::TrashRecord {
+            action: TrashRowAction::Removed { removed_seq },
             ..
-        }) if *removed_seq == ChangeSeq(9),
+        }) if *removed_seq == CommitSeq(9),
         "unexpected delta row: {:?}",
         delta_rows[0]
     );
@@ -223,29 +217,29 @@ fn the_compaction_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest
         tombstone_set(InodeId(7), 12, "notes.txt", InodeKind::File),
     ]);
     let mut rows_by_family = std::collections::BTreeMap::from([(
-        ApiMetadataRowFamily::ActiveDeletions,
-        manifest_rows_for_family(&state, ApiMetadataRowFamily::ActiveDeletions),
+        ApiMetadataRowFamily::Trash,
+        manifest_rows_for_family(&state, ApiMetadataRowFamily::Trash),
     )]);
     compact_rows_with_retention(
-        MetadataFamilyGroup::ActiveDeletions,
+        MetadataFamilyGroup::Trash,
         &mut rows_by_family,
-        ChangeSeq(10),
+        CommitSeq(10),
     )
-    .expect("compact active deletions");
+    .expect("compact the trash");
 
     let kept = rows_by_family
-        .remove(&ApiMetadataRowFamily::ActiveDeletions)
+        .remove(&ApiMetadataRowFamily::Trash)
         .expect("family rows")
         .into_iter()
-        .map(|row| row.row_key_for_family(ApiMetadataRowFamily::ActiveDeletions))
+        .map(|row| row.row_key_for_family(ApiMetadataRowFamily::Trash))
         .collect::<Vec<_>>();
     assert_eq!(
         kept,
         vec![
-            "active-deletion-00000000000000000011-00000000000000000000000008-0000000001".to_owned(),
-            "active-deletion-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
+            "trash-00000000000000000011-00000000000000000000000008-0000000001".to_owned(),
+            "trash-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
         ],
-        "the undeleted pair and the deletion at the floor go, and both deletions above it stay"
+        "the restored pair and the deletion at the floor go, and both deletions above it stay"
     );
 }
 
@@ -283,12 +277,12 @@ async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
     .expect("commit accepted")
 }
 
-async fn undelete<S: ObjectStore + ?Sized>(
+async fn restore_deleted<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     commit_id: &str,
     inode_id: InodeId,
-    deletion_seq: ChangeSeq,
+    deletion_seq: CommitSeq,
     absolute_path: &str,
     context: &WriterAt,
 ) -> loonfs_types::Commit {
@@ -296,10 +290,10 @@ async fn undelete<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         commit_id,
-        FilesystemOperation::Undelete {
+        FilesystemOperation::RestoreDeleted {
             inode_id,
             deletion_seq,
-            destination: loonfs_types::options::UndeleteDestination::Path(
+            destination: loonfs_types::options::RestoreDeletedDestination::Path(
                 AbsolutePath::parse(absolute_path).expect("path"),
             ),
         },
@@ -308,13 +302,13 @@ async fn undelete<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Undeletes the deletion of `inode_id` at `deletion_seq` in place, and
+/// Restores the deletion of `inode_id` at `deletion_seq` in place, and
 /// returns the error that refused it.
-async fn refused_undelete<S: ObjectStore + ?Sized>(
+async fn refused_restore_deleted<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
-    deletion_seq: ChangeSeq,
+    deletion_seq: CommitSeq,
     context: &WriterAt,
 ) -> CoreError {
     NamespaceCommitEngine::new(
@@ -326,10 +320,10 @@ async fn refused_undelete<S: ObjectStore + ?Sized>(
             CommitId::generate(),
             loonfs_test_support::test_actor(),
             None,
-            FilesystemOperation::undelete(
+            FilesystemOperation::restore_deleted(
                 inode_id,
                 deletion_seq,
-                &loonfs_types::options::UndeleteDestination::Recorded,
+                &loonfs_types::options::RestoreDeletedDestination::Recorded,
             ),
         ))],
         &context.clock(),
@@ -338,7 +332,7 @@ async fn refused_undelete<S: ObjectStore + ?Sized>(
     .results
     .pop()
     .expect("one result")
-    .expect_err("the undelete is refused")
+    .expect_err("the restore is refused")
 }
 
 async fn trash_page<S: ObjectStore + ?Sized>(
@@ -402,7 +396,7 @@ async fn trash_entries<S: ObjectStore + ?Sized>(
     entries
 }
 
-/// The listing algorithm the active-deletions family replaced: load every
+/// The listing algorithm the trash family replaced: load every
 /// tombstone event the namespace ever recorded, group by root, reduce
 /// newest-event-wins per root, and leave out every deletion at or below the
 /// retention floor.
@@ -411,8 +405,8 @@ async fn trash_entries<S: ObjectStore + ?Sized>(
 /// implementation, and it is the range scan.
 fn trash_by_walking_every_tombstone(
     state: &MetadataState,
-    head_seq: ChangeSeq,
-    retention_floor_seq: ChangeSeq,
+    head_seq: CommitSeq,
+    retention_floor_seq: CommitSeq,
 ) -> Vec<TrashEntry> {
     let mut per_root: std::collections::BTreeMap<InodeId, Vec<SubtreeTombstoneRecord>> =
         std::collections::BTreeMap::new();
@@ -491,9 +485,9 @@ async fn assert_listing_matches_the_old_walk<S: ObjectStore + ?Sized>(
 enum HistoryStep {
     Create(&'static str),
     Delete(&'static str),
-    /// Undelete the deletion the named path produced, re-binding at the
+    /// Restore the deletion the named path produced, re-binding at the
     /// second path.
-    Undelete(&'static str, &'static str),
+    RestoreDeleted(&'static str, &'static str),
     /// Advance the retention floor to the deletion the named path produced,
     /// which expires it and every older deletion.
     AdvanceFloorThrough(&'static str),
@@ -513,23 +507,23 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         HistoryStep::Create("/a.txt"),
         HistoryStep::Create("/b.txt"),
         HistoryStep::Create("/dir/inner.txt"),
-        // A plain delete, then its undelete, then a re-delete: the three
+        // A plain delete, then its restore, then a re-delete: the three
         // reducer transitions in order.
         HistoryStep::Delete("/a.txt"),
-        HistoryStep::Undelete("/a.txt", "/a-restored.txt"),
+        HistoryStep::RestoreDeleted("/a.txt", "/a-restored.txt"),
         HistoryStep::Delete("/a-restored.txt"),
         // A deletion inside an already-deleted subtree: delete the child
-        // first, then its parent, so two live deletions nest.
+        // first, then its parent, so two deletions in the trash nest.
         HistoryStep::Delete("/dir/inner.txt"),
         HistoryStep::Delete("/dir"),
-        // An undelete whose old parent is still deleted: the recovered
+        // A restore whose old parent is still deleted: the recovered
         // subtree re-binds elsewhere and the nested child stays deleted.
-        HistoryStep::Undelete("/dir", "/dir-restored"),
+        HistoryStep::RestoreDeleted("/dir", "/dir-restored"),
         HistoryStep::Delete("/b.txt"),
         // Re-delete the recovered subtree, then recover it once more.
         HistoryStep::Delete("/dir-restored"),
-        HistoryStep::Undelete("/dir-restored", "/dir-again"),
-        HistoryStep::Undelete("/b.txt", "/b-back.txt"),
+        HistoryStep::RestoreDeleted("/dir-restored", "/dir-again"),
+        HistoryStep::RestoreDeleted("/b.txt", "/b-back.txt"),
         // Expire a deletion nested under a recovered subtree, with every
         // deletion before it, then a plain one, and recreate a path that an
         // expired deletion used to hold.
@@ -542,7 +536,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         HistoryStep::Create("/c.txt"),
     ];
 
-    let mut deletions: std::collections::HashMap<String, (InodeId, ChangeSeq)> =
+    let mut deletions: std::collections::HashMap<String, (InodeId, CommitSeq)> =
         std::collections::HashMap::new();
     for (step, action) in script.into_iter().enumerate() {
         context = writer_at("writer-1", 5_000 + step as u64);
@@ -560,11 +554,11 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
                         .expect("delete path");
                 deletions.insert(path.to_owned(), (deleted_inode_id, response.committed_seq));
             }
-            HistoryStep::Undelete(deleted_path, restored_path) => {
+            HistoryStep::RestoreDeleted(deleted_path, restored_path) => {
                 let (inode_id, deletion_seq) = deletions
                     .remove(deleted_path)
-                    .expect("undelete follows a recorded delete");
-                undelete(
+                    .expect("restore follows a recorded delete");
+                restore_deleted(
                     &store,
                     &namespace_id,
                     &commit_id,
@@ -586,9 +580,9 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         // Half the steps materialize into a manifest, so the comparison sees
         // both a WAL-tail-only listing and a durable one.
         if step % 2 == 1 {
-            create_checkpoint(&store, &namespace_id, &context)
+            create_snapshot(&store, &namespace_id, &context)
                 .await
-                .expect("create checkpoint");
+                .expect("create snapshot");
             assert_listing_matches_the_old_walk(&store, &namespace_id, step).await;
         }
     }
@@ -608,7 +602,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
     assert_listing_matches_the_old_walk(&store, &namespace_id, usize::MAX).await;
     assert!(
         !trash_entries(&store, &namespace_id, 2).await.is_empty(),
-        "the script must leave live deletions, or the comparison proves nothing"
+        "the script must leave deletions in the trash, or the comparison proves nothing"
     );
 }
 
@@ -679,7 +673,7 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
             EntryInodeKind::Directory
         ]
     );
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold deletions");
     assert_eq!(trash_entries(&store, &namespace_id, 10).await, entries);
@@ -715,9 +709,9 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
             .await
             .expect("delete path");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     let first = trash_page(&store, &namespace_id, 2, None).await;
     assert_eq!(
@@ -763,8 +757,8 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
     );
 
     let wrong_kind = loonfs_types::encode_cursor(&loonfs_types::DirectoryPageCursor {
-        head_seq: ChangeSeq(1),
-        pin_id: None,
+        head_seq: CommitSeq(1),
+        snapshot_id: None,
         directory_inode_id: ROOT_INODE_ID,
         last_name_key: NameKey::parse("x").expect("name key"),
     })
@@ -773,12 +767,12 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
         .expect_err("another endpoint's cursor must not resume a trash listing");
 }
 
-/// The rows of the active-deletions family in the current manifest, as
+/// The rows of the trash family in the current manifest, as
 /// `(deletion sequence, listed or removed)` pairs.
-async fn stored_active_deletions<S: ObjectStore + ?Sized>(
+async fn stored_trash_rows<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Vec<(ChangeSeq, &'static str)> {
+) -> Vec<(CommitSeq, &'static str)> {
     let current = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
@@ -786,7 +780,7 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
     super::super::metadata_basis_from_manifest(store, None, &current)
         .segments
         .scan_range(
-            ApiMetadataRowFamily::ActiveDeletions,
+            ApiMetadataRowFamily::Trash,
             "",
             None,
             usize::MAX,
@@ -800,14 +794,14 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
         .collect::<Vec<_>>()
         .into_iter()
         .map(|row| match row {
-            MetadataRow::ActiveDeletion(record) => (
+            MetadataRow::Trash(record) => (
                 record.deletion_seq,
                 match record.action {
-                    ActiveDeletionRowAction::Listed { .. } => "listed",
-                    ActiveDeletionRowAction::Removed { .. } => "removed",
+                    TrashRowAction::Listed { .. } => "listed",
+                    TrashRowAction::Removed { .. } => "removed",
                 },
             ),
-            other => panic!("unexpected row in the active-deletions family: {other:?}"),
+            other => panic!("unexpected row in the trash family: {other:?}"),
         })
         .collect()
 }
@@ -842,9 +836,9 @@ async fn delete_below_the_floor<S: ObjectStore>(
         )
         .await;
     }
-    create_checkpoint(store, namespace_id, context)
+    create_snapshot(store, namespace_id, context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
@@ -861,7 +855,7 @@ async fn delete_below_the_floor<S: ObjectStore>(
 }
 
 /// Checks that a deletion at or below the retention floor leaves the trash
-/// and refuses an undelete at once, and that a base compaction over the
+/// and refuses a restore at once, and that a base compaction over the
 /// advance's manifest removes its listed row.
 #[tokio::test]
 async fn a_deletion_below_the_floor_leaves_the_trash_and_its_row_is_removed() {
@@ -885,7 +879,7 @@ async fn a_deletion_below_the_floor_leaves_the_trash_and_its_row_is_removed() {
         Vec::new(),
         "a deletion below the floor leaves the trash"
     );
-    let error = refused_undelete(
+    let error = refused_restore_deleted(
         &store,
         &namespace_id,
         deleted_inode_id,
@@ -905,7 +899,7 @@ async fn a_deletion_below_the_floor_leaves_the_trash_and_its_row_is_removed() {
     )
     .await;
     assert_eq!(
-        stored_active_deletions(&store, &namespace_id).await,
+        stored_trash_rows(&store, &namespace_id).await,
         Vec::new(),
         "a base compaction over the advance's manifest removes the expired listed row"
     );
@@ -972,8 +966,8 @@ async fn a_trash_cursor_resumes_above_a_floor_that_passed_it() {
 
 #[tokio::test]
 async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
-    /// One page's reads over a namespace with `deletions` recoverable
-    /// deletions, measured after the family is compacted into its base.
+    /// One page's reads over a namespace with `deletions` trash
+    /// entries, measured after the family is compacted into its base.
     async fn page_reads(deletions: u32) -> usize {
         let temp = tempdir().expect("tempdir");
         let store = RecordingStore::metadata_segments(
@@ -999,9 +993,9 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
                 .await
                 .expect("delete path");
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
         drain_compaction(
             &store,
             &namespace_id,
@@ -1075,7 +1069,7 @@ async fn nested_deletions_each_keep_their_own_entry() {
         "a deletion inside an already-deleted subtree keeps its own entry"
     );
 
-    undelete(
+    restore_deleted(
         &store,
         &namespace_id,
         "com_nested0000000000000000002",
@@ -1114,9 +1108,9 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
         .delete_path("/durable.txt", None)
         .await
         .expect("delete path");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     // This pair is committed after the manifest and is only in the WAL tail.
     write_test_file(
@@ -1139,10 +1133,10 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
         "the unfolded deletion lists last, in deletion order"
     );
 
-    // An undelete in the tail hides a deletion the manifest still lists.
+    // A restore in the tail hides a deletion the manifest still lists.
     let durable_inode_id = entries[0].inode_id;
     let durable_seq = entries[0].deletion_seq;
-    undelete(
+    restore_deleted(
         &store,
         &namespace_id,
         "com_tail000000000000000000003",
@@ -1156,7 +1150,7 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
     assert_eq!(
         entries.len(),
         1,
-        "an unfolded undelete must hide the durable row it cancels: {entries:?}"
+        "an unfolded restore must hide the durable row it cancels: {entries:?}"
     );
     assert_eq!(entries[0].deletion_seq, fresh.committed_seq);
 }
@@ -1202,9 +1196,9 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
             )
             .await;
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
         drain_compaction(
             &store,
             &namespace_id,
@@ -1221,7 +1215,7 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
         store.reset();
         let page = engine
             .list_changes_after(
-                loonfs_types::ChangeFeedPosition::after(ChangeSeq(1)),
+                loonfs_types::ChangeFeedPosition::after(CommitSeq(1)),
                 EffectiveLimit::new(NonZeroU32::new(4).expect("nonzero")),
                 loonfs_types::options::CommitSplitting::Whole,
                 &read_context,
@@ -1288,7 +1282,7 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
 
     let first = engine
         .list_changes_after(
-            loonfs_types::ChangeFeedPosition::after(ChangeSeq(3)),
+            loonfs_types::ChangeFeedPosition::after(CommitSeq(3)),
             limit,
             loonfs_types::options::CommitSplitting::Whole,
             &read_context,
@@ -1301,13 +1295,13 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
             .iter()
             .map(|change| change.committed_seq)
             .collect::<Vec<_>>(),
-        [ChangeSeq(4), ChangeSeq(5), ChangeSeq(6), ChangeSeq(7)]
+        [CommitSeq(4), CommitSeq(5), CommitSeq(6), CommitSeq(7)]
     );
-    assert_eq!(first.next_after_seq, Some(ChangeSeq(7)));
+    assert_eq!(first.next_after_seq, Some(CommitSeq(7)));
 
     let second = engine
         .list_changes_after(
-            loonfs_types::ChangeFeedPosition::after(ChangeSeq(7)),
+            loonfs_types::ChangeFeedPosition::after(CommitSeq(7)),
             limit,
             loonfs_types::options::CommitSplitting::Whole,
             &read_context,
@@ -1320,9 +1314,9 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
             .iter()
             .map(|change| change.committed_seq)
             .collect::<Vec<_>>(),
-        [ChangeSeq(8)]
+        [CommitSeq(8)]
     );
-    assert_eq!(second.head_seq, ChangeSeq(8));
+    assert_eq!(second.head_seq, CommitSeq(8));
     assert_eq!(second.next_after_seq, None);
 }
 
@@ -1332,8 +1326,8 @@ async fn a_page_crossing_the_fold_boundary_reads_folded_then_tail_commits() {
 struct ExpiredDocs {
     docs: InodeId,
     notes: InodeId,
-    deletion_seq: ChangeSeq,
-    keep_seq: ChangeSeq,
+    deletion_seq: CommitSeq,
+    keep_seq: CommitSeq,
 }
 
 async fn expire_docs<S: ObjectStore>(
@@ -1367,11 +1361,11 @@ async fn expire_docs<S: ObjectStore>(
     }
 }
 
-/// Checks that the trash, path reads, visibility, and undelete validation
+/// Checks that the trash, path reads, visibility, and restore validation
 /// treat a deletion at or below the floor as expired from the advance on,
 /// and the same once base compactions remove the rows it hides.
 #[tokio::test]
-async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidden() {
+async fn an_expired_deletion_leaves_the_trash_refuses_a_restore_and_stays_hidden() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-expiry").expect("namespace id");
@@ -1427,7 +1421,7 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
             );
         }
 
-        let error = refused_undelete(
+        let error = refused_restore_deleted(
             &store,
             &namespace_id,
             expired.docs,

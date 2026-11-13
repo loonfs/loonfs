@@ -1103,7 +1103,7 @@ mod tests {
     #[tokio::test]
     async fn ranged_reads_match_the_reference_contract_in_one_round_trip() {
         let store = memory_store();
-        let key = "namespaces/demo/segments/seg_abc.sst.zst";
+        let key = "namespaces/demo/segments/seg_abc.sst";
         store
             .put_if_absent(key, Bytes::from_static(b"0123456789"))
             .await
@@ -1149,7 +1149,7 @@ mod tests {
 
         // A missing object is `Ok(None)` however the request is shaped —
         // the same answer the unranged read and the local provider give.
-        let missing = "namespaces/demo/segments/seg_missing.sst.zst";
+        let missing = "namespaces/demo/segments/seg_missing.sst";
         assert_eq!(
             store.get(missing, range(0, 4)).await.expect("missing"),
             None
@@ -1419,9 +1419,9 @@ mod tests {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
         let ours = Bytes::from_static(b"ours");
-        let identical = "namespaces/demo/segments/seg_1.sst.zst";
-        let different = "namespaces/demo/segments/seg_2.sst.zst";
-        let without_checksum = "namespaces/demo/segments/seg_3.sst.zst";
+        let identical = "namespaces/demo/segments/seg_1.sst";
+        let different = "namespaces/demo/segments/seg_2.sst";
+        let without_checksum = "namespaces/demo/segments/seg_3.sst";
         store
             .put_if_absent(identical, ours.clone())
             .await
@@ -1639,7 +1639,7 @@ mod tests {
         script_puts(&flaky, [WriteScript::FailWithoutWriting]);
         store
             .put_immutable_verified(
-                "namespaces/demo/segments/seg_8.sst.zst",
+                "namespaces/demo/segments/seg_8.sst",
                 Bytes::from_static(b"payload"),
             )
             .await

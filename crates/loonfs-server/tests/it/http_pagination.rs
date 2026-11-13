@@ -1,15 +1,17 @@
 //! HTTP directory and revision pagination behavior.
 
 use crate::common::http_split_support::*;
-use crate::common::{assert_api_code, collect_checkpoints, collect_path_entries, start_server};
+use crate::common::{
+    assert_api_code, collect_path_entries, collect_snapshot_records, start_server,
+};
 use loonfs_client::{ClientError, ListOptions, MoveOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::options::{CommitSplitting, DiffOptions, ListChangesOptions};
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, CommitRequest, DestinationBehavior, ErrorCode,
-    ErrorResponse, FilesystemChange, FilesystemOperation, ListCheckpointsResponse,
-    ListPathEntriesResponse, RevisionNo, MAX_PAGE_LIMIT,
+    AbsolutePath, CommitId, CommitRequest, CommitSeq, DestinationBehavior, ErrorCode,
+    ErrorResponse, FilesystemEvent, FilesystemOperation, ListPathEntriesResponse,
+    ListSnapshotRecordsResponse, RevisionNo, MAX_PAGE_LIMIT,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -33,12 +35,12 @@ fn assert_invalid_request<T: std::fmt::Debug>(result: Result<T, ClientError>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
+async fn http_paginates_the_snapshot_inventory_and_rejects_invalid_requests() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
         "loonfs-server-test",
-        "http-checkpoint-pagination",
+        "http-snapshot-pagination",
     ))
     .await;
     let demo = namespace_id("demo");
@@ -56,9 +58,9 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
         expected_ids.push(
             harness
                 .client
-                .create_snapshot(&demo, &format!("pin-{index}"))
+                .create_snapshot(&demo, &format!("snapshot-{index}"))
                 .await
-                .expect("create checkpoint")
+                .expect("create snapshot")
                 .snapshot_id,
         );
     }
@@ -69,16 +71,16 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     loop {
         let page = harness
             .client
-            .list_checkpoints(&demo)
+            .list_snapshot_records(&demo)
             .page_limit(page_limit(2))
             .cursor(cursor.clone())
             .page()
             .await
-            .expect("list checkpoint page");
+            .expect("list snapshot page");
         actual_ids.extend(
-            page.checkpoints
+            page.snapshots
                 .into_iter()
-                .map(|checkpoint| checkpoint.checkpoint_id),
+                .map(|snapshot| snapshot.snapshot_id),
         );
         let Some(next_cursor) = page.next_cursor else {
             break;
@@ -87,13 +89,13 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     }
     assert_eq!(actual_ids, expected_ids);
 
-    let all = collect_checkpoints(&harness.client, &demo)
+    let all = collect_snapshot_records(&harness.client, &demo)
         .await
-        .expect("aggregate checkpoint pages");
+        .expect("aggregate snapshot pages");
     assert_eq!(
-        all.checkpoints
+        all.snapshots
             .into_iter()
-            .map(|checkpoint| checkpoint.checkpoint_id)
+            .map(|snapshot| snapshot.snapshot_id)
             .collect::<Vec<_>>(),
         expected_ids
     );
@@ -101,16 +103,16 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
 
     let first = harness
         .client
-        .list_checkpoints(&demo)
+        .list_snapshot_records(&demo)
         .page_limit(page_limit(1))
         .page()
         .await
-        .expect("first checkpoint page");
-    let foreign_cursor = first.next_cursor.expect("checkpoint cursor");
+        .expect("first snapshot page");
+    let foreign_cursor = first.next_cursor.expect("snapshot cursor");
     assert_invalid_request(
         harness
             .client
-            .list_checkpoints(&other)
+            .list_snapshot_records(&other)
             .page_limit(page_limit(1))
             .cursor(Some(foreign_cursor.clone()))
             .page()
@@ -119,16 +121,16 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     assert_invalid_request(
         harness
             .client
-            .list_checkpoints(&demo)
+            .list_snapshot_records(&demo)
             .page_limit(page_limit(1))
             .cursor(Some("not-a-cursor".to_owned()))
             .page()
             .await,
     );
     // A page request holds only a valid limit, so a zero limit goes out raw.
-    let zero_limit: Result<ListCheckpointsResponse, Box<ErrorResponse>> = get_json(
+    let zero_limit: Result<ListSnapshotRecordsResponse, Box<ErrorResponse>> = get_json(
         &format!(
-            "{}/v0/maintenance/namespaces/demo/checkpoints?limit=0",
+            "{}/v0/maintenance/namespaces/demo/snapshots?limit=0",
             harness.server_url
         ),
         "test-token",
@@ -140,21 +142,21 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
     assert_invalid_request(
         harness
             .client
-            .list_checkpoints(&demo)
+            .list_snapshot_records(&demo)
             .page_limit(page_limit(MAX_PAGE_LIMIT + 1))
             .page()
             .await,
     );
 
-    let raw: ListCheckpointsResponse = get_json(
+    let raw: ListSnapshotRecordsResponse = get_json(
         &format!(
-            "{}/v0/maintenance/namespaces/demo/checkpoints?limit=1",
+            "{}/v0/maintenance/namespaces/demo/snapshots?limit=1",
             harness.server_url
         ),
         "test-token",
     )
-    .expect("raw checkpoint page");
-    assert_eq!(raw.checkpoints.len(), 1);
+    .expect("raw snapshot page");
+    assert_eq!(raw.snapshots.len(), 1);
     assert!(raw.next_cursor.is_some());
 
     harness
@@ -164,13 +166,13 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
         .expect("delete namespace");
     let deleted_page = harness
         .client
-        .list_checkpoints(&demo)
+        .list_snapshot_records(&demo)
         .page_limit(page_limit(1))
         .cursor(Some(foreign_cursor.clone()))
         .page()
         .await
-        .expect("resume checkpoints in deleted namespace");
-    assert_eq!(deleted_page.checkpoints.len(), 1);
+        .expect("resume snapshots in deleted namespace");
+    assert_eq!(deleted_page.snapshots.len(), 1);
     harness.server.abort();
 }
 
@@ -580,7 +582,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         )
         .await
         .expect("replace file");
-    assert_eq!(replace.committed_seq, ChangeSeq(2));
+    assert_eq!(replace.committed_seq, CommitSeq(2));
 
     let restore = harness
         .client
@@ -596,7 +598,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         )
         .await
         .expect("restore revision");
-    assert_eq!(restore.committed_seq, ChangeSeq(3));
+    assert_eq!(restore.committed_seq, CommitSeq(3));
 
     let entry = harness
         .client
@@ -614,7 +616,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("list changes");
@@ -627,7 +629,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     assert_eq!(changes.changes[2].events.len(), 1);
     assert_matches!(
         &changes.changes[2].events[0],
-        FilesystemChange::ContentChanged {
+        FilesystemEvent::ContentChanged {
             inode_id: event_inode,
             revision_no,
             content_ref,
@@ -639,14 +641,14 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let first_page = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page_limit(page_limit(2))
         .page()
         .await
         .expect("list first changes page");
-    assert_eq!(first_page.after_seq, ChangeSeq(0));
-    assert_eq!(first_page.head_seq, ChangeSeq(3));
-    assert_eq!(first_page.next_after_seq, Some(ChangeSeq(2)));
+    assert_eq!(first_page.after_seq, CommitSeq(0));
+    assert_eq!(first_page.head_seq, CommitSeq(3));
+    assert_eq!(first_page.next_after_seq, Some(CommitSeq(2)));
     assert_eq!(first_page.changes.len(), 2);
 
     let second_page = harness
@@ -656,8 +658,8 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .page()
         .await
         .expect("list second changes page");
-    assert_eq!(second_page.after_seq, ChangeSeq(2));
-    assert_eq!(second_page.head_seq, ChangeSeq(3));
+    assert_eq!(second_page.after_seq, CommitSeq(2));
+    assert_eq!(second_page.head_seq, CommitSeq(3));
     assert_eq!(second_page.next_after_seq, None);
     assert_eq!(
         second_page
@@ -665,7 +667,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             .iter()
             .map(|change| change.committed_seq)
             .collect::<Vec<_>>(),
-        vec![ChangeSeq(3)]
+        vec![CommitSeq(3)]
     );
 
     harness.server.abort();
@@ -873,7 +875,7 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
 
     let whole = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("list the whole commit");
@@ -889,7 +891,7 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
     // returns it whole.
     let from_start = harness
         .client
-        .list_changes_with_options(&namespace, ChangeSeq(0), &split_at(0))
+        .list_changes_with_options(&namespace, CommitSeq(0), &split_at(0))
         .page()
         .await
         .expect("list with split_commits");
@@ -941,14 +943,14 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
 
     let whole_diff = harness
         .client
-        .diff(&namespace, ChangeSeq(0))
+        .diff(&namespace, CommitSeq(0))
         .await
         .expect("diff the whole commit");
     let resumed_diff = harness
         .client
         .diff_with_options(
             &namespace,
-            ChangeSeq(0),
+            CommitSeq(0),
             &DiffOptions {
                 after_seq: Some(commit_seq),
                 event_index: 1,
@@ -986,7 +988,7 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
                 .client
                 .diff_with_options(
                     &namespace,
-                    ChangeSeq(0),
+                    CommitSeq(0),
                     &DiffOptions {
                         after_seq: Some(commit_seq),
                         event_index: 1,

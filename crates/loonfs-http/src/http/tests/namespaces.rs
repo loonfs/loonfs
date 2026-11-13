@@ -133,6 +133,43 @@ async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
 }
 
 #[tokio::test]
+async fn a_session_that_finds_its_namespace_deleted_leaves_the_host_at_the_next_open() {
+    let (directory, router, state, namespaces) = host("holding-host").await;
+    let (other_router, _, _) = test_app_with_sessions(
+        test_options(directory.path(), "deleting-host"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("other host");
+    let deleted = namespace_id("deleted");
+    create_namespace(&state, &deleted).await;
+    let held = state.namespaces.open(&deleted).await.expect("held session");
+    let uri = format!("/v0/namespaces/{deleted}");
+    assert_eq!(
+        send(&other_router, Method::DELETE, &uri, String::new())
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    // The held session's first publish finds the other writer's tombstone,
+    // and the next request's open drops the session.
+    let commits = format!("{uri}/commits");
+    let body = serde_json::json!({
+        "commit_id": "after-delete",
+        "operations": [{"kind": "create_directory", "path": "/late"}],
+    })
+    .to_string();
+    for held_after in [true, false] {
+        let (_, bytes) = send(&router, Method::POST, &commits, body.clone()).await;
+        let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("error");
+        assert_eq!(error.code, ErrorCode::NamespaceDeleted.as_str());
+        assert_eq!(held.session_status(), NamespaceSessionStatus::Closed);
+        assert_eq!(namespaces.held_ids().contains(&deleted), held_after);
+    }
+}
+
+#[tokio::test]
 async fn a_create_request_with_a_naming_field_is_rejected_and_leaves_no_writer_handle() {
     let (_directory, router, _, namespaces) = host("naming-field-host").await;
     let named = namespace_id("named");
@@ -255,7 +292,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
 }
 
 #[tokio::test]
-async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replacements_held() {
+async fn concurrent_opens_drop_a_fenced_session_once_and_keep_other_sessions_and_replacements() {
     let (directory, router, state, namespaces) = host("fenced-host").await;
     let (_, other, other_namespaces) = test_app_with_sessions(
         test_options(directory.path(), "winning-host"),
@@ -277,53 +314,41 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
         .await
         .expect("take over");
     let winning_epoch = writer_epoch(&state, &fenced).await;
-    let barrier = tokio::sync::Barrier::new(4);
     let errors = futures::future::join_all((0..4).map(|index| {
         let old = old.clone();
-        let barrier = &barrier;
-        let state = &state;
-        let fenced = &fenced;
         async move {
-            let error = old
-                .create_directory(
-                    &format!("/refused-{index}"),
-                    &loonfs_test_support::test_actor(),
-                )
-                .await
-                .expect_err("old session is fenced");
-            barrier.wait().await;
-            let response = ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                fenced,
-                error.clone(),
-            );
-            let response = response.into_response();
-            assert_eq!(response.status(), StatusCode::CONFLICT);
-            assert_eq!(error.code(), ErrorCode::WriterFenced);
-            error
+            old.create_directory(
+                &format!("/refused-{index}"),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .expect_err("old session is fenced")
         }
     }))
     .await;
+    for error in &errors {
+        assert_eq!(error.code(), ErrorCode::WriterFenced);
+        let response = ApiResponseError::runtime(error.clone()).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
     assert_eq!(writer_epoch(&state, &fenced).await, winning_epoch);
-    assert_eq!(namespaces.held_ids(), std::slice::from_ref(&kept));
-    state.namespaces.forget_after(&kept, &errors[0]);
-    state.namespaces.forget_after(&fenced, &errors[0]);
-    assert_eq!(
-        namespaces.held_ids(),
-        std::slice::from_ref(&kept),
-        "a fenced error does not drop an open session"
-    );
+    assert_eq!(old.session_status(), NamespaceSessionStatus::Fenced);
+
+    // Every open finds the fenced session or the one replacement that the
+    // first open put in its place.
+    let replacements =
+        futures::future::join_all((0..4).map(|_| state.namespaces.open(&fenced))).await;
+    for replacement in &replacements {
+        let replacement = replacement.as_ref().expect("replacement");
+        assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
+    }
+    assert_eq!(namespaces.held_ids(), [fenced.clone(), kept.clone()]);
 
     create_directory(&router, &fenced, "/replacement").await;
     let replacement = state.namespaces.open(&fenced).await.expect("replacement");
-    assert_eq!(replacement.session_status(), NamespaceSessionStatus::Open);
-    assert_eq!(old.session_status(), NamespaceSessionStatus::Fenced);
-    let response = ApiResponseError::runtime_for_namespace_writer(
-        state.namespaces.as_ref(),
-        &fenced,
-        errors[0].clone(),
-    );
-    assert_eq!(response.into_response().status(), StatusCode::CONFLICT);
+    old.create_directory("/late", &loonfs_test_support::test_actor())
+        .await
+        .expect_err("a late request through the old session is fenced");
     assert_eq!(namespaces.held_ids().len(), 2, "the replacement stays held");
     drop(old);
     create_directory(&router, &fenced, "/still-replacement").await;
@@ -343,18 +368,15 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
         .expect("held other namespace");
     assert_eq!(held.last_published_seq(), kept_handle.last_published_seq());
 
-    winner
+    let error = winner
         .create_directory("/refused-winner", &loonfs_test_support::test_actor())
         .await
         .expect_err("winner was fenced back");
-    let error = winner
-        .create_directory("/still-refused", &loonfs_test_support::test_actor())
-        .await
-        .expect_err("same session stays fenced");
     assert_eq!(error.code(), ErrorCode::WriterFenced);
+    assert_eq!(winner.session_status(), NamespaceSessionStatus::Fenced);
     assert!(other_namespaces.held_ids().contains(&fenced));
-    other.namespaces.forget_after(&fenced, &error);
-    assert!(!other_namespaces.held_ids().contains(&fenced));
+    let reopened = other.namespaces.open(&fenced).await.expect("reopen");
+    assert_eq!(reopened.session_status(), NamespaceSessionStatus::Open);
 }
 
 #[tokio::test]
@@ -413,7 +435,6 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
     assert_eq!(status, StatusCode::CONFLICT);
     let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("fenced error");
     assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
-    assert!(namespaces.held_ids().is_empty());
     let (status, bytes) = send(&router, Method::POST, &uri, body.clone()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let error: loonfs_types::ErrorResponse = serde_json::from_slice(&bytes).expect("closing error");

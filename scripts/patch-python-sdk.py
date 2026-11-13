@@ -123,7 +123,7 @@ api_error_path.write_text(source)
 openapi = json.loads(pathlib.Path("../docs/specs/openapi.json").read_text())
 event_kinds = "".join(
     f'    "{kind}",\n'
-    for kind in sorted(openapi["components"]["schemas"]["FilesystemChange"]["discriminator"]["mapping"])
+    for kind in sorted(openapi["components"]["schemas"]["FilesystemEvent"]["discriminator"]["mapping"])
 )
 commit_path = pathlib.Path("generated/python/types/commit.py")
 source = commit_path.read_text()
@@ -170,7 +170,7 @@ entry_fields = {
     kind: set(schemas[reference.rsplit("/", 1)[1]]["properties"])
     for kind, reference in schemas["PathEntry"]["discriminator"]["mapping"].items()
 }
-assert entry_fields["dir"] == set.intersection(*entry_fields.values()), (
+assert entry_fields["directory"] == set.intersection(*entry_fields.values()), (
     "a directory entry no longer has exactly the fields that every entry includes"
 )
 inode_kinds = "".join(f'    "{kind}",\n' for kind in sorted(entry_fields))
@@ -189,7 +189,7 @@ source = replace_once(
     f"_INODE_KINDS = frozenset({{\n{inode_kinds}}})\n",
 )
 directory_member = source[
-    source.index("class PathEntry_Dir(UniversalBaseModel):\n") : source.index("class PathEntry_File(UniversalBaseModel):\n")
+    source.index("class PathEntry_Directory(UniversalBaseModel):\n") : source.index("class PathEntry_File(UniversalBaseModel):\n")
 ]
 unknown_member, count = re.subn(
     r'    """\n.*?    """\n',
@@ -202,8 +202,8 @@ unknown_member, count = re.subn(
     flags=re.DOTALL,
 )
 assert count == 1, "expected a docstring on the directory member"
-unknown_member = replace_once(unknown_member, "class PathEntry_Dir(", "class PathEntry_Unknown(")
-unknown_member = replace_once(unknown_member, '    inode_kind: typing.Literal["dir"] = "dir"\n', "    inode_kind: str\n")
+unknown_member = replace_once(unknown_member, "class PathEntry_Directory(", "class PathEntry_Unknown(")
+unknown_member = replace_once(unknown_member, '    inode_kind: typing.Literal["directory"] = "directory"\n', "    inode_kind: str\n")
 unknown_member = replace_once(
     unknown_member,
     "    if IS_PYDANTIC_V2:\n",
@@ -220,11 +220,11 @@ unknown_member = replace_once(
 source = replace_once(
     source,
     "PathEntry = typing_extensions.Annotated[\n"
-    '    typing.Union[PathEntry_Dir, PathEntry_File], pydantic.Field(discriminator="inode_kind")\n'
+    '    typing.Union[PathEntry_Directory, PathEntry_File], pydantic.Field(discriminator="inode_kind")\n'
     "]\n",
     unknown_member + "PathEntry = typing.Union[\n"
     "    typing_extensions.Annotated[\n"
-    '        typing.Union[PathEntry_Dir, PathEntry_File], pydantic.Field(discriminator="inode_kind")\n'
+    '        typing.Union[PathEntry_Directory, PathEntry_File], pydantic.Field(discriminator="inode_kind")\n'
     "    ],\n"
     "    PathEntry_Unknown,\n"
     "]\n",
@@ -237,8 +237,8 @@ for exports_path, replacements in (
         pathlib.Path("generated/python/types/__init__.py"),
         (
             (
-                "    from .path_entry import PathEntry, PathEntry_Dir, PathEntry_File\n",
-                "    from .path_entry import PathEntry, PathEntry_Dir, PathEntry_File, PathEntry_Unknown\n",
+                "    from .path_entry import PathEntry, PathEntry_Directory, PathEntry_File\n",
+                "    from .path_entry import PathEntry, PathEntry_Directory, PathEntry_File, PathEntry_Unknown\n",
             ),
             ('    "PathEntry_File": ".path_entry",\n', '    "PathEntry_File": ".path_entry",\n    "PathEntry_Unknown": ".path_entry",\n'),
             ('    "PathEntry_File",\n', '    "PathEntry_File",\n    "PathEntry_Unknown",\n'),

@@ -81,7 +81,7 @@ async fn a_retry_of_a_committed_replay_folds_nothing() {
 }
 
 /// Checks that a rebase of a fork whose own retention floor is above the
-/// start of the fork's next merge returns `rebootstrap_required` before it
+/// start of the fork's next merge returns `below_retention_floor` before it
 /// creates the new fork, and folds nothing: main keeps its manifest and the
 /// commit in its WAL tail.
 #[tokio::test]
@@ -126,7 +126,7 @@ async fn a_rebase_of_a_fork_below_its_own_floor_creates_nothing() {
         .fork_namespace_for_rebase(&main_id, &fork_id, &rebase_id, &actor())
         .await
         .expect_err("the fork's floor");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
     assert_eq!(
         manifest_nos(&maintenance, [&main_id, &fork_id]).await,
         before
@@ -220,7 +220,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
     };
     let PlannedCommit {
         candidate,
-        slot,
+        reservation,
         record,
         report,
         ..
@@ -233,7 +233,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         .expect("another writer of the new fork");
 
     let error = rebase
-        .submit_merge(candidate, &slot)
+        .submit_merge(candidate, &reservation)
         .await
         .expect_err("the new fork's head moved");
     assert_eq!(error.code(), ErrorCode::StaleHead);
@@ -243,7 +243,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         ..request
     };
     let PlannedMerge::Candidate(replanned) = rebase
-        .plan_replay(&replan, Some(slot))
+        .plan_replay(&replan, Some(reservation))
         .await
         .expect("the second plan")
     else {
@@ -256,7 +256,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         .collect();
     assert_eq!(kinds, [(MergeConflictKind::Subtree, true)]);
     rebase
-        .submit_merge(replanned.candidate, &replanned.slot)
+        .submit_merge(replanned.candidate, &replanned.reservation)
         .await
         .expect("the second plan commits");
     assert_eq!(

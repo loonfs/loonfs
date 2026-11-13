@@ -73,7 +73,7 @@ enum PreparedContentKind {
         expires_at_ms: u64,
         upload_id: Option<UploadId>,
     },
-    /// Content of another member of the fork family, or of `namespace_id`
+    /// Content of another member of the pool, or of `namespace_id`
     /// itself, that `namespace_id` reuses without a copy. The layout is the
     /// one that the source's view finds, and it records the chain's creator.
     Shared {
@@ -153,9 +153,9 @@ impl PreparedContent {
     }
 
     /// Prepares content that `namespace_id` reuses from a member of its own
-    /// fork family, with the layout that the source's view finds, until
+    /// pool, with the layout that the source's view finds, until
     /// `expires_at_ms`.
-    pub(crate) fn for_family_member(
+    pub(crate) fn for_pool_member(
         namespace_id: NamespaceId,
         content_ref: ContentRef,
         layout: ContentLayout,
@@ -212,7 +212,7 @@ impl PreparedContent {
     /// in a commit of `namespace_id`.
     ///
     /// An upload is one whole object, and `namespace_id` is its creator.
-    /// Content from a member of the fork family records the source's layout,
+    /// Content from a member of the pool records the source's layout,
     /// whose creator is the chain's.
     pub(crate) fn revision_layout(&self, namespace_id: &NamespaceId) -> Option<ContentLayout> {
         match &self.kind {
@@ -413,9 +413,9 @@ mod tests {
     }
 
     /// Checks that a token is bound to the namespace whose upload completed
-    /// the content, so another member of the same fork family refuses it.
+    /// the content, so another member of the same pool refuses it.
     #[test]
-    fn a_token_is_refused_by_another_member_of_its_fork_family() {
+    fn a_token_is_refused_by_another_member_of_its_pool() {
         let root = NamespaceId::parse("root").expect("namespace");
         let content = fixed_content();
         let token = mint_content_token("secret", &evidence(&root, &content), 1_000).expect("mint");
@@ -424,9 +424,10 @@ mod tests {
             1_000,
             loonfs_test_support::test_actor(),
         );
-        fork.family_root_id = root.clone();
+        let pool_id = loonfs_test_support::ids::numbered_pool_id(1);
+        fork.pool_id = pool_id.clone();
         let fork = VerifiedNamespaceCatalogEntry::from_head(&fork);
-        assert_eq!(fork.family_root_id(), &root);
+        assert_eq!(fork.pool_id(), &pool_id);
         assert_eq!(
             verify_content_token("secret", &fork, &token, 1_000),
             Err(ContentTokenError::NamespaceMismatch)

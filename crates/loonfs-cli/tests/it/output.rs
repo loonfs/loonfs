@@ -163,7 +163,7 @@ fn recovery_hints_name_their_namespace_and_quote_the_path() {
     let deletion_seq = entry["deletion_seq"].as_u64().expect("the deletion seq");
     assert_eq!(
         hinted_recovery_command(&removed),
-        format!("loonfs undelete --inode {inode} --deletion-seq {deletion_seq} --namespace demo")
+        format!("loonfs restore --inode {inode} --deletion-seq {deletion_seq} --namespace demo")
     );
 
     // The trash table offers the same command for the same deletion. Neither
@@ -173,10 +173,10 @@ fn recovery_hints_name_their_namespace_and_quote_the_path() {
     assert_success(&listed);
     assert_eq!(
         trash_recovery_command(&listed, "Quarterly Report.PDF"),
-        format!("loonfs undelete --inode {inode} --deletion-seq {deletion_seq} --namespace demo")
+        format!("loonfs restore --inode {inode} --deletion-seq {deletion_seq} --namespace demo")
     );
 
-    // Pasting the hint into a shell recovers the file, which is the whole
+    // Pasting the hint into a shell restores the file, which is the whole
     // reason the path is quoted.
     let replayed = harness.replay_in_shell(&hinted_recovery_command(&removed));
     assert_success(&replayed);
@@ -437,7 +437,7 @@ fn json_all_is_invalid_usage_even_with_a_limit() {
         vec![
             "--json",
             "maintenance",
-            "checkpoint",
+            "snapshot",
             "list",
             "--all",
             "--limit",

@@ -1,7 +1,7 @@
 //! Aborting an upload session, and releasing the provider objects of a
 //! session that never completed.
 
-use super::records::OutcomeCreation;
+use super::records::{create_upload_outcome, OutcomeCreation};
 use super::session::{authorize_upload_subject, ensure_session_subject, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
@@ -10,7 +10,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{
     UploadAlreadyCompletedError, UploadOutcome, UploadSessionMode, UploadSessionPayload,
 };
-use loonfs_types::{ContentId, NamespaceId, UploadId, UploadSession, UploadSessionStatus};
+use loonfs_types::{ContentId, PoolId, UploadId, UploadSession, UploadSessionStatus};
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Aborts an upload session, then deletes the content object it owned
@@ -36,10 +36,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 let outcome = UploadOutcome::Aborted {
                     aborted_at_ms: clock.request_at_ms(),
                 };
-                match self
-                    .namespace
-                    .create_upload_outcome(catalog.family_root_id(), &loaded.session, &outcome)
-                    .await?
+                match create_upload_outcome(
+                    &self.namespace.store,
+                    catalog.pool_id(),
+                    &loaded.session,
+                    &outcome,
+                )
+                .await?
                 {
                     OutcomeCreation::Created => clock.request_at_ms(),
                     OutcomeCreation::Existing(existing) => repeated_abort(&existing, upload_id)?,
@@ -47,7 +50,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
         };
 
-        if !AbandonedUpload::of(catalog.family_root_id(), &loaded.session)
+        if !AbandonedUpload::of(catalog.pool_id(), &loaded.session)
             .release(&self.namespace.store)
             .await
         {
@@ -84,16 +87,16 @@ fn repeated_abort(outcome: &UploadOutcome, upload_id: &UploadId) -> Result<u64> 
 /// cleanup only after the aborted outcome record exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AbandonedUpload {
-    /// The family root whose prefix stores the session's content object.
-    pub(crate) family_root_id: NamespaceId,
+    /// The pool whose prefix stores the session's content object.
+    pub(crate) pool_id: PoolId,
     pub(crate) content_id: ContentId,
     pub(crate) provider_multipart_upload_id: Option<String>,
 }
 
 impl AbandonedUpload {
     /// Returns what the session `state` left under the prefix of
-    /// `family_root_id`.
-    pub(crate) fn of(family_root_id: &NamespaceId, state: &UploadSessionPayload) -> Self {
+    /// `pool_id`.
+    pub(crate) fn of(pool_id: &PoolId, state: &UploadSessionPayload) -> Self {
         let provider_multipart_upload_id = match &state.mode {
             UploadSessionMode::DirectMultipart {
                 provider_upload_id, ..
@@ -101,7 +104,7 @@ impl AbandonedUpload {
             UploadSessionMode::ServiceProxied { .. } | UploadSessionMode::DirectPut { .. } => None,
         };
         Self {
-            family_root_id: family_root_id.clone(),
+            pool_id: pool_id.clone(),
             content_id: state.content_id.clone(),
             provider_multipart_upload_id,
         }
@@ -118,14 +121,14 @@ impl AbandonedUpload {
         if !self.release_provider(store).await {
             return false;
         }
-        delete_unpublished_content_object(store, &self.family_root_id, &self.content_id).await
+        delete_unpublished_content_object(store, &self.pool_id, &self.content_id).await
     }
 
     pub(crate) async fn release_provider<S: ObjectStore + ?Sized>(&self, store: &S) -> bool {
         if let Some(provider_upload_id) = &self.provider_multipart_upload_id {
             if !abort_unpublished_multipart_upload(
                 store,
-                &self.family_root_id,
+                &self.pool_id,
                 &self.content_id,
                 provider_upload_id,
             )
@@ -151,10 +154,10 @@ impl AbandonedUpload {
 #[must_use]
 pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     content_id: &ContentId,
 ) -> bool {
-    let object_key = content_blob(family_root_id, content_id);
+    let object_key = content_blob(pool_id, content_id);
     match store.delete(&object_key).await {
         Ok(()) => true,
         Err(error) => {
@@ -179,11 +182,11 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
 #[must_use]
 pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     content_id: &ContentId,
     provider_upload_id: &str,
 ) -> bool {
-    let object_key = content_blob(family_root_id, content_id);
+    let object_key = content_blob(pool_id, content_id);
     match store
         .abort_multipart_upload(&object_key, provider_upload_id)
         .await

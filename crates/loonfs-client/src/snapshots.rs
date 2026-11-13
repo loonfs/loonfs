@@ -8,7 +8,7 @@ use loonfs_types::{
     CreateSnapshotRequest, DeleteSnapshotResponse, ExtendSnapshotRequest, ListSnapshotsResponse,
     Snapshot,
 };
-use loonfs_types::{NamespaceId, PageRequest, Pager, PinId};
+use loonfs_types::{NamespaceId, PageRequest, Pager, SnapshotId};
 use std::num::NonZeroU64;
 
 /// A pager over snapshots.
@@ -76,7 +76,7 @@ impl Client {
     pub async fn get_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
     ) -> Result<Snapshot> {
         let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}"));
         self.send_json(self.request(operations::GET_SNAPSHOT, &url))
@@ -90,7 +90,7 @@ impl Client {
     pub async fn extend_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
         ttl_ms: NonZeroU64,
     ) -> Result<Snapshot> {
         let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}/extend"));
@@ -108,7 +108,7 @@ impl Client {
     pub async fn delete_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
         let url = self.namespace_url(namespace_id, &format!("/snapshots/{snapshot_id}"));
         self.send_json(self.request(operations::DELETE_SNAPSHOT, &url))

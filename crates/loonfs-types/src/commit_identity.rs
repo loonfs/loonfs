@@ -11,11 +11,11 @@
 
 use crate::digest::is_sha256_hex;
 use crate::id_macros::{string_id, validation_error};
-use crate::options::UndeleteDestination;
+use crate::options::RestoreDeletedDestination;
 use crate::wal::MergeRecord;
 use crate::{
     AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey, AttributeValue,
-    AttributesRevisionNo, ChangeSeq, CommitPrecondition, ContentId, ContentRef, ContentRefKind,
+    AttributesRevisionNo, CommitPrecondition, CommitSeq, ContentId, ContentRef, ContentRefKind,
     DeleteDirectoryBehavior, DestinationBehavior, FileContent, FilesystemOperation, InodeId,
     NamespaceId, RevisionNo, SubjectId,
 };
@@ -183,9 +183,9 @@ enum OperationFingerprintInput<'a> {
         inode_id: InodeId,
         source_revision_no: RevisionNo,
     },
-    Undelete {
+    RestoreDeleted {
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         destination_path: Option<&'a str>,
         destination_parent_inode_id: Option<InodeId>,
         destination_display_name: Option<&'a str>,
@@ -227,7 +227,7 @@ enum OperationFingerprintInput<'a> {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PreconditionFingerprintInput<'a> {
     NamespaceHead {
-        expected_head_seq: ChangeSeq,
+        expected_head_seq: CommitSeq,
     },
     FileRevision {
         inode_id: InodeId,
@@ -559,21 +559,21 @@ fn operation_fingerprint_input<'a>(
             inode_id: *inode_id,
             source_revision_no: *source_revision_no,
         },
-        FilesystemOperation::Undelete {
+        FilesystemOperation::RestoreDeleted {
             inode_id,
             deletion_seq,
             destination,
         } => {
             let (destination_path, destination_parent_inode_id, destination_display_name) =
                 match destination {
-                    UndeleteDestination::Recorded => (None, None, None),
-                    UndeleteDestination::Path(path) => (Some(path.as_str()), None, None),
-                    UndeleteDestination::Name {
+                    RestoreDeletedDestination::Recorded => (None, None, None),
+                    RestoreDeletedDestination::Path(path) => (Some(path.as_str()), None, None),
+                    RestoreDeletedDestination::Name {
                         parent_inode_id,
                         display_name,
                     } => (None, Some(*parent_inode_id), Some(display_name.as_str())),
                 };
-            OperationFingerprintInput::Undelete {
+            OperationFingerprintInput::RestoreDeleted {
                 inode_id: *inode_id,
                 deletion_seq: *deletion_seq,
                 destination_path,
@@ -888,8 +888,8 @@ mod tests {
         let actor_id = ActorId::parse("usr_8f3c").expect("actor");
         let merge = MergeRecord {
             source_namespace_id: NamespaceId::parse("demo-fork").expect("namespace"),
-            source_after_seq: ChangeSeq(418),
-            source_through_seq: ChangeSeq(425),
+            source_after_seq: CommitSeq(418),
+            source_through_seq: CommitSeq(425),
         };
         let input = MergeFingerprintInput {
             namespace_id: &namespace_id,
@@ -912,11 +912,11 @@ mod tests {
             ..merge.clone()
         };
         let other_after = MergeRecord {
-            source_after_seq: ChangeSeq(419),
+            source_after_seq: CommitSeq(419),
             ..merge.clone()
         };
         let other_through = MergeRecord {
-            source_through_seq: ChangeSeq(426),
+            source_through_seq: CommitSeq(426),
             ..merge.clone()
         };
         for changed in [other_source, other_after, other_through] {
@@ -1220,7 +1220,7 @@ mod tests {
             ),
             (
                 serde_json::json!({
-                    "kind": "undelete",
+                    "kind": "restore_deleted",
                     "inode_id": "ino_0000000000000000000000001a",
                     "deletion_seq": 17,
                     "destination_parent_inode_id": "ino_00000000000000000000000007",
@@ -1236,7 +1236,7 @@ mod tests {
             ),
             (
                 serde_json::json!({
-                    "kind": "undelete",
+                    "kind": "restore_deleted",
                     "inode_id": "ino_0000000000000000000000001a",
                     "deletion_seq": 17,
                     "destination_path": "/report.txt"

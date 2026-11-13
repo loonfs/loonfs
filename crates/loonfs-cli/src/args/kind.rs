@@ -4,8 +4,8 @@
 use super::cli::{Cli, Command, ConfigCommand, TopLevelCommand};
 use super::filesystem::AccessCommand;
 use super::maintenance::{
-    MaintenanceCheckpointCommand, MaintenanceCommand, MaintenanceIndexCommand,
-    MaintenanceRetentionCommand, MaintenanceStoreCommand,
+    MaintenanceCommand, MaintenanceIndexCommand, MaintenancePoolCommand,
+    MaintenanceRetentionCommand, MaintenanceSnapshotCommand, MaintenanceStoreCommand,
 };
 use super::namespace::{NamespaceCommand, SnapshotCommand};
 use super::profile::ProfileCommand;
@@ -66,7 +66,6 @@ command_kinds! {
     FilesystemRevisions => "filesystem_revisions",
     FilesystemTrash => "filesystem_trash",
     FilesystemRestore => "filesystem_restore",
-    FilesystemUndelete => "filesystem_undelete",
     FilesystemMkdir => "filesystem_mkdir",
     FilesystemRm => "filesystem_rm",
     FilesystemMv => "filesystem_mv",
@@ -74,12 +73,13 @@ command_kinds! {
     Changes => "changes",
     Capabilities => "capabilities",
     Doctor => "doctor",
-    MaintenanceCheckpointList => "maintenance_checkpoint_list",
+    MaintenanceSnapshotList => "maintenance_snapshot_list",
     MaintenanceFold => "maintenance_fold",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
     MaintenanceRetentionWindow => "maintenance_retention_window",
     MaintenanceMetadata => "maintenance_metadata",
     MaintenanceGc => "maintenance_gc",
+    MaintenancePoolGc => "maintenance_pool_gc",
     MaintenanceStoreProbe => "maintenance_store_probe",
     MaintenanceIndexEnable => "maintenance_index_enable",
     MaintenanceIndexDisable => "maintenance_index_disable",
@@ -146,7 +146,6 @@ impl Command {
             Command::Revisions(_) => CommandKind::FilesystemRevisions,
             Command::Trash(_) => CommandKind::FilesystemTrash,
             Command::Restore(_) => CommandKind::FilesystemRestore,
-            Command::Undelete(_) => CommandKind::FilesystemUndelete,
             Command::Mkdir(_) => CommandKind::FilesystemMkdir,
             Command::Rm(_) => CommandKind::FilesystemRm,
             Command::Mv(_) => CommandKind::FilesystemMv,
@@ -159,8 +158,8 @@ impl Command {
                 }
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
                 MaintenanceCommand::Fold => CommandKind::MaintenanceFold,
-                MaintenanceCommand::Checkpoint { command } => match command {
-                    MaintenanceCheckpointCommand::List(_) => CommandKind::MaintenanceCheckpointList,
+                MaintenanceCommand::Snapshot { command } => match command {
+                    MaintenanceSnapshotCommand::List(_) => CommandKind::MaintenanceSnapshotList,
                 },
                 MaintenanceCommand::Index { command } => match command {
                     MaintenanceIndexCommand::Enable(_) => CommandKind::MaintenanceIndexEnable,
@@ -176,6 +175,9 @@ impl Command {
                     }
                 },
                 MaintenanceCommand::Gc(_) => CommandKind::MaintenanceGc,
+                MaintenanceCommand::Pool { command } => match command {
+                    MaintenancePoolCommand::Gc(_) => CommandKind::MaintenancePoolGc,
+                },
                 MaintenanceCommand::Store { command } => match command {
                     MaintenanceStoreCommand::Probe => CommandKind::MaintenanceStoreProbe,
                 },

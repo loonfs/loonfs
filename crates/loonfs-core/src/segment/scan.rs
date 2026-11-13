@@ -19,7 +19,7 @@ use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_types::format::segment_blocks::{key_range_may_intersect, string_prefix_upper_bound};
-use loonfs_types::ChangeSeq;
+use loonfs_types::CommitSeq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -117,6 +117,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     ) -> Self {
         let payload = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
             loonfs_types::NamespaceId::parse("runs").expect("a static namespace id should parse"),
+            loonfs_types::PoolId::generate(),
             0,
             loonfs_types::ActorId::parse("runs").expect("a static actor id should parse"),
             loonfs_types::NamespaceAccess::Unrestricted {},
@@ -307,7 +308,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     /// Whether a read at `visible_seq` sees every row of these runs. Every
     /// row of a run is at or below the run's sequence, which each block load
     /// checks.
-    pub(crate) fn every_row_is_visible_at(&self, visible_seq: ChangeSeq) -> bool {
+    pub(crate) fn every_row_is_visible_at(&self, visible_seq: CommitSeq) -> bool {
         self.scan_runs.iter().all(|run| run.run_seq <= visible_seq)
     }
 
@@ -471,7 +472,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             store: self.store,
             segment_cache: self.segment_cache,
             block_memo: &self.block_memo,
-            pool: self.block_memo.pool(),
+            read_working_memory: self.block_memo.read_working_memory(),
             blocks_per_refill,
             upper_bound,
         };
@@ -508,7 +509,12 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             if iterators.is_empty() {
                 break;
             }
-            refill_iterators(&loader, &mut iterators, loader.pool.available_bytes()).await?;
+            refill_iterators(
+                &loader,
+                &mut iterators,
+                loader.read_working_memory.available_bytes(),
+            )
+            .await?;
             if filter_admitted {
                 for iterator in &iterators[previously_open..] {
                     let matched = iterator

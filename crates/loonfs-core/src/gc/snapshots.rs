@@ -1,69 +1,68 @@
-//! Pin deletion decisions, the collection rules for fork pins, and grace
+//! Snapshot deletion decisions, the collection rules for fork snapshots, and grace
 //! window age checks.
 
+use super::deletes::{Counter, Decision};
 use super::live_set::LiveSet;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
-use crate::snapshot::record::load_pin_at_key;
+use crate::snapshot::record::load_snapshot_record_at_key;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload};
-use loonfs_types::{NamespaceId, RetainedReason};
-
-pub(super) enum PinSweep {
-    DeleteFork,
-    DeleteUser,
-    Gone,
-    /// Kept. `reclaimable_at_ms` is when a user pin becomes deletable.
-    Retain {
-        reclaimable_at_ms: Option<u64>,
-    },
-}
+use loonfs_types::format::control::{ForkBasis, SnapshotOwner, SnapshotPayload};
+use loonfs_types::{GcResponse, NamespaceId, RetainedReason};
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Reads the pin record at `key` and decides what to do with the pin.
-    pub(super) async fn sweep_pin(
+    /// Reads the snapshot record at `key` and decides what to do with the snapshot.
+    pub(super) async fn sweep_snapshot(
         &self,
         key: &str,
         grace_window_ms: u64,
         live: &LiveSet,
         clock: &OperationClock,
-    ) -> Result<PinSweep> {
-        match self.load_listed_pin(key).await? {
+    ) -> Result<Decision<GcResponse>> {
+        match self.load_listed_snapshot_record(key).await? {
             Some(record) => {
-                self.sweep_pin_record(key, &record, grace_window_ms, live, clock)
+                self.sweep_snapshot_record(key, &record, grace_window_ms, live, clock)
                     .await
             }
-            None => Ok(PinSweep::Gone),
+            None => Ok(Decision::Gone),
         }
     }
 
-    /// Decides what to do with the pin at `key`, whose record is `record`.
-    pub(super) async fn sweep_pin_record(
+    /// Decides what to do with the snapshot at `key`, whose record is `record`.
+    pub(super) async fn sweep_snapshot_record(
         &self,
         key: &str,
-        record: &PinPayload,
+        record: &SnapshotPayload,
         grace_window_ms: u64,
         live: &LiveSet,
         clock: &OperationClock,
-    ) -> Result<PinSweep> {
-        let deletion = match &record.owner {
-            PinOwner::User { .. } => PinSweep::DeleteUser,
-            PinOwner::Fork {
+    ) -> Result<Decision<GcResponse>> {
+        let now_ms = clock.request_at_ms();
+        let delete = |counter: Counter<GcResponse>| Decision::Delete {
+            keys: vec![key.to_owned()],
+            counter,
+        };
+        let user: Counter<GcResponse> = match &record.owner {
+            SnapshotOwner::User { .. } => |report| &mut report.deleted_snapshots_by_owner.user,
+            SnapshotOwner::Fork {
                 target_namespace_id,
             } => {
                 return Ok(
                     match self
-                        .fork_pin_is_retained(record, target_namespace_id, grace_window_ms, clock)
+                        .fork_snapshot_is_retained(
+                            record,
+                            target_namespace_id,
+                            grace_window_ms,
+                            clock,
+                        )
                         .await?
                     {
-                        false => PinSweep::DeleteFork,
+                        false => delete(|report| &mut report.deleted_snapshots_by_owner.fork),
                         true => {
-                            tracing::debug!(object_key = key, "retaining fork pin");
-                            PinSweep::Retain {
-                                reclaimable_at_ms: None,
-                            }
+                            tracing::debug!(object_key = key, "retaining fork snapshot");
+                            Decision::retain(RetainedReason::SnapshotNotDeletable, None, now_ms)
                         }
                     },
                 );
@@ -79,24 +78,31 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .then(|| record.created_at_ms.saturating_add(grace_window_ms));
         let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
         Ok(match reclaimable_at_ms {
-            Some(at_ms) if clock.request_at_ms() >= at_ms => deletion,
-            _ => PinSweep::Retain { reclaimable_at_ms },
+            Some(at_ms) if now_ms >= at_ms => delete(user),
+            _ => Decision::retain(
+                RetainedReason::SnapshotNotDeletable,
+                reclaimable_at_ms,
+                now_ms,
+            ),
         })
     }
 
-    /// Loads the pin record at `key`, a key from a listing, or returns `None`
+    /// Loads the snapshot record at `key`, a key from a listing, or returns `None`
     /// when the record is gone.
-    pub(super) async fn load_listed_pin(&self, key: &str) -> Result<Option<PinPayload>> {
-        match load_pin_at_key(&self.store, key).await {
+    pub(super) async fn load_listed_snapshot_record(
+        &self,
+        key: &str,
+    ) -> Result<Option<SnapshotPayload>> {
+        match load_snapshot_record_at_key(&self.store, key).await {
             Ok(loaded) => Ok(Some(loaded.state)),
             Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
             Err(error) => Err(CoreError::ControlObjectLoad(error)),
         }
     }
 
-    async fn fork_pin_is_retained(
+    async fn fork_snapshot_is_retained(
         &self,
-        record: &PinPayload,
+        record: &SnapshotPayload,
         target_namespace_id: &NamespaceId,
         grace_window_ms: u64,
         clock: &OperationClock,
@@ -106,19 +112,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         // A target whose current manifest can't be loaded, whether the store
         // failed or the manifest is invalid, is a member whose roots the
-        // family root's collection can't read. That stops only the family's content
-        // sweep (format spec, "One complete pass"), and keeping the pin
+        // pool's collection can't read. That stops only the pool's content
+        // sweep (format spec, "One complete collection"), and keeping the snapshot
         // protects more, never less.
         match self
             .with_namespace(target_namespace_id.clone())
-            .target_retains_pin(record)
+            .target_retains_snapshot(record)
             .await
         {
             Err(CoreError::ControlObjectLoad(error)) => {
                 tracing::warn!(
                     namespace_id = %target_namespace_id,
                     error = %error,
-                    "the fork target's current manifest couldn't be loaded; retaining its source pin"
+                    "the fork target's current manifest couldn't be loaded; retaining its fork snapshot"
                 );
                 Ok(true)
             }
@@ -126,9 +132,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
     }
 
-    pub(super) async fn delete_source_pin(&self, basis: &ForkBasis) -> Result<bool> {
-        let key =
-            loonfs_objectstore::keys::pin(&basis.manifest.owner_namespace_id, &basis.source_pin_id);
+    pub(super) async fn delete_source_snapshot(&self, basis: &ForkBasis) -> Result<bool> {
+        let key = loonfs_objectstore::keys::snapshot_record(
+            &basis.manifest.owner_namespace_id,
+            &basis.source_snapshot_id,
+        );
         let present = self
             .store
             .get_with_metadata(&key)
@@ -136,7 +144,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .map_err(|error| CoreError::store(&key, &error))?
             .is_some();
         self.with_namespace(basis.manifest.owner_namespace_id.clone())
-            .delete_pin(&basis.source_pin_id)
+            .delete_snapshot_record(&basis.source_snapshot_id)
             .await?;
         Ok(present)
     }
@@ -161,16 +169,6 @@ impl GraceAge {
             None => Self::Unknown,
             Some(modified) if now_ms.saturating_sub(modified) < grace_window_ms => Self::Young,
             Some(_) => Self::Aged,
-        }
-    }
-
-    /// The retention reason this outcome is, for a caller reporting why a
-    /// collection kept what it kept. `None` for the outcome that retained nothing.
-    pub(crate) fn retained_reason(self) -> Option<RetainedReason> {
-        match self {
-            Self::Aged => None,
-            Self::Young => Some(RetainedReason::WithinGraceWindow),
-            Self::Unknown => Some(RetainedReason::NoProviderTimestamp),
         }
     }
 }

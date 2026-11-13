@@ -83,7 +83,7 @@ export function downloadRanges(
 ): ReadableStream<Uint8Array> {
     let offset = 0;
     if (ranges.length === 0 || (sizeBytes === 0 && ranges.length !== 1))
-        throw new Error("download grant has invalid ranges");
+        throw new Error("download has invalid ranges");
     for (const range of ranges) {
         if (
             range.start_offset !== offset ||
@@ -92,12 +92,12 @@ export function downloadRanges(
             (range.length === 0 && sizeBytes !== 0) ||
             range.length > sizeBytes - offset
         )
-            throw new Error("download grant has invalid ranges");
-        if (range.access.method !== "GET") throw new Error("download grant must use GET");
+            throw new Error("download has invalid ranges");
+        if (range.transfer.method !== "GET") throw new Error("download presigned URL must use GET");
         offset += range.length;
     }
     if (!Number.isSafeInteger(offset) || offset !== sizeBytes)
-        throw new Error("download grant has invalid ranges");
+        throw new Error("download has invalid ranges");
     const parts = ranges.filter((range) => range.length !== 0);
     let requested = 0;
     let opened = 0;
@@ -109,10 +109,10 @@ export function downloadRanges(
         while (pending.length < RANGE_RESPONSES_IN_FLIGHT - 1 && requested < parts.length && !cancelled) {
             scope.check();
             const range = parts[requested++]!;
-            const response = send(range.access.url, {
+            const response = send(range.transfer.url, {
                 redirect: "error",
-                method: range.access.method,
-                headers: range.access.headers,
+                method: range.transfer.method,
+                headers: range.transfer.headers,
                 signal: scope.signal,
             });
             response.catch(() => {});

@@ -17,7 +17,7 @@ use loonfs_core::ManifestLoadError;
 use loonfs_objectstore::StoreIdentity;
 use loonfs_types::format::manifest::{InodeRecord, MetadataRow, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::{decode_index_block, BlockHandle, SegmentBlocksBuilder};
-use loonfs_types::{ChangeSeq, CommitId, InodeId, InodeKind};
+use loonfs_types::{CommitId, CommitSeq, InodeId, InodeKind};
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -61,7 +61,7 @@ fn test_blocks() -> Vec<TestBlock> {
         let row = MetadataRow::Inode(InodeRecord {
             inode_id: InodeId(u128::from(inode) + 2),
             inode_kind: InodeKind::File,
-            committed_seq: ChangeSeq(inode + 1),
+            committed_seq: CommitSeq(inode + 1),
             commit_id: CommitId::parse(format!("c_ssd_{inode:02}")).expect("commit id"),
             committed_by: loonfs_test_support::test_actor(),
             committed_at_ms: 1_000 + inode,

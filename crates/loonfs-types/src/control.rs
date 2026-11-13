@@ -1,12 +1,12 @@
 //! Durable control-object shapes: the discovery hint,
-//! pins, upload session and outcome records, and their envelopes
+//! snapshots, upload session and outcome records, pool records, and their envelopes
 //! ([Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads)).
 
 use crate::envelope::EnvelopeCodecError;
 use crate::WriterId;
 use crate::{
-    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId,
-    PayloadChecksum, PinId, SubjectId, UploadId,
+    ChecksumAlgorithm, CommitId, CommitSeq, ContentId, ContentRef, ManifestNo, NamespaceId,
+    PayloadChecksum, PoolId, SnapshotId, SubjectId, UploadId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -20,21 +20,24 @@ use std::num::NonZeroU64;
 pub enum ControlObjectKind {
     /// Starts forward discovery of numbered manifests.
     Hint,
-    /// Pins a manifest basis for a user or fork lifecycle.
-    Pin,
+    /// Keeps a manifest basis for a user or fork lifecycle.
+    Snapshot,
     /// Starts one upload session.
     UploadSession,
     /// Records how one upload session ended.
     UploadOutcome,
+    /// Records the creation of one pool.
+    Pool,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Hint,
-        Self::Pin,
+        Self::Snapshot,
         Self::UploadSession,
         Self::UploadOutcome,
+        Self::Pool,
     ];
 
     /// Returns the durable format version for this control object kind.
@@ -46,9 +49,10 @@ impl ControlObjectKind {
     pub const fn format_version(self) -> u32 {
         match self {
             Self::Hint => 1,
-            Self::Pin => 1,
+            Self::Snapshot => 1,
             Self::UploadSession => 1,
             Self::UploadOutcome => 1,
+            Self::Pool => 1,
         }
     }
 
@@ -56,9 +60,10 @@ impl ControlObjectKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Hint => "hint",
-            Self::Pin => "pin",
+            Self::Snapshot => "snapshot",
             Self::UploadSession => "upload_session",
             Self::UploadOutcome => "upload_outcome",
+            Self::Pool => "pool",
         }
     }
 
@@ -92,34 +97,34 @@ pub struct ManifestRef {
     /// Monotonic logical position of the referenced manifest.
     pub manifest_no: ManifestNo,
     /// The referenced manifest's folded head, a sequence of the owner namespace.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub payload_checksum: PayloadChecksum,
 }
 
-/// Durable owner and expiry policy of a pin.
+/// Durable owner and expiry policy of a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PinOwner {
-    /// A pin that a caller created, which the API calls a snapshot. It's
+pub enum SnapshotOwner {
+    /// A snapshot that a caller created through the snapshot API. It's
     /// deleted by its ID, or by garbage collection after its expiry. The name
     /// is a label, not a key, so several records can have the same name.
     User {
         /// The label that the creator recorded. Labels don't need to be unique.
         name: String,
-        /// When the pin expires. A pin without an expiry doesn't expire.
+        /// When the snapshot expires. A snapshot without an expiry doesn't expire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at_ms: Option<u64>,
     },
     /// Keeps the source manifest and its runs readable by the target.
     Fork {
-        /// Fork namespace whose continued existence keeps the source basis pinned.
+        /// Fork namespace whose continued existence keeps the source basis.
         target_namespace_id: NamespaceId,
     },
 }
 
-impl PinOwner {
-    /// Returns when this record expires. A fork pin and a user pin without
+impl SnapshotOwner {
+    /// Returns when this record expires. A fork snapshot and a user snapshot without
     /// an expiry return `None`.
     pub fn expires_at_ms(&self) -> Option<u64> {
         match self {
@@ -129,30 +134,30 @@ impl PinOwner {
     }
 }
 
-/// A pin stored under `pins/`; see format specification section 8.
+/// A snapshot stored under `snapshots/`; see format specification section 8.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PinPayload {
-    /// Namespace containing the pinned manifest.
+pub struct SnapshotPayload {
+    /// Namespace containing the snapshot's manifest.
     pub namespace_id: NamespaceId,
     /// Positions this record at its manifest number.
-    pub pin_id: PinId,
-    /// Greatest sequence in the pinned manifest.
-    pub head_seq: ChangeSeq,
+    pub snapshot_id: SnapshotId,
+    /// Greatest sequence in the snapshot's manifest.
+    pub head_seq: CommitSeq,
     /// Verifies the referenced manifest payload.
     pub payload_checksum: PayloadChecksum,
     /// Creation time used by collection grace.
     pub created_at_ms: u64,
     /// Determines when collection may delete this record.
-    pub owner: PinOwner,
+    pub owner: SnapshotOwner,
 }
 
-impl PinPayload {
-    /// Builds the reference for reads through this pin.
+impl SnapshotPayload {
+    /// Builds the reference for reads through this snapshot.
     pub fn manifest(&self) -> ManifestRef {
         ManifestRef {
             owner_namespace_id: self.namespace_id.clone(),
-            manifest_no: self.pin_id.manifest_no(),
+            manifest_no: self.snapshot_id.manifest_no(),
             head_seq: self.head_seq,
             payload_checksum: self.payload_checksum.clone(),
         }
@@ -204,15 +209,15 @@ impl NamespaceStatus {
     }
 }
 
-/// Immutable fork provenance matched against the source pin by GC.
+/// Immutable fork provenance matched against the fork snapshot by GC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkBasis {
     /// Source manifest used as the target's initial state. Its owner must
     /// differ from the target namespace.
     pub manifest: ManifestRef,
-    /// Source pin that keeps the basis for as long as the target lives.
-    pub source_pin_id: PinId,
+    /// Fork snapshot that keeps the basis for as long as the target lives.
+    pub source_snapshot_id: SnapshotId,
     /// The fork whose commits a rebase replays into the target, which only a
     /// rebase's new fork records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,10 +236,10 @@ pub struct RebasedFrom {
     /// The fork sequence that the fork's next merge into its source would
     /// have started after when the rebase made the new fork. The new fork's
     /// first replay commit starts after it.
-    pub resume_after_seq: ChangeSeq,
+    pub resume_after_seq: CommitSeq,
 }
 
-const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
+const GENESIS_COMMIT_ID: &str = "cmt_00000000000000000000000000";
 
 /// Returns the commit id every namespace's sequence zero has, before any
 /// commit is published.
@@ -309,7 +314,7 @@ impl UploadSessionMode {
 pub struct UploadSessionPayload {
     /// The namespace that created the session, and the only namespace whose
     /// commits the session's content admits. The record is stored under the
-    /// prefix of that namespace's family root.
+    /// prefix of that namespace's pool.
     pub namespace_id: NamespaceId,
     /// Durable session identity used by upload and completion requests.
     pub upload_id: UploadId,
@@ -396,6 +401,24 @@ pub struct UploadOutcomePayload {
     pub upload_id: UploadId,
     /// How the session ended.
     pub outcome: UploadOutcome,
+}
+
+/// The record that a namespace's create call writes when the call generates
+/// a pool.
+///
+/// LoonFS writes the record once, with put-if-absent, after the namespace's
+/// hint and before manifest 1, and never changes the record.
+///
+/// See [pools and pool records](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md#pools-and-pool-records).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolPayload {
+    /// The pool that the record describes.
+    pub pool_id: PoolId,
+    /// The namespace that was created with the pool, the pool's first member.
+    pub first_member_namespace_id: NamespaceId,
+    /// The create call's request clock, in unix milliseconds.
+    pub created_at_ms: u64,
 }
 
 /// Control state decoded through its checked durable codec.

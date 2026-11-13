@@ -1,5 +1,5 @@
-//! Merges in the publisher's queue: a merge's admission, one merge at a
-//! time, and its publication in a WAL object of its own.
+//! Merges in the publisher's queue: a merge's admission, merges that share
+//! the merge allowance, and a merge's publication in a WAL object of its own.
 
 use super::*;
 use loonfs_test_support::stores::RecordedOperation;
@@ -22,13 +22,13 @@ fn merge_through(commit_id: &str, name: &str, after_seq: u64, through_seq: u64) 
         CommitCandidate::new(create_directory_request(commit_id, name)),
         MergeRecord {
             source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
-            source_after_seq: ChangeSeq(after_seq),
-            source_through_seq: ChangeSeq(through_seq),
+            source_after_seq: CommitSeq(after_seq),
+            source_through_seq: CommitSeq(through_seq),
         },
-        ChangeSeq(3),
+        CommitSeq(3),
         BTreeMap::from([(
             0,
-            InodeId::generate(ChangeSeq(after_seq + 1), NonZeroU32::MIN),
+            InodeId::generate(CommitSeq(after_seq + 1), NonZeroU32::MIN),
         )]),
     )
 }
@@ -122,12 +122,12 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
 /// peak, three times its planned WAL bytes, fits the merge allowance,
 /// although the merge is above the budget's byte total and above its
 /// namespace's byte allowance, which refuse a lighter ordinary commit with
-/// `commit_queue_full`. A second merge while the first is
-/// admitted gets `commit_queue_full`, and it's admitted once the first
-/// settles. A merge whose peak is above the allowance fails with
-/// `merge_too_large`, which reports the peak and the allowance.
+/// `commit_queue_full`. Two merges whose reservations fit the allowance are
+/// admitted at once, and both commit. A merge whose peak is above the
+/// allowance fails with `merge_too_large`, which reports the peak and the
+/// allowance.
 #[tokio::test]
-async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
+async fn merges_that_fit_the_allowance_are_admitted_together() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("main").expect("namespace");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -146,10 +146,15 @@ async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
             .max_admitted_bytes(below_the_merge)
             .max_merge_bytes(max_merge_bytes)
             .build();
-        standalone_publisher_with(&namespace_id, &runtime, core)
+        let budget = core.execution_budget.clone();
+        (
+            standalone_publisher_with(&namespace_id, &runtime, core),
+            budget,
+        )
     };
 
-    let publisher = publisher_with_allowance(merge_peak);
+    let allowance = 2 * super::super::admission::MIN_MERGE_RESERVED_BYTES;
+    let (publisher, budget) = publisher_with_allowance(allowance);
     assert_matches!(
         try_admit_commit(
             &publisher,
@@ -160,23 +165,20 @@ async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
     );
     let first = try_admit_candidate(&publisher, &namespace_id, merge("merge", "merged"))
         .expect("admit a merge above the namespace allowance and the byte total");
-    let second = || merge_through("later", "second", 7, 9);
-    assert_matches!(
-        try_admit_candidate(&publisher, &namespace_id, second()),
-        Err(CoreError::CommitQueueFull)
-    );
-    assert!(recv_commit(first, "merge").await.merge.is_some());
-    publisher.wait_for_worker().await;
-    let next = recv_commit(
-        try_admit_candidate(&publisher, &namespace_id, second())
-            .expect("admit the second merge once the first settles"),
-        "later",
+    let second = try_admit_candidate(
+        &publisher,
+        &namespace_id,
+        merge_through("later", "second", 7, 9),
     )
-    .await;
-    assert!(next.merge.is_some());
+    .expect("admit a second merge beside the first");
+    assert_eq!(budget.stats().admitted_merges, 2);
+    assert_eq!(budget.stats().admitted_merge_bytes, allowance);
+    assert!(recv_commit(first, "merge").await.merge.is_some());
+    assert!(recv_commit(second, "later").await.merge.is_some());
     publisher.wait_for_worker().await;
+    assert_eq!(budget.stats().admitted_merge_bytes, 0);
 
-    let smaller = publisher_with_allowance(merge_peak - 1);
+    let (smaller, _) = publisher_with_allowance(merge_peak - 1);
     assert_matches!(
         try_admit_candidate(&smaller, &namespace_id, merge("merge", "merged")),
         Err(CoreError::MergeTooLarge {
@@ -188,12 +190,12 @@ async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
     );
 }
 
-/// Checks that a retry of a merge whose commit is still in flight gets
-/// `commit_queue_full`, as a different merge does, because the budget admits
-/// one merge at a time, and that a retry after the merge commits returns the
-/// merge.
+/// Checks that a retry of a merge whose commit is still in flight is
+/// admitted beside the merge and returns the merge's commit, and that a
+/// merge of the same range under another commit ID fails the writer's range
+/// check, so the range is applied once.
 #[tokio::test]
-async fn a_retry_of_a_merge_in_flight_finds_the_slot_taken() {
+async fn a_retry_of_a_merge_in_flight_returns_the_merge() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("main").expect("namespace");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -206,19 +208,16 @@ async fn a_retry_of_a_merge_in_flight_finds_the_slot_taken() {
         futures::poll!(first.as_mut()).is_pending(),
         "the merge is admitted"
     );
-    for candidate in [merge("merge", "merged"), merge("other", "merged")] {
-        assert_matches!(
-            publisher.submit(candidate).await,
-            Err(crate::Error::Core(CoreError::CommitQueueFull))
-        );
-    }
-
-    let first = first.await.expect("the merge");
-    publisher.wait_for_worker().await;
     let retry = publisher
         .submit(merge("merge", "merged"))
         .await
         .expect("the retry");
+    let first = first.await.expect("the merge");
     assert_eq!(retry, first);
+    let error = publisher
+        .submit(merge("other", "merged"))
+        .await
+        .expect_err("the range was applied");
+    assert_eq!(error.code(), crate::ErrorCode::MergeRangeConflict);
     publisher.wait_for_worker().await;
 }

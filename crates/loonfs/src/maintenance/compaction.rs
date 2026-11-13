@@ -35,6 +35,7 @@ fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCo
             input_bytes,
             output_bytes,
             output_segments,
+            skipped,
             ..
         } => MetadataCompactionOutcome::Published {
             manifest_no: manifest.manifest.manifest_no,
@@ -43,6 +44,7 @@ fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCo
             input_bytes,
             output_bytes,
             output_segments: loonfs_types::u64_from_usize(output_segments),
+            skipped,
         },
         loonfs_core::CompactionUnitOutcome::Cancelled => MetadataCompactionOutcome::Cancelled,
         loonfs_core::CompactionUnitOutcome::Abandoned => MetadataCompactionOutcome::Abandoned,
@@ -137,6 +139,7 @@ impl Maintenance {
         };
         let mut lost_races = 0;
         let mut published_units = 0;
+        let mut skipped = Vec::new();
         let outcome = loop {
             if lost_races >= MAX_LOST_COMPACTION_RACES
                 || published_units >= MAX_COMPACTION_UNITS_PER_CALL
@@ -148,7 +151,17 @@ impl Maintenance {
                 .compact_once(namespace_id, observed.take(), cancellation)
                 .await?;
             let won = match compaction {
-                MetadataCompactionOutcome::Published { .. } => true,
+                MetadataCompactionOutcome::Published {
+                    skipped: unit_skipped,
+                    ..
+                } => {
+                    for reason in unit_skipped {
+                        if !skipped.contains(&reason) {
+                            skipped.push(reason);
+                        }
+                    }
+                    true
+                }
                 MetadataCompactionOutcome::Abandoned => false,
                 MetadataCompactionOutcome::NotNeeded if cancellation.is_cancelled() => {
                     break MetadataMaintenanceOutcome::Due
@@ -169,6 +182,7 @@ impl Maintenance {
             namespace_id: namespace_id.clone(),
             outcome,
             compaction_units: loonfs_types::u64_from_usize(published_units),
+            skipped,
         })
     }
 

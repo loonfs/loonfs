@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// A host that injects the clocks with [`Self::monotonic_timer`] and
 /// [`Self::wall_clock`] to make a run repeatable also needs repeatable IDs,
 /// and those aren't a builder setting. Generated IDs (content, segment,
-/// upload, pin, and commit IDs, and the low word of every inode ID) draw
+/// upload, snapshot, and commit IDs, and the low word of every inode ID) draw
 /// their random bits from one process-wide entropy source, and
 /// [`loonfs_types::install_entropy`] replaces that source for every runtime
 /// in the process.
@@ -161,12 +161,12 @@ impl<M> LoonFsBuilder<M> {
     /// Runs this runtime's reads, publications, folds, and compactions under
     /// `execution_budget`, which other runtimes may share.
     ///
-    /// Read memos share its read working memory pool.
+    /// Read memos share its read working memory budget.
     /// Every publication request this runtime admits counts against the
     /// budget's admitted totals until its work settles. Public reads wait for
     /// a read permit before loading anything. Publication batches,
     /// session folds and compactions, [`LoonFs::maintenance`] work, namespace
-    /// deletions, and the creation of checkpoints, snapshots, and forks of
+    /// deletions, and the creation of snapshots and forks of
     /// the current head take their permits from it, and every compaction keeps
     /// at most its compaction input size. The per-namespace admission limits stay
     /// with this runtime. The budget

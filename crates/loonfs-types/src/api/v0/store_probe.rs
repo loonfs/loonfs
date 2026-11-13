@@ -1,6 +1,6 @@
 //! Store contract probe requests and results for the v0 HTTP API.
 
-use crate::ProbeRunId;
+use crate::ProbeId;
 use serde::{Deserialize, Serialize};
 
 /// A request for one run of the store contract probe, with an empty body.
@@ -15,7 +15,7 @@ pub struct StoreProbeRequest {}
 pub struct StoreProbeResponse {
     /// The ID of this probe run. The server generates the ID and writes the probe's temporary
     /// objects under it.
-    pub run_id: ProbeRunId,
+    pub probe_id: ProbeId,
     /// The check results, in the order that the checks ran.
     pub checks: Vec<StoreProbeCheck>,
 }

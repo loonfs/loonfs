@@ -6,9 +6,9 @@ use crate::trace::{self, operation_span};
 use crate::ByteStream;
 use crate::Result;
 use crate::{
-    AccessState, ActorId, AppendFileOptions, AttributeChanges, ChangeSeq, Commit, CommitOptions,
+    AccessState, ActorId, AppendFileOptions, AttributeChanges, Commit, CommitOptions, CommitSeq,
     CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, PutFileOptions,
-    RevisionNo, UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
+    RestoreDeletedOptions, RevisionNo, UpdateAccessOptions, UpdateAttributesOptions,
 };
 use crate::{Namespace, Writable};
 
@@ -484,30 +484,35 @@ impl Namespace<Writable> {
 
     /// Restores a deleted file or subtree under the parent and name its
     /// deletion recorded.
-    pub async fn undelete(
+    pub async fn restore_deleted(
         &self,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         actor: &ActorId,
     ) -> Result<Commit> {
-        self.undelete_with_options(inode_id, deletion_seq, actor, &UndeleteOptions::default())
-            .await
+        self.restore_deleted_with_options(
+            inode_id,
+            deletion_seq,
+            actor,
+            &RestoreDeletedOptions::default(),
+        )
+        .await
     }
 
     /// Restores a deleted file or subtree where `options` says.
-    pub async fn undelete_with_options(
+    pub async fn restore_deleted_with_options(
         &self,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         actor: &ActorId,
-        options: &UndeleteOptions,
+        options: &RestoreDeletedOptions,
     ) -> Result<Commit> {
         trace::in_operation(
-            operation_span!(self.core, "undelete", self.namespace_id),
+            operation_span!(self.core, "restore_deleted", self.namespace_id),
             self.commit_one(
                 actor,
                 &options.commit,
-                FilesystemOperation::undelete(inode_id, deletion_seq, &options.destination),
+                FilesystemOperation::restore_deleted(inode_id, deletion_seq, &options.destination),
             ),
         )
         .await

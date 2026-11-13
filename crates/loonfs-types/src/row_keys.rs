@@ -1,9 +1,7 @@
 //! Durable row keys, lookup prefixes, and Bloom filter probes for metadata
 //! rows ([metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys)).
 
-use crate::metadata_rows::{
-    ActiveDeletionRecord, ActiveDeletionRowAction, MetadataRow, MetadataRowFamily,
-};
+use crate::metadata_rows::{MetadataRow, MetadataRowFamily, TrashRecord, TrashRowAction};
 
 impl MetadataRowFamily {
     /// Returns the fixed prefix before the first variable component in this
@@ -17,7 +15,7 @@ impl MetadataRowFamily {
             Self::DirentryChildBinds => lookup_keys::DIRENTRY_CHILD_BIND_ROW_PREFIX,
             Self::Revisions => lookup_keys::REVISION_ROW_PREFIX,
             Self::Tombstones => lookup_keys::TOMBSTONE_ROW_PREFIX,
-            Self::ActiveDeletions => lookup_keys::ACTIVE_DELETION_ROW_PREFIX,
+            Self::Trash => lookup_keys::TRASH_ROW_PREFIX,
             Self::CommitReceipts => lookup_keys::COMMIT_RECEIPT_ROW_PREFIX,
             Self::Commits => lookup_keys::COMMIT_ROW_PREFIX,
             Self::ContentLayouts => lookup_keys::CONTENT_LAYOUT_ROW_PREFIX,
@@ -28,21 +26,21 @@ impl MetadataRowFamily {
     }
 }
 
-impl ActiveDeletionRowAction {
+impl TrashRowAction {
     /// The row-key component that orders a removal ahead of the row it
     /// removes.
     fn sort_rank(&self) -> u32 {
         match self {
-            Self::Removed { .. } => lookup_keys::ACTIVE_DELETION_RANK_REMOVED,
-            Self::Listed { .. } => lookup_keys::ACTIVE_DELETION_RANK_LISTED,
+            Self::Removed { .. } => lookup_keys::TRASH_RANK_REMOVED,
+            Self::Listed { .. } => lookup_keys::TRASH_RANK_LISTED,
         }
     }
 }
 
-impl ActiveDeletionRecord {
+impl TrashRecord {
     /// Builds this row's durable key in trash-listing order.
     pub fn row_key(&self) -> String {
-        lookup_keys::active_deletion_row_key(
+        lookup_keys::trash_row_key(
             self.deletion_seq,
             self.root_inode_id,
             self.action.sort_rank(),
@@ -60,7 +58,7 @@ impl MetadataRow {
             Self::DirentryBinding(_) => MetadataRowFamily::DirentryBinds,
             Self::FileRevision(_) => MetadataRowFamily::Revisions,
             Self::Tombstone(_) => MetadataRowFamily::Tombstones,
-            Self::ActiveDeletion(_) => MetadataRowFamily::ActiveDeletions,
+            Self::Trash(_) => MetadataRowFamily::Trash,
             Self::CommitReceipt(_) => MetadataRowFamily::CommitReceipts,
             Self::Commit(_) => MetadataRowFamily::Commits,
             Self::Merge(_) => MetadataRowFamily::Merges,
@@ -96,7 +94,7 @@ impl MetadataRow {
                 MetadataRowFamily::Inodes
                 | MetadataRowFamily::Revisions
                 | MetadataRowFamily::Tombstones
-                | MetadataRowFamily::ActiveDeletions
+                | MetadataRowFamily::Trash
                 | MetadataRowFamily::CommitReceipts
                 | MetadataRowFamily::Commits
                 | MetadataRowFamily::ContentLayouts
@@ -116,7 +114,7 @@ impl MetadataRow {
                 record.committed_seq,
                 record.delta_index,
             ),
-            Self::ActiveDeletion(record) => lookup_keys::active_deletion_row_key(
+            Self::Trash(record) => lookup_keys::trash_row_key(
                 record.deletion_seq,
                 record.root_inode_id,
                 record.action.sort_rank(),
@@ -163,7 +161,7 @@ impl MetadataRow {
                 MetadataRowFamily::Inodes
                 | MetadataRowFamily::Revisions
                 | MetadataRowFamily::Tombstones
-                | MetadataRowFamily::ActiveDeletions
+                | MetadataRowFamily::Trash
                 | MetadataRowFamily::CommitReceipts
                 | MetadataRowFamily::Commits
                 | MetadataRowFamily::ContentLayouts
@@ -174,8 +172,8 @@ impl MetadataRow {
             .expect("a binding row should use a binding family"),
             Self::FileRevision(record) => lookup_keys::revision_probe(record.inode_id),
             Self::Tombstone(record) => lookup_keys::tombstone_probe(record.root_inode_id),
-            Self::ActiveDeletion(record) => {
-                lookup_keys::active_deletion_probe(record.deletion_seq, record.root_inode_id)
+            Self::Trash(record) => {
+                lookup_keys::trash_probe(record.deletion_seq, record.root_inode_id)
             }
             Self::CommitReceipt(record) => lookup_keys::commit_receipt_probe(&record.commit_id),
             Self::Commit(_) => self.row_key_for_family(family),
@@ -215,7 +213,7 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 pub mod lookup_keys {
     use super::hex_encode_row_key_component;
     use crate::{
-        AccessRevisionNo, AttributesRevisionNo, ChangeSeq, CommitId, ContentId, InodeId, NameKey,
+        AccessRevisionNo, AttributesRevisionNo, CommitId, CommitSeq, ContentId, InodeId, NameKey,
         NamespaceId, RevisionNo,
     };
 
@@ -243,7 +241,7 @@ pub mod lookup_keys {
     }
 
     /// Builds a commit row key.
-    pub fn commit_row_key(seq: ChangeSeq) -> String {
+    pub fn commit_row_key(seq: CommitSeq) -> String {
         format!("{COMMIT_ROW_PREFIX}{:020}", seq.0)
     }
 
@@ -301,7 +299,7 @@ pub mod lookup_keys {
         parent_inode_id: InodeId,
         name_key: &NameKey,
         child_inode_id: InodeId,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         delta_index: u32,
     ) -> String {
         format!(
@@ -343,7 +341,7 @@ pub mod lookup_keys {
         child_inode_id: InodeId,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         delta_index: u32,
     ) -> String {
         format!(
@@ -370,7 +368,7 @@ pub mod lookup_keys {
     /// position share a key.
     pub(super) fn tombstone_row_key(
         root_inode_id: InodeId,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         delta_index: u32,
     ) -> String {
         format!(
@@ -381,57 +379,57 @@ pub mod lookup_keys {
         )
     }
 
-    /// Prefix for active-deletion row keys.
-    pub const ACTIVE_DELETION_ROW_PREFIX: &str = "active-deletion-";
+    /// Prefix for trash row keys.
+    pub const TRASH_ROW_PREFIX: &str = "trash-";
 
-    /// Rank of an undelete's removal marker within one deletion position.
+    /// Rank of a restore's removal marker within one deletion position.
     /// It is the lowest rank on purpose: an ascending scan sees the removal
     /// before the row it removes, so a page never lists a deletion whose
     /// marker was going to arrive one page later.
-    pub(super) const ACTIVE_DELETION_RANK_REMOVED: u32 = 0;
+    pub(super) const TRASH_RANK_REMOVED: u32 = 0;
 
     /// Rank of the listed row within one deletion position, and the highest
     /// rank the family defines.
-    pub(super) const ACTIVE_DELETION_RANK_LISTED: u32 = 1;
+    pub(super) const TRASH_RANK_LISTED: u32 = 1;
 
     /// Builds the Bloom filter probe for one deletion's listed and removed
     /// rows.
-    pub(super) fn active_deletion_probe(deletion_seq: ChangeSeq, root_inode_id: InodeId) -> String {
+    pub(super) fn trash_probe(deletion_seq: CommitSeq, root_inode_id: InodeId) -> String {
         format!(
-            "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{}",
+            "{TRASH_ROW_PREFIX}{:020}-{}",
             deletion_seq.0,
             root_inode_id.body()
         )
     }
 
-    /// Builds an active-deletion row key.
-    pub(super) fn active_deletion_row_key(
-        deletion_seq: ChangeSeq,
+    /// Builds a trash row key.
+    pub(super) fn trash_row_key(
+        deletion_seq: CommitSeq,
         root_inode_id: InodeId,
         sort_rank: u32,
     ) -> String {
         format!(
             "{}-{sort_rank:010}",
-            active_deletion_probe(deletion_seq, root_inode_id)
+            trash_probe(deletion_seq, root_inode_id)
         )
     }
 
     /// Builds a trash scan bound after one deletion position.
-    pub fn active_deletion_key_after(deletion_seq: ChangeSeq, root_inode_id: InodeId) -> String {
-        after_row_key(&active_deletion_row_key(
+    pub fn trash_key_after(deletion_seq: CommitSeq, root_inode_id: InodeId) -> String {
+        after_row_key(&trash_row_key(
             deletion_seq,
             root_inode_id,
-            ACTIVE_DELETION_RANK_LISTED,
+            TRASH_RANK_LISTED,
         ))
     }
 
-    /// Builds a scan bound after every active-deletion row whose deletion
+    /// Builds a scan bound after every trash row whose deletion
     /// sequence is at or below `deletion_seq`.
-    pub fn active_deletion_key_after_seq(deletion_seq: ChangeSeq) -> String {
+    pub fn trash_key_after_seq(deletion_seq: CommitSeq) -> String {
         // `.` is the byte after the `-` that ends the sequence component, so
         // the bound sorts after every key of this sequence and before every
         // key of the next one.
-        format!("{ACTIVE_DELETION_ROW_PREFIX}{:020}.", deletion_seq.0)
+        format!("{TRASH_ROW_PREFIX}{:020}.", deletion_seq.0)
     }
 
     /// Selects one chain in the Bloom filter.
@@ -448,7 +446,7 @@ pub mod lookup_keys {
     pub fn content_layout_row_key(
         content_id: &ContentId,
         size_bytes: u64,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
     ) -> String {
         format!(
             "{}{:020}-{:020}",
@@ -472,7 +470,7 @@ pub mod lookup_keys {
     }
 
     /// Builds a commit receipt row key.
-    pub(super) fn commit_receipt_row_key(commit_id: &CommitId, committed_seq: ChangeSeq) -> String {
+    pub(super) fn commit_receipt_row_key(commit_id: &CommitId, committed_seq: CommitSeq) -> String {
         format!(
             "{}{:020}",
             commit_receipt_prefix(commit_id),
@@ -496,7 +494,7 @@ pub mod lookup_keys {
     /// Builds a newest-first merge index row key.
     pub(super) fn merge_row_key(
         source_namespace_id: &NamespaceId,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
     ) -> String {
         format!(
             "{}{:020}",
@@ -528,7 +526,7 @@ pub mod lookup_keys {
     pub fn revision_row_key(
         inode_id: InodeId,
         revision_no: RevisionNo,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         delta_index: u32,
     ) -> String {
         format!(
@@ -553,7 +551,7 @@ pub mod lookup_keys {
     pub(super) fn attributes_row_key(
         inode_id: InodeId,
         attributes_revision_no: AttributesRevisionNo,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         delta_index: u32,
     ) -> String {
         format!(
@@ -579,7 +577,7 @@ pub mod lookup_keys {
     pub(super) fn access_row_key(
         inode_id: InodeId,
         access_revision_no: AccessRevisionNo,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         delta_index: u32,
     ) -> String {
         format!(
@@ -596,12 +594,12 @@ pub mod lookup_keys {
 mod tests {
     use super::lookup_keys;
     use crate::metadata_rows::{
-        AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction,
-        AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, DeletedBinding,
-        DirentryBindingRecord, DirentryBindingState, InodeRecord, MergeIndexRecord, MetadataRow,
-        MetadataRowFamily, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+        AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
+        DeletedBinding, DirentryBindingRecord, DirentryBindingState, InodeRecord, MergeIndexRecord,
+        MetadataRow, MetadataRowFamily, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+        TrashRecord, TrashRowAction,
     };
-    use crate::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId};
+    use crate::{CommitId, CommitSeq, InodeId, NameKey, NamespaceId};
 
     fn row_commit_id() -> CommitId {
         CommitId::parse("c_metadata_row").expect("commit id")
@@ -664,13 +662,13 @@ mod tests {
             child_kind: crate::InodeKind::File,
             child_created_by: crate::ActorId::loonfs(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(17),
+            committed_seq: CommitSeq(17),
             delta_index: 3,
             commit_id: row_commit_id(),
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 4_200,
             bind_position: crate::metadata_rows::DeltaPosition {
-                seq: ChangeSeq(17),
+                seq: CommitSeq(17),
                 delta_index: 3,
             },
         }
@@ -704,14 +702,14 @@ mod tests {
     fn binding_and_tombstone_histories_sort_newest_first() {
         let at = |seq: u64, delta_index: u32| {
             let mut record = binding_record("report.txt", "report.txt");
-            record.committed_seq = ChangeSeq(seq);
+            record.committed_seq = CommitSeq(seq);
             record.delta_index = delta_index;
             MetadataRow::DirentryBinding(record)
         };
         let tombstone_at = |seq: u64, delta_index: u32| {
             MetadataRow::Tombstone(SubtreeTombstoneRecord {
                 root_inode_id: InodeId(42),
-                committed_seq: ChangeSeq(seq),
+                committed_seq: CommitSeq(seq),
                 delta_index,
                 commit_id: row_commit_id(),
                 action: TombstoneRowAction::Set {
@@ -757,29 +755,29 @@ mod tests {
     #[test]
     fn a_deletions_listed_and_removed_rows_share_one_filter_key() {
         let row = |action| {
-            MetadataRow::ActiveDeletion(ActiveDeletionRecord {
+            MetadataRow::Trash(TrashRecord {
                 root_inode_id: InodeId(42),
-                deletion_seq: ChangeSeq(12),
+                deletion_seq: CommitSeq(12),
                 action,
             })
         };
-        let listed = row(ActiveDeletionRowAction::Listed {
+        let listed = row(TrashRowAction::Listed {
             inode_kind: crate::InodeKind::File,
             deleted_at_ms: 12_000,
             deleted_by: crate::ActorId::loonfs(),
             deleted_binding: deleted_binding(),
         });
-        let removed = row(ActiveDeletionRowAction::Removed {
-            removed_seq: ChangeSeq(15),
+        let removed = row(TrashRowAction::Removed {
+            removed_seq: CommitSeq(15),
         });
 
-        let filter_key = listed.filter_key_for_family(MetadataRowFamily::ActiveDeletions);
+        let filter_key = listed.filter_key_for_family(MetadataRowFamily::Trash);
         assert_eq!(
             filter_key,
-            "active-deletion-00000000000000000012-0000000000000000000000001a"
+            "trash-00000000000000000012-0000000000000000000000001a"
         );
         assert_eq!(
-            removed.filter_key_for_family(MetadataRowFamily::ActiveDeletions),
+            removed.filter_key_for_family(MetadataRowFamily::Trash),
             filter_key
         );
         for row in [listed, removed] {
@@ -802,7 +800,7 @@ mod tests {
         let row = MetadataRow::FileRevision(RevisionRecord {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
-            committed_seq: ChangeSeq(12),
+            committed_seq: CommitSeq(12),
             commit_id: row_commit_id(),
             committed_at_ms: 12_000,
             committed_by: crate::ActorId::loonfs(),
@@ -827,7 +825,7 @@ mod tests {
             MetadataRow::AttributesRevision(AttributesRevisionRecord {
                 inode_id: InodeId(42),
                 attributes_revision_no: crate::AttributesRevisionNo(revision),
-                committed_seq: ChangeSeq(seq),
+                committed_seq: CommitSeq(seq),
                 commit_id: row_commit_id(),
                 delta_index,
                 committed_by: crate::ActorId::loonfs(),
@@ -868,7 +866,7 @@ mod tests {
             MetadataRow::AccessRevision(AccessRevisionRecord {
                 inode_id: InodeId(42),
                 access_revision_no: crate::AccessRevisionNo(revision),
-                committed_seq: ChangeSeq(seq),
+                committed_seq: CommitSeq(seq),
                 commit_id: crate::CommitId::parse("c_access").expect("commit"),
                 delta_index,
                 committed_by: crate::ActorId::loonfs(),
@@ -893,9 +891,9 @@ mod tests {
     fn merge_row(source: &str, committed_seq: u64) -> MergeIndexRecord {
         MergeIndexRecord {
             source_namespace_id: NamespaceId::parse(source).expect("namespace"),
-            committed_seq: ChangeSeq(committed_seq),
-            source_after_seq: ChangeSeq(3),
-            source_through_seq: ChangeSeq(8),
+            committed_seq: CommitSeq(committed_seq),
+            source_after_seq: CommitSeq(3),
+            source_through_seq: CommitSeq(8),
         }
     }
 
@@ -945,7 +943,7 @@ mod tests {
         let revision = MetadataRow::FileRevision(RevisionRecord {
             inode_id: InodeId(42),
             revision_no: crate::RevisionNo(7),
-            committed_seq: ChangeSeq(12),
+            committed_seq: CommitSeq(12),
             commit_id: row_commit_id(),
             committed_at_ms: 12_000,
             committed_by: crate::ActorId::loonfs(),
@@ -963,7 +961,7 @@ mod tests {
                 MetadataRow::Inode(InodeRecord {
                     inode_id: InodeId(42),
                     inode_kind: crate::InodeKind::File,
-                    committed_seq: ChangeSeq(3),
+                    committed_seq: CommitSeq(3),
                     commit_id: row_commit_id(),
                     committed_by: crate::ActorId::loonfs(),
                     committed_at_ms: 3_000,
@@ -977,7 +975,7 @@ mod tests {
                 MetadataRow::ContentLayout(ContentLayoutRecord {
                     content_id: crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                         .expect("content id"),
-                    committed_seq: ChangeSeq(12),
+                    committed_seq: CommitSeq(12),
                     size_bytes: 5,
                     layout: crate::ContentLayout {
                         creator_namespace_id: NamespaceId::parse("demo").expect("namespace"),
@@ -995,7 +993,7 @@ mod tests {
                 MetadataRowFamily::Tombstones,
                 MetadataRow::Tombstone(SubtreeTombstoneRecord {
                     root_inode_id: InodeId(42),
-                    committed_seq: ChangeSeq(12),
+                    committed_seq: CommitSeq(12),
                     delta_index: 0,
                     commit_id: row_commit_id(),
                     action: TombstoneRowAction::Set {
@@ -1007,12 +1005,12 @@ mod tests {
                 }),
             ),
             (
-                MetadataRowFamily::ActiveDeletions,
-                MetadataRow::ActiveDeletion(ActiveDeletionRecord {
+                MetadataRowFamily::Trash,
+                MetadataRow::Trash(TrashRecord {
                     root_inode_id: InodeId(42),
-                    deletion_seq: ChangeSeq(12),
-                    action: ActiveDeletionRowAction::Removed {
-                        removed_seq: ChangeSeq(15),
+                    deletion_seq: CommitSeq(12),
+                    action: TrashRowAction::Removed {
+                        removed_seq: CommitSeq(15),
                     },
                 }),
             ),
@@ -1021,7 +1019,7 @@ mod tests {
                 MetadataRow::CommitReceipt(CommitReceiptRecord {
                     commit_id: CommitId::parse("c_00000000000000000000000000000001")
                         .expect("commit id"),
-                    committed_seq: ChangeSeq(12),
+                    committed_seq: CommitSeq(12),
                 }),
             ),
             (
@@ -1029,7 +1027,7 @@ mod tests {
                 MetadataRow::AttributesRevision(AttributesRevisionRecord {
                     inode_id: InodeId(42),
                     attributes_revision_no: crate::AttributesRevisionNo(3),
-                    committed_seq: ChangeSeq(12),
+                    committed_seq: CommitSeq(12),
                     commit_id: row_commit_id(),
                     delta_index: 0,
                     committed_by: crate::ActorId::loonfs(),
@@ -1084,7 +1082,7 @@ mod tests {
                     MetadataRow::Inode(InodeRecord {
                         inode_id: InodeId(42),
                         inode_kind: crate::InodeKind::File,
-                        committed_seq: ChangeSeq(3),
+                        committed_seq: CommitSeq(3),
                         commit_id: row_commit_id(),
                         committed_by: actor.clone(),
                         committed_at_ms: 3_000,
@@ -1095,7 +1093,7 @@ mod tests {
                     MetadataRow::FileRevision(RevisionRecord {
                         inode_id: InodeId(42),
                         revision_no: crate::RevisionNo(7),
-                        committed_seq: ChangeSeq(12),
+                        committed_seq: CommitSeq(12),
                         commit_id: row_commit_id(),
                         committed_at_ms: 12_000,
                         committed_by: actor.clone(),
@@ -1112,7 +1110,7 @@ mod tests {
                     MetadataRowFamily::Tombstones,
                     MetadataRow::Tombstone(SubtreeTombstoneRecord {
                         root_inode_id: InodeId(42),
-                        committed_seq: ChangeSeq(12),
+                        committed_seq: CommitSeq(12),
                         delta_index: 3,
                         commit_id: row_commit_id(),
                         action: TombstoneRowAction::Set {
@@ -1124,11 +1122,11 @@ mod tests {
                     }),
                 ),
                 (
-                    MetadataRowFamily::ActiveDeletions,
-                    MetadataRow::ActiveDeletion(ActiveDeletionRecord {
+                    MetadataRowFamily::Trash,
+                    MetadataRow::Trash(TrashRecord {
                         root_inode_id: InodeId(42),
-                        deletion_seq: ChangeSeq(12),
-                        action: ActiveDeletionRowAction::Listed {
+                        deletion_seq: CommitSeq(12),
+                        action: TrashRowAction::Listed {
                             inode_kind: crate::InodeKind::File,
                             deleted_at_ms: 12_000,
                             deleted_by: actor.clone(),
@@ -1141,7 +1139,7 @@ mod tests {
                     MetadataRow::AttributesRevision(AttributesRevisionRecord {
                         inode_id: InodeId(42),
                         attributes_revision_no: crate::AttributesRevisionNo(2),
-                        committed_seq: ChangeSeq(12),
+                        committed_seq: CommitSeq(12),
                         commit_id: row_commit_id(),
                         delta_index: 3,
                         committed_by: actor,

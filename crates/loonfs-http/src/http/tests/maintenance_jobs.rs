@@ -1,5 +1,5 @@
-//! Maintenance runs: the metadata job's loop, the retention window job, and
-//! runs against namespaces that do not exist or are deleted.
+//! Maintenance jobs: the metadata job's loop, the retention window job, jobs
+//! against namespaces that do not exist or are deleted, and jobs on a pool.
 
 use super::*;
 use loonfs::MaintainMetadataOptions;
@@ -15,7 +15,7 @@ async fn run(
     namespace_id: &NamespaceId,
     body: &str,
 ) -> (StatusCode, serde_json::Value) {
-    let uri = format!("/v0/maintenance/namespaces/{namespace_id}/runs");
+    let uri = format!("/v0/maintenance/namespaces/{namespace_id}/jobs");
     send(router, "POST", &uri, body).await
 }
 
@@ -33,7 +33,7 @@ async fn send(
                 .uri(uri)
                 .header("authorization", "Bearer test-token")
                 .header("content-type", "application/json")
-                .header("Loonfs-Actor", "maintenance-runs")
+                .header("Loonfs-Actor", "maintenance-jobs")
                 .body(axum::body::Body::from(body.to_owned()))
                 .expect("request"),
         )
@@ -175,7 +175,7 @@ async fn one_metadata_run_does_the_work_of_repeated_metadata_steps() {
 async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes() {
     let directory = tempdir().expect("tempdir");
     let (router, state) = test_app(
-        test_options(directory.path(), "maintenance-runs"),
+        test_options(directory.path(), "maintenance-jobs"),
         TestAppOptions::default(),
     )
     .await
@@ -222,6 +222,62 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
     state.runtime.shutdown().await.expect("shutdown writer");
 }
 
+/// Checks that a pool's `gc` run returns the pool's result, that a pool
+/// without a pool record is `pool_not_found`, and that an invalid pool ID is
+/// rejected as the path parameter.
+#[tokio::test]
+async fn a_pool_run_collects_the_pool_and_rejects_a_missing_or_invalid_pool() {
+    let directory = tempdir().expect("tempdir");
+    let (router, state) = test_app(
+        test_options(directory.path(), "maintenance-jobs"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let pool_id = state
+        .runtime
+        .create_namespace(&namespace_id("pooled"), &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace")
+        .pool_id;
+    let run_pool = async |pool: &str, body: &str| {
+        send(
+            &router,
+            "POST",
+            &format!("/v0/maintenance/pools/{pool}/jobs"),
+            body,
+        )
+        .await
+    };
+
+    let (status, body) = run_pool(pool_id.as_str(), r#"{"kind":"gc"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"], "gc");
+    assert_eq!(body["pool_id"], pool_id.as_str());
+    assert_eq!(
+        body["deleted"],
+        serde_json::json!({"content_objects": 0, "upload_sessions": 0, "temporary_objects": 0})
+    );
+
+    let missing = loonfs_types::PoolId::generate();
+    let (status, body) = run_pool(missing.as_str(), r#"{"kind":"gc"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], ErrorCode::PoolNotFound.as_str());
+    assert!(body["message"]
+        .as_str()
+        .expect("message")
+        .contains(missing.as_str()));
+
+    let (status, body) = run_pool("pool_NOT-VALID", r#"{"kind":"gc"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], ErrorCode::InvalidRequest.as_str());
+    assert_eq!(body["param"], "pool_id");
+
+    let (status, body) = run_pool(pool_id.as_str(), r#"{"kind":"metadata"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    state.runtime.shutdown().await.expect("shutdown writer");
+}
+
 /// Checks that a namespace's retention window is set at creation, changed
 /// and cleared by `retention_window` runs, included in the namespace's
 /// metadata, and copied by a fork, and that a window of zero is rejected.
@@ -234,7 +290,6 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
     )
     .await
     .expect("app");
-    let windowed = namespace_id("windowed");
     let window = |body: &serde_json::Value| body.get("retention_window_ms").cloned();
     let rejected = |(status, body): (StatusCode, serde_json::Value)| {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -260,10 +315,12 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         &router,
         "POST",
         "/v0/namespaces",
-        r#"{"namespace_id":"windowed","retention_window_ms":86400000}"#,
+        r#"{"retention_window_ms":86400000}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
+    let windowed = NamespaceId::parse(created["namespace_id"].as_str().expect("namespace ID"))
+        .expect("the generated namespace ID is valid");
     assert_eq!(window(&created), Some(serde_json::json!(86_400_000)));
 
     rejected(
@@ -283,15 +340,15 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
     assert_eq!(status, StatusCode::OK, "{changed}");
     assert_eq!(
         changed,
-        serde_json::json!({"kind": "retention_window", "namespace_id": "windowed", "retention_window_ms": 3_600_000})
+        serde_json::json!({"kind": "retention_window", "namespace_id": windowed.as_str(), "retention_window_ms": 3_600_000})
     );
-    let (_, shown) = send(&router, "GET", "/v0/namespaces/windowed", "").await;
+    let (_, shown) = send(&router, "GET", &format!("/v0/namespaces/{windowed}"), "").await;
     assert_eq!(window(&shown), Some(serde_json::json!(3_600_000)));
     let (status, forked) = send(
         &router,
         "POST",
-        "/v0/namespaces/windowed/forks",
-        r#"{"new_namespace_id":"forked"}"#,
+        &format!("/v0/namespaces/{windowed}/forks"),
+        "{}",
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{forked}");
@@ -315,7 +372,7 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         assert_eq!(status, StatusCode::OK, "{cleared}");
         assert_eq!(
             cleared,
-            serde_json::json!({"kind": "retention_window", "namespace_id": "windowed"})
+            serde_json::json!({"kind": "retention_window", "namespace_id": windowed.as_str()})
         );
     }
     assert_eq!(
@@ -323,9 +380,13 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         before.map(|number| number.0 + 1),
         "the first clear publishes a manifest, and the second finds nothing to change"
     );
-    let (_, shown) = send(&router, "GET", "/v0/namespaces/windowed", "").await;
+    let (_, shown) = send(&router, "GET", &format!("/v0/namespaces/{windowed}"), "").await;
     assert_eq!(window(&shown), None);
-    let (_, shown) = send(&router, "GET", "/v0/namespaces/forked", "").await;
+    let forked_uri = format!(
+        "/v0/namespaces/{}",
+        forked["namespace_id"].as_str().expect("ID")
+    );
+    let (_, shown) = send(&router, "GET", &forked_uri, "").await;
     assert_eq!(
         window(&shown),
         Some(serde_json::json!(3_600_000)),

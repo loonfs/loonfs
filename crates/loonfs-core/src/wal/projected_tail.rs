@@ -6,7 +6,7 @@ use crate::metadata::{CommitReceiptRecord, ContentLayoutRecord, MetadataState, R
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef};
+use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ pub struct ProjectedWalTail {
 /// One WAL object's commits: its rows, its content pieces, and its activity.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TailChunk {
-    pub(crate) first_seq: ChangeSeq,
+    pub(crate) first_seq: CommitSeq,
     pub(crate) rows: MetadataState,
     activity: ManifestActivity,
     contents: Vec<ProjectedContent>,
@@ -47,12 +47,12 @@ pub(crate) struct TailChunk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectedContent {
     pub(crate) content_ref: ContentRef,
-    pub(crate) committed_seq: ChangeSeq,
+    pub(crate) committed_seq: CommitSeq,
     pub(crate) pieces: Vec<ProjectedPiece>,
 }
 
 impl ProjectedContent {
-    pub(crate) fn new(content_ref: &ContentRef, committed_seq: ChangeSeq) -> Self {
+    pub(crate) fn new(content_ref: &ContentRef, committed_seq: CommitSeq) -> Self {
         Self {
             content_ref: content_ref.clone(),
             committed_seq,
@@ -64,7 +64,7 @@ impl ProjectedContent {
         &mut self,
         content_ref: &ContentRef,
         piece: ProjectedPiece,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
     ) -> Option<ProjectedPiece> {
         if content_ref.size_bytes > self.content_ref.size_bytes {
             self.content_ref = content_ref.clone();
@@ -104,7 +104,7 @@ impl ProjectedPiece {
 impl ProjectedWalTail {
     pub(crate) fn from_rows(rows: MetadataState) -> Self {
         Self {
-            chunks: vec![Arc::new(TailChunk::new(ChangeSeq(0), rows))],
+            chunks: vec![Arc::new(TailChunk::new(CommitSeq(0), rows))],
             ..Self::default()
         }
     }
@@ -141,7 +141,7 @@ impl ProjectedWalTail {
     ///
     /// A fold folds whole WAL objects and commit sequences have no gaps, so
     /// the first chunk after the fold starts at the sequence after `seq`.
-    pub(crate) fn after_seq(&self, seq: ChangeSeq, head_seq: ChangeSeq) -> Option<Self> {
+    pub(crate) fn after_seq(&self, seq: CommitSeq, head_seq: CommitSeq) -> Option<Self> {
         let mut after = Self::default();
         for chunk in self.chunks.iter().filter(|chunk| chunk.first_seq > seq) {
             after
@@ -163,7 +163,7 @@ impl ProjectedWalTail {
     /// The rows of every chunk a view at `visible_seq` can see, newest first.
     pub(crate) fn row_states(
         &self,
-        visible_seq: ChangeSeq,
+        visible_seq: CommitSeq,
     ) -> impl Iterator<Item = &MetadataState> {
         self.chunks
             .iter()
@@ -280,7 +280,7 @@ impl ProjectedWalTail {
 }
 
 impl TailChunk {
-    fn new(first_seq: ChangeSeq, rows: MetadataState) -> Self {
+    fn new(first_seq: CommitSeq, rows: MetadataState) -> Self {
         Self {
             first_seq,
             rows,
@@ -339,7 +339,7 @@ impl TailChunk {
         &mut self,
         content_ref: &ContentRef,
         entry: &WalInlineContent,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
     ) {
         let position = match self.content_positions.entry(content_ref.content_id.clone()) {
             Entry::Occupied(entry) => *entry.get(),
@@ -402,11 +402,11 @@ mod tests {
     use super::ProjectedWalTail;
     use crate::metadata::MetadataState;
     use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
-    use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, InodeId, RevisionNo};
+    use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, InodeId, RevisionNo};
 
     fn commit(seq: u64, content_id: &ContentId, whole: &[u8], offset: usize) -> WalCommitPayload {
         WalCommitPayload {
-            committed_seq: ChangeSeq(seq),
+            committed_seq: CommitSeq(seq),
             commit_id: CommitId::parse(format!("c_{seq:032x}")).expect("commit id"),
             committed_by: loonfs_test_support::test_actor(),
             semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
@@ -423,7 +423,7 @@ mod tests {
                     display_name: loonfs_types::DisplayName::parse("file.txt")
                         .expect("display name"),
                     bind_position: loonfs_types::format::manifest::DeltaPosition {
-                        seq: loonfs_types::ChangeSeq(1),
+                        seq: loonfs_types::CommitSeq(1),
                         delta_index: 0,
                     },
                     child_created_by: loonfs_types::ActorId::loonfs(),
@@ -502,7 +502,7 @@ mod tests {
 
         let content = tail.content(&newest).expect("combined content");
         assert_eq!(content.content_ref, newest);
-        assert_eq!(content.committed_seq, ChangeSeq(3));
+        assert_eq!(content.committed_seq, CommitSeq(3));
         assert_eq!(
             content
                 .pieces
@@ -513,11 +513,11 @@ mod tests {
         );
         assert_eq!(tail.contents(), [content]);
         assert_eq!(
-            tail.row_states(ChangeSeq(1))
+            tail.row_states(CommitSeq(1))
                 .flat_map(MetadataState::commits)
                 .map(|record| record.committed_seq)
                 .collect::<Vec<_>>(),
-            [ChangeSeq(1)]
+            [CommitSeq(1)]
         );
     }
 }

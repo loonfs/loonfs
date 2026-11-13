@@ -110,10 +110,10 @@ impl NamespacePublisher {
                     }
                 }
                 WorkItem::RetentionAdvance(pending) => {
-                    // An advance folds, so it's bounded by its fold permit
-                    // alone, as a delete is.
-                    drop(publication);
+                    // An advance is one WAL put, so it's bounded by the
+                    // publication permit, as a batch is.
                     self.execute_retention_advance(pending).await;
+                    drop(publication);
                 }
             }
         }
@@ -148,7 +148,7 @@ impl NamespacePublisher {
     /// returns the commits that wait at the write stop.
     ///
     /// This worker is the namespace's only publication path. If publication
-    /// panics, each request in the batch receives `commit_outcome_unknown`
+    /// panics, each request in the batch receives `outcome_unknown`
     /// because the panic may have occurred before or after the WAL put. Callers
     /// can retry with the same commit ID and use the durable receipt to resolve
     /// the outcome. The worker then continues with queued work.
@@ -510,7 +510,7 @@ fn split_write_stop_waiters(
     permits: &[Arc<AdmissionPermit>],
 ) -> (Vec<BatchCandidate>, Vec<CommitId>, Vec<Result<Commit>>) {
     // A commit whose earlier put had an unknown outcome keeps
-    // `commit_outcome_unknown` under the settling rule, so only a commit
+    // `outcome_unknown` under the settling rule, so only a commit
     // whose result is the refusal waits.
     let mut waiting = Vec::new();
     let (mut delivered_ids, mut delivered) = (Vec::new(), Vec::new());
@@ -567,9 +567,9 @@ pub(super) fn elapsed_ms_from(start: u64, end: u64) -> u64 {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "the publication pacing, the write-stop wait, a merge's fold budget, and the trailing \
-              hint raise decide when a request publishes or returns or the hint is raised, not \
-              whether a publication is valid"
+    reason = "the publication pacing, the write-stop wait, and the trailing hint raise decide \
+              when a request publishes or returns or the hint is raised, not whether a \
+              publication is valid"
 )]
 pub(crate) async fn sleep_ms(delay_ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;

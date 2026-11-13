@@ -36,16 +36,16 @@ pub(crate) fn store_probe_run_outcome(
 }
 
 pub(crate) fn store_probe_summary_line(response: &loonfs_types::StoreProbeResponse) -> String {
-    let run_id = &response.run_id;
+    let probe_id = &response.probe_id;
     let total = response.checks.len();
     match store_probe_run_outcome(response) {
         StoreProbeRunOutcome::Failed { checks } => {
-            format!("store probe {run_id}: {checks} of {total} checks failed")
+            format!("store probe {probe_id}: {checks} of {total} checks failed")
         }
         StoreProbeRunOutcome::Unsupported { checks } => {
-            format!("store probe {run_id}: {checks} of {total} checks are unsupported")
+            format!("store probe {probe_id}: {checks} of {total} checks are unsupported")
         }
-        StoreProbeRunOutcome::Passed => format!("store probe {run_id}: {total} checks passed"),
+        StoreProbeRunOutcome::Passed => format!("store probe {probe_id}: {total} checks passed"),
     }
 }
 
@@ -130,59 +130,96 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
     }
 }
 
-/// Formats a checkpoint owner for the table view.
+/// Formats a snapshot owner for the table view.
 ///
-/// Snapshots show their label. Fork checkpoints show their target namespace
+/// User snapshots show their label. Fork snapshots show their target namespace
 /// because users can't delete them.
-pub(super) fn checkpoint_owner_label(owner: &CheckpointOwner) -> String {
+pub(super) fn snapshot_record_owner_label(owner: &SnapshotRecordOwner) -> String {
     match owner {
-        CheckpointOwner::User { name } => name.clone(),
-        CheckpointOwner::Fork {
+        SnapshotRecordOwner::User { name } => name.clone(),
+        SnapshotRecordOwner::Fork {
             target_namespace_id,
         } => format!("fork -> {target_namespace_id}"),
-        CheckpointOwner::Unknown => "owner unknown to this CLI".to_owned(),
+        SnapshotRecordOwner::Unknown => "owner unknown to this CLI".to_owned(),
     }
 }
 
-fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 6] {
     let deleted = &report.deleted;
-    let checkpoints = &report.deleted_checkpoints_by_owner;
+    let snapshots = &report.deleted_snapshots_by_owner;
     [
         ("wal objects", deleted.wal_objects),
         ("metadata segments", deleted.metadata_segments),
         ("extension segments", deleted.extension_segments),
         ("manifests", deleted.manifests),
-        ("fork checkpoints", checkpoints.fork),
-        ("snapshots", checkpoints.user),
-        ("upload sessions", deleted.upload_sessions),
-        ("content objects", deleted.content_objects),
-        ("retired content objects", deleted.retired_content_objects),
-        ("temporary objects", deleted.temporary_objects),
+        ("fork snapshots", snapshots.fork),
+        ("snapshots", snapshots.user),
     ]
 }
 
-fn push_top_retention_reason(summary: &mut String, response: &GcResponse) {
-    if let Some((reason, count)) = response.retained.top_reason() {
-        summary.push_str(&format!("; mostly {reason}: {count}"));
+pub(super) fn gc_summary(report: &GcResponse) -> String {
+    let mut summary = gc_counts_summary(
+        gc_deleted_counts(report),
+        report.retained.total(),
+        report.retained.top_reason(),
+    );
+    if let Some(deadline) = report.retires_at_ms {
+        summary.push_str(&format!(
+            "\nnamespace can be retired at or after {} after snapshot cleanup; only fork snapshots can hold it beyond this deadline",
+            format_utc_ms(deadline)
+        ));
     }
+    summary
 }
 
-pub(super) fn gc_summary(report: &GcResponse) -> String {
-    let deleted = gc_deleted_counts(report)
+pub(super) fn pool_gc_summary(report: &PoolGcResponse) -> String {
+    let deleted = &report.deleted;
+    let mut lines = vec![
+        gc_counts_summary(
+            [
+                ("content objects", deleted.content_objects),
+                ("upload sessions", deleted.upload_sessions),
+                ("temporary objects", deleted.temporary_objects),
+            ],
+            report.retained.total(),
+            report.retained.top_reason(),
+        ),
+        format!("listed {} bytes under the pool", report.listed_bytes),
+    ];
+    if let Some(next_reclamation_at_ms) = report.next_reclamation_at_ms {
+        lines.push(format!(
+            "next reclamation at {}",
+            format_utc_ms(next_reclamation_at_ms)
+        ));
+    }
+    lines.extend(report.skipped.iter().map(|reason| {
+        match reason {
+            GcSkippedWork::ContentDeletionPoolBudget => {
+                "skipped the content sweep: the collection couldn't read every pool member's roots within its budget"
+            }
+            GcSkippedWork::ContentDeletionUnreadableMember => {
+                "skipped the content sweep: the collection couldn't read one pool member's roots"
+            }
+            GcSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
+        }
+        .to_owned()
+    }));
+    lines.join("\n")
+}
+
+fn gc_counts_summary<const N: usize>(
+    deleted: [(&'static str, u64); N],
+    retained: u64,
+    top_reason: Option<(&'static str, u64)>,
+) -> String {
+    let deleted = deleted
         .into_iter()
         .map(|(family, count)| format!("{count} {family}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut summary = format!(
-        "gc deleted {deleted} ({} retained)",
-        report.retained.total()
-    );
-    push_top_retention_reason(&mut summary, report);
-    if let Some(deadline) = report.reclaimable_at_ms {
-        summary.push_str(&format!(
-            "\nnamespace can be retired at or after {} after pin cleanup; only fork pins can hold it beyond this deadline",
-            format_utc_ms(deadline)
-        ));
+    let mut summary = format!("gc deleted {deleted} ({retained} retained)");
+    if let Some((reason, count)) = top_reason {
+        summary.push_str(&format!("; mostly {reason}: {count}"));
     }
     summary
 }
@@ -204,30 +241,30 @@ pub(super) fn format_utc_ms(unix_ms: u64) -> String {
 }
 
 /// Formats one change-feed event for human-readable output.
-pub(super) fn event_descriptor(event: &loonfs_types::FilesystemChange) -> String {
-    use loonfs_types::FilesystemChange;
+pub(super) fn event_descriptor(event: &loonfs_types::FilesystemEvent) -> String {
+    use loonfs_types::FilesystemEvent;
     match event {
-        FilesystemChange::DirectoryCreated { display_name, .. }
-        | FilesystemChange::FileCreated { display_name, .. } => {
+        FilesystemEvent::DirectoryCreated { display_name, .. }
+        | FilesystemEvent::FileCreated { display_name, .. } => {
             format!("create '{display_name}'")
         }
-        FilesystemChange::ContentChanged {
+        FilesystemEvent::ContentChanged {
             inode_id,
             revision_no,
             ..
         } => format!("write inode {inode_id} rev #{}", revision_no.0),
-        FilesystemChange::Moved {
+        FilesystemEvent::Moved {
             source_display_name,
             destination_display_name,
             ..
         } => format!("move '{source_display_name}' -> '{destination_display_name}'"),
-        FilesystemChange::Deleted {
+        FilesystemEvent::Deleted {
             deleted_binding, ..
         } => format!("delete '{}'", deleted_binding.display_name),
-        FilesystemChange::Undeleted { display_name, .. } => {
-            format!("undelete '{display_name}'")
+        FilesystemEvent::Restored { display_name, .. } => {
+            format!("restore '{display_name}'")
         }
-        FilesystemChange::AttributesChanged {
+        FilesystemEvent::AttributesChanged {
             inode_id,
             attributes_revision_no,
             ..
@@ -235,16 +272,16 @@ pub(super) fn event_descriptor(event: &loonfs_types::FilesystemChange) -> String
             "attributes inode {inode_id} rev #{}",
             attributes_revision_no.0
         ),
-        FilesystemChange::AccessChanged {
+        FilesystemEvent::AccessChanged {
             inode_id,
             access_revision_no,
             ..
         } => format!("access inode {inode_id} rev #{}", access_revision_no.0),
-        FilesystemChange::Unknown => "unknown event".to_owned(),
+        FilesystemEvent::Unknown => "unknown event".to_owned(),
     }
 }
 
-pub(super) fn event_summary(events: &[loonfs_types::FilesystemChange]) -> String {
+pub(super) fn event_summary(events: &[loonfs_types::FilesystemEvent]) -> String {
     const SHOWN: usize = 3;
     if events.is_empty() {
         return "-".to_owned();

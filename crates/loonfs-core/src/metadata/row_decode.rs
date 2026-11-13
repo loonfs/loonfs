@@ -6,9 +6,8 @@
 
 use crate::error::{CoreError, Result};
 use crate::metadata::{
-    AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
+    DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TrashRecord,
 };
 use loonfs_types::format::manifest::{MergeIndexRecord, MetadataRow};
 use loonfs_types::format::wal::WalCommitPayload;
@@ -52,10 +51,10 @@ pub(crate) fn tombstone_from_manifest_row(row: MetadataRow) -> Result<SubtreeTom
     }
 }
 
-pub(crate) fn active_deletion_from_manifest_row(row: MetadataRow) -> Result<ActiveDeletionRecord> {
+pub(crate) fn trash_from_manifest_row(row: MetadataRow) -> Result<TrashRecord> {
     match row {
-        MetadataRow::ActiveDeletion(record) => Ok(record),
-        other => Err(foreign_row("active_deletion", &other)),
+        MetadataRow::Trash(record) => Ok(record),
+        other => Err(foreign_row("trash", &other)),
     }
 }
 
@@ -112,14 +111,14 @@ mod tests {
     use super::*;
     use loonfs_types::format::manifest::TombstoneRowAction;
     use loonfs_types::ROOT_INODE_ID;
-    use loonfs_types::{ChangeSeq, CommitId, InodeId};
+    use loonfs_types::{CommitId, CommitSeq, InodeId};
     use std::assert_matches;
 
     fn foreign() -> MetadataRow {
         MetadataRow::Inode(InodeRecord {
             inode_id: InodeId(7),
             inode_kind: loonfs_types::InodeKind::File,
-            committed_seq: ChangeSeq(3),
+            committed_seq: CommitSeq(3),
             commit_id: CommitId::parse("c_foreign_inode").expect("commit id"),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 4_000,
@@ -160,7 +159,7 @@ mod tests {
         );
         let tombstone = MetadataRow::Tombstone(SubtreeTombstoneRecord {
             root_inode_id: ROOT_INODE_ID,
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             delta_index: 0,
             commit_id: CommitId::parse("c_foreign_tombstone").expect("commit id"),
             action: TombstoneRowAction::Set {

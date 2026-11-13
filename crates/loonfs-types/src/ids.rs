@@ -4,7 +4,6 @@
 //! The macros in `id_macros.rs` generate every ID type, including the ID types in other
 //! modules.
 
-use crate::hex::{hex_encode_bytes, is_lower_hex_byte};
 use crate::id_macros::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -328,43 +327,50 @@ string_id! {
     ///
     /// Reuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase
     /// ASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.
-    /// Generated commit IDs have the form `c_` followed by 26 lowercase Crockford base 32
+    /// Generated commit IDs have the form `cmt_` followed by 26 lowercase Crockford base 32
     /// characters, but callers can supply any value that follows these rules.
     CommitId,
     error = CommitIdValidationError,
     validate = validate_commit_id,
     schema(
         pattern = r"^[a-z0-9][a-z0-9._-]{0,127}$",
-        example = "c_7kn71d9dq885x91hejz3gvf9p0"
+        example = "cmt_7kn71d9dq885x91hejz3gvf9p0"
     )
+}
+
+impl NamespaceId {
+    /// Generates a valid random namespace ID.
+    pub fn generate() -> Self {
+        Self(generated_id("ns"))
+    }
 }
 
 impl CommitId {
     /// Generates a valid random commit id.
     pub fn generate() -> Self {
-        Self(generated_id("c"))
+        Self(generated_id("cmt"))
     }
 }
 
 string_id! {
-    /// The durable ID of one pin.
+    /// The durable ID of one snapshot.
     ///
-    /// The manifest number in the ID determines which namespace manifest the pin protects.
-    PinId,
+    /// The manifest number in the ID determines which namespace manifest the snapshot protects.
+    SnapshotId,
     error = GeneratedIdValidationError,
-    validate = validate_pin_id,
+    validate = validate_snapshot_id,
     schema(
-        pattern = r"^pin_[0-9]{20}-[0-9a-f]{16}$",
-        example = "pin_00000000000000000001-0000000000000002"
+        pattern = r"^snp_[0-9]{20}-[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        example = "snp_00000000000000000001-00000000000000000000000002"
     )
 }
 
-impl PinId {
-    /// Generates a new pin for the given manifest number.
+impl SnapshotId {
+    /// Generates a new snapshot ID for the given manifest number.
     pub fn generate(manifest_no: ManifestNo) -> Self {
-        let entropy = hex_encode_bytes(&random_bytes::<8>());
-        Self::parse(format!("pin_{:020}-{entropy}", manifest_no.0))
-            .expect("the pinned manifest number should be valid")
+        let body = encode_generated_id_body(random_uuid_v4());
+        Self::parse(format!("snp_{:020}-{body}", manifest_no.0))
+            .expect("the snapshot's manifest number should be valid")
     }
 
     /// Returns the manifest number encoded in this id.
@@ -372,16 +378,16 @@ impl PinId {
         ManifestNo(
             self.0[4..24]
                 .parse()
-                .expect("a pin id should contain a manifest number"),
+                .expect("a snapshot id should contain a manifest number"),
         )
     }
 }
 
-fn validate_pin_id(value: &str) -> Result<(), GeneratedIdValidationError> {
+fn validate_snapshot_id(value: &str) -> Result<(), GeneratedIdValidationError> {
     let valid = value
-        .strip_prefix("pin_")
+        .strip_prefix("snp_")
         .and_then(|body| body.split_once('-'))
-        .is_some_and(|(number, entropy)| {
+        .is_some_and(|(number, body)| {
             number.len() == 20
                 && number.bytes().all(|byte| byte.is_ascii_digit())
                 && number
@@ -389,13 +395,23 @@ fn validate_pin_id(value: &str) -> Result<(), GeneratedIdValidationError> {
                     .ok()
                     .and_then(|number| ManifestNo::parse(number).ok())
                     .is_some_and(|number| number.0 > 0)
-                && entropy.len() == 16
-                && entropy.bytes().all(is_lower_hex_byte)
+                && generated_id_body_error(body).is_none()
         });
     if !valid {
-        return Err(GeneratedIdValidationError::new(value, "must be `pin_` followed by a twenty-digit positive manifest number, `-`, and sixteen lowercase hex characters".to_owned()));
+        return Err(GeneratedIdValidationError::new(value, "must be `snp_` followed by a twenty-digit positive manifest number, `-`, and 26 lowercase Crockford base 32 characters".to_owned()));
     }
     Ok(())
+}
+
+string_id! {
+    /// The ID of one pool, the set of namespaces that share one set of content objects. See
+    /// [Pools](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md).
+    PoolId,
+    prefix = "pool",
+    schema(
+        pattern = r"^pool_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        example = "pool_3s0drmj8em84yb4mnetqkz2j0x"
+    )
 }
 
 string_id! {
@@ -499,7 +515,7 @@ string_id! {
     /// The ID of one run of the store contract probe.
     ///
     /// The probe stores its temporary objects under a key prefix that includes this ID.
-    ProbeRunId,
+    ProbeId,
     prefix = "probe",
     schema(
         pattern = r"^probe_[0-7][0-9a-hjkmnp-tv-z]{25}$",
@@ -565,7 +581,7 @@ numeric_id! {
     /// The sequence number of one namespace commit.
     ///
     /// Commits become visible in the order of these numbers.
-    ChangeSeq,
+    CommitSeq,
     public_ordinal,
     schema_description = "The sequence number of one namespace commit. Commits become visible in the order of these numbers."
 }
@@ -613,9 +629,9 @@ numeric_id! {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_public_ordinal, BindingVersion, ChangeSeq, CommitId, ContentId, ManifestNo,
-        MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo, UploadId, WalNo,
-        WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
+        next_public_ordinal, BindingVersion, CommitId, CommitSeq, ContentId, ManifestNo,
+        MetadataSegmentId, NameKey, NamespaceId, PoolId, RevisionNo, RunNo, SnapshotId, UploadId,
+        WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributesRevisionNo;
     use std::collections::BTreeSet;
@@ -660,7 +676,7 @@ mod tests {
         }
 
         assert_range!(RevisionNo);
-        assert_range!(ChangeSeq);
+        assert_range!(CommitSeq);
         assert_range!(AttributesRevisionNo);
         assert_range!(ManifestNo);
         assert_range!(WalNo);
@@ -755,10 +771,10 @@ mod tests {
             "commit-1"
         );
         assert_eq!(
-            PinId::try_from("pin_00000000000000000001-0000000000000001")
-                .expect("valid pin id")
+            SnapshotId::try_from("snp_00000000000000000001-00000000000000000000000001")
+                .expect("valid snapshot id")
                 .as_str(),
-            "pin_00000000000000000001-0000000000000001"
+            "snp_00000000000000000001-00000000000000000000000001"
         );
         assert_eq!(
             NameKey::try_from("report.txt".to_owned())
@@ -771,8 +787,8 @@ mod tests {
             .expect_err("a namespace ID with a slash should be rejected");
         CommitId::try_from("invalid/name")
             .expect_err("a commit ID with a slash should be rejected");
-        PinId::try_from("pin_00000000000000000001-000000000000000g")
-            .expect_err("a pin ID with a non-hex digit should be rejected");
+        SnapshotId::try_from("snp_00000000000000000001-0000000000000000000000000u")
+            .expect_err("a snapshot ID with a character outside the alphabet should be rejected");
         NameKey::try_from("a/b").expect_err("a name key with a slash should be rejected");
     }
 
@@ -784,9 +800,13 @@ mod tests {
         let commit_id: CommitId =
             serde_json::from_str(r#""commit-1""#).expect("valid commit id json");
         assert_eq!(commit_id.as_str(), "commit-1");
-        let pin_id: PinId = serde_json::from_str(r#""pin_00000000000000000001-0000000000000001""#)
-            .expect("valid pin id json");
-        assert_eq!(pin_id.as_str(), "pin_00000000000000000001-0000000000000001");
+        let snapshot_id: SnapshotId =
+            serde_json::from_str(r#""snp_00000000000000000001-00000000000000000000000001""#)
+                .expect("valid snapshot id json");
+        assert_eq!(
+            snapshot_id.as_str(),
+            "snp_00000000000000000001-00000000000000000000000001"
+        );
 
         let namespace_error = serde_json::from_str::<NamespaceId>(r#""invalid/name""#)
             .expect_err("invalid namespace id json");
@@ -794,25 +814,26 @@ mod tests {
         let commit_error = serde_json::from_str::<CommitId>(r#""invalid/name""#)
             .expect_err("invalid commit id json");
         assert!(commit_error.to_string().contains("commit_id"));
-        let pin_error =
-            serde_json::from_str::<PinId>(r#""pin_00000000000000000001-000000000000000g""#)
-                .expect_err("invalid pin id json");
-        assert!(pin_error.to_string().contains("generated id"));
+        let snapshot_id_error = serde_json::from_str::<SnapshotId>(
+            r#""snp_00000000000000000001-0000000000000000000000000u""#,
+        )
+        .expect_err("invalid snapshot id json");
+        assert!(snapshot_id_error.to_string().contains("generated id"));
     }
 
     #[test]
-    fn generated_upload_wal_metadata_segment_and_pin_ids_reject_hyphenated_ids() {
+    fn generated_upload_wal_metadata_segment_and_snapshot_ids_reject_hyphenated_ids() {
         assert!(UploadId::parse("upl_00000000000000000000000001").is_ok());
         assert!(MetadataSegmentId::parse("seg_00000000000000000000000001").is_ok());
-        assert!(PinId::parse("pin_00000000000000000001-0000000000000001").is_ok());
+        assert!(SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001").is_ok());
         UploadId::parse(["upl", "123"].join("-"))
             .expect_err("a hyphenated upload ID should be rejected");
         // The two positional families are told apart by their prefix, never
         // by context.
         MetadataSegmentId::parse(["seg", "123"].join("-"))
             .expect_err("a hyphenated segment ID should be rejected");
-        PinId::parse(["chk", "123"].join("-"))
-            .expect_err("a pin ID with another prefix should be rejected");
+        SnapshotId::parse(["chk", "123"].join("-"))
+            .expect_err("a snapshot ID with another prefix should be rejected");
     }
 
     #[test]
@@ -827,7 +848,7 @@ mod tests {
         );
         let upload_id = UploadId::generate();
         let metadata_segment_id = MetadataSegmentId::generate();
-        let pin_id = PinId::generate(ManifestNo(1));
+        let snapshot_id = SnapshotId::generate(ManifestNo(1));
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
         assert_generated_id_shape(metadata_segment_id.as_str(), "seg");
@@ -849,43 +870,66 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(pin_id.manifest_no(), ManifestNo(1));
+        assert_eq!(snapshot_id.manifest_no(), ManifestNo(1));
         assert!(UploadId::parse(upload_id.as_str()).is_ok());
         assert!(MetadataSegmentId::parse(metadata_segment_id.as_str()).is_ok());
-        assert!(PinId::parse(pin_id.as_str()).is_ok());
+        assert!(SnapshotId::parse(snapshot_id.as_str()).is_ok());
     }
 
     #[test]
-    fn pin_ids_order_and_validate_their_manifest_numbers() {
-        let first = PinId::parse("pin_00000000000000000009-ffffffffffffffff").expect("pin");
-        let second = PinId::parse("pin_00000000000000000010-0000000000000000").expect("pin");
+    fn snapshot_ids_order_and_validate_their_manifest_numbers() {
+        let first = SnapshotId::parse("snp_00000000000000000009-0000000000ffffffffffffffff")
+            .expect("snapshot");
+        let second = SnapshotId::parse("snp_00000000000000000010-00000000000000000000000000")
+            .expect("snapshot");
         assert!(first < second);
         assert_eq!(second.manifest_no(), ManifestNo(10));
-        let decoded: PinId =
-            serde_json::from_str(&serde_json::to_string(&second).expect("serialize pin id"))
-                .expect("decode pin id");
+        let decoded: SnapshotId =
+            serde_json::from_str(&serde_json::to_string(&second).expect("serialize snapshot id"))
+                .expect("decode snapshot id");
         assert_eq!(decoded, second);
         for invalid in [
-            "pin_00000000000000000000-0000000000000000".to_owned(),
-            format!("pin_{:020}-0000000000000000", MAX_PUBLIC_INTEGER + 1),
-            "pin_00000000000000000001-000000000000000G".to_owned(),
-            "pin_1-0000000000000000".to_owned(),
-            "pin_00000000000000000001-00000000000000000".to_owned(),
+            "snp_00000000000000000000-00000000000000000000000000".to_owned(),
+            format!(
+                "snp_{:020}-00000000000000000000000000",
+                MAX_PUBLIC_INTEGER + 1
+            ),
+            "snp_00000000000000000001-0000000000000000000000000G".to_owned(),
+            "snp_1-00000000000000000000000000".to_owned(),
+            "snp_00000000000000000001-000000000000000000000000000".to_owned(),
         ] {
-            PinId::parse(&invalid).expect_err(&format!("{invalid} should be rejected"));
+            SnapshotId::parse(&invalid).expect_err(&format!("{invalid} should be rejected"));
         }
     }
 
     #[test]
-    fn generated_content_ids_are_unique() {
+    fn generated_content_and_pool_ids_are_unique() {
         let mut ids = BTreeSet::new();
         for _ in 0..512 {
-            let id = ContentId::generate();
-            assert_generated_id_shape(id.as_str(), "con");
-            assert!(
-                ids.insert(id.clone()),
-                "generated duplicate content id {id}"
-            );
+            let content_id = ContentId::generate();
+            assert_generated_id_shape(content_id.as_str(), "con");
+            let pool_id = PoolId::generate();
+            assert_generated_id_shape(pool_id.as_str(), "pool");
+            assert_eq!(PoolId::parse(pool_id.as_str()).as_ref(), Ok(&pool_id));
+            for id in [content_id.to_string(), pool_id.to_string()] {
+                assert!(ids.insert(id.clone()), "generated duplicate id {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn pool_id_parse_requires_the_generated_id_shape() {
+        let pool_id = PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x").expect("valid pool ID");
+        assert_eq!(pool_id.body(), "3s0drmj8em84yb4mnetqkz2j0x");
+        for invalid in [
+            "con_3s0drmj8em84yb4mnetqkz2j0x",
+            "pol_3s0drmj8em84yb4mnetqkz2j0x",
+            "pool_3S0DRMJ8EM84YB4MNETQKZ2J0X",
+            "pool_8s0drmj8em84yb4mnetqkz2j0x",
+            "pool_3s0drmj8em84yb4mnetqkz2j0",
+            "pool_3s0drmj8em84yb4mnetqkz2j0u",
+        ] {
+            PoolId::parse(invalid).expect_err(invalid);
         }
     }
 

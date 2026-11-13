@@ -1,10 +1,10 @@
-//! Pin creation, listing, verification, snapshot, and cleanup tests.
+//! Snapshot creation, listing, verification, and cleanup tests.
 
 mod inventory;
-mod pin_cleanup;
-mod pin_verification;
+mod snapshot_cleanup;
 mod snapshot_fork_gc;
 mod snapshot_renewal;
+mod snapshot_verification;
 
 use super::record;
 use crate::compaction::CompactionUnitOutcome;
@@ -24,7 +24,7 @@ use loonfs_objectstore::{
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
 };
-use loonfs_types::{ManifestNo, NamespaceId, PinId};
+use loonfs_types::{ManifestNo, NamespaceId, SnapshotId};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;

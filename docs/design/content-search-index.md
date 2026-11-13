@@ -1,6 +1,6 @@
 # Content search index
 
-[Grep across a fork family](grep-fork-family.md) describes the index's postings, its row families, pruning, and the order of a query's results. The index records content values instead of file revisions, a posting refers to a value by its position in the value table of the posting's run, and matches are ordered by content value. This note describes the approach, the index's lifecycle, and collection.
+[Grep across a pool](grep-across-a-pool.md) describes the index's postings, its row families, pruning, and the order of a query's results. The index records content values instead of file revisions, a posting refers to a value by its position in the value table of the posting's run, and matches are ordered by content value. This note describes the approach, the index's lifecycle, and collection.
 
 LoonFS supports grep-style regular-expression queries through a derived content index. The index narrows down the files that a query needs to read, and then the query checks those files against the original pattern. LoonFS maintains the index separately from metadata, so a file's metadata commit doesn't wait until its content has been indexed.
 
@@ -51,9 +51,9 @@ This section describes the posting rows that the index stores.
 
 The tokenizer folds ASCII letters to lowercase, and then extracts every overlapping three-byte window. Grams are byte sequences, not Unicode characters. This folding supports common case-insensitive ASCII searches without storing separate postings for each case, but it doesn't implement general Unicode case folding.
 
-A posting identifies a content value and doesn't contain a path, so a rename changes the paths in results without rewriting any postings. [Indexing content, not revisions](grep-fork-family.md#indexing-content-not-revisions) describes the posting rows and the value table of each run.
+A posting identifies a content value and doesn't contain a path, so a rename changes the paths in results without rewriting any postings. [Indexing content, not revisions](grep-across-a-pool.md#indexing-content-not-revisions) describes the posting rows and the value table of each run.
 
-A fork inherits its source's index. The fork's first manifest copies grep's entry, and the fork pin protects the inherited segments, which stay in the source's prefix. Grep reads the source's commits that the inherited index doesn't cover through the fork pin, and after that it indexes only the fork's own commits. [Grep across a fork family](grep-fork-family.md) describes the rules.
+A fork inherits its source's index. The fork's first manifest copies grep's entry, and the fork snapshot protects the inherited segments, which stay in the source's prefix. Grep reads the source's commits that the inherited index doesn't cover through the fork snapshot, and after that it indexes only the fork's own commits. [Grep across a pool](grep-across-a-pool.md) describes the rules.
 
 ## Segments and grep's entry
 
@@ -63,16 +63,16 @@ Grep segments use the layout described in [Metadata block storage](metadata-bloc
 
 ```text
 namespaces/{owner_namespace_id}/extensions/grep/
-└── segments/{segment_id}.sst.zst
+└── segments/{segment_id}.sst
 ```
 
-The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. The index's run numbers are allocated from the manifest's `next_run_no` when grep publishes a change. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a fork family](grep-fork-family.md) explains why.
+The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. Grep assigns the index's run numbers itself, one above the largest number in its entry. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a pool](grep-across-a-pool.md) explains why.
 
 A run of index steps changes a copy of the entry in memory (the "pending entry") and publishes the change in a manifest of its own:
 
 1. The run loads the current manifest.
 2. Each step writes its segments and records its change in the pending entry.
-3. Once the change is one maintenance interval old, or when the run ends, the run creates the next manifest with put-if-absent, and the change's new runs are numbered from the `next_run_no` of the manifest that it's published over.
+3. Once the change is one maintenance interval old, or when the run ends, the run creates the next manifest with put-if-absent.
 4. If the run loses the race to a manifest that copied grep's entry, such as a fold, the run publishes the change over that manifest. If another process changed the entry, the run publishes nothing, and its next step loads the winning manifest and plans again.
 
 A query reads grep's entry from the manifest of its read view, so the index is as current as the view, and the query sends no request to find the index. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines the entry and its publication.
@@ -84,7 +84,7 @@ An index is in one of three lifecycle states, and grep's entry records the state
 | State | Position and behavior |
 | --- | --- |
 | `disabled` | No segment set that queries can see, and no pending reorganization. |
-| `backfilling` | The ID of the backfill's snapshot (`pin_id`), `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
+| `backfilling` | The ID of the backfill's snapshot (`snapshot_id`), `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
 | `active` | An incremental cursor made of `built_through_seq` and `next_event_index`. Queries can use the completed index plus the unindexed tail. |
 
 ```text
@@ -159,7 +159,7 @@ Reorganization rewrites the index's runs across three tiers: delta, mid, and bas
 
 A reorganization starts when a tier reaches its run limit, eight delta runs or eight mid runs by default. The scheduler and the CLI run a reorganization step instead of a build step whenever a reorganization is in progress or a tier is at its limit, so the delta tier has at most eight runs while the index is behind a writer. Every build step looks up its content values' `texts` rows in the index's segments, so a build step's cost grows with the number of runs. A reorganization that waited for a build step to find the index up to date might never run while a writer keeps committing, and the build steps would keep getting slower.
 
-The thresholds count logical runs, not physical segments. Every build step that writes rows adds one run for its batch, whose `run_no` is allocated from `next_run_no` when the step's change is published. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
+The thresholds count logical runs, not physical segments. Every build step that writes rows adds one run for its batch, whose `run_no` is one above the largest run number in the pending entry. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
 
 With eight delta runs per mid run, and eight mid runs per base rewrite, a simplified sequence of full batches rewrites the base about once every 64 build runs. A two-tier scheme that rewrote the base after every eight delta runs would rewrite it eight times as often in that example. This is a constant-factor reduction. Because the structure always has three tiers, it doesn't provide logarithmic cumulative write amplification as the corpus grows.
 
@@ -171,7 +171,7 @@ Until the scan completes, both the inputs and the completed outputs stay referen
 
 The row budget can be exceeded for rows with equal keys. All the rows with the same key are processed together before the cursor moves past that key.
 
-Grep's entry records each run's `level` (`0`, `1`, or `2`) and `run_no`, and a change's new runs are assigned their numbers from the manifest's `next_run_no` when the change is published. An in-progress reorganization records its `output_level`, its output `run_no` (which doesn't change once a published entry records it), its selected inputs, its outputs, and its cursor. A replacement worker resumes from the last entry that was published successfully.
+Grep's entry records each run's `level` (`0`, `1`, or `2`) and `run_no`. An in-progress reorganization records its `output_level`, its output `run_no` (which grep assigns when the reorganization starts, and which doesn't change after that), its selected inputs, its outputs, and its cursor. A replacement worker resumes from the last entry that was published successfully.
 
 Why can queries see both the inputs and the outputs? A reorganization's output has no posting that its inputs lack, and readers take the union of the batches, so a posting that appears twice doesn't cause a missed candidate. This isn't a general rule for replacing metadata rows that have different retention semantics.
 
@@ -179,7 +179,7 @@ Why aren't rows with equal keys split across steps? If a step split that group a
 
 ### Old postings
 
-A base-level reorganization drops the postings of a content value that no retained revision references, as [Pruning the index](grep-fork-family.md#pruning-the-index) describes.
+A base-level reorganization drops the postings of a content value that no retained revision references, as [Pruning the index](grep-across-a-pool.md#pruning-the-index) describes.
 
 ## Queries
 
@@ -206,7 +206,7 @@ By default, LoonFS rejects a valid pattern that has no useful required grams (su
 
 ### Candidate selection and verification
 
-Each page of results uses one read view, and [Querying](grep-fork-family.md#querying) describes how the query turns posting batches into candidate files, checks each file against that read view, and verifies the content.
+Each page of results uses one read view, and [Querying](grep-across-a-pool.md#querying) describes how the query turns posting batches into candidate files, checks each file against that read view, and verifies the content.
 
 Path-prefix filtering applies to the resolved path, not to a path cached when the posting was created. The response contains line-oriented matches, not a streaming file response.
 
@@ -218,7 +218,7 @@ A page is limited by both its match limit and its budget of verified candidates.
 
 The continuation cursor records the scan's progress, including candidates that produced no matches, not just the last match that was returned. It's bound to the request fields that select results (the pattern, the case flag, the path scope, `allow_scan`, and `allow_stale`), and a request that reuses it with different values for those fields is rejected.
 
-Each page reports the namespace `head_seq` that it used. Every later page reads the namespace at the first page's `head_seq`, which the cursor records, so a search across several pages reads one consistent view ([`GET /grep`](../specs/api.md#617-get-grep)).
+Each page reports the namespace `head_seq` that it used. Every later page reads the namespace at the first page's `head_seq`, which the cursor records, so a search across several pages reads one consistent view ([`GET /grep`](../specs/api.md#618-get-grep)).
 
 Why does a page need a candidate budget as well as a match limit? A pattern with many false-positive candidates produces few matches, and it must not trigger an unlimited content scan just because of that.
 
@@ -235,13 +235,13 @@ If the tail is larger than the query's budget:
 - By default, the query fails with an `index_lagging` error.
 - With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, along with the index and head positions. Stale results still go through visibility checks and content verification, but they might leave out eligible revisions that aren't indexed yet.
 
-If the tail's change history is below the retention floor, the query returns `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds the index from a new snapshot, and the rebuild keeps the index's segments, so it reads only the values that they don't record.
+If the tail's change history is below the retention floor, the query returns `below_retention_floor`, with or without `allow_stale`. The worker's next step rebuilds the index from a new snapshot, and the rebuild keeps the index's segments, so it reads only the values that they don't record.
 
 Index maintenance reduces this gap when it runs. Core backpressure on the WAL tail doesn't limit grep lag by itself, because metadata can be folded while grep maintenance is still behind. When the gap is too large, the query's tail budget and the explicit stale-result option determine what happens.
 
 ## Grep garbage collection
 
-Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while the current manifest or a pinned manifest lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later collection deletes them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
+Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while the current manifest or a manifest that a snapshot keeps lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later collection deletes them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
 
 ## Costs and defaults
 

@@ -9,7 +9,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ForkBasis;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{
-    ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
+    ActorId, CommitSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
     NamespaceRebasedFrom,
 };
 use std::num::NonZeroU64;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamespaceWalTailUsage {
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     pub wal_tail_objects: u64,
     pub wal_tail_inline_bytes: usize,
     pub wal_tail_bytes: usize,
@@ -65,15 +65,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-/// Namespace storage diagnostics that do not require checkpoint enumeration.
+/// Namespace storage diagnostics that do not require snapshot enumeration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStorageDiagnostics {
     pub namespace_id: NamespaceId,
     pub created_at_ms: u64,
     pub created_by: ActorId,
     pub fork_basis: Option<NamespaceForkBasis>,
-    pub head_seq: ChangeSeq,
-    pub retention_floor_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
+    pub retention_floor_seq: CommitSeq,
     pub current_manifest_no: ManifestNo,
     pub wal_tail_objects: u64,
     pub wal_tail_newest_commit_at_ms: Option<u64>,
@@ -82,8 +82,8 @@ pub struct NamespaceStorageDiagnostics {
 fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
     basis.map(|basis| NamespaceForkBasis {
         source_namespace_id: basis.manifest.owner_namespace_id,
-        source_head_seq: basis.manifest.head_seq,
-        source_pin_id: basis.source_pin_id,
+        fork_point_seq: basis.manifest.head_seq,
+        source_snapshot_id: basis.source_snapshot_id,
         rebased_from: basis.rebased_from.map(|rebased_from| NamespaceRebasedFrom {
             source_namespace_id: rebased_from.source_namespace_id,
             resume_after_seq: rebased_from.resume_after_seq,
@@ -96,8 +96,8 @@ pub(crate) fn created_namespace(manifest: &NamespaceManifestPayload) -> Namespac
     namespace_metadata(NamespaceReadState::from(manifest), manifest)
 }
 
-/// Combines the head with the retention state of `manifest`, which is the
-/// current manifest below that head.
+/// Combines the head, whose retention floor is the view's, with the retention
+/// window of `manifest`, which is the current manifest below that head.
 fn namespace_metadata(
     head: NamespaceReadState,
     manifest: &NamespaceManifestPayload,
@@ -107,10 +107,10 @@ fn namespace_metadata(
         created_at_ms: head.created_at_ms,
         created_by: head.created_by,
         fork_basis: fork_basis(head.fork_basis),
-        family_root_id: head.family_root_id,
+        pool_id: head.pool_id,
         namespace_id: head.namespace_id,
         head_seq: head.seq,
-        retention_floor_seq: manifest.retention_floor_seq,
+        retention_floor_seq: head.retention_floor_seq,
         retention_window_ms: manifest.retention_window_ms.map(NonZeroU64::get),
     }
 }

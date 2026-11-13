@@ -23,19 +23,21 @@ async fn assert_leaf_reads_every_members_file(store: &LocalFsStore, namespaces: 
 }
 
 #[tokio::test]
-async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_leaf_first() {
+async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_first() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespaces =
         ["root", "middle", "leaf"].map(|name| NamespaceId::parse(name).expect("namespace"));
     let setup = context(1_000);
     let mut keys = Vec::new();
+    let mut pool_id = None;
     for (index, namespace_id) in namespaces.iter().enumerate() {
         if index == 0 {
-            crate::test_support::NamespaceFixture::new(&store, namespace_id, &setup)
+            let created = crate::test_support::NamespaceFixture::new(&store, namespace_id, &setup)
                 .create()
                 .await
                 .expect("bootstrap root");
+            pool_id = Some(created.pool_id);
         } else {
             let fixture =
                 crate::test_support::NamespaceFixture::new(&store, &namespaces[index - 1], &setup);
@@ -53,8 +55,9 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
         }
         keys.push(publish_inline(&store, namespace_id, index, &setup).await);
     }
-    let middle_pin = read_fork_record(&store, &namespaces[0]).await;
-    let leaf_pin = read_fork_record(&store, &namespaces[1]).await;
+    let pool_id = pool_id.expect("the first member's pool");
+    let middle_snapshot = read_fork_record(&store, &namespaces[0]).await;
+    let leaf_snapshot = read_fork_record(&store, &namespaces[1]).await;
     for namespace_id in &namespaces[..2] {
         crate::test_support::NamespaceFixture::new(&store, namespace_id, &setup)
             .engine()
@@ -76,13 +79,19 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     let aged = context(aged_now);
     for index in [0, 1, 1, 0] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(None, &options(), &aged.clock())
+            .gc(&options(), &aged.clock())
             .await
             .expect("collect ancestor while grandchild lives");
-        assert_eq!(report.deleted.retired_content_objects, 0);
-        assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
-        assert!(pin_exists(&store, &namespaces[0], &middle_pin.pin_id).await);
-        assert!(pin_exists(&store, &namespaces[1], &leaf_pin.pin_id).await);
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
+        assert_eq!(
+            collect_pool(&store, &pool_id, &aged)
+                .await
+                .deleted
+                .content_objects,
+            0
+        );
+        assert!(snapshot_record_exists(&store, &namespaces[0], &middle_snapshot.snapshot_id).await);
+        assert!(snapshot_record_exists(&store, &namespaces[1], &leaf_snapshot.snapshot_id).await);
         assert_leaf_reads_every_members_file(&store, &namespaces).await;
     }
 
@@ -94,30 +103,38 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
     // Deletion alone must not release either link in the protection chain.
     for index in [0, 1] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(None, &options(), &aged.clock())
+            .gc(&options(), &aged.clock())
             .await
-            .expect("ancestors still pinned by unretired descendants");
-        assert_eq!(report.deleted.retired_content_objects, 0);
+            .expect("ancestors still kept by unretired descendants");
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     }
     for index in [2, 1, 0] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(None, &options(), &aged.clock())
+            .gc(&options(), &aged.clock())
             .await
             .expect("retire from leaf to root");
         if index > 0 {
-            // A fork's retirement releases its source pin and deletes no
-            // content, because the family root's prefix stores the content
-            // that the fork wrote.
-            assert_eq!(report.deleted.retired_content_objects, 0);
+            // A fork's retirement releases its fork snapshot and deletes no
+            // content.
+            assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
             for key in &keys {
-                assert!(store.head(key).await.expect("family object").is_some());
+                assert!(store.head(key).await.expect("pool object").is_some());
             }
-            let pin = if index == 2 { &leaf_pin } else { &middle_pin };
-            assert!(!pin_exists(&store, &namespaces[index - 1], &pin.pin_id).await);
+            let snapshot = if index == 2 {
+                &leaf_snapshot
+            } else {
+                &middle_snapshot
+            };
+            assert!(
+                !snapshot_record_exists(&store, &namespaces[index - 1], &snapshot.snapshot_id)
+                    .await
+            );
         } else {
-            // The family root retires last, and its retirement sweeps the
-            // content of the whole family.
-            assert!(report.deleted.retired_content_objects >= keys.len() as u64);
+            // The first member retires last, and then the pool has no members,
+            // so the pool's collection deletes the aged content.
+            assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
+            let pool_report = collect_pool(&store, &pool_id, &aged).await;
+            assert!(pool_report.deleted.content_objects >= keys.len() as u64);
             for key in &keys {
                 assert!(store.head(key).await.expect("retired object").is_none());
             }

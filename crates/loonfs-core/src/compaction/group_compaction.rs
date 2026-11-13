@@ -28,7 +28,7 @@ use crate::segment::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRun
 use crate::segment::scan::VerifiedMetadataSegments;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
-use loonfs_types::{ChangeSeq, NamespaceId, RunNo};
+use loonfs_types::{CommitSeq, MetadataSkippedWork, NamespaceId, RunNo};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -53,6 +53,8 @@ pub(crate) struct GroupCompactionReport {
     /// size of the group. A retention operator decides each row as it
     /// arrives and keeps none.
     pub(crate) peak_resident_blocks: usize,
+    /// The work that the compaction skipped at a limit.
+    pub(crate) skipped: Vec<MetadataSkippedWork>,
 }
 
 /// Rebuilds the family group and runs selected by `spec`. `segments` must come
@@ -93,7 +95,7 @@ struct GroupCompaction<'a, S: ObjectStore + ?Sized> {
     group: MetadataFamilyGroup,
     /// Where the output stands in the group and whether rows may be dropped.
     placement: CompactionPlacement,
-    frozen_floor_seq: ChangeSeq,
+    frozen_floor_seq: CommitSeq,
     run_policy: MetadataRunPolicy,
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
@@ -161,6 +163,12 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
             .flat_map(|run| group_run_descriptors(run, group))
             .map(segment_object_bytes)
             .sum();
+        let skipped = match kept_inodes {
+            KeptInodeFilter::EveryInodeAtWalkLimit => {
+                vec![MetadataSkippedWork::ExpiredRowRemovalWalkLimit]
+            }
+            KeptInodeFilter::EveryInode | KeptInodeFilter::Reached(_) => Vec::new(),
+        };
         Self {
             store: basis.store,
             basis_runs: &basis.scan_runs,
@@ -176,6 +184,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
             input_runs,
             result: GroupCompactionReport {
                 input_bytes,
+                skipped,
                 ..GroupCompactionReport::default()
             },
             canonical_digest: RowDigest::default(),
@@ -553,7 +562,7 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
         MetadataFamilyGroup::Revisions
         | MetadataFamilyGroup::Inodes
         | MetadataFamilyGroup::Tombstones
-        | MetadataFamilyGroup::ActiveDeletions
+        | MetadataFamilyGroup::Trash
         | MetadataFamilyGroup::Commits
         | MetadataFamilyGroup::ContentLayouts
         | MetadataFamilyGroup::Attributes
@@ -588,7 +597,7 @@ fn resolve_input_runs<S: ObjectStore + ?Sized>(
 mod tests {
     use super::RowDigest;
     use loonfs_types::format::manifest::MetadataRow;
-    use loonfs_types::{ChangeSeq, DisplayName, InodeId, NameKey};
+    use loonfs_types::{CommitSeq, DisplayName, InodeId, NameKey};
 
     fn bind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
         MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
@@ -602,13 +611,13 @@ mod tests {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(bind_seq),
+            committed_seq: CommitSeq(bind_seq),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(bind_seq),
+                seq: CommitSeq(bind_seq),
                 delta_index: 0,
             },
         })
@@ -622,13 +631,13 @@ mod tests {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(bind_seq + 1),
+            committed_seq: CommitSeq(bind_seq + 1),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(bind_seq + 1),
+                seq: CommitSeq(bind_seq + 1),
                 delta_index: 0,
             },
             state: loonfs_types::format::manifest::DirentryBindingState::Unbound,

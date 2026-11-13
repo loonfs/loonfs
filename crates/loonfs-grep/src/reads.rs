@@ -12,10 +12,10 @@ use loonfs::{
     RetainedRevisionsPageCursor, SnapshotFilesPager, StatOptions, MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
-    PathEntry, PinId, RevisionNo, Subject, MAX_PAGE_LIMIT,
+    AbsolutePath, CommitSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
+    PathEntry, RevisionNo, SnapshotId, Subject, MAX_PAGE_LIMIT,
 };
-use loonfs_types::{FilesystemChange, ListChangesResponse};
+use loonfs_types::{FilesystemEvent, ListChangesResponse};
 
 /// Filesystem reads for one namespace.
 ///
@@ -74,7 +74,7 @@ impl NamespaceReads {
     /// subject's rights, which a later page decides the files of its cut
     /// through. It reads as the service, so a subject's rights never decide
     /// what the cut contains.
-    pub(crate) async fn membership_view(&self, seq: ChangeSeq) -> Result<NamespaceReadView<'_>> {
+    pub(crate) async fn membership_view(&self, seq: CommitSeq) -> Result<NamespaceReadView<'_>> {
         let view = self
             .namespace
             .read_view()
@@ -90,14 +90,14 @@ impl NamespaceReads {
         Ok(self.namespace.metadata().await?)
     }
 
-    /// Lists the files a snapshot pins, in ascending inode-id order.
-    /// Deleted files are included so an undelete needs no new postings;
+    /// Lists the files a snapshot keeps, in ascending inode-id order.
+    /// Deleted files are included so a restore needs no new postings;
     /// queries determine visibility.
     ///
     /// A page returns `snapshot_not_found` if the snapshot was deleted,
-    /// expired, or collected, and `checkpoint_unavailable` if its manifest is
+    /// expired, or collected, and `snapshot_unavailable` if its manifest is
     /// gone. The caller must then restart the backfill from a new snapshot.
-    pub fn list_snapshot_files(&self, snapshot_id: &PinId) -> SnapshotFilesPager {
+    pub fn list_snapshot_files(&self, snapshot_id: &SnapshotId) -> SnapshotFilesPager {
         self.namespace.list_snapshot_files_with_options(
             snapshot_id,
             &ListSnapshotFilesOptions {
@@ -109,15 +109,15 @@ impl NamespaceReads {
     /// Reads committed changes after `after_seq` as semantic events.
     ///
     /// In a fork, when `after_seq` is below the fork point, this reads the
-    /// source's changes through the fork pin (see
+    /// source's changes through the fork snapshot (see
     /// [`Self::list_fork_gap_after`]). Otherwise, it returns
-    /// `rebootstrap_required` when `after_seq` is below the retention floor.
+    /// `below_retention_floor` when `after_seq` is below the retention floor.
     /// The page is `strong`, because `after_seq` comes
     /// from the index, which another process may have built past this
     /// process's last confirmation of the head.
     pub async fn list_changes_after(
         &self,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         limit: usize,
     ) -> Result<ListChangesResponse> {
         let options = ListChangesOptions {
@@ -144,7 +144,7 @@ impl NamespaceReads {
 
     /// Lists one page of a fork's "gap" after `after_seq`, which is the
     /// source's commits above `after_seq` and at or below the fork point,
-    /// read through the fork pin as a rebase reads its source.
+    /// read through the fork snapshot as a rebase reads its source.
     ///
     /// A fork's own feed starts at the fork point, which is its first
     /// retention floor, so grep reads the commits below the fork point that
@@ -159,32 +159,32 @@ impl NamespaceReads {
     /// each matching file in the fork, as it does for any file of the tail.
     ///
     /// `error` is what the fork's own feed returned for `after_seq`. The gap
-    /// is read only when that's `rebootstrap_required` and `after_seq` is
+    /// is read only when that's `below_retention_floor` and `after_seq` is
     /// below the fork point of a fork, and `error` is returned otherwise.
     /// `error` is also returned when the source can't serve the gap, such as
     /// when the source's retention floor was above `after_seq` when the fork
     /// was made, so the index is rebuilt as it is after any rebootstrap.
     async fn list_fork_gap_after(
         &self,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         limit: usize,
         error: loonfs::Error,
     ) -> Result<ListChangesResponse> {
         if !matches!(
             error,
-            loonfs::Error::Core(CoreError::RebootstrapRequired { .. })
+            loonfs::Error::Core(CoreError::BelowRetentionFloor { .. })
         ) {
             return Err(error.into());
         }
         let metadata = self.namespace.metadata().await?;
         let Some(basis) = metadata
             .fork_basis
-            .filter(|basis| after_seq < basis.source_head_seq)
+            .filter(|basis| after_seq < basis.fork_point_seq)
         else {
             return Err(error.into());
         };
         let options = ListChangesOptions {
-            at: ReadAt::Snapshot(basis.source_pin_id),
+            at: ReadAt::Snapshot(basis.source_snapshot_id),
             ..ListChangesOptions::default()
         };
         match self
@@ -196,15 +196,15 @@ impl NamespaceReads {
             .await
         {
             Ok(mut page) => {
-                if page.next_after_seq.is_none() && metadata.head_seq > basis.source_head_seq {
-                    page.next_after_seq = Some(basis.source_head_seq);
+                if page.next_after_seq.is_none() && metadata.head_seq > basis.fork_point_seq {
+                    page.next_after_seq = Some(basis.fork_point_seq);
                 }
                 Ok(page)
             }
             Err(loonfs::Error::Core(
-                CoreError::RebootstrapRequired { .. }
+                CoreError::BelowRetentionFloor { .. }
                 | CoreError::SnapshotNotFound { .. }
-                | CoreError::CheckpointUnavailable(_),
+                | CoreError::SnapshotUnavailable(_),
             )) => Err(error.into()),
             Err(other) if other.code().is_namespace_gone() => Err(error.into()),
             Err(other) => Err(other.into()),
@@ -228,7 +228,7 @@ impl NamespaceReadView<'_> {
 
     /// Returns the sequence that every metadata read sees: the head the view
     /// captured, or the earlier sequence of a view from [`Self::at_seq`].
-    pub(crate) fn head_seq(&self) -> ChangeSeq {
+    pub(crate) fn head_seq(&self) -> CommitSeq {
         self.view.head_seq()
     }
 
@@ -249,9 +249,9 @@ impl NamespaceReadView<'_> {
     }
 
     /// Returns a view of this view's head at `seq`, which checks the
-    /// subject's rights at the head, or `rebootstrap_required` when the
+    /// subject's rights at the head, or `below_retention_floor` when the
     /// retention floor is above `seq`.
-    pub(crate) async fn at_seq(&self, seq: ChangeSeq) -> Result<Self> {
+    pub(crate) async fn at_seq(&self, seq: CommitSeq) -> Result<Self> {
         Ok(Self {
             reads: self.reads,
             view: self.view.at_seq(seq).await?,
@@ -263,12 +263,12 @@ impl NamespaceReadView<'_> {
     /// The feed itself may observe a later durable head. Its immutable commit
     /// prefix is truncated here so later commits cannot affect this query. In
     /// a fork, when `after_seq` is below the fork point, this reads the
-    /// source's changes through the fork pin (see
+    /// source's changes through the fork snapshot (see
     /// [`NamespaceReads::list_fork_gap_after`]), and the page after the gap's
     /// last commit continues in the fork's own feed.
     pub(crate) async fn list_changes_after(
         &self,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         limit: usize,
     ) -> Result<ListChangesResponse> {
         let head_seq = self.head_seq();
@@ -415,9 +415,9 @@ pub(crate) struct PublishedRevision<'a> {
 /// Events that do not change file content need no index update. The index is
 /// keyed by `(inode_id, revision_no)`, and queries verify each candidate
 /// against current state before returning it.
-pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRevision<'_>> {
+pub(crate) fn published_revision(event: &FilesystemEvent) -> Option<PublishedRevision<'_>> {
     match event {
-        FilesystemChange::FileCreated {
+        FilesystemEvent::FileCreated {
             inode_id,
             revision_no,
             content_ref,
@@ -427,7 +427,7 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
             revision_no: *revision_no,
             content_ref,
         }),
-        FilesystemChange::ContentChanged {
+        FilesystemEvent::ContentChanged {
             inode_id,
             revision_no,
             content_ref,
@@ -438,13 +438,13 @@ pub(crate) fn published_revision(event: &FilesystemChange) -> Option<PublishedRe
             content_ref,
         }),
         // A created directory publishes no content.
-        FilesystemChange::DirectoryCreated { .. }
-        | FilesystemChange::Moved { .. }
-        | FilesystemChange::Deleted { .. }
-        | FilesystemChange::Undeleted { .. }
-        | FilesystemChange::AttributesChanged { .. }
-        | FilesystemChange::AccessChanged { .. }
-        | FilesystemChange::Unknown => None,
+        FilesystemEvent::DirectoryCreated { .. }
+        | FilesystemEvent::Moved { .. }
+        | FilesystemEvent::Deleted { .. }
+        | FilesystemEvent::Restored { .. }
+        | FilesystemEvent::AttributesChanged { .. }
+        | FilesystemEvent::AccessChanged { .. }
+        | FilesystemEvent::Unknown => None,
     }
 }
 

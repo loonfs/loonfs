@@ -6,7 +6,7 @@ This glossary defines the terms used in the LoonFS specs, grouped by topic. The 
 
 ### Namespace
 
-A directory tree with its own history, stored under its own prefix in object storage (`namespaces/{namespace_id}/`). Each namespace has its own manifests, WAL, and retention floor, and a fork can share stored objects with the namespace it was forked from. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A directory tree with its own history, stored under its own prefix in object storage (`namespaces/{namespace_id}/`). Each namespace has its own manifests, WAL, and retention floor, and a fork can share stored objects with the namespace it was forked from. Each namespace is a member of one [pool](#pool), and the pool's prefix stores the namespace's content objects and upload records. See [Namespaces and identity](format.md#11-namespaces-and-identity).
 
 ### Manifest
 
@@ -18,7 +18,7 @@ A small object that records the number of a recent manifest, so readers know whe
 
 ### WAL
 
-The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits, or a single [fence](#fence). Successfully writing the next WAL object to object storage commits every record contained in that WAL object. See [Publishing a commit](format.md#6-publishing-a-commit).
+The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits, a single [fence](#fence), or a [floor object](#floor-object). Successfully writing the next WAL object to object storage commits every record contained in that WAL object. See [Publishing a commit](format.md#6-publishing-a-commit).
 
 ### WAL tip
 
@@ -42,7 +42,7 @@ The position of one object in a numbered series, such as a manifest number (`man
 
 ### Garbage collection (`gc`)
 
-The process that deletes stored objects that nothing references anymore, such as replaced manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_namespace`. Each call runs one [collection](#collection).
+The process that deletes stored objects that nothing references anymore, such as replaced manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_pool`. Each call runs one [collection](#collection).
 
 ### Head
 
@@ -112,7 +112,11 @@ A committed deletion record. Deleting an item removes its name from its parent d
 
 ### Restore
 
-Bringing a deleted file or directory back, or making a prior revision's content current again. Restoring a deletion revokes its [tombstone](#tombstone) and binds the deleted root again, under its saved parent and name or at a new destination, so the whole subtree reappears with its revision history. Only a recoverable deletion can be restored. The API spells this operation `undelete`, and the change feed reports it as an `undeleted` event. Restoring a revision (`restore_revision`) makes that revision's content the file's current content. See [File and subtree deletion](format.md#16-file-and-subtree-deletion).
+An operation that brings back an earlier state of a file or directory. LoonFS has two kinds of restore. A restore of a deleted item (`restore_deleted`) revokes the [tombstone](#tombstone) of a deletion in the [trash](#trash) and binds the deleted root again, under its saved parent and name or at a new destination, so the whole subtree reappears with its revision history, and the change feed reports it as a `restored` event. Only a deletion in the trash can be restored this way. A restore of a revision (`restore_revision`) makes an earlier revision's content the file's current content, and the change feed reports it as a `content_changed` event. For example, after `report.txt` is deleted, `restore_deleted` with the deletion's inode ID and sequence brings `report.txt` back, and after a bad write to `report.txt`, `restore_revision` with revision 3 makes revision 3's content current again. See [File and subtree deletion](format.md#16-file-and-subtree-deletion).
+
+### Trash
+
+The set of a namespace's deletions that a restore can still undo. A deletion is in the trash when the latest event of its [tombstone](#tombstone) is the `set` that started the deletion, and its deletion sequence is above the namespace's [retention floor](#retention-floor). Each deletion in the trash is a "trash entry". The trash listing (`list_trash`) returns the entries oldest first, each with the deleted item's former name and the inode ID and deletion sequence that a [restore](#restore) needs. A deletion leaves the trash when a restore revokes it, or when the retention floor reaches it, and then the deletion has expired. For example, if `/old` is deleted at sequence 40 while the floor is 35, `/old` is in the trash and a restore can bring it back. Once a retention advance moves the floor to 50, the deletion has expired, and the trash listing leaves it out. LoonFS stores the trash as the `trash` family, a [query index](#query-index) over the tombstone events. See [File and subtree deletion](format.md#16-file-and-subtree-deletion).
 
 ### Namespace tombstone
 
@@ -122,11 +126,11 @@ A deleted namespace's final manifest, which records that the namespace was delet
 
 ### Content object
 
-An immutable object that stores file bytes, under the family root's prefix (`namespaces/{family_root_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
+An immutable object that stores file bytes, under the prefix of the namespace's [pool](#pool) (`pools/{pool_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
 
 ### Content reference
 
-The record in a file revision that identifies its bytes: a content ID, a size, and a checksum. The reader's manifest supplies the [family root](#family-root), so a reference identifies the same object in every member of a [fork family](#fork-family). A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
+The record in a file revision that identifies its bytes: a content ID, a size, and a checksum. The reader's manifest supplies the [pool](#pool), so a reference identifies the same object in every member of that pool. A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
 
 ### Chain
 
@@ -134,7 +138,7 @@ The bytes stored under one content ID. A chain grows when a file is appended to,
 
 ### Chain creator
 
-The namespace whose commit started a chain, recorded in the chain's [layout](#layout). Only the creator's commits extend the chain in place. When another member of the [fork family](#fork-family) appends to the chain, LoonFS starts a new chain that lists the first chain's extents as [shared base extents](#extent). See [Operations and WAL deltas](format.md#66-operations-and-wal-deltas).
+The namespace whose commit started a chain, recorded in the chain's [layout](#layout). Only the creator's commits extend the chain in place. When another member of the creator's [pool](#pool) appends to the chain, LoonFS starts a new chain that lists the first chain's extents as [shared base extents](#extent). See [Operations and WAL deltas](format.md#66-operations-and-wal-deltas).
 
 ### Extent
 
@@ -164,11 +168,11 @@ An object-store operation that creates one new immutable object from ranges of e
 
 ### Temporary object
 
-An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. Temporary objects are stored under `namespaces/{namespace_id}/temporary/`. Nothing references them, so garbage collection deletes any that are older than the [grace window](#grace-window) (for example, after a crash).
+An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. Every assembly writes a content object, so every temporary object is stored under the prefix of a [pool](#pool) (`pools/{pool_id}/temporary/`). Nothing references them, so the pool's [collection](#collection) deletes any that are older than the [grace window](#grace-window) (for example, after a crash).
 
 ### Upload session
 
-The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. Both records are stored under the family root's prefix, and each one records the namespace that created the session. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
+The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. Both records are stored under the prefix of the namespace's [pool](#pool), and each one records the namespace that created the session. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
 
 ### Presigned URL
 
@@ -180,7 +184,7 @@ Proof that a content reference's bytes were verified in a completed upload. A co
 
 ### Content root
 
-A reference that keeps a [fork family's](#fork-family) content objects from being deleted. A root in any member of the fork family counts. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
+A reference that keeps a [pool's](#pool) content objects from being deleted. A root in any member of the pool counts, and the pool's [collection](#collection) reads the roots of every member. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
 
 ## Metadata storage
 
@@ -218,25 +222,29 @@ The process that moves committed records from the WAL tail into new metadata seg
 
 ### Compaction
 
-The process that rewrites a namespace's metadata runs into fewer runs, and drops rows that are no longer needed, without changing any retained view. Each compaction rewrites one family group's window of at most eight runs without keeping every row in memory, and publishes once at the end. See [Retention and compaction](format.md#10-retention-and-compaction).
+The process that rewrites a namespace's metadata runs into fewer runs, and drops rows that are no longer needed, without changing any retained view. Each compaction rewrites a window of one family group's runs (at most eight runs by default) without keeping every row in memory, and publishes once at the end. See [Retention and compaction](format.md#10-retention-and-compaction).
 
 ### Retention floor
 
-The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, old attribute and access states, and commit receipts). A deletion at or below the floor has expired, so it can't be restored, and if its latest event is still `set`, a base compaction removes the rows that it hides. For example, if the floor is 20, a deletion at sequence 10 that nobody restored has expired, and the next base compaction of each family group removes the rows of the inodes that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. Only the holder of the namespace's [writer epoch](#writer-epoch) advances the floor, after it has folded every commit validated against the old floor, so no restore of an expired deletion can be committed after the advance. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is in the [trash](#trash). Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, old attribute and access states, and commit receipts). A deletion at or below the floor has expired, so it can't be restored, and if its latest event is still `set`, a base compaction removes the rows that it hides. For example, if the floor is 20, a deletion at sequence 10 that nobody restored has expired, and the next base compaction of each family group removes the rows of the inodes that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. The advance writes the new floor to the WAL as a [floor object](#floor-object), so the WAL orders the advance against every restore, and the fold that covers the floor object records the new floor in a manifest. A [read view's](#read-view) floor is the manifest's floor, raised by the floor objects in the view's WAL tail. For example, if the manifest's floor is 5 and the WAL tail contains a floor object with floor 20, the view's floor is 20, and a restore of a deletion at sequence 10 returns `not_deleted`. A snapshot below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Retention window
 
-A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's [sweep](#sweep) advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. It uses the namespace's own window if the namespace's manifest sets `retention_window_ms`, and the server's `retention_window_ms` setting otherwise. For example, a namespace with a 7-day window keeps at least 7 days of revisions and recoverable deletions. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's [sweep](#sweep) advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. The sweep reads the window from the namespace's manifest (`retention_window_ms`), and it doesn't advance the floor of a namespace without a window. When a create request doesn't include a window, the server records its own `retention_window_ms` setting as the new namespace's window. For example, a namespace with a 7-day window keeps at least 7 days of revisions and of deletions in the [trash](#trash). See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+
+### Minimum commit age
+
+How old a commit has to be before a retention advance can move the [retention floor](#retention-floor) past that commit, which is one hour (`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`). A reader that opened a file revision can keep reading that revision after a later commit replaces the revision, so LoonFS keeps the replaced revision readable for at least an hour after the replacing commit. For example, if a commit replaces a file's revision at 9:00, an advance at 9:30 stops below that commit, and an advance at 10:00 or later can move the floor past the commit. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Control object
 
-A small object used for discovery, retained views, or upload state: the hint, pins, and the session and outcome records of upload sessions. Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
+A small object used for discovery, retained views, upload state, or a pool's creation: the hint, snapshots, the session and outcome records of upload sessions, and [pool records](#pool-record). Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
 
 ## Reads and retained views
 
 ### Read view
 
-The namespace state that one read sees (or a group of related reads in one request). A read view exists only in memory, and it doesn't protect anything from garbage collection.
+The namespace state that one read sees (or a group of related reads in one request). A read view exists only in memory, and it doesn't protect anything from garbage collection. A read view has its own [retention floor](#retention-floor), which is the manifest's floor raised by the [floor objects](#floor-object) in the WAL tail that the view replays. For example, if the manifest's floor is 5 and the tail contains a floor object with floor 20, the view's floor is 20, so a deletion at sequence 10 has expired in that view.
 
 ### Metadata basis
 
@@ -244,16 +252,16 @@ The verified set of metadata runs, from the current manifest, that a read starts
 
 ### Snapshot
 
-A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. The format calls the record a "pin". Every pin is a snapshot with one of two owners:
+A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. Every snapshot has one of two owners:
 
-- A "user pin" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user pins. A snapshot can have an expiry time, or none. An expired snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits. A merge or a rebase also creates a user pin on the fork while it plans, and deletes the pin after its commit.
-- A "fork pin" is a snapshot whose owner is `fork`. It keeps the source manifest that a fork reads through, until the fork is retired. A read of the source accepts a fork pin's ID as `snapshot_id`, so a client can read the source as it was at the fork point.
+- A "user snapshot" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user snapshots. A user snapshot can have an expiry time, or none. An expired user snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits. A merge or a rebase also creates a user snapshot of the fork while it plans, and deletes the snapshot after its commit.
+- A "fork snapshot" is a snapshot whose owner is `fork`. It keeps the source manifest that a fork reads through, until the fork is retired. A read of the source accepts a fork snapshot's ID as `snapshot_id`, so a client can read the source as it was at the fork point.
 
-The maintenance API's "checkpoint" inventory lists every pin of a namespace, so an operator can see what keeps old manifests, and the API calls any pin's ID a `checkpoint_id`. See [Pins](format.md#8-pins).
+The maintenance API's snapshot inventory lists every snapshot of a namespace, user and fork, so an operator can see what keeps old manifests. See [Snapshots](format.md#8-snapshots).
 
 ### Fork
 
-A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a fork snapshot for the fork until the fork is retired. The fork is a member of its source's [pool](#pool), so it reads inherited content and writes new content under the pool's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
 
 ### Source
 
@@ -261,19 +269,23 @@ The namespace that an operation reads from. For a fork, the source is the namesp
 
 ### Fork point
 
-The source namespace's sequence at which a fork was taken. The fork basis records it (`fork_basis.source_head_seq`), the fork's retention floor starts at it, and the fork's first merge or rebase starts from it. For example, if `sandbox` was forked from `main` at sequence 100, the fork point is 100, and the first merge of `sandbox` into `main` applies `sandbox`'s commits after 100.
+The source namespace's sequence at which a fork was taken. The fork basis records it (`fork_basis.fork_point_seq`), the fork's retention floor starts at it, and the fork's first merge or rebase starts from it. For example, if `sandbox` was forked from `main` at sequence 100, the fork point is 100, and the first merge of `sandbox` into `main` applies `sandbox`'s commits after 100.
 
-### Fork family
+### Pool
 
-A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the family root's prefix, so a content reference identifies the same object in every member. The family root's [collection](#collection) deletes the family's unreferenced content, with roots from every member. The collection finds the members through fork pins, because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family, and their content objects are stored under `namespaces/main/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A set of namespaces that share one set of content objects, together with the key prefix that stores those objects (`pools/{pool_id}/`). A pool is identified by a generated pool ID, such as `pool_3s0drmj8em84yb4mnetqkz2j0x`. Every manifest records the namespace's pool (`pool_id`), and the value can't be changed. A namespace created without a source records a pool ID that its create call generates, and a fork records the pool of its source.
 
-### Family root
+A "member" of a pool is a namespace whose manifest records the pool, until the namespace is [retired](#namespace-retirement). The pool's "first member" is the namespace that was created with the pool, which the [pool record](#pool-record) identifies. Every other member is a fork of a member, directly or through other forks. The pool's prefix stores the content objects and upload records of every member, and the temporary objects of content assemblies, so one content reference identifies the same object in every member, and a fork or a merge shares content without copying bytes.
 
-The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its collections keep deleting the family's unreferenced content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
+A collection of the pool deletes the pool's unreferenced content objects, upload records, and temporary objects, with roots that it reads from every member. It finds the members through fork snapshots, because each fork keeps a fork snapshot on the namespace it was forked from. A namespace's own [collection](#collection) doesn't delete content. For example, if `main` records `pool_3s0drmj8em84yb4mnetqkz2j0x`, `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of the pool, and `main` is its first member. A file that `sandbox` uploads is stored under `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/content/`, and a revision in `main` can refer to the same object after a merge. See [Pools](../design/pools.md).
+
+### Pool record
+
+A control object that records the creation of one [pool](#pool), stored at `pools/{pool_id}/pool.json`. A create call that generates a pool writes the pool record once, with put-if-absent, after the namespace's hint and before manifest 1, so every pool that a manifest records has a pool record. The record contains the pool's ID (`pool_id`), the namespace that was created with the pool, which is the pool's first member (`first_member_namespace_id`), and the create call's request clock (`created_at_ms`). A fork joins its source's pool and writes no pool record. If the create call fails, or loses to another create call for the same namespace ID, the pool has no members, and the pool's collection deletes the pool record once the record's creation grace (the [grace window](#grace-window) after `created_at_ms`) has passed. A pool whose first member is retired keeps its pool record, so a later collection of the pool can find that the pool has no members. For example, creating `main` with the pool `pool_3s0drmj8em84yb4mnetqkz2j0x` writes `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/pool.json` with `first_member_namespace_id` `main`. See [Pools and pool records](../design/pools.md#pools-and-pool-records) and [Creating a namespace](format.md#91-creating-a-namespace).
 
 ### Merge
 
-A commit that applies a fork's commits to another namespace in its [fork family](#fork-family), so that the changes made in the fork appear there as one commit. The other namespace is usually the one that the fork was forked from, and for a [rebase](#rebase), it's a new fork of that namespace. The commit's record includes a "merge record", which identifies the fork and the range of the fork's commits that the merge applied: the commits above `source_after_seq`, through `source_through_seq`. For example, if `sandbox` was forked from `main` at sequence 100 and then committed sequences 101 through 120, a merge of those commits is one commit on `main` whose merge record is `sandbox`, 100, and 120. The change feed reports the merge record with the commit, and a merge's [semantic fingerprint](#semantic-fingerprint) covers its merge record in place of its operations. Rewriting metadata runs during [compaction](#compaction) isn't called a merge. See [Merges](format.md#merges), [Commit identity and retries](format.md#65-commit-identity-and-retries), and [WAL records](format.md#a5-wal-records).
+A commit that applies a fork's commits to another namespace in its [pool](#pool), so that the changes made in the fork appear there as one commit. The other namespace is usually the one that the fork was forked from, and for a [rebase](#rebase), it's a new fork of that namespace. The commit's record includes a "merge record", which identifies the fork and the range of the fork's commits that the merge applied: the commits above `source_after_seq`, through `source_through_seq`. For example, if `sandbox` was forked from `main` at sequence 100 and then committed sequences 101 through 120, a merge of those commits is one commit on `main` whose merge record is `sandbox`, 100, and 120. The change feed reports the merge record with the commit, and a merge's [semantic fingerprint](#semantic-fingerprint) covers its merge record in place of its operations. Rewriting metadata runs during [compaction](#compaction) isn't called a merge. See [Merges](format.md#merges), [Commit identity and retries](format.md#65-commit-identity-and-retries), and [WAL records](format.md#a5-wal-records).
 
 ### Merge index
 
@@ -285,7 +297,7 @@ A replay of a fork's unmerged commits onto a new fork of the namespace that the 
 
 ### Writer position
 
-The head that a writer session plans its next commit against, together with the manifest that head was read against. The session's process keeps the writer position in memory, and reads in that process start from it instead of from a cached view, so they send no WAL probe. The process moves the position to each commit before it acknowledges the commit, and to each manifest it publishes itself. For example, after the session commits sequence 43 above manifest 5, an `eventual` `stat` in the same process reads at sequence 43 against manifest 5 without sending a request. The session's manifest check finds a manifest published above the position's. The position moves onto one with the session's writer epoch, and a new writer's claim drops it. A `strong` read waits for the check, and an `eventual` read waits for it once the read's maximum staleness has passed since the position's last check. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The head that a writer session plans its next commit against, together with the manifest that head was read against. The session's process keeps the writer position in memory, and reads in that process start from it instead of from a cached view, so they send no WAL probe. Another writer has to publish a claim manifest before it can commit, and the session's manifest check finds that claim. A [floor object](#floor-object) from another process changes only the [retention floor](#retention-floor), so reads can use the earlier floor until the session's next discovery, or until the manifest check finds the fold that covers the floor object. The process moves the position to each commit before it acknowledges the commit, and to each manifest it publishes itself. For example, after the session commits sequence 43 above manifest 5, an `eventual` `stat` in the same process reads at sequence 43 against manifest 5 without sending a request. The session's manifest check finds a manifest published above the position's. The position moves onto a manifest with the session's writer epoch, unless that manifest folds past the position's tip (its `folded_wal_no` is above the tip, because its fold covered a WAL object that the session hasn't read). A new writer's claim, or a manifest that folds past the tip, drops the position, and the session runs discovery. A `strong` read waits for the check, and an `eventual` read waits for it once the read's maximum staleness has passed since the position's last check. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Consistency
 
@@ -315,7 +327,7 @@ A process's claim on the right to commit to a namespace, identified by its write
 
 ### Writer epoch
 
-A counter in the manifest that increases each time a new writer session takes over. A writer session with an older epoch can't commit once the newer session's fence is written.
+A counter in the manifest that increases each time a new writer session takes over. A writer session with an older epoch can't commit once the newer session's fence is written. A [floor object](#floor-object) copies the writer epoch of the manifest that its creator's discovery loaded, so creating a floor object doesn't change the epoch or fence a writer.
 
 ### Epoch claim
 
@@ -323,7 +335,11 @@ A manifest publication that increases the writer epoch or the compactor epoch by
 
 ### Fence
 
-A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit.
+A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit. (A [floor object](#floor-object) is also a WAL object with no commits, but it keeps the writer epoch of the current manifest, so it fences no writer.)
+
+### Floor object
+
+A WAL object with no commits that records a new [retention floor](#retention-floor) in its `retention_floor_seq`. A retention advance creates a floor object at the next WAL number, so the WAL orders the advance against every restore. Any process can create a floor object without claiming the [writer epoch](#writer-epoch), and a floor object doesn't fence the namespace's [writer session](#writer-session). A writer whose commit collides with a floor object runs discovery and validates its batch again against the new floor. For example, if the WAL tip is WAL object 30 at sequence 140, an advance of the floor to 20 creates WAL object 31 with `head_seq` 140, no commits, and `retention_floor_seq` 20, and the fold that covers WAL object 31 publishes a manifest with floor 20. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Compactor epoch
 
@@ -331,11 +347,11 @@ A counter in the manifest, like the writer epoch, that stops a compaction from p
 
 ### Maintainer
 
-The role that folds a namespace's WAL, compacts its metadata, publishes an extension's entry, and collects its garbage. The other role is the writer, which commits, deletes the namespace, and advances its [retention floor](#retention-floor), under the [writer epoch](#writer-epoch). Any process can be a namespace's maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold or an extension's publication publishes under the current compactor epoch without a claim. A process without a writer session that advances the floor acquires the writer epoch first, with a claim and a fence (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). See [Maintenance roles](../design/maintenance-roles.md) for the two roles and [Publishing a manifest](format.md#72-publishing-a-manifest).
+The role that folds a namespace's WAL, compacts its metadata, publishes an extension's entry, advances its [retention floor](#retention-floor), and collects its garbage. The other role is the writer, which commits and deletes the namespace, under the [writer epoch](#writer-epoch). Any process can be a namespace's maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold or an extension's publication publishes under the current compactor epoch without a claim. A retention advance creates a [floor object](#floor-object) with the current writer epoch, copied from the manifest without a claim (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). See [Maintenance roles](../design/maintenance-roles.md) for the two roles and [Publishing a manifest](format.md#72-publishing-a-manifest).
 
 ### Job
 
-One maintenance API request (`POST .../runs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, a `gc` job runs one [collection](#collection), and a `recover_administrator` job grants a principal `admin` on the root again. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
+One maintenance API request (`POST .../jobs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, a `gc` job runs one [collection](#collection) of the namespace, or of a [pool](#pool) on the pool's route, and a `recover_administrator` job grants a principal `admin` on the root again. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
 
 ### Step
 
@@ -343,11 +359,11 @@ One bounded unit of maintenance work on one namespace. A metadata step folds the
 
 ### Sweep
 
-The reference server's scheduler listing every namespace in the store, including deleted ones, and running each listed namespace's due steps, including a collection and a retention advance under the namespace's [retention window](#retention-window). A sweep runs when the server starts, and then on the sweep interval (24 hours by default). A namespace that nobody writes to through the server is maintained only by sweeps. See [Deleting, retaining, and reclaiming](api.md#deleting-retaining-and-reclaiming).
+The reference server's scheduler listing every namespace in the store, including deleted ones, and running each listed namespace's due steps, including a collection and a retention advance under the namespace's [retention window](#retention-window), and then listing every [pool](#pool) in the store and running a collection of each pool. A sweep runs when the server starts, and then on the sweep interval (24 hours by default). A namespace that nobody writes to through the server is maintained only by sweeps, and the server collects a pool's content objects, upload records, and temporary objects only in sweeps. See [Deleting, retaining, and reclaiming](api.md#deleting-retaining-and-reclaiming).
 
 ### Compare-and-swap (CAS)
 
-A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap to raise the hint and to extend a user pin's expiry.
+A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap to raise the hint and to extend a user snapshot's expiry.
 
 ### Publication budget
 
@@ -357,7 +373,7 @@ The longest time allowed between the state a publisher planned against and the s
 
 ### Collection
 
-One garbage collection call over a namespace. A collection reads the current manifest and the other roots (everything that's still referenced), lists each object family, and deletes the unreferenced objects that are older than the [grace window](#grace-window). It's complete and stateless: it stores no progress, so after a failure the next collection starts over. On a [family root](#family-root), a collection also reads the roots of every member of the fork family and deletes the family's unreferenced content. See [One complete collection](format.md#111-one-complete-collection).
+One garbage collection call over a namespace or a [pool](#pool). A collection reads the roots (everything that's still referenced), lists each kind of object that it covers, and deletes the unreferenced objects that are older than the [grace window](#grace-window). It's complete and stateless: it stores no progress, so after a failure the next collection starts over. A namespace's collection reads the namespace's current manifest and snapshots, and covers the namespace's manifests, WAL objects, metadata segments, extension segments, and snapshots. A pool's collection reads the roots of every member of the pool, and covers the pool's content objects, upload records, and temporary objects. See [One complete collection](format.md#111-one-complete-collection).
 
 ### Grace window
 
@@ -365,7 +381,7 @@ How old an unreferenced manifest, WAL object, content object, or temporary objec
 
 ### Namespace retirement
 
-The point at which garbage collection deletes a deleted fork's pin on its source, or deletes the objects under a deleted family root's content prefix. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
+The point at which a deleted namespace stops being a member of its [pool](#pool). A deleted namespace is retired once its retirement grace has passed and no snapshots on it remain. When the namespace is a fork, its collection retires it by deleting its fork snapshot on its source. A namespace created without a source has no fork snapshot, so its retirement deletes nothing, and no retirement deletes content. After the retirement, the namespace's content references don't protect the pool's content. See [Retirement](format.md#95-retirement) and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone).
 
 ## API
 
@@ -383,4 +399,4 @@ The document a deployment returns from `GET /v0/capabilities`. It lists the depl
 
 ### Extension
 
-An optional subsystem that keeps state derived from a namespace's committed metadata and content, such as the grep index. An extension's state is an entry in the namespace's manifest, under the extension's name, and the entry lists the extension's segments, which are stored under `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/`. Every manifest publication copies the entry forward (a tombstone copies it with its runs emptied), a fork's first manifest copies its source's entry, a pin keeps the segments that its manifest lists, and garbage collection collects the segments that no kept manifest lists. See [Extensions](format.md#124-extensions).
+An optional subsystem that keeps state derived from a namespace's committed metadata and content, such as the grep index. An extension's state is an entry in the namespace's manifest, under the extension's name, and the entry lists the extension's segments, which are stored under `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/`. Every manifest publication copies the entry forward (a tombstone copies it with its runs emptied), a fork's first manifest copies its source's entry, a snapshot keeps the segments that its manifest lists, and garbage collection collects the segments that no kept manifest lists. See [Extensions](format.md#124-extensions).

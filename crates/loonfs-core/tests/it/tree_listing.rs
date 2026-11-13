@@ -3,7 +3,7 @@
 //! costs.
 
 use crate::common::{
-    create_checkpoint, default_writer, namespace_engine, read_context, submit_commit,
+    create_snapshot, default_writer, namespace_engine, read_context, submit_commit,
     submit_operation,
 };
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
@@ -350,7 +350,7 @@ async fn a_recursive_page_costs_the_store_requests_of_one_directory_page() {
     }
     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     seed(&store, &namespace_id, &paths).await;
-    create_checkpoint(&store, &namespace_id, &default_writer())
+    create_snapshot(&store, &namespace_id, &default_writer())
         .await
         .expect("fold the tree into segments");
 

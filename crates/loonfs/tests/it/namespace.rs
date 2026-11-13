@@ -3,9 +3,13 @@
 
 use crate::common::{data_wal_put_for, expect_code, writer_epoch};
 use loonfs::test_support::writer;
-use loonfs::{ErrorCode, LoonFs, NamespaceId, NamespaceSessionStatus, SharedObjectStore, Writable};
+use loonfs::{
+    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, NamespaceSessionStatus, RuntimeConfig,
+    SharedObjectStore, Writable,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, RecordingStore};
+use std::num::NonZeroU64;
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
@@ -14,6 +18,52 @@ async fn create_namespace(writer: &LoonFs<Writable>, namespace_id: &NamespaceId)
         .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
+}
+
+#[tokio::test]
+async fn a_namespace_created_without_a_window_has_the_runtimes_default_window() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let default_window_ms = NonZeroU64::new(30 * 86_400_000);
+    let own_window_ms = NonZeroU64::new(86_400_000);
+    let writer = LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("default-window"))
+        .config(RuntimeConfig {
+            default_retention_window_ms: default_window_ms,
+            ..RuntimeConfig::default()
+        })
+        .build()
+        .await
+        .expect("build writer");
+    for (name, requested, expected) in [
+        ("defaulted", None, default_window_ms),
+        ("own", own_window_ms, own_window_ms),
+    ] {
+        let namespace_id = NamespaceId::parse(name).expect("namespace id");
+        writer
+            .create_namespace_with_options(
+                &namespace_id,
+                &loonfs_test_support::test_actor(),
+                &CreateNamespaceOptions {
+                    retention_window_ms: requested,
+                    ..CreateNamespaceOptions::default()
+                },
+            )
+            .await
+            .expect("create namespace");
+        let metadata = writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace")
+            .metadata()
+            .await
+            .expect("namespace metadata");
+        assert_eq!(
+            metadata.retention_window_ms,
+            expected.map(NonZeroU64::get),
+            "{name}"
+        );
+    }
 }
 
 #[tokio::test]

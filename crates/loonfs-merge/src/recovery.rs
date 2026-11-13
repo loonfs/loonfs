@@ -6,7 +6,7 @@ use crate::{
     Mechanics, MergeError, MergeFailure, MergeSession, MergeSessionOptions, MergeSessionState,
     MergeSessionStatus, PendingCommit, Resolver, Result, MAX_NEW_FORKS,
 };
-use loonfs_types::{ActorId, CheckpointOwner, NamespaceId, NextMergeRangeOutcome};
+use loonfs_types::{ActorId, NamespaceId, NextMergeRangeOutcome, SnapshotRecordOwner};
 
 /// A fork of the session's namespace that a rebase created.
 struct RebasedFork {
@@ -23,7 +23,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     ///
     /// The session's new forks are the forks of `namespace_id` whose fork
     /// basis records a rebase of the original fork or of another new fork,
-    /// which the namespace's checkpoint inventory lists. Recovery follows
+    /// which the namespace's snapshot inventory lists. Recovery follows
     /// them from the original fork. A new fork that merged into the
     /// namespace, or that was itself rebased, is one that the lost session
     /// continued with, so the session merges the last fork that it continued
@@ -76,7 +76,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                             merge.is_some()
                         }
                         // A merge of this new fork would return
-                        // `rebootstrap_required`, so recovery doesn't
+                        // `below_retention_floor`, so recovery doesn't
                         // continue with it.
                         NextMergeRangeOutcome::ForkPointBelowFloor { .. } => false,
                         NextMergeRangeOutcome::Unknown => {
@@ -143,22 +143,22 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
 /// Returns the forks of `namespace_id` that rebases of `original_fork_id`,
 /// or of another fork that the result lists, created.
 ///
-/// The search reads the namespace's checkpoint inventory once, and the
-/// namespace of each fork pin's target once. A fork's pin can come before
-/// the pin of the fork that it was rebased from, so the search follows the
-/// rebases from the original fork only after it read every pin.
+/// The search reads the namespace's snapshot inventory once, and the
+/// namespace of each fork snapshot's target once. A fork's snapshot can come before
+/// the snapshot of the fork that it was rebased from, so the search follows the
+/// rebases from the original fork only after it read every snapshot.
 async fn find_rebased_forks(
     mechanics: &impl Mechanics,
     namespace_id: &NamespaceId,
     original_fork_id: &NamespaceId,
 ) -> Result<Vec<RebasedFork>> {
     let mut rebased: Vec<RebasedFork> = Vec::new();
-    let mut pages = mechanics.list_checkpoints(namespace_id);
+    let mut pages = mechanics.list_snapshot_records(namespace_id);
     while let Some(page) = pages.next().await {
-        for checkpoint in page?.checkpoints {
-            let CheckpointOwner::Fork {
+        for snapshot in page?.snapshots {
+            let SnapshotRecordOwner::Fork {
                 target_namespace_id,
-            } = checkpoint.owner
+            } = snapshot.owner
             else {
                 continue;
             };

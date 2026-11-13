@@ -74,10 +74,11 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
     let temp_dir = tempdir().expect("tempdir");
     let (writer, maintenance, recorder) = manual_deployment(temp_dir.path()).await;
     let namespace = namespace_id("maintenance-gc-metrics");
-    writer
+    let pool_id = writer
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
-        .expect("create namespace");
+        .expect("create namespace")
+        .pool_id;
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     namespace_writer
         .put_file("/live.txt", b"live", &loonfs_test_support::test_actor())
@@ -100,26 +101,16 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
         gc.retained.total(),
         "the collection records its retained count exactly once"
     );
-    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
+    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
     for (category, reclaimed) in [
         ("deleted_wal_objects", gc.deleted.wal_objects),
         ("deleted_metadata_segments", gc.deleted.metadata_segments),
         ("deleted_extension_segments", gc.deleted.extension_segments),
         ("deleted_manifests", gc.deleted.manifests),
+        ("deleted_fork_snapshots", gc.deleted_snapshots_by_owner.fork),
         (
-            "deleted_fork_checkpoints",
-            gc.deleted_checkpoints_by_owner.fork,
-        ),
-        (
-            "deleted_expired_checkpoints",
-            gc.deleted_checkpoints_by_owner.user,
-        ),
-        ("deleted_upload_sessions", gc.deleted.upload_sessions),
-        ("deleted_content_objects", gc.deleted.content_objects),
-        ("deleted_temporary_objects", gc.deleted.temporary_objects),
-        (
-            "deleted_retired_content_objects",
-            gc.deleted.retired_content_objects,
+            "deleted_expired_snapshots",
+            gc.deleted_snapshots_by_owner.user,
         ),
     ] {
         assert_eq!(
@@ -128,6 +119,37 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
             "the collection records `{category}` exactly once"
         );
     }
+
+    let pool_gc = maintenance
+        .gc_pool(&pool_id)
+        .await
+        .expect("run the pool's collection");
+    assert_eq!(pool_gc.pool_id, pool_id);
+    let snapshot = recorder.snapshot();
+    assert_eq!(
+        counter(&snapshot, "loonfs.gc.retained", &[]),
+        gc.retained.total() + pool_gc.retained.total(),
+        "the pool's collection records its retained count exactly once"
+    );
+    for (category, reclaimed) in [
+        ("deleted_upload_sessions", pool_gc.deleted.upload_sessions),
+        ("deleted_content_objects", pool_gc.deleted.content_objects),
+        (
+            "deleted_temporary_objects",
+            pool_gc.deleted.temporary_objects,
+        ),
+    ] {
+        assert_eq!(
+            counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)],),
+            reclaimed,
+            "the pool's collection records `{category}` exactly once"
+        );
+    }
+    let missing = maintenance
+        .gc_pool(&crate::PoolId::generate())
+        .await
+        .expect_err("a pool without a record");
+    assert_eq!(missing.code(), crate::ErrorCode::PoolNotFound);
 }
 
 /// Writes one file and folds the tail, so each call leaves one more delta run.
@@ -758,18 +780,18 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 
     // A load of a live namespace sends a HEAD request for the missing
     // manifest after the current one in its discovery, and again in its
-    // check of the manifest's successor. A deleted namespace that wasn't
-    // forked is still a family root, so its collection lists its upload sessions
-    // as roots, as a live namespace's collection does.
+    // check of the manifest's successor. A collection lists each of its five
+    // families once, the snapshots included, and lists nothing under its
+    // pool's prefix, whether the namespace is live or deleted.
     let heads = 2;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [4, heads, 0, 0], None, [4, heads, 9, 0], None),
-        (&claimed, [4, heads, 0, 0], None, [4, heads, 9, 0], None),
+        (&idle, [4, heads, 0, 0], None, [4, heads, 5, 0], None),
+        (&claimed, [4, heads, 0, 0], None, [4, heads, 5, 0], None),
         (
             &retired,
             [2, 0, 0, 0],
             Some(crate::ErrorCode::NamespaceDeleted),
-            [2, 0, 9, 0],
+            [2, 0, 5, 0],
             None,
         ),
         (
@@ -838,7 +860,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 
 #[tokio::test]
 async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothing() {
-    use crate::{AdvanceRetentionFloorOptions, ChangeSeq, RetentionTarget};
+    use crate::{AdvanceRetentionFloorOptions, CommitSeq, RetentionTarget};
     use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 
     let directory = tempdir().expect("tempdir");
@@ -877,27 +899,27 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
     let maintenance = || maintenance_past_the_grace_window(store.clone());
     for (floor, advances) in [
         (
-            ChangeSeq(1),
+            CommitSeq(1),
             [
-                (RetentionTarget::Seq(ChangeSeq(0)), 3),
-                (RetentionTarget::Seq(ChangeSeq(1)), 3),
+                (RetentionTarget::Seq(CommitSeq(0)), 4),
+                (RetentionTarget::Seq(CommitSeq(1)), 4),
                 // The scan reads commit 2 from the commits segment, and
                 // commit 2 is later than the cutoff.
-                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 4),
+                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 5),
             ],
         ),
         (
-            ChangeSeq(2),
+            CommitSeq(2),
             [
-                (RetentionTarget::Head, 3),
-                (RetentionTarget::Seq(ChangeSeq(u64::MAX)), 3),
+                (RetentionTarget::Head, 4),
+                (RetentionTarget::Seq(CommitSeq(u64::MAX)), 4),
                 // No folded commit is above the head, so the scan reads no
                 // segment.
                 (
                     RetentionTarget::Cutoff {
                         cutoff_at_ms: u64::MAX,
                     },
-                    3,
+                    4,
                 ),
             ],
         ),
@@ -951,24 +973,25 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 .count();
             assert_eq!(
                 (loads, operations.len() - heads, heads),
-                (1, gets, 1),
-                "{target:?} loads the current manifest once (the hint, the manifest, a HEAD \
-                 request for the missing manifest after it, and the hint again): \
-                 {operations:?}"
+                (1, gets, 2),
+                "{target:?} loads the current manifest once and plans from the view after it \
+                 (the hint, the manifest, a HEAD request for the missing manifest after it, \
+                 the hint again, a GET of the missing WAL number after the manifest, and the \
+                 manifest HEAD again): {operations:?}"
             );
         }
     }
 }
 
 #[tokio::test]
-async fn a_repeated_retirement_collection_lists_once_and_deletes_nothing() {
+async fn a_repeated_collection_of_a_pool_without_members_lists_once_and_deletes_nothing() {
     use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 
     let directory = tempdir().expect("directory");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix("namespaces/retired/content/"),
+        KeyPredicate::new(|key| key.starts_with("pools/") && key.contains("/content/")),
     ));
     let namespace_id = namespace_id("retired");
     let writer = LoonFs::builder_with_store(store.clone())
@@ -976,15 +999,14 @@ async fn a_repeated_retirement_collection_lists_once_and_deletes_nothing() {
         .build()
         .await
         .expect("writer");
-    writer
+    let pool_id = writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
-        .expect("namespace");
+        .expect("namespace")
+        .pool_id;
     for _ in 0..3 {
-        let key = loonfs_objectstore::keys::content_blob(
-            &namespace_id,
-            &loonfs_types::ContentId::generate(),
-        );
+        let key =
+            loonfs_objectstore::keys::content_blob(&pool_id, &loonfs_types::ContentId::generate());
         store
             .put_if_absent(&key, bytes::Bytes::from_static(b"content"))
             .await
@@ -1000,12 +1022,20 @@ async fn a_repeated_retirement_collection_lists_once_and_deletes_nothing() {
         .grace_window_ms
         .max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
         + GC_SAFETY_MARGIN_MS;
+    loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+        .gc(&crate::GcOptions::default(), &context.clock())
+        .await
+        .expect("retire the namespace");
+    // The content's provider ages are real times, so the pool's collections
+    // run far later than the content was written.
+    context.now_ms = u64::MAX / 4;
     store.reset();
-    let first = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+    let pool = loonfs_core::test_support::pool_store(store.as_ref(), &pool_id);
+    let first = pool
         .gc(None, &crate::GcOptions::default(), &context.clock())
         .await
         .expect("first collection");
-    assert_eq!(first.deleted.retired_content_objects, 3);
+    assert_eq!(first.deleted.content_objects, 3);
     assert_eq!(
         store.counts(),
         StoreCounts {
@@ -1015,13 +1045,13 @@ async fn a_repeated_retirement_collection_lists_once_and_deletes_nothing() {
         }
     );
     store.reset();
-    let repeated = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+    let repeated = pool
         .gc(None, &crate::GcOptions::default(), &context.clock())
         .await
         .expect("repeat collection");
     assert_eq!(
         repeated.deleted,
-        loonfs_types::DeletedObjectCounts::default()
+        loonfs_types::PoolDeletedObjectCounts::default()
     );
     assert_eq!(
         store.counts(),
@@ -1315,7 +1345,7 @@ async fn a_read_after_an_extension_publication_sends_no_request() {
         .await
         .expect("load the basis");
     let published = maintenance
-        .publish_extension(&basis, &name, |base| (entry.clone(), base))
+        .publish_extension(&basis, &name, entry.clone())
         .await
         .expect("publish the entry");
     let loonfs_core::ExtensionPublication::Published(published) = published else {

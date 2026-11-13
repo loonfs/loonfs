@@ -38,7 +38,7 @@ struct ManyRunFixture {
     store: ConcurrencyWatchStore<LocalFsStore>,
     namespace_id: NamespaceId,
     /// The head of the base run and of each delta run, oldest first.
-    run_heads: Vec<ChangeSeq>,
+    run_heads: Vec<CommitSeq>,
     docs: InodeId,
     /// Every name ever bound under `/docs`, and one that never was.
     names: Vec<NameKey>,
@@ -49,7 +49,7 @@ struct ManyRunFixture {
 }
 
 impl ManyRunFixture {
-    fn head(&self) -> ChangeSeq {
+    fn head(&self) -> CommitSeq {
         *self.run_heads.last().expect("the fixture folds three runs")
     }
 
@@ -80,7 +80,7 @@ impl ManyRunFixture {
     }
 }
 
-async fn head_seq<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> ChangeSeq {
+async fn head_seq<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> CommitSeq {
     crate::test_support::namespace_store(store, namespace_id)
         .load_read_state()
         .await
@@ -186,7 +186,7 @@ async fn many_run_fixture() -> ManyRunFixture {
         .expect("write the base files");
     let mut inodes = inodes_at(&store, &namespace_id, &base_paths).await;
     append_whole_state_revisions(&store, &namespace_id, &inodes[..3], 1).await;
-    checkpoint_then_compact(
+    snapshot_then_compact(
         &store,
         &namespace_id,
         &context,
@@ -207,7 +207,7 @@ async fn many_run_fixture() -> ManyRunFixture {
             .expect("delete a base file");
     }
     append_whole_state_revisions(&store, &namespace_id, &inodes[1..3], 2).await;
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the middle delta run");
     run_heads.push(head_seq(&store, &namespace_id).await);
@@ -222,7 +222,7 @@ async fn many_run_fixture() -> ManyRunFixture {
         .await
         .expect("delete the trash directory");
     append_whole_state_revisions(&store, &namespace_id, &inodes[2..3], 3).await;
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the newest delta run");
     run_heads.push(head_seq(&store, &namespace_id).await);
@@ -260,7 +260,7 @@ async fn many_run_fixture() -> ManyRunFixture {
 fn newest_revision(
     combined: &MetadataState,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<RevisionRecord> {
     combined
         .revisions()
@@ -273,7 +273,7 @@ fn newest_revision(
 fn newest_attributes(
     combined: &MetadataState,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<AttributesRevisionRecord> {
     combined
         .attributes_revisions()
@@ -292,7 +292,7 @@ fn newest_attributes(
 fn newest_access(
     combined: &MetadataState,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<AccessRevisionRecord> {
     combined
         .access_revisions()
@@ -483,10 +483,37 @@ struct FalsePositiveKeys {
     plain_revision: InodeId,
 }
 
+/// The fixtures that the search for false positive keys builds before it
+/// gives up.
+///
+/// The 512 fillers of one fixture have a binding and a revision that exactly
+/// one delta filter admits in about 46% of fixtures (115 of 250 measured),
+/// because the delta segments have a few keys each. So 48 fixtures have none
+/// in about one run in 10^13, and in fewer than one run in 10^10 at the
+/// rate's 95% upper bound.
+const FALSE_POSITIVE_FIXTURES: usize = 48;
+
+/// Builds fixtures until the fillers of one have false positive keys, and
+/// returns that fixture with its keys.
+async fn fixture_with_false_positive_keys() -> (ManyRunFixture, FalsePositiveKeys) {
+    for _ in 0..FALSE_POSITIVE_FIXTURES {
+        let fixture = many_run_fixture().await;
+        let (verified, _) = fixture.load(None).await;
+        let keys = false_positive_keys(&fixture, &verified).await;
+        drop(verified);
+        if let Some(keys) = keys {
+            return (fixture, keys);
+        }
+    }
+    panic!("no fixture has a filler that exactly one delta filter admits");
+}
+
+/// The false positive keys among `fixture`'s fillers, or `None` when a family
+/// has no filler that exactly one delta filter admits.
 async fn false_positive_keys(
     fixture: &ManyRunFixture,
     verified: &scan::VerifiedMetadataSegments<'_, ConcurrencyWatchStore<LocalFsStore>>,
-) -> FalsePositiveKeys {
+) -> Option<FalsePositiveKeys> {
     let (mut bindings, mut revisions) = ([None, None], [None, None]);
     for (name, inode_id) in &fixture.fillers {
         let admitting = delta_segments_admitting(
@@ -513,17 +540,17 @@ async fn false_positive_keys(
         }
     }
     let [Some(binding), Some(plain_binding)] = bindings else {
-        panic!("some filler names are admitted by a delta filter and some aren't");
+        return None;
     };
     let [Some(revision), Some(plain_revision)] = revisions else {
-        panic!("some filler inodes are admitted by a delta filter and some aren't");
+        return None;
     };
-    FalsePositiveKeys {
+    Some(FalsePositiveKeys {
         binding,
         plain_binding,
         revision,
         plain_revision,
-    }
+    })
 }
 
 /// The segment GETs that a cold lookup of `name`'s slot and of `inode_id`'s
@@ -558,10 +585,9 @@ async fn cold_lookup_gets(
 /// round trip) than a lookup that no newer filter admits.
 #[tokio::test]
 async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row() {
-    let fixture = many_run_fixture().await;
+    let (fixture, keys) = fixture_with_false_positive_keys().await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
     let (verified, combined) = fixture.load(Some(&cache)).await;
-    let keys = false_positive_keys(&fixture, &verified).await;
     let (docs, head) = (fixture.docs, fixture.head());
 
     let view = MetadataView::over_manifest_segments(&verified, head);
@@ -620,7 +646,7 @@ async fn hot_key_fixture<S: ObjectStore + ?Sized>(
     let inodes = inodes_at(store, namespace_id, &["/docs".to_owned(), paths[0].clone()]).await;
     let (docs, hot) = (inodes[0], inodes[1]);
     append_whole_state_revisions(store, namespace_id, &[hot], 1).await;
-    checkpoint_then_compact(store, namespace_id, &context, MetadataRunPolicy::default()).await;
+    snapshot_then_compact(store, namespace_id, &context, MetadataRunPolicy::default()).await;
     for run in 2..=HOT_KEY_RUNS {
         // Names at both ends of the directory keep each run's binding range
         // across the slot, so only the filters can rule a run out.
@@ -638,7 +664,7 @@ async fn hot_key_fixture<S: ObjectStore + ?Sized>(
             .await
             .expect("bind the slot to a new inode");
         append_whole_state_revisions(store, namespace_id, &[hot], run).await;
-        create_checkpoint(store, namespace_id, &context)
+        create_snapshot(store, namespace_id, &context)
             .await
             .expect("fold a delta run");
     }

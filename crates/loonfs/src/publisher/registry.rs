@@ -7,14 +7,15 @@ use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
-    AdvanceRetentionResponse, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error,
-    ErrorCode, Result, SharedObjectStore, WriterState,
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result,
+    SharedObjectStore, WriterState,
 };
 use futures::future::BoxFuture;
+use loonfs_core::control::LoadedManifest;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
-use loonfs_core::{Phase, PublicationReport, PublishedManifest};
+use loonfs_core::{FloorObjectReport, Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_types::{CommitSeq, ManifestNo, NamespaceId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -38,8 +39,9 @@ pub enum NamespaceSessionStatus {
     /// Another writer acquired a later epoch. Mutations fail with
     /// `writer_fenced` for the rest of the session.
     Fenced,
-    /// The session admits no more work. It was closed, its namespace was
-    /// deleted, or the runtime is shutting down.
+    /// The session is finished. It was closed, its namespace was deleted
+    /// through it, its last publish found its namespace deleted or missing,
+    /// or the runtime is shutting down.
     Closed,
 }
 
@@ -108,10 +110,19 @@ pub(crate) struct NamespaceSession {
     pub(super) publisher: NamespacePublisher,
 }
 
-/// The merge slot that a merge keeps from before its plan until its commit
-/// settles, so the merge allowance covers the merge's planning and its
-/// publication.
-pub(crate) struct MergeSlot(Arc<AdmissionPermit>);
+/// A merge's reservation of the merge allowance, which the merge keeps from
+/// before its plan until its commit settles, so the allowance covers the
+/// merge's planning and its publication. The reservation grows while the
+/// merge plans and doesn't shrink.
+pub(crate) struct MergeReservation(Arc<AdmissionPermit>);
+
+impl MergeReservation {
+    /// Returns the merge allowance with this reservation, which the merge
+    /// planner checks and grows.
+    pub(crate) fn allowance(&self) -> loonfs_core::MergeAllowance {
+        self.0.merge_allowance()
+    }
+}
 
 impl Drop for NamespaceSession {
     fn drop(&mut self) {
@@ -130,28 +141,22 @@ impl NamespaceSession {
         self.publisher.submit_candidate(candidate).await
     }
 
-    /// Takes the merge slot for a merge, before the merge is planned.
-    /// Another merge, into any namespace that shares the execution budget,
-    /// including a retry of this merge, gets `commit_queue_full` until the
-    /// slot is dropped.
-    pub(crate) fn acquire_merge_slot(&self) -> Result<MergeSlot> {
-        Ok(MergeSlot(self.publisher.acquire_merge_slot()?))
+    /// Reserves a merge's share of the merge allowance, before the merge is
+    /// planned. When the reservations of other merges, into any namespace
+    /// that shares the execution budget, leave no room, the merge gets
+    /// `server_busy`.
+    pub(crate) fn reserve_merge(&self) -> Result<MergeReservation> {
+        Ok(MergeReservation(self.publisher.reserve_merge()?))
     }
 
-    /// Submits a merge under `slot`. Admitted work continues if the caller is
-    /// cancelled.
+    /// Submits a merge under `reservation`. Admitted work continues if the
+    /// caller is cancelled.
     pub(crate) async fn submit_merge(
         &self,
         candidate: CommitCandidate,
-        slot: &MergeSlot,
+        reservation: &MergeReservation,
     ) -> Result<Commit> {
-        self.publisher.submit_merge(candidate, &slot.0).await
-    }
-
-    /// Returns the merge allowance that admission checks a merge against,
-    /// which the merge planner checks as it plans.
-    pub(crate) fn merge_allowance(&self) -> loonfs_core::MergeAllowance {
-        self.publisher.merge_allowance()
+        self.publisher.submit_merge(candidate, &reservation.0).await
     }
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations
@@ -164,22 +169,11 @@ impl NamespaceSession {
         self.publisher.submit_delete(options).await
     }
 
-    /// Submits an advance of the retention floor to `target`, sequenced like
-    /// a deletion: mutations admitted before it publish first, and are
-    /// folded before the floor moves, and mutations admitted after it are
-    /// validated against the new floor.
-    pub(crate) async fn submit_retention_advance(
-        &self,
-        target: ChangeSeq,
-    ) -> Result<AdvanceRetentionResponse> {
-        self.publisher.submit_retention_advance(target).await
-    }
-
     pub(crate) fn state(&self) -> NamespaceSessionStatus {
         self.publisher.session_status()
     }
 
-    pub(crate) fn last_published_seq(&self) -> Option<ChangeSeq> {
+    pub(crate) fn last_published_seq(&self) -> Option<CommitSeq> {
         self.publisher
             .lock_state()
             .last_published
@@ -499,6 +493,25 @@ impl PublisherRegistry {
         self.shared.live_publisher(namespace_id)
     }
 
+    /// Submits an advance of the retention floor to `target`, planned from
+    /// `planned`, to the queue of the namespace's writer session in this
+    /// runtime, and returns `None` without submitting when the runtime has
+    /// no writer session for the namespace that admits work and isn't
+    /// fenced.
+    ///
+    /// The queue orders the advance like a deletion: commits admitted before
+    /// it publish first, and commits admitted after it are validated against
+    /// the new floor.
+    pub(crate) async fn submit_retention_advance(
+        &self,
+        namespace_id: &NamespaceId,
+        planned: LoadedManifest,
+        target: CommitSeq,
+    ) -> Option<Result<FloorObjectReport>> {
+        let publisher = self.live_publisher(namespace_id)?;
+        publisher.submit_retention_advance(planned, target).await
+    }
+
     /// Returns the writer sessions that this runtime's reads start from.
     pub(crate) fn head_positions(&self) -> Weak<dyn HeadPositions> {
         Arc::downgrade(&self.shared) as Weak<dyn HeadPositions>
@@ -522,6 +535,16 @@ impl PublisherRegistry {
     /// within the revalidation bound (see
     /// [`NamespacePublisher::current_position`]), or `None` when this runtime
     /// has no such position for the namespace.
+    /// Drops the position of the namespace's writer session in this
+    /// runtime, if the runtime has one, once no other task has the session's
+    /// engine locked. The session's next unit runs discovery, and a fold
+    /// without a position loads the tail from the store.
+    pub(crate) async fn drop_session_position(&self, namespace_id: &NamespaceId) {
+        if let Some(publisher) = self.live_publisher(namespace_id) {
+            publisher.change_position(PositionChange::Drop).await;
+        }
+    }
+
     pub(crate) fn current_position(&self, namespace_id: &NamespaceId) -> Option<WriterPosition> {
         self.live_publisher(namespace_id)?.current_position()
     }
@@ -624,7 +647,7 @@ pub(crate) enum NamespaceChange {
     /// dropped.
     Published(PublishedManifest),
     /// The mutation published no manifest, such as a garbage collection
-    /// or a change to a pin. The publisher keeps its position, and the
+    /// or a change to a snapshot. The publisher keeps its position, and the
     /// cached head stays confirmed, because the head didn't move.
     Unchanged,
     /// The mutation may have changed the namespace in ways this runtime

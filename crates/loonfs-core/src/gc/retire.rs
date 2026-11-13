@@ -1,68 +1,32 @@
-//! Content and source-pin cleanup for an eligible tombstone.
+//! Fork snapshot cleanup for an eligible tombstone.
 
 use super::live_set::{LiveSet, RetirementStatus};
-use super::sweep::Decision;
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::namespace::store::NamespaceStore;
-use futures::TryStreamExt;
-use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::GcResponse;
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Deletes a family root's content prefix, which stores the content of its
-    /// whole fork family, and the source pin of a fork's basis, once the
-    /// namespace is eligible for retirement. Returns whether the collection listed
-    /// the content prefix.
-    ///
-    /// A family root is retired after every other member of its family, and
-    /// a fork's content prefix stores nothing, so a fork's retirement deletes
-    /// no content.
+    /// Deletes the fork snapshot that the tombstone's fork basis refers to, once
+    /// the namespace is eligible for retirement. A namespace created without a
+    /// source has no fork snapshot, so its retirement deletes nothing.
     pub(super) async fn retire_namespace(
         &self,
         live: &LiveSet,
         report: &mut GcResponse,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if live.retirement_status() != RetirementStatus::Eligible {
-            return Ok(false);
+            return Ok(());
         }
         let tombstone = live
             .current_tombstone
             .as_ref()
             .expect("eligible namespace should have a tombstone");
-        let content_listed = tombstone.is_family_root();
-        if content_listed {
-            self.sweep_content(tombstone, report).await?;
-        }
         if let Some(basis) = &tombstone.fork_basis {
-            if self.delete_source_pin(basis).await? {
-                report.deleted_checkpoints_by_owner.fork += 1;
+            if self.delete_source_snapshot(basis).await? {
+                report.deleted_snapshots_by_owner.fork += 1;
             }
         }
-        Ok(content_listed)
-    }
-
-    async fn sweep_content(
-        &self,
-        tombstone: &NamespaceManifestPayload,
-        report: &mut GcResponse,
-    ) -> Result<()> {
-        let prefix = content_prefix(&tombstone.namespace_id);
-        let mut listed_bytes = 0;
-        let decisions = self
-            .store
-            .list_entries_from_stream(&prefix, None)
-            .map_err(|error| CoreError::store(&prefix, &error))
-            .map_ok(|entry| {
-                listed_bytes += entry.size_bytes;
-                Decision::Delete {
-                    key: entry.key,
-                    counter: |report| &mut report.deleted.retired_content_objects,
-                }
-            });
-        self.apply_decisions(decisions, report).await?;
-        report.listed_bytes += listed_bytes;
         Ok(())
     }
 }

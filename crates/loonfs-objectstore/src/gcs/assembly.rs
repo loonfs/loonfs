@@ -6,7 +6,7 @@ use crate::assembly::{
     tail_bytes, verify_expected, ResolvedSource, READ_BYTES,
 };
 use crate::keys::temporary_object;
-use crate::layout::parse_object_key;
+use crate::layout::{parse_object_key, KeyPrefix};
 use crate::object_store::invalid_request;
 use crate::presign::percent_encode_segment;
 use crate::provider_limits::PROVIDER_MULTIPART_THRESHOLD_BYTES;
@@ -16,7 +16,7 @@ use crate::{AssemblySource, ByteRange, ObjectMetadata, ObjectStoreError, Result}
 use bytes::Bytes;
 use futures::{stream, FutureExt, StreamExt};
 use http::header::CONTENT_TYPE;
-use loonfs_types::{Checksum, ChecksumAlgorithm, NamespaceId};
+use loonfs_types::{Checksum, ChecksumAlgorithm, PoolId};
 use object_store::client::HttpRequestBody;
 
 /// Most source objects one GCS compose request may list, a limit GCS sets.
@@ -27,23 +27,25 @@ const GCS_MAX_COMPOSE_SOURCES: usize = 32;
 /// The temporary objects that one assembly creates, each with the guard that
 /// deletes it if the assembly is abandoned.
 struct TemporaryObjects {
-    namespace_id: NamespaceId,
+    pool_id: PoolId,
     created: Vec<(String, AbortUploadOnDrop)>,
 }
 
 impl TemporaryObjects {
     /// Starts the temporary objects of an assembly of `key`, under the prefix
-    /// of the namespace whose prefix contains `key` (for a content object,
-    /// the family root).
+    /// of the pool whose prefix contains `key`.
     fn new(key: &str) -> Result<Self> {
-        let namespace_id = parse_object_key(key)
-            .and_then(|parsed| NamespaceId::parse(parsed.prefix_namespace_id()).ok())
+        let pool_id = parse_object_key(key)
+            .and_then(|parsed| match parsed.prefix() {
+                KeyPrefix::Pool(pool_id) => PoolId::parse(pool_id).ok(),
+                KeyPrefix::Namespace(_) => None,
+            })
             .ok_or_else(|| ObjectStoreError::InvalidKey {
                 object_key: key.to_owned(),
-                message: "an assembled object must belong to a namespace".to_owned(),
+                message: "an assembled object must belong to a pool".to_owned(),
             })?;
         Ok(Self {
-            namespace_id,
+            pool_id,
             created: Vec::new(),
         })
     }
@@ -51,7 +53,7 @@ impl TemporaryObjects {
     /// Returns the key of a new temporary object, and arms the guard that
     /// deletes the object.
     fn next_name(&mut self, signer: &GcsRequestSigner) -> String {
-        let name = temporary_object(&self.namespace_id);
+        let name = temporary_object(&self.pool_id);
         self.created
             .push((name.clone(), signer.temporary_cleanup(&name)));
         name

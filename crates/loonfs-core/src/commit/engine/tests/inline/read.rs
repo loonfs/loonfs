@@ -55,6 +55,7 @@ fn cache_key(context: &RuntimeReadContext) -> WalTailCacheKey {
         namespace_id: context.read_basis.head.namespace_id.clone(),
         manifest_no: context.read_basis.basis.manifest_no(),
         head_seq: context.read_basis.head.seq,
+        wal_no: context.read_basis.head.wal_no,
     }
 }
 
@@ -366,6 +367,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     namespace.head_and_wal_tail_cache.insert_tail(
         WalTailCacheKey {
             head_seq: newest.read_basis.head.seq,
+            wal_no: newest.read_basis.head.wal_no,
             ..cache_key(&context)
         },
         Arc::clone(&newest.tail),
@@ -408,7 +410,7 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
         b"foreign",
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let key = content_blob(&family_root_id(), &foreign.content_id);
+    let key = content_blob(&pool_id(&store).await, &foreign.content_id);
     store
         .put(
             &key,
@@ -490,7 +492,7 @@ async fn inline_checksum_failures_match_object_validation() {
         .expect("decode")
         .into_payload();
     payload.wal_no = WalNo(input.read_basis.head.wal_no.0 + 1);
-    payload.head_seq = ChangeSeq(input.read_basis.head.seq.0 + 1);
+    payload.head_seq = CommitSeq(input.read_basis.head.seq.0 + 1);
     let mut corrupt_ref = value.content_ref().clone();
     corrupt_ref.content_id = ContentId::generate();
     let record = &mut payload.records[0];
@@ -546,12 +548,13 @@ async fn inline_checksum_failures_match_object_validation() {
     assert_eq!(fold_error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
     assert_eq!(fold_error.to_string(), error.to_string());
     assert_no_writes(&store);
-    let key = content_blob(&publisher.namespace.namespace_id, &corrupt_ref.content_id);
+    let pool_id = pool_id(&store).await;
+    let key = content_blob(&pool_id, &corrupt_ref.content_id);
     store
         .put(&key, Bytes::from_static(b"wrong"), PutMode::CreateIfAbsent)
         .await
         .expect("bad object");
-    let expected = ContentLocation::whole(&family_root_id(), &corrupt_ref)
+    let expected = ContentLocation::whole(&pool_id, &corrupt_ref)
         .read_bytes(&store, None, &corrupt_ref)
         .await
         .expect_err("object mismatch");
@@ -648,7 +651,8 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
         None,
     )
     .await;
-    let key = content_blob(&namespace_id, &original.content_id);
+    let pool_id = pool_id(&store).await;
+    let key = content_blob(&pool_id, &original.content_id);
     let engine =
         NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
     let read_context = fresh_context(&store, &namespace_id).await;
@@ -730,7 +734,8 @@ async fn a_reference_older_than_its_object_reads_only_its_prefix() {
         .fold_wal()
         .await
         .expect("fold the append");
-    let key = loonfs_objectstore::keys::content_span(&namespace_id, &original.content_id, 0, 11);
+    let pool_id = pool_id(&store).await;
+    let key = loonfs_objectstore::keys::content_span(&pool_id, &original.content_id, 0, 11);
 
     store.reset();
     assert_eq!(

@@ -18,7 +18,7 @@ use loonfs_types::options::StatOptions;
 use loonfs_types::Commit;
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    AbsolutePath, CommitId, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     MetadataFamilyGroup, NamespaceId, PageRequest, RevisionNo,
 };
 use std::sync::Arc;
@@ -212,16 +212,16 @@ impl VisibilityHarness {
         .await
     }
 
-    async fn undelete(
+    async fn restore_deleted(
         &self,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         path: &str,
     ) -> Result<Commit, CoreError> {
-        self.publish_operation(FilesystemOperation::Undelete {
+        self.publish_operation(FilesystemOperation::RestoreDeleted {
             inode_id,
             deletion_seq,
-            destination: loonfs_types::options::UndeleteDestination::Path(
+            destination: loonfs_types::options::RestoreDeletedDestination::Path(
                 AbsolutePath::parse(path).expect("valid path"),
             ),
         })
@@ -280,7 +280,7 @@ impl VisibilityHarness {
     async fn assert_equivalence(
         &self,
         context: &RuntimeReadContext,
-        checkpoint: &str,
+        stage: &str,
         expected: &[ExpectedInode<'_>],
     ) {
         let inode_ids: Vec<InodeId> = expected
@@ -295,13 +295,13 @@ impl VisibilityHarness {
         assert_eq!(
             states.len(),
             expected.len(),
-            "{checkpoint}: every requested inode must be answered"
+            "{stage}: every requested inode must be answered"
         );
 
         for (expectation, state) in expected.iter().zip(states) {
             assert_eq!(
                 state.inode_id, expectation.inode_id,
-                "{checkpoint}: answers must come back in request order"
+                "{stage}: answers must come back in request order"
             );
             // The two oracles meet here: an inode is reported visible
             // exactly when the tombstone rules admit it and its bindings
@@ -315,13 +315,13 @@ impl VisibilityHarness {
             assert_eq!(
                 current_path.is_some(),
                 expectation.path.is_some(),
-                "{checkpoint}: inode {} visibility disagrees with its expected path",
+                "{stage}: inode {} visibility disagrees with its expected path",
                 expectation.inode_id
             );
             assert_eq!(
                 current_path.as_ref().map(AbsolutePath::as_str),
                 expectation.path,
-                "{checkpoint}: inode {} derived an unexpected root path",
+                "{stage}: inode {} derived an unexpected root path",
                 expectation.inode_id
             );
 
@@ -333,7 +333,7 @@ impl VisibilityHarness {
                     .expect("forward path resolution must confirm a root-reaching chain");
                 assert_eq!(
                     resolved.inode_id, expectation.inode_id,
-                    "{checkpoint}: derived path resolved to a different inode"
+                    "{stage}: derived path resolved to a different inode"
                 );
             }
         }
@@ -658,9 +658,9 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
         .await;
 
     harness
-        .undelete(source, deletion.committed_seq, "/restored-source")
+        .restore_deleted(source, deletion.committed_seq, "/restored-source")
         .await
-        .expect("undelete source root");
+        .expect("restore source root");
     harness
         .move_path("/safe/branch", "/restored-source/branch")
         .await
@@ -685,8 +685,8 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
 }
 
 #[tokio::test]
-async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
-    let harness = VisibilityHarness::new("visibility-undelete-interior").await;
+async fn a_restore_of_a_deleted_subtree_preserves_later_interior_mutations_and_nested_deletions() {
+    let harness = VisibilityHarness::new("visibility-restore-interior").await;
     harness
         .put_file(
             "/tree/branch/kept.txt",
@@ -758,14 +758,14 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
         .await;
 
     harness
-        .undelete(tree, first_deletion.committed_seq, "/restored")
+        .restore_deleted(tree, first_deletion.committed_seq, "/restored")
         .await
-        .expect("undelete mutated subtree");
+        .expect("restore mutated subtree");
     let restored_snapshot = harness.read_context().await;
     harness
         .assert_equivalence(
             &restored_snapshot,
-            "after first undelete",
+            "after first restore",
             &[
                 ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(tree, "/restored"),
@@ -780,24 +780,24 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
     harness
         .put_file(
             "/restored/branch/moved.txt",
-            b"after undelete",
+            b"after restore",
             DestinationBehavior::Replace,
         )
         .await
-        .expect("mutate interior after undelete");
+        .expect("mutate interior after restore");
     let second_deletion = harness
         .delete("/restored", DeleteDirectoryBehavior::Recursive)
         .await
         .expect("delete subtree again");
     harness
-        .undelete(tree, second_deletion.committed_seq, "/again")
+        .restore_deleted(tree, second_deletion.committed_seq, "/again")
         .await
-        .expect("undelete newer position");
+        .expect("restore newer position");
     let second_restored_snapshot = harness.read_context().await;
     harness
         .assert_equivalence(
             &second_restored_snapshot,
-            "after mutation and second undelete",
+            "after mutation and second restore",
             &[
                 ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(tree, "/again"),
@@ -916,11 +916,11 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         .assert_equivalence(&after_folds, "after eight WAL folds", &expected)
         .await;
 
-    // Every commit is now one grace window old, so the floor can reach the
+    // Every commit is now an hour old, so the floor can reach the
     // head.
     harness
         .clock
-        .advance_ms(loonfs_core::limits::GC_DEFAULT_GRACE_WINDOW_MS);
+        .advance_ms(loonfs_core::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     match order {
         MaintenanceOrder::CompactThenRetain => {
             drain_compaction(&harness, &expected, "before retention").await;
@@ -980,7 +980,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
 async fn drain_compaction(
     harness: &VisibilityHarness,
     expected: &[ExpectedInode<'_>],
-    checkpoint: &str,
+    stage: &str,
 ) {
     let mut published_units = 0usize;
     for _ in 0..16 {
@@ -1001,9 +1001,7 @@ async fn drain_compaction(
             CompactionUnitOutcome::Published { .. } => {
                 published_units += 1;
                 let context = harness.read_context().await;
-                harness
-                    .assert_equivalence(&context, checkpoint, expected)
-                    .await;
+                harness.assert_equivalence(&context, stage, expected).await;
             }
             other => panic!("a single-writer test's unit should publish, got {other:?}"),
         }

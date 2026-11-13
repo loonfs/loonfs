@@ -27,13 +27,17 @@ use crate::phase::Phase;
 use crate::segment::runs::{runs_newest_first, MetadataFamilyGroup};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{CompactorEpoch, NamespaceId};
+use loonfs_types::{CompactorEpoch, MetadataSkippedWork, NamespaceId};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
 /// How one compaction unit ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per compaction unit, moved once: indirection would buy an allocation and save nothing"
+)]
 pub enum CompactionUnitOutcome {
     /// No family group has eligible input.
     NotNeeded,
@@ -52,6 +56,8 @@ pub enum CompactionUnitOutcome {
         input_bytes: u64,
         output_bytes: u64,
         output_segments: usize,
+        /// The work that the unit skipped at a limit, each reason once.
+        skipped: Vec<MetadataSkippedWork>,
     },
     /// The caller cancelled the unit before it published.
     Cancelled,
@@ -188,6 +194,7 @@ fn log_unit_outcome(
             input_bytes,
             output_bytes,
             output_segments,
+            skipped,
             ..
         } => tracing::info!(
             namespace_id = namespace_id.as_str(),
@@ -199,6 +206,7 @@ fn log_unit_outcome(
             input_bytes,
             output_bytes,
             output_segments,
+            ?skipped,
             manifest_no = manifest.manifest.manifest_no.0,
             "metadata compaction unit published"
         ),

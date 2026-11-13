@@ -40,7 +40,7 @@ const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/max_staleness_ms", "/s
         path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
-        description = "Returns ordered, signed object ranges that cover exactly `[start_offset, size_bytes)` of the selected revision. Each range includes its signed headers in `access.headers`, and the client sends them unchanged. The client checks each range's length and the complete revision's checksum. To resume a download, a client asks for a new grant from its current offset. A deployment that can't presign URLs returns 501 `not_supported`. The proxied `GET /filesystem/content` route is still available, up to the `download.service_proxied.max_content_bytes` limit.",
+        description = "Returns ordered, signed object ranges that cover exactly `[start_offset, size_bytes)` of the selected revision. Each range includes its signed headers in `transfer.headers`, and the client sends them unchanged. The client checks each range's length and the complete revision's checksum. To resume a download, a client asks for a new download from its current offset. A deployment that can't presign URLs returns 501 `not_supported`. The proxied `GET /filesystem/content` route is still available, up to the `download.service_proxied.max_content_bytes` limit.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID.")
         ),
@@ -119,7 +119,7 @@ pub(super) async fn create_download(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
-        description = "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that an unexpired snapshot captured. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
+        description = "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that an unexpired snapshot captured. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw")
@@ -180,7 +180,7 @@ pub(super) async fn create_download_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin revision download by inode",
-        description = "Authorizes a direct read of one retained inode revision. The capability reads exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
+        description = "Authorizes a direct read of one retained inode revision. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
@@ -291,7 +291,7 @@ async fn presigned_ranges(
         granted.push(DownloadRange {
             start_offset,
             length: range.length,
-            access: signed.into(),
+            transfer: signed.into(),
         });
         start_offset += range.length;
     }

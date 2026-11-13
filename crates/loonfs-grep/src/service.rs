@@ -15,7 +15,7 @@ use loonfs::CoreError;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::{
-    decode_cursor, ChangeSeq, GrepPageCursor, GrepRequest, GrepResponse, GrepScope, PageRequest,
+    decode_cursor, CommitSeq, GrepPageCursor, GrepRequest, GrepResponse, GrepScope, PageRequest,
     PathEntry, MAX_PAGE_LIMIT,
 };
 use page_walk::{walk_page, GrepResume};
@@ -80,7 +80,7 @@ pub struct GrepService {
 struct ActiveIndex {
     /// The sequence that the index's backfill captured, which identifies
     /// the build that a cursor records.
-    captured_seq: ChangeSeq,
+    captured_seq: CommitSeq,
     resume: ChangeFeedResume,
     entry: GrepEntry,
 }
@@ -204,7 +204,7 @@ impl GrepService {
 struct PageReads<'a> {
     reads: NamespaceReadView<'a>,
     resume: Option<GrepResume>,
-    cursor_cut_seq: Option<ChangeSeq>,
+    cursor_cut_seq: Option<CommitSeq>,
     later: Option<LaterPage<'a>>,
 }
 
@@ -226,7 +226,7 @@ async fn page_reads<'a>(
     head: NamespaceReadView<'a>,
     namespace_reads: &'a NamespaceReads,
     fingerprint: u64,
-    captured_seq: ChangeSeq,
+    captured_seq: CommitSeq,
 ) -> Result<PageReads<'a>> {
     let Some(cursor) = cursor else {
         return Ok(PageReads {
@@ -287,7 +287,7 @@ async fn plan_candidates<S: ObjectStore>(
     index: &GrepSegments<'_, S>,
     page: &PageReads<'_>,
     scope: Option<&PathEntry>,
-) -> Result<(GrepCandidates, ChangeSeq, bool)> {
+) -> Result<(GrepCandidates, CommitSeq, bool)> {
     let mut candidates = GrepCandidates::default();
     let read_seq = page.reads.head_seq();
     let mut cut_seq = read_seq;
@@ -389,11 +389,11 @@ struct QueryPlan<'a, S> {
     later: Option<LaterPage<'a>>,
     /// The sequence that the page reads at: the head for a first page, and
     /// the cursor's sequence for a later page.
-    read_seq: ChangeSeq,
-    built_through_seq: ChangeSeq,
+    read_seq: CommitSeq,
+    built_through_seq: CommitSeq,
     /// The sequence that the index's backfill captured, which the page's
     /// cursor records.
-    index_captured_seq: ChangeSeq,
+    index_captured_seq: CommitSeq,
     fingerprint: u64,
     resume: Option<GrepResume>,
     pattern: regex::bytes::Regex,
@@ -403,7 +403,7 @@ struct QueryPlan<'a, S> {
     /// The newest commit whose `content_revisions` rows the page uses: the
     /// read sequence, or with `allow_stale` and a tail past its budget, the
     /// last commit that the index covers in full, if that's lower.
-    cut_seq: ChangeSeq,
+    cut_seq: CommitSeq,
     index: GrepSegments<'a, S>,
     /// The segments of the index that the page reads.
     index_runs: Vec<ExtensionSegmentRef>,
@@ -427,9 +427,9 @@ struct LaterPage<'a> {
 /// Returns the last commit that an index at `resume` covers in full, which a
 /// stale query treats as the end of what it scanned. The commit at the
 /// watermark is left out while the index covers only part of it.
-fn stale_cut_seq(resume: ChangeFeedResume) -> ChangeSeq {
+fn stale_cut_seq(resume: ChangeFeedResume) -> CommitSeq {
     match resume.next_event_index() {
         0 => resume.built_through_seq(),
-        _ => ChangeSeq(resume.built_through_seq().0.saturating_sub(1)),
+        _ => CommitSeq(resume.built_through_seq().0.saturating_sub(1)),
     }
 }

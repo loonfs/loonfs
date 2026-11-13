@@ -5,7 +5,7 @@ use crate::common::{
     open_compacting_runtime_with_async, open_runtime_async, open_runtime_with_async, store,
 };
 use loonfs::{
-    ChangeSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, ListOptions,
+    CommitSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, ListOptions,
     LoonFs, NamespaceId, PutFileOptions, ReadAt, RevisionNo,
 };
 use std::assert_matches;
@@ -340,15 +340,15 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
 }
 
 #[tokio::test]
-async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_pin_when_a_segment_is_missing(
+async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_snapshot_when_a_segment_is_missing(
 ) {
     use loonfs_objectstore::{keys, ObjectStore};
     use loonfs_types::format::manifest::MetadataRowFamily;
 
     let directory = tempdir().expect("tempdir");
     let store = store(directory.path());
-    let namespace_id = NamespaceId::parse("deleted-pin-segment").expect("namespace");
-    let runtime = open_runtime_async(store.clone(), "deleted-pin-segment").await;
+    let namespace_id = NamespaceId::parse("deleted-snapshot-segment").expect("namespace");
+    let runtime = open_runtime_async(store.clone(), "deleted-snapshot-segment").await;
     runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -503,7 +503,7 @@ async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapsho
     let root = first_page.entries[0].parent_inode_id.expect("root inode");
 
     for (snapshot, reason) in [
-        (&twin, "does not match requested pin"),
+        (&twin, "does not match requested snapshot"),
         (&later, "does not match the read view head"),
     ] {
         assert_cursor_rejected(
@@ -601,9 +601,12 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         first_page.next_cursor.as_deref().expect("next cursor"),
     )
     .expect("decode cursor");
-    assert_eq!(cursor.pin_id.as_ref(), Some(&first_snapshot.snapshot_id));
+    assert_eq!(
+        cursor.snapshot_id.as_ref(),
+        Some(&first_snapshot.snapshot_id)
+    );
     let mut unbound_cursor = cursor.clone();
-    unbound_cursor.pin_id = None;
+    unbound_cursor.snapshot_id = None;
     let unbound_cursor = loonfs_types::encode_cursor(&unbound_cursor).expect("encode cursor");
     let cursor = first_page.next_cursor.clone().expect("next cursor");
 
@@ -805,7 +808,7 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
 
 /// Checks that a view at an earlier sequence reads the namespace as it was at
 /// that sequence, refuses a sequence above its head, and returns
-/// `rebootstrap_required` once the retention floor passes the sequence.
+/// `below_retention_floor` once the retention floor passes the sequence.
 #[tokio::test]
 async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passes_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -868,7 +871,7 @@ async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passe
     );
     let later = earlier.stat("/b.txt").await.expect_err("b is later");
     assert_eq!(later.code(), ErrorCode::PathNotFound);
-    let Err(ahead) = view.at_seq(ChangeSeq(view.head_seq().0 + 1)).await else {
+    let Err(ahead) = view.at_seq(CommitSeq(view.head_seq().0 + 1)).await else {
         panic!("a sequence above the head should be refused");
     };
     assert_eq!(ahead.code(), ErrorCode::InvalidRequest);
@@ -896,7 +899,7 @@ async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passe
     let Err(error) = view.at_seq(first.committed_seq).await else {
         panic!("the floor passed the first commit");
     };
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
 }
 
 /// Checks that a view lists every retained file revision, including the

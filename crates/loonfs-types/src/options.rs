@@ -4,9 +4,9 @@
 use crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
-    AttributesRevisionNo, ChangeSeq, CommitId, CommitPrecondition, DeleteDirectoryBehavior,
+    AttributesRevisionNo, CommitId, CommitPrecondition, CommitSeq, DeleteDirectoryBehavior,
     DestinationBehavior, DestinationPrecondition, DisplayName, EffectiveLimit, InodeId,
-    NamespaceAccess, PinId, RevisionNo,
+    NamespaceAccess, RevisionNo, SnapshotId,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -107,9 +107,9 @@ pub enum ReadAt {
     /// The live head, confirmed as the consistency asks, or as the runtime's
     /// default consistency when it's `None`.
     Live(Option<Consistency>),
-    /// The state that this snapshot, or this fork pin of the namespace,
+    /// The state that this snapshot, or this fork snapshot of the namespace,
     /// captured.
-    Snapshot(PinId),
+    Snapshot(SnapshotId),
 }
 
 impl Default for ReadAt {
@@ -118,10 +118,10 @@ impl Default for ReadAt {
     }
 }
 
-impl From<Option<PinId>> for ReadAt {
+impl From<Option<SnapshotId>> for ReadAt {
     /// Returns a read of the snapshot, or of the live head at the runtime's
     /// default consistency when there's no snapshot.
-    fn from(snapshot_id: Option<PinId>) -> Self {
+    fn from(snapshot_id: Option<SnapshotId>) -> Self {
         snapshot_id.map_or(Self::Live(None), Self::Snapshot)
     }
 }
@@ -321,10 +321,10 @@ pub struct DiffOptions {
     /// The sequence that the diff ends at, inclusive, or `None` for the head
     /// that the page reads. A later page passes the `to_seq` that the first
     /// page returned.
-    pub to_seq: Option<ChangeSeq>,
+    pub to_seq: Option<CommitSeq>,
     /// The `next_after_seq` that the previous page returned, or `None` to
     /// start at the diff's start.
-    pub after_seq: Option<ChangeSeq>,
+    pub after_seq: Option<CommitSeq>,
     /// The `next_event_index` that the previous page returned, when that page
     /// ended inside the commit at `after_seq`, or 0 to start after that
     /// commit. A position above 0 needs [`CommitSplitting::AtPageBudget`].
@@ -360,7 +360,7 @@ pub struct ListFileRevisionsOptions {
     pub consistency: Option<Consistency>,
 }
 
-/// Options for listing the namespace's recoverable deletions.
+/// Options for listing the namespace's trash.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListTrashOptions {
     /// How recently each page confirms the live head, or `None` for the
@@ -540,9 +540,9 @@ impl CopyOptions {
     }
 }
 
-/// Where an undelete binds the entry it restores.
+/// Where a restore of a deleted item binds the entry it restores.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum UndeleteDestination {
+pub enum RestoreDeletedDestination {
     /// The parent and name the deletion recorded.
     #[default]
     Recorded,
@@ -557,13 +557,13 @@ pub enum UndeleteDestination {
     },
 }
 
-/// Options for undeleting a file or subtree.
+/// Options for restoring a deleted file or subtree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct UndeleteOptions {
+pub struct RestoreDeletedOptions {
     /// Commit ID, message, and preconditions.
     pub commit: CommitOptions,
     /// Where the restored entry is bound.
-    pub destination: UndeleteDestination,
+    pub destination: RestoreDeletedDestination,
 }
 
 /// Options for starting a direct multipart upload.
@@ -578,7 +578,7 @@ pub struct DirectMultipartUploadOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForkNamespaceOptions {
     /// Fork from this unexpired snapshot instead of the current head.
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// Options for merging a fork into a namespace.
@@ -589,7 +589,7 @@ pub struct MergeForkOptions {
     /// The optional commit message that forms part of the merge's identity.
     pub message: Option<String>,
     /// The fork sequence to merge through, or `None` for the fork's head.
-    pub through_seq: Option<ChangeSeq>,
+    pub through_seq: Option<CommitSeq>,
 }
 
 /// Options for creating a namespace.
@@ -598,8 +598,8 @@ pub struct CreateNamespaceOptions {
     /// The access mode, which can't be changed after the namespace is created.
     pub access: NamespaceAccess,
     /// The namespace's retention window, which a host's scheduled retention
-    /// advance uses instead of the host's own setting, or `None` when the
-    /// host's window applies.
+    /// advance uses, or `None` for the runtime's default window, if the
+    /// runtime has a default.
     pub retention_window_ms: Option<NonZeroU64>,
     /// Whether creating a namespace that already exists succeeds and returns
     /// the existing namespace's state.
@@ -621,7 +621,7 @@ impl Default for CreateNamespaceOptions {
 pub struct DeleteNamespaceOptions {
     /// Delete only if the head is still at this sequence. A mismatch fails
     /// with `stale_head` instead of deleting work the caller has not seen.
-    pub expected_head_seq: Option<ChangeSeq>,
+    pub expected_head_seq: Option<CommitSeq>,
 }
 
 /// Options for creating a snapshot.

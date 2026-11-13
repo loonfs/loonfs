@@ -17,7 +17,7 @@ use loonfs_grep::{
     NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, DEFAULT_GREP_PUBLISH_INTERVAL_MS,
 };
 use loonfs_types::GrepIndex;
-use loonfs_types::{AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
+use loonfs_types::{AbsolutePath, CommitSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
 use std::sync::Arc;
 
 pub(crate) struct GrepHost {
@@ -140,7 +140,7 @@ impl GrepHost {
     pub(crate) async fn catch_up_grep_index(
         &self,
         namespace_id: &NamespaceId,
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
     ) -> Result<GrepIndexStatus, GrepError> {
         let mut steps = self
             .worker
@@ -203,8 +203,10 @@ pub(crate) mod control {
     use loonfs::control::NamespaceReadState;
     use loonfs::SharedObjectStore;
     use loonfs_objectstore::keys;
-    use loonfs_types::format::control::{decode_control_object, ControlObjectKind, PinPayload};
-    use loonfs_types::{NamespaceId, PinId};
+    use loonfs_types::format::control::{
+        decode_control_object, ControlObjectKind, SnapshotPayload,
+    };
+    use loonfs_types::{NamespaceId, SnapshotId};
 
     async fn control_bytes(store: &SharedObjectStore, object_key: &str) -> Option<Vec<u8>> {
         store
@@ -248,36 +250,33 @@ pub(crate) mod control {
             .map(|entry| loonfs_grep::entry::GrepEntry::decode(entry).expect("decode grep's entry"))
     }
 
-    pub(crate) async fn pin(
+    pub(crate) async fn snapshot_record(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
-        checkpoint_id: &PinId,
-    ) -> Option<PinPayload> {
-        let bytes = control_bytes(store, &keys::pin(namespace_id, checkpoint_id)).await?;
+        snapshot_id: &SnapshotId,
+    ) -> Option<SnapshotPayload> {
+        let bytes = control_bytes(store, &keys::snapshot_record(namespace_id, snapshot_id)).await?;
         Some(
-            decode_control_object::<PinPayload>(&bytes, ControlObjectKind::Pin)
-                .expect("decode pin")
+            decode_control_object::<SnapshotPayload>(&bytes, ControlObjectKind::Snapshot)
+                .expect("decode snapshot")
                 .into_payload(),
         )
     }
 }
 
-/// Publishes `entry` as grep's entry in the namespace's next manifest, with
-/// `next_run_no` as the next run number, whatever grep would make of it.
+/// Publishes `entry` as grep's entry in the namespace's next manifest,
+/// whatever grep would make of it.
 pub(crate) async fn publish_grep_entry(
     maintenance: &Maintenance,
     namespace_id: &NamespaceId,
     entry: loonfs_types::format::manifest::ExtensionEntry,
-    next_run_no: loonfs_types::RunNo,
 ) {
     let basis = maintenance
         .load_extension_basis(namespace_id)
         .await
         .expect("load the basis");
     let published = maintenance
-        .publish_extension(&basis, &loonfs_grep::entry::grep_extension_name(), |_| {
-            (entry.clone(), next_run_no)
-        })
+        .publish_extension(&basis, &loonfs_grep::entry::grep_extension_name(), entry)
         .await
         .expect("publish grep's entry");
     assert!(
@@ -324,17 +323,17 @@ pub(crate) fn page_request(cursor: Option<String>, matches: u32) -> PageRequest<
 /// through a runtime whose wall clock is one default grace window ahead, so
 /// the advance can pass every commit made before the call.
 ///
-/// That runtime is separate from the test's others, so the advance opens a
-/// writer session of its own and takes the namespace's writer epoch. A
-/// writer session for the namespace in another runtime then fails its next
-/// request with `writer_fenced`. A test that writes through such a session
-/// after the advance needs to advance the floor in that session's runtime
-/// instead, as `ContentFixture::advance_retention_floor` does.
+/// That runtime is separate from the test's others and has no writer session
+/// for the namespace, so the advance creates a floor object at the WAL tip,
+/// folds it, and claims no writer epoch. A writer session for the namespace
+/// in another runtime isn't fenced. Its next commit collides with the floor
+/// object and plans again against the new floor, so a test can keep writing
+/// through that session after the advance.
 pub(crate) async fn fold_wal_and_advance_retention(
     store: &SharedObjectStore,
     maintenance: &Maintenance,
     namespace_id: &NamespaceId,
-) -> ChangeSeq {
+) -> CommitSeq {
     maintenance
         .maintain_metadata_with_options(
             namespace_id,

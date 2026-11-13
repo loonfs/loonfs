@@ -8,11 +8,11 @@ use loonfs_test_support::stores::{
     RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
+use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
 use std::assert_matches;
 
-/// The head of the namespace whose tail these tests write, the root of its
-/// own fork family.
+/// The head of the namespace whose tail these tests write, a namespace that
+/// was created without a source.
 static HEAD: std::sync::LazyLock<NamespaceReadState> = std::sync::LazyLock::new(|| {
     NamespaceReadState::initial(
         NamespaceId::parse("demo").expect("namespace"),
@@ -36,7 +36,7 @@ impl LayoutLookup for Layout {
 
 fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -> WalCommitPayload {
     WalCommitPayload {
-        committed_seq: ChangeSeq(seq),
+        committed_seq: CommitSeq(seq),
         commit_id: CommitId::parse(format!("c_{seq:032x}")).expect("commit id"),
         committed_by: loonfs_test_support::test_actor(),
         semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
@@ -52,7 +52,7 @@ fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -
                 name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
                 display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: loonfs_types::ChangeSeq(1),
+                    seq: loonfs_types::CommitSeq(1),
                     delta_index: 0,
                 },
                 child_created_by: loonfs_types::ActorId::loonfs(),
@@ -97,10 +97,7 @@ async fn fixture<S: ObjectStore>(
             length: length as u64,
         };
         store
-            .put_immutable_verified(
-                &extent_object_key(&HEAD.family_root_id, &extent),
-                bytes.clone(),
-            )
+            .put_immutable_verified(&extent_object_key(&HEAD.pool_id, &extent), bytes.clone())
             .await
             .expect("source");
         crc = crc
@@ -111,7 +108,7 @@ async fn fixture<S: ObjectStore>(
     }
     let layout = Layout(ContentLayoutRecord {
         content_id: content_id.clone(),
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         size_bytes: offset,
         layout: ContentLayout {
             creator_namespace_id: HEAD.namespace_id.clone(),
@@ -145,12 +142,12 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     let (layout, tail, reference) = fixture(&store, &[20 * mib, 20 * mib], false, 12 * mib).await;
     let content = tail.content(&reference).expect("content");
     store.reset();
-    let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
+    let permits = Permits::new(std::num::NonZeroUsize::MIN, None);
     let written = write_tail_content(
-        ContentWrites::new(&store, &pool, &HEAD),
+        ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         &content,
-        assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces"),
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
     )
     .await
     .expect("assembly");
@@ -182,15 +179,15 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
             );
         }
     }
-    let key = extent_object_key(&HEAD.family_root_id, extent);
+    let key = extent_object_key(&HEAD.pool_id, extent);
     let metadata = store.head(&key).await.expect("head").expect("span");
     assert_eq!(metadata.checksum, Some(reference.checksum.clone()));
     local.reset();
     let retried = write_tail_content(
-        ContentWrites::new(&store, &pool, &HEAD),
+        ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         &content,
-        assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces"),
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
     )
     .await
     .expect("retry");
@@ -213,12 +210,12 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
     let written = write_tail_content(
         ContentWrites::new(
             &store,
-            &PermitPool::new(std::num::NonZeroUsize::MIN, None),
+            &Permits::new(std::num::NonZeroUsize::MIN, None),
             &HEAD,
         ),
         &layout,
         &content,
-        assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces"),
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
     )
     .await
     .expect("bounded layout");
@@ -254,7 +251,7 @@ async fn assembly_sources_require_whole_extents_and_stored_checksums_in_the_stor
                 extent.offset = offset;
                 extent.length -= offset;
                 let located = LocatedExtent {
-                    object_key: extent_object_key(&HEAD.family_root_id, &extent),
+                    object_key: extent_object_key(&HEAD.pool_id, &extent),
                     extent,
                 };
                 let result = assembly_sources(&store, "destination", &[located], &[]).await;
@@ -288,14 +285,14 @@ async fn local_large_tail_assembles_without_sources() {
     let mut tail = ProjectedWalTail::default();
     tail.push_object(&records, 0).expect("tail");
     let content = tail.content(&reference).expect("content");
-    let pieces = assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces");
+    let pieces = assemble_tail_content(&HEAD.pool_id, &content).expect("pieces");
     assert_eq!(pieces.len(), 13);
     for (actual, resident) in pieces.iter().zip(&content.pieces) {
         assert_eq!(actual.as_ptr(), resident.bytes.as_ptr());
     }
-    let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
+    let permits = Permits::new(std::num::NonZeroUsize::MIN, None);
     let written = write_tail_content(
-        ContentWrites::new(&store, &pool, &HEAD),
+        ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         &content,
         pieces,
@@ -308,7 +305,7 @@ async fn local_large_tail_assembles_without_sources() {
     );
     let stored = store
         .head(&extent_object_key(
-            &HEAD.family_root_id,
+            &HEAD.pool_id,
             &written.layout.extents[0],
         ))
         .await
@@ -333,7 +330,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
             end: size,
         };
         extent.length = layout_size;
-        let key = extent_object_key(&HEAD.family_root_id, extent);
+        let key = extent_object_key(&HEAD.pool_id, extent);
         let bytes = Bytes::from(
             [
                 b"aaaaaa".as_slice(),
@@ -351,12 +348,12 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let written = write_tail_content(
             ContentWrites::new(
                 &store,
-                &PermitPool::new(std::num::NonZeroUsize::MIN, None),
+                &Permits::new(std::num::NonZeroUsize::MIN, None),
                 &HEAD,
             ),
             &layout,
             &content,
-            assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces"),
+            assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
         )
         .await
         .expect("write");
@@ -381,21 +378,21 @@ async fn validation_materialization_holds_a_write_permit() {
         OperationSelector::Head,
     );
     let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
-    let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
+    let permits = Permits::new(std::num::NonZeroUsize::MIN, None);
     store.arm();
     let content = tail.content(&reference);
     let write = materialize_content_layout(
-        ContentWrites::new(&store, &pool, &HEAD),
+        ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         content.as_ref(),
         &reference,
     );
     let check = async {
         store.wait_until_blocked().await;
-        assert_eq!(pool.counts().running, 1);
+        assert_eq!(permits.counts().running, 1);
         store.release();
     };
     let (written, ()) = tokio::join!(write, check);
     assert_eq!(written.expect("combined").extents[0].length, 10);
-    assert_eq!(pool.counts(), crate::PoolCounts::default());
+    assert_eq!(permits.counts(), crate::PermitCounts::default());
 }

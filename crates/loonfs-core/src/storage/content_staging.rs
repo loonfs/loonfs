@@ -11,7 +11,7 @@ use loonfs_objectstore::{
     ByteStream, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, ObjectStoreExtension, PutMode,
 };
 use loonfs_types::{
-    ChecksumAlgorithm, ChecksumDigest, ContentId, ContentRef, ContentRefKind, NamespaceId, UploadId,
+    ChecksumAlgorithm, ChecksumDigest, ContentId, ContentRef, ContentRefKind, PoolId, UploadId,
 };
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Plants test content under a fresh identity, under the prefix of the
-    /// current namespace's family root.
+    /// current namespace's pool.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -32,7 +32,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let catalog = self.load_catalog_entry().await?;
         stage_bytes_under_content_id(
             &self.store,
-            catalog.family_root_id(),
+            catalog.pool_id(),
             ContentId::generate(),
             bytes,
             ContentKeyOwner::FreshIdentity,
@@ -68,7 +68,7 @@ impl ContentKeyOwner<'_> {
     }
 }
 
-/// Stages and hashes a payload under the prefix of `family_root_id`, without
+/// Stages and hashes a payload under the prefix of `pool_id`, without
 /// buffering the complete stream.
 ///
 /// The write is create-only, and the store enforces that atomically with
@@ -78,13 +78,13 @@ impl ContentKeyOwner<'_> {
 /// bytes that passed through this writer.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     content_id: ContentId,
     body: ByteStream,
     owner: ContentKeyOwner<'_>,
     check_ownership: impl Future<Output = Result<()>>,
 ) -> Result<ContentRef> {
-    let object_key = content_blob(family_root_id, &content_id);
+    let object_key = content_blob(pool_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::new(store.checksum_algorithm())));
     let (request_check, check_requested) = oneshot::channel();
     let (allow_completion, completion_allowed) = oneshot::channel();
@@ -195,16 +195,16 @@ impl StreamedPayload {
 
 /// Stages bytes under an identity the caller already allocated, for writers
 /// that minted the id earlier (an upload session allocates at `begin`), under
-/// the prefix of `family_root_id`.
+/// the prefix of `pool_id`.
 pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     content_id: ContentId,
     bytes: &[u8],
     owner: ContentKeyOwner<'_>,
 ) -> Result<StoredContent> {
     let content_ref = ContentRef::blob_v1(content_id, bytes, store.checksum_algorithm());
-    let object_key = content_blob(family_root_id, &content_ref.content_id);
+    let object_key = content_blob(pool_id, &content_ref.content_id);
     store
         .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
         .await
@@ -236,9 +236,10 @@ mod tests {
         let (_temp_dir, store) = test_store();
         let bytes = b"identical payload";
 
+        let pool_id = loonfs_test_support::ids::numbered_pool_id(1);
         let first = stage_bytes_under_content_id(
             &store,
-            &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+            &pool_id,
             ContentId::generate(),
             bytes,
             ContentKeyOwner::FreshIdentity,
@@ -247,7 +248,7 @@ mod tests {
         .expect("first stage");
         let second = stage_bytes_under_content_id(
             &store,
-            &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+            &pool_id,
             ContentId::generate(),
             bytes,
             ContentKeyOwner::FreshIdentity,
@@ -281,9 +282,9 @@ mod tests {
     #[tokio::test]
     async fn staging_over_an_object_without_an_equal_stored_checksum_is_corruption() {
         let (_temp_dir, local) = test_store();
-        let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
+        let pool_id = loonfs_test_support::ids::numbered_pool_id(1);
         let content_id = ContentId::generate();
-        let key = content_blob(&namespace_id, &content_id);
+        let key = content_blob(&pool_id, &content_id);
         local
             .put_if_absent(&key, Bytes::from_static(b"staged"))
             .await
@@ -304,7 +305,7 @@ mod tests {
         for (store, bytes, reason) in cases {
             let error = stage_bytes_under_content_id(
                 store,
-                &namespace_id,
+                &pool_id,
                 content_id.clone(),
                 bytes,
                 ContentKeyOwner::FreshIdentity,

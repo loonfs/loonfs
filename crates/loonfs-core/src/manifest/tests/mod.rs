@@ -1,7 +1,6 @@
 //! Manifest, cache, index, recovery, and retention tests.
 
 mod access;
-mod active_deletions;
 mod attributes;
 mod basis_publications;
 mod block_fetches;
@@ -12,7 +11,6 @@ mod directory_bindings;
 mod expired_deletion_rows;
 mod expired_subtrees;
 pub(crate) mod extensions;
-mod family_roots;
 mod fold_races;
 mod index_parity;
 pub(crate) mod inspection_state;
@@ -20,8 +18,10 @@ mod manifest_gc_races;
 mod manifest_round_trips;
 mod merges;
 mod newest_first_lookups;
+mod pools;
 mod retention;
 mod streaming_compaction;
+mod trash;
 mod views_below_the_head;
 
 use super::error::ManifestLoadError;
@@ -84,8 +84,8 @@ use loonfs_types::format::segment_blocks::{
     SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
-    NameKey, NamespaceId, PinId, RevisionNo, RunNo,
+    AbsolutePath, CommitId, CommitSeq, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
+    NameKey, NamespaceId, RevisionNo, RunNo, SnapshotId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -129,32 +129,32 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
             .collect::<Vec<_>>();
         rows.extend(manifest_rows_for_family(&tail_rows, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));
-        append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)?;
+        append_rows_to_metadata(&mut metadata_state, family, "snapshot projection", &rows)?;
     }
     Ok((projection.head, metadata_state.build()))
 }
 
-/// Every lifecycle test in this file pins as one user owner; owner-specific
+/// Every lifecycle test in this file takes snapshots as one user owner; owner-specific
 /// behavior (fork owners, distinct-owner records) is exercised explicitly
 /// where it matters.
-pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_snapshot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &WriterAt,
-) -> crate::error::Result<loonfs_types::Checkpoint> {
+) -> crate::error::Result<loonfs_types::SnapshotRecord> {
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     let manifest = crate::test_support::folded_manifest(&namespace).await?;
     namespace
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
-                name: "test-pin".to_owned(),
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
+                name: "test-snapshot".to_owned(),
                 expires_at_ms: None,
             },
             manifest,
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
 }
 
 pub(crate) use crate::test_support::writer_at;
@@ -237,7 +237,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 async fn read_floor_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> ChangeSeq {
+) -> CommitSeq {
     let head = crate::test_support::namespace_store(store, namespace_id)
         .load_read_state()
         .await
@@ -255,7 +255,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
 async fn advance_floor_through<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    deletion_seq: ChangeSeq,
+    deletion_seq: CommitSeq,
     context: &WriterAt,
 ) {
     crate::test_support::namespace_store(store, namespace_id)
@@ -277,20 +277,20 @@ async fn advance_floor_through<S: ObjectStore + ?Sized>(
     assert_eq!(advanced.response.retention_floor_seq, deletion_seq);
 }
 
-/// Checkpoints, then compacts every delta run into the base through
+/// Creates a snapshot, then compacts every delta run into the base through
 /// compaction units, returning the resulting current manifest number. The
-/// old synchronous rebuild produced this shape in one checkpoint call;
+/// old synchronous rebuild produced this shape in one snapshot call;
 /// tests that need a compacted base with a specific segmentation policy use
 /// this instead.
-async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
+async fn snapshot_then_compact<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &WriterAt,
     policy: MetadataRunPolicy,
 ) -> ManifestNo {
-    create_checkpoint(store, namespace_id, context)
+    create_snapshot(store, namespace_id, context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     drain_compaction(
         store,
         namespace_id,
@@ -306,7 +306,7 @@ async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
 fn compact_rows_with_retention(
     group: MetadataFamilyGroup,
     rows_by_family: &mut BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
-    floor_seq: ChangeSeq,
+    floor_seq: CommitSeq,
 ) -> crate::error::Result<()> {
     for cluster in retention_clusters(group) {
         // The stream a compaction sees: the cluster's rows by locality, then family,
@@ -720,25 +720,25 @@ pub(crate) fn test_context() -> WriterAt {
     writer_at("test-writer", 1_000)
 }
 
-fn manifest_no(seq: ChangeSeq) -> ManifestNo {
+fn manifest_no(seq: CommitSeq) -> ManifestNo {
     ManifestNo(seq.0)
 }
 
-async fn write_file_and_checkpoint(
+async fn write_file_and_create_snapshot(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     context: &WriterAt,
     index: u64,
-) -> ChangeSeq {
+) -> CommitSeq {
     let path = format!("/docs/file-{index}.txt");
     let bytes = format!("file {index}\n");
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .write_file_bytes(&path, bytes.as_bytes(), None)
         .await
         .expect("write file");
-    create_checkpoint(store, namespace_id, context)
+    create_snapshot(store, namespace_id, context)
         .await
-        .expect("create checkpoint")
+        .expect("create snapshot")
         .captured_seq
 }
 
@@ -755,12 +755,12 @@ fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
 }
 
 // Test support: a manifest built directly from a MetadataState, used to
-// author arbitrary layouts without driving the full checkpoint pipeline.
+// author arbitrary layouts without driving the full snapshot pipeline.
 #[cfg(test)]
 pub(crate) struct ManifestMetadataSource<'a> {
     pub(crate) head: &'a NamespaceReadState,
     pub(crate) basis_manifest_no: Option<ManifestNo>,
-    pub(crate) retention_floor_seq: ChangeSeq,
+    pub(crate) retention_floor_seq: CommitSeq,
     pub(crate) metadata_state: &'a MetadataState,
 }
 
@@ -870,7 +870,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: head.fork_basis.clone(),
-        family_root_id: head.family_root_id.clone(),
+        pool_id: head.pool_id.clone(),
         status: head.status,
         writer: head.writer.clone(),
         folded_wal_no: head.wal_no,
@@ -891,7 +891,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 
 #[cfg(test)]
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
-    payload.head_seq == ChangeSeq(0) && payload.base_seq() == ChangeSeq(0)
+    payload.head_seq == CommitSeq(0) && payload.base_seq() == CommitSeq(0)
 }
 
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
@@ -979,7 +979,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
-    head_seq: ChangeSeq,
+    head_seq: CommitSeq,
     segments: Vec<MetadataSegmentRef>,
 ) -> ManifestNo {
     let manifest_number = manifest_no;
@@ -990,7 +990,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,
-        family_root_id: namespace_id.clone(),
+        pool_id: loonfs_test_support::ids::numbered_pool_id(1),
         status: loonfs_types::format::control::NamespaceStatus::Active {},
         writer: None,
         folded_wal_no: loonfs_types::WalNo(0),
@@ -1002,7 +1002,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
 
         writer_epoch: loonfs_types::WriterEpoch(1),
         next_run_no: RunNo(1),
-        retention_floor_seq: ChangeSeq(0),
+        retention_floor_seq: CommitSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
             run_seq: head_seq,

@@ -1,14 +1,12 @@
-//! Retention advances in a writer session's queue: the order of the
-//! session's undeletes around an advance, a takeover between the advance's
-//! fold and its floor, a commit of an older writer between the advance's
-//! claim and its fence, and an advance by another runtime.
+//! Retention advances through floor objects: the order of a session's
+//! restores around an advance in its queue, a restore that takes the
+//! number that another runtime's floor object was planned for, an advance
+//! by another runtime that a session's restore collides with, and a read
+//! from a cached head after a floor object.
 
 use super::*;
-use loonfs_objectstore::keys::metadata_manifest_object;
-use loonfs_types::format::manifest::{decode_namespace_manifest_json, NamespaceManifestPayload};
-use loonfs_types::{
-    DeleteDirectoryBehavior, ErrorCode, FilesystemChange, InodeId, ManifestNo, WalNo,
-};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::{DeleteDirectoryBehavior, ErrorCode, FilesystemEvent, InodeId, WalNo};
 
 /// The inode rows that the current manifest's segments store.
 async fn inode_rows(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> u64 {
@@ -32,27 +30,11 @@ async fn current_manifest(
         .clone()
 }
 
-/// The manifest numbered `manifest_no`.
-async fn manifest_at(
-    store: &dyn ObjectStore,
-    namespace_id: &NamespaceId,
-    manifest_no: ManifestNo,
-) -> NamespaceManifestPayload {
-    let bytes = store
-        .get(&metadata_manifest_object(namespace_id, &manifest_no), None)
-        .await
-        .expect("read the manifest")
-        .expect("the manifest exists");
-    decode_namespace_manifest_json(&bytes)
-        .expect("decode the manifest")
-        .into_payload()
-}
-
 /// The number of the WAL object that commits `committed_seq`.
 async fn wal_no_of_commit(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
 ) -> WalNo {
     for key in store
         .list_prefix(&wal_prefix(namespace_id))
@@ -112,7 +94,7 @@ async fn create_directories(namespace: &crate::Namespace<crate::Writable>, name:
 async fn delete_a_directory(
     namespace: &crate::Namespace<crate::Writable>,
     name: &str,
-) -> (InodeId, ChangeSeq) {
+) -> (InodeId, CommitSeq) {
     let deleted = namespace
         .commit_candidate(CommitCandidate::new(CommitIntent::single(
             CommitId::parse(format!("delete-{name}")).expect("commit id"),
@@ -130,7 +112,7 @@ async fn delete_a_directory(
         .events
         .iter()
         .find_map(|event| match event {
-            FilesystemChange::Deleted { inode_id, .. } => Some(*inode_id),
+            FilesystemEvent::Deleted { inode_id, .. } => Some(*inode_id),
             _ => None,
         })
         .expect("the delete reports its deletion");
@@ -175,12 +157,37 @@ async fn wait_for_queued_advance(publisher: &NamespacePublisher) {
     .expect("the advance should queue");
 }
 
-/// Checks that a session's queue orders its undeletes around a retention
-/// advance. An undelete queued before the advance is folded before the
-/// advance's manifest, even though the advance expires its deletion, and an
-/// undelete of that deletion queued after the advance returns `not_deleted`.
+/// The WAL object numbered `wal_no`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads a floor object that the advance wrote"
+)]
+async fn wal_object_at(
+    store: &dyn ObjectStore,
+    namespace_id: &NamespaceId,
+    wal_no: WalNo,
+) -> loonfs_types::format::wal::WalObjectPayload {
+    let bytes = store
+        .get(
+            &loonfs_objectstore::keys::wal_object(namespace_id, &wal_no),
+            None,
+        )
+        .await
+        .expect("read the WAL object")
+        .expect("the WAL object exists");
+    decode_wal_object_envelope_zstd(&bytes)
+        .expect("decode the WAL object")
+        .into_payload()
+}
+
+/// Checks the first example of a retention advance in the WAL: a session's
+/// queue with a restore, an advance, and a second restore of the same
+/// deletion. The first restore commits, the floor object follows it at the
+/// next WAL number, and the second restore returns `not_deleted`, as does
+/// a restore of another deletion that the new floor expired. The manifest
+/// that records the floor contains the first restore.
 #[tokio::test]
-async fn an_advance_orders_the_undeletes_queued_around_it() {
+async fn an_advance_orders_the_restores_queued_around_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let clock = Arc::new(ManualClock::at_system_time());
@@ -203,7 +210,7 @@ async fn an_advance_orders_the_undeletes_queued_around_it() {
         .fold_wal(&namespace_id)
         .await
         .expect("fold the deletions");
-    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let publisher = writer
         .mode
         .publisher
@@ -211,13 +218,18 @@ async fn an_advance_orders_the_undeletes_queued_around_it() {
         .expect("the namespace's session");
 
     // The worker takes nothing while every publication permit is taken, so
-    // the three requests queue in the order they're made.
+    // the requests queue in the order they're made.
     let permits = hold_every_publication_permit(&writer).await;
-    let before = tokio::spawn({
+    let restore_deleted = |inode_id, deletion_seq| {
         let namespace = namespace.clone();
         let actor = actor.clone();
-        async move { namespace.undelete(restored, restored_seq, &actor).await }
-    });
+        tokio::spawn(async move {
+            namespace
+                .restore_deleted(inode_id, deletion_seq, &actor)
+                .await
+        })
+    };
+    let before = restore_deleted(restored, restored_seq);
     wait_for_queued_candidates(&publisher, 1).await;
     let advance = tokio::spawn({
         let maintenance = maintenance.clone();
@@ -225,131 +237,51 @@ async fn an_advance_orders_the_undeletes_queued_around_it() {
         async move { maintenance.advance_retention_floor(&namespace_id).await }
     });
     wait_for_queued_advance(&publisher).await;
-    let after = tokio::spawn({
-        let namespace = namespace.clone();
-        let actor = actor.clone();
-        async move { namespace.undelete(expired, expired_seq, &actor).await }
-    });
+    let again = restore_deleted(restored, restored_seq);
     wait_for_queued_candidates(&publisher, 2).await;
+    let after = restore_deleted(expired, expired_seq);
+    wait_for_queued_candidates(&publisher, 3).await;
     drop(permits);
 
     let before = before
         .await
         .expect("join")
-        .expect("the undelete before the advance");
+        .expect("the restore before the advance");
     let advanced = advance.await.expect("join").expect("the advance");
     assert_eq!(advanced.retention_floor_seq, expired_seq);
-    let error = after
-        .await
-        .expect("join")
-        .expect_err("the undelete after the advance");
-    assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+    for refused in [again, after] {
+        let error = refused
+            .await
+            .expect("join")
+            .expect_err("a restore after the advance");
+        assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+    }
 
-    let floor = current_manifest(store.as_ref(), &namespace_id).await;
-    assert_eq!(floor.retention_floor_seq, expired_seq);
-    let predecessor = manifest_at(
+    let restored_at = wal_no_of_commit(store.as_ref(), &namespace_id, before.committed_seq).await;
+    let floor_object = wal_object_at(
         store.as_ref(),
         &namespace_id,
-        ManifestNo(floor.manifest_no.0 - 1),
+        restored_at.successor().expect("next WAL number"),
     )
     .await;
+    assert!(floor_object.records.is_empty());
+    assert_eq!(floor_object.retention_floor_seq, Some(expired_seq));
+    let floor = current_manifest(store.as_ref(), &namespace_id).await;
+    assert_eq!(floor.retention_floor_seq, expired_seq);
     assert!(
-        predecessor.folded_wal_no
-            >= wal_no_of_commit(store.as_ref(), &namespace_id, before.committed_seq).await,
-        "the advance's predecessor folds the undelete queued before it"
+        floor.folded_wal_no >= floor_object.wal_no && floor.head_seq >= before.committed_seq,
+        "the manifest that records the floor folds the restore queued before the advance"
     );
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that an advance whose writer epoch another runtime claims between
-/// the advance's fold and its floor returns `writer_fenced` and publishes
-/// nothing, so the new writer's manifest keeps the old floor.
+/// Checks the third example of a retention advance in the WAL: a writer's
+/// restore takes the WAL number that another runtime planned its floor
+/// object for. The advance's put collides, its floor object goes to the
+/// next number, and the manifest that records the floor contains the
+/// restore, so a base compaction keeps the restored item's rows.
 #[tokio::test]
-async fn a_takeover_between_the_fold_and_the_floor_fences_the_advance() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    // The advance's fold finds the tail folded, so the floor's put is the
-    // advance's first manifest put, which the gate parks.
-    let gated = Arc::new(BlockingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-        OperationSelector::Put,
-    ));
-    let clock = Arc::new(ManualClock::at_system_time());
-    let writer = runtime_at(gated.clone() as SharedStore, "writer-a", &clock).await;
-    let actor = loonfs_test_support::test_actor();
-    writer
-        .create_namespace(&namespace_id, &actor)
-        .await
-        .expect("create");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    create_directories(&namespace, "history").await;
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
-    maintenance
-        .fold_wal(&namespace_id)
-        .await
-        .expect("fold the history");
-    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
-
-    gated.block_next();
-    let advance = tokio::spawn({
-        let maintenance = maintenance.clone();
-        let namespace_id = namespace_id.clone();
-        async move { maintenance.advance_retention_floor(&namespace_id).await }
-    });
-    gated.wait_until_blocked().await;
-    let parked = current_manifest(gated.inner(), &namespace_id).await;
-    let takeover = runtime_at(
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore,
-        "writer-b",
-        &clock,
-    )
-    .await;
-    takeover
-        .open_namespace(&namespace_id)
-        .expect("open namespace")
-        .commit_candidate(CommitCandidate::new(create_directory_request(
-            "takeover", "takeover",
-        )))
-        .await
-        .expect("the new writer commits");
-    gated.release();
-
-    let error = advance
-        .await
-        .expect("join")
-        .expect_err("the advance's epoch was taken over");
-    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
-    let current = current_manifest(gated.inner(), &namespace_id).await;
-    assert!(current.writer_epoch > parked.writer_epoch);
-    assert_eq!(
-        current.retention_floor_seq, parked.retention_floor_seq,
-        "the new writer's manifest keeps the old floor"
-    );
-    for manifest_no in parked.manifest_no.0 + 1..=current.manifest_no.0 {
-        assert_eq!(
-            manifest_at(gated.inner(), &namespace_id, ManifestNo(manifest_no))
-                .await
-                .retention_floor_seq,
-            parked.retention_floor_seq,
-            "manifest {manifest_no}: the advance published no floor"
-        );
-    }
-    assert_eq!(
-        namespace.session_status(),
-        crate::NamespaceSessionStatus::Fenced
-    );
-    takeover.shutdown().await.expect("shutdown");
-    writer.shutdown().await.expect("shutdown");
-}
-
-/// Checks that an undelete that the old writer commits between an advance's
-/// claim and its fence is folded before the advance's floor, so a base
-/// compaction over the advance's manifest keeps the restored item's rows.
-#[tokio::test]
-async fn a_commit_between_the_claim_and_the_fence_is_folded_before_the_floor() {
+async fn a_restore_at_the_floor_objects_number_is_folded_before_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
@@ -365,8 +297,9 @@ async fn a_commit_between_the_claim_and_the_fence_is_folded_before_the_floor() {
         .expect("open namespace");
     create_directories(&namespace, "deleted").await;
     let maintainer_clock = Arc::new(ManualClock::at_system_time());
-    maintainer_clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
-    // The maintainer's first WAL put is its fence, which the gate parks.
+    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    // The maintainer's first WAL put is its floor object, which the gate
+    // parks.
     let gated = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
@@ -388,6 +321,7 @@ async fn a_commit_between_the_claim_and_the_fence_is_folded_before_the_floor() {
         .fold_wal(&namespace_id)
         .await
         .expect("fold the deletion");
+    let before = current_manifest(store.as_ref(), &namespace_id).await;
 
     gated.block_next();
     let advance = tokio::spawn({
@@ -396,22 +330,33 @@ async fn a_commit_between_the_claim_and_the_fence_is_folded_before_the_floor() {
         async move { maintenance.advance_retention_floor(&namespace_id).await }
     });
     gated.wait_until_blocked().await;
-    let claim = current_manifest(store.as_ref(), &namespace_id).await;
-    // The writer's session trusts its basis, so it doesn't see the claim,
-    // and its undelete takes the WAL number that the fence waits for.
+    // The writer's session trusts its tip, and its restore takes the WAL
+    // number that the floor object waits for.
     let restored = namespace
-        .undelete(inode_id, deletion_seq, &actor)
+        .restore_deleted(inode_id, deletion_seq, &actor)
         .await
-        .expect("an undelete against the old floor");
+        .expect("a restore against the old floor");
     gated.release();
 
     let advanced = advance.await.expect("join").expect("the advance");
     assert_eq!(advanced.retention_floor_seq, deletion_seq);
+    let restored_at = wal_no_of_commit(store.as_ref(), &namespace_id, restored.committed_seq).await;
+    let floor_object = wal_object_at(
+        store.as_ref(),
+        &namespace_id,
+        restored_at.successor().expect("next WAL number"),
+    )
+    .await;
+    assert_eq!(floor_object.retention_floor_seq, Some(deletion_seq));
     let floor = current_manifest(store.as_ref(), &namespace_id).await;
-    assert_eq!(floor.writer_epoch, claim.writer_epoch);
+    assert_eq!(floor.retention_floor_seq, deletion_seq);
+    assert_eq!(
+        floor.writer_epoch, before.writer_epoch,
+        "the advance claims no epoch"
+    );
     assert!(
         floor.head_seq >= restored.committed_seq,
-        "the advance's fold covers the undelete"
+        "the advance's fold covers the restore"
     );
     let rows = inode_rows(store.as_ref(), &namespace_id).await;
     assert!(drain_compaction(&maintenance, &namespace_id).await > 0);
@@ -431,13 +376,14 @@ async fn a_commit_between_the_claim_and_the_fence_is_folded_before_the_floor() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that an advance by another runtime fences the writer's session,
-/// so an undelete of a deletion that the advance expired returns
-/// `writer_fenced` and then `not_deleted` from the writer's next session,
-/// and that a base compaction over the advance's manifest removes the
+/// Checks that an advance by another runtime leaves the writer's session
+/// unfenced. The session's restore of a deletion that the advance expired
+/// collides with the floor object, plans again against the new floor, and
+/// returns `not_deleted`, and the session's next commit succeeds. A base
+/// compaction over the manifest that records the floor removes the
 /// deletion's rows.
 #[tokio::test]
-async fn an_advance_by_another_runtime_fences_a_session_on_the_old_floor() {
+async fn an_advance_by_another_runtime_leaves_a_session_on_the_old_floor_unfenced() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let clock = Arc::new(ManualClock::at_system_time());
@@ -452,7 +398,7 @@ async fn an_advance_by_another_runtime_fences_a_session_on_the_old_floor() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let maintainer_clock = Arc::new(ManualClock::at_system_time());
-    maintainer_clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let maintainer = runtime_at(store.clone(), "maintainer", &maintainer_clock).await;
     let maintenance = maintainer.maintenance(loonfs_test_support::ids::writer_id("maintainer"));
     // Each fold writes a run, and the directories created after the
@@ -480,29 +426,177 @@ async fn an_advance_by_another_runtime_fences_a_session_on_the_old_floor() {
     assert!(advanced.retention_floor_seq >= deletion_seq);
 
     let error = namespace
-        .undelete(inode_id, deletion_seq, &actor)
+        .restore_deleted(inode_id, deletion_seq, &actor)
         .await
-        .expect_err("the session's epoch was taken over");
-    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+        .expect_err("the deletion has expired");
+    assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+    assert_ne!(
+        namespace.session_status(),
+        crate::NamespaceSessionStatus::Fenced
+    );
     let rows = inode_rows(store.as_ref(), &namespace_id).await;
     assert!(drain_compaction(&maintenance, &namespace_id).await > 0);
     assert!(
         inode_rows(store.as_ref(), &namespace_id).await < rows,
-        "a compaction over the advance's manifest removes the deletion's rows"
+        "a compaction over the manifest that records the floor removes the deletion's rows"
     );
+    create_directories(&namespace, "after").await;
+    maintainer.shutdown().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
+}
 
-    drop(namespace);
-    writer
-        .drain()
+/// Checks that an advance that finds no session, and so creates its floor
+/// object itself, folds the floor object even when a session opens in the
+/// same runtime and commits before the floor object's discovery. The
+/// session's position ends below the floor object, so the advance drops it,
+/// and when the advance returns, the current manifest records the floor.
+#[tokio::test]
+async fn an_advance_without_a_session_folds_its_floor_object_after_a_session_opens() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let clock = Arc::new(ManualClock::at_system_time());
+    let seed = runtime_at(
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore,
+        "seed",
+        &clock,
+    )
+    .await;
+    let actor = loonfs_test_support::test_actor();
+    seed.create_namespace(&namespace_id, &actor)
         .await
-        .expect("the fenced session's work ends");
-    let error = writer
+        .expect("create");
+    create_directories(
+        &seed.open_namespace(&namespace_id).expect("open namespace"),
+        "history",
+    )
+    .await;
+    seed.maintenance(loonfs_test_support::ids::writer_id("seed"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the history");
+    seed.shutdown().await.expect("shutdown");
+    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    // The direct path checks the planned manifest's segments after it finds
+    // no session and before its discovery, so the gate parks it there.
+    let gated = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::metadata_segment(),
+        OperationSelector::Head,
+    ));
+    let writer = runtime_at(gated.clone() as SharedStore, "writer-a", &clock).await;
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+
+    gated.block_next();
+    let advance = tokio::spawn({
+        let maintenance = maintenance.clone();
+        let namespace_id = namespace_id.clone();
+        async move { maintenance.advance_retention_floor(&namespace_id).await }
+    });
+    gated.wait_until_blocked().await;
+    let namespace = writer
         .open_namespace(&namespace_id)
-        .expect("open a new session")
-        .undelete(inode_id, deletion_seq, &actor)
+        .expect("open namespace");
+    create_directories(&namespace, "later").await;
+    assert!(writer
+        .mode
+        .publisher
+        .current_position(&namespace_id)
+        .is_some());
+    gated.release();
+
+    let advanced = advance.await.expect("join").expect("the advance");
+    assert!(advanced.retention_floor_seq > CommitSeq(0));
+    assert_eq!(
+        current_manifest(gated.inner(), &namespace_id)
+            .await
+            .retention_floor_seq,
+        advanced.retention_floor_seq,
+        "the fold after the advance covers the floor object"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// The deletion sequences that a strong listing of the namespace's trash
+/// returns.
+async fn listed_deletions(namespace: &crate::Namespace<crate::Writable>) -> Vec<CommitSeq> {
+    namespace
+        .list_trash_with_options(&crate::ListTrashOptions {
+            consistency: Some(crate::Consistency::Strong),
+        })
+        .page()
         .await
-        .expect_err("the deletion has expired");
-    assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+        .expect("list the trash")
+        .entries
+        .into_iter()
+        .map(|entry| entry.deletion_seq)
+        .collect()
+}
+
+/// Checks that a strong read in a runtime with a cached head finds the floor
+/// of a floor object that no manifest records yet. The reader lists a
+/// deletion, another runtime's advance creates its floor object and waits at
+/// the put of the manifest that folds the floor object, and the reader's
+/// next listing leaves the expired deletion out.
+#[tokio::test]
+async fn a_read_from_a_cached_head_finds_an_unfolded_floor_object() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let clock = Arc::new(ManualClock::at_system_time());
+    let writer = runtime_at(store.clone(), "writer-a", &clock).await;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    create_directories(&namespace, "deleted").await;
+    let (_, deletion_seq) = delete_a_directory(&namespace, "deleted").await;
+    let gated = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let maintainer_clock = Arc::new(ManualClock::at_system_time());
+    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    let maintainer = runtime_at(
+        gated.clone() as SharedStore,
+        "maintainer",
+        &maintainer_clock,
+    )
+    .await;
+    let maintenance = maintainer.maintenance(loonfs_test_support::ids::writer_id("maintainer"));
+    maintenance
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the deletion");
+    let reader = runtime_at(store.clone(), "reader", &clock).await;
+    let reads = reader
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    assert_eq!(listed_deletions(&reads).await, [deletion_seq]);
+
+    gated.block_next();
+    let advance = tokio::spawn({
+        let maintenance = maintenance.clone();
+        let namespace_id = namespace_id.clone();
+        async move { maintenance.advance_retention_floor(&namespace_id).await }
+    });
+    gated.wait_until_blocked().await;
+    assert_eq!(
+        current_manifest(store.as_ref(), &namespace_id)
+            .await
+            .retention_floor_seq,
+        CommitSeq(0),
+        "no manifest records the floor yet"
+    );
+    assert_eq!(listed_deletions(&reads).await, []);
+    gated.release();
+
+    let advanced = advance.await.expect("join").expect("the advance");
+    assert!(advanced.retention_floor_seq >= deletion_seq);
+    reader.shutdown().await.expect("shutdown");
     maintainer.shutdown().await.expect("shutdown");
     writer.shutdown().await.expect("shutdown");
 }

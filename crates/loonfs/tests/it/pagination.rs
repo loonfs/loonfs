@@ -82,7 +82,7 @@ fn directory_pages_use_canonical_name_key_order() {
         .expect("put file");
     }
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint");
+        .expect("snapshot");
 
     let limit = page_limit(2);
     let first = block_on(fs.list(&namespace_id, "/docs").page_limit(limit).page())
@@ -141,7 +141,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     )
     .expect("put v2");
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint after v2");
+        .expect("snapshot after v2");
     fs.put_file_with_options_blocking(
         &namespace_id,
         "/doc.txt",
@@ -264,7 +264,7 @@ fn directory_cursor_from_the_future_is_rejected() {
     .expect("first directory page");
     let mut cursor =
         decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
-    cursor.head_seq = loonfs::ChangeSeq(cursor.head_seq.0 + 1000);
+    cursor.head_seq = loonfs::CommitSeq(cursor.head_seq.0 + 1000);
 
     assert_core_error_kind(
         block_on(
@@ -312,7 +312,7 @@ fn directory_cursor_resumes_across_a_wal_fold() {
     )
     .expect("put later file");
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint newer snapshot");
+        .expect("snapshot newer snapshot");
 
     // Materializing the newer state into the manifest does not retire the
     // cursor either: retained rows answer the resume at the current head.
@@ -569,7 +569,7 @@ fn inode_children_rejects_files_and_missing_inodes() {
                 .page_limit(page_limit(2))
                 .page(),
         ),
-        ErrorCode::PathConflict,
+        ErrorCode::WrongKind,
     );
     assert_core_error_kind(
         block_on(
@@ -716,7 +716,7 @@ fn inode_children_cursor_from_the_future_is_rejected() {
     .expect("first directory page");
     let mut cursor =
         decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
-    cursor.head_seq = loonfs::ChangeSeq(cursor.head_seq.0 + 1000);
+    cursor.head_seq = loonfs::CommitSeq(cursor.head_seq.0 + 1000);
 
     assert_core_error_kind(
         block_on(

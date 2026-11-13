@@ -12,29 +12,29 @@ use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::storage::content_admission::ContentTokenError;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::control::{
-    ForkBasis, ManifestRef, PinOwner, PinPayload, RebasedFrom, WriterBlock,
+    ForkBasis, ManifestRef, RebasedFrom, SnapshotOwner, SnapshotPayload, WriterBlock,
 };
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
-    AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord,
-    ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef, InodeRecord, MergeIndexRecord,
-    MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestEnvelope,
-    NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
+    DeletedBinding, DirentryBindingRecord, ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef,
+    InodeRecord, MergeIndexRecord, MetadataRow, MetadataRunRef, MetadataSegmentRef,
+    NamespaceAccess, NamespaceManifestEnvelope, NamespaceManifestPayload, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction, TrashRecord, TrashRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
     MergeRecord, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
 };
-use loonfs_types::options::UndeleteDestination;
+use loonfs_types::options::RestoreDeletedDestination;
 use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
-    ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, ContentId,
+    Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
-    MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PinId, PrincipalId,
-    PrincipalScope, Subject, SubjectId, UploadId, WriterId,
+    MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PoolId, PrincipalId,
+    PrincipalScope, SnapshotId, Subject, SubjectId, UploadId, WriterId,
 };
-use loonfs_types::{DiffEntry, FilesystemChange};
+use loonfs_types::{DiffEntry, FilesystemEvent};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 
@@ -174,7 +174,8 @@ text_heap_bytes!(
     NameKey,
     NamespaceId,
     PayloadChecksum,
-    PinId,
+    SnapshotId,
+    PoolId,
     PrincipalId,
     PrincipalScope,
     SubjectId,
@@ -188,7 +189,7 @@ impl HeapBytes for InodeId {
     }
 }
 
-impl HeapBytes for ChangeSeq {
+impl HeapBytes for CommitSeq {
     fn heap_bytes(&self) -> usize {
         0
     }
@@ -335,10 +336,10 @@ impl HeapBytes for FilesystemOperation {
                 destination_display_name,
                 ..
             } => destination_display_name.heap_bytes(),
-            Self::Undelete { destination, .. } => match destination {
-                UndeleteDestination::Recorded => 0,
-                UndeleteDestination::Path(path) => path.heap_bytes(),
-                UndeleteDestination::Name { display_name, .. } => display_name.heap_bytes(),
+            Self::RestoreDeleted { destination, .. } => match destination {
+                RestoreDeletedDestination::Recorded => 0,
+                RestoreDeletedDestination::Path(path) => path.heap_bytes(),
+                RestoreDeletedDestination::Name { display_name, .. } => display_name.heap_bytes(),
             },
             Self::RestoreRevisionByInode { .. } => 0,
             Self::UpdateAttributes {
@@ -360,7 +361,7 @@ fn attribute_set_heap_bytes(set: &BTreeMap<AttributeKey, AttributeValue>) -> usi
         .fold(btree_map_node_bytes(set), usize::saturating_add)
 }
 
-impl HeapBytes for FilesystemChange {
+impl HeapBytes for FilesystemEvent {
     fn heap_bytes(&self) -> usize {
         match self {
             Self::DirectoryCreated {
@@ -368,7 +369,7 @@ impl HeapBytes for FilesystemChange {
                 binding_version,
                 ..
             }
-            | Self::Undeleted {
+            | Self::Restored {
                 display_name,
                 binding_version,
                 ..
@@ -448,7 +449,7 @@ impl HeapBytes for MetadataRow {
             MetadataRow::DirentryBinding(record) => record.heap_bytes(),
             MetadataRow::FileRevision(record) => record.heap_bytes(),
             MetadataRow::Tombstone(record) => record.heap_bytes(),
-            MetadataRow::ActiveDeletion(record) => record.heap_bytes(),
+            MetadataRow::Trash(record) => record.heap_bytes(),
             MetadataRow::CommitReceipt(record) => record.heap_bytes(),
             MetadataRow::Merge(record) => record.heap_bytes(),
             MetadataRow::Commit(record) => record.heap_bytes(),
@@ -496,15 +497,15 @@ impl HeapBytes for SubtreeTombstoneRecord {
     }
 }
 
-impl HeapBytes for ActiveDeletionRecord {
+impl HeapBytes for TrashRecord {
     fn heap_bytes(&self) -> usize {
         match &self.action {
-            ActiveDeletionRowAction::Listed {
+            TrashRowAction::Listed {
                 deleted_by,
                 deleted_binding,
                 ..
             } => deleted_by.heap_bytes() + deleted_binding.heap_bytes(),
-            ActiveDeletionRowAction::Removed { .. } => 0,
+            TrashRowAction::Removed { .. } => 0,
         }
     }
 }
@@ -622,7 +623,7 @@ impl HeapBytes for NamespaceManifestPayload {
             + self.created_by.heap_bytes()
             + self.access.heap_bytes()
             + self.fork_basis.heap_bytes()
-            + self.family_root_id.heap_bytes()
+            + self.pool_id.heap_bytes()
             + self.writer.heap_bytes()
             + self.runs.heap_bytes()
             + self
@@ -705,7 +706,7 @@ impl HeapBytes for NamespaceReadState {
             + self.created_by.heap_bytes()
             + self.access.heap_bytes()
             + self.fork_basis.heap_bytes()
-            + self.family_root_id.heap_bytes()
+            + self.pool_id.heap_bytes()
             + self.writer.heap_bytes()
     }
 }
@@ -716,14 +717,14 @@ impl HeapBytes for ManifestRef {
     }
 }
 
-impl HeapBytes for PinPayload {
+impl HeapBytes for SnapshotPayload {
     fn heap_bytes(&self) -> usize {
         self.namespace_id.heap_bytes()
-            + self.pin_id.heap_bytes()
+            + self.snapshot_id.heap_bytes()
             + self.payload_checksum.heap_bytes()
             + match &self.owner {
-                PinOwner::User { name, .. } => name.heap_bytes(),
-                PinOwner::Fork {
+                SnapshotOwner::User { name, .. } => name.heap_bytes(),
+                SnapshotOwner::Fork {
                     target_namespace_id,
                 } => target_namespace_id.heap_bytes(),
             }
@@ -733,7 +734,7 @@ impl HeapBytes for PinPayload {
 impl HeapBytes for ForkBasis {
     fn heap_bytes(&self) -> usize {
         self.manifest.heap_bytes()
-            + self.source_pin_id.heap_bytes()
+            + self.source_snapshot_id.heap_bytes()
             + self.rebased_from.heap_bytes()
     }
 }

@@ -7,23 +7,27 @@ use crate::common::*;
 use bytes::Bytes;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::test_support::WriterAt;
-use loonfs_core::test_support::{compact_every_group, namespace_store, NamespaceFixture};
+use loonfs_core::test_support::{
+    compact_every_group, namespace_store, pool_store, NamespaceFixture,
+};
 use loonfs_core::{CoreError, ErrorCode};
-use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin};
+use loonfs_objectstore::keys::{
+    content_blob, hint, metadata_manifest_object, pool_record, snapshot_record,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, PutMode};
-use loonfs_test_support::ids::{commit_id, namespace_id};
+use loonfs_test_support::ids::{commit_id, namespace_id, numbered_content_id};
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore,
     MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
-    format::control::{decode_control_object, ControlObjectKind, PinOwner, PinPayload},
+    format::control::{decode_control_object, ControlObjectKind, SnapshotOwner, SnapshotPayload},
     format::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
     },
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId, PinId,
+    AbsolutePath, CommitId, CommitSeq, DestinationBehavior, ManifestNo, NamespaceId, SnapshotId,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -47,18 +51,18 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
         .await
 }
 
-async fn load_pin<S: ObjectStore + ?Sized>(
+async fn load_snapshot_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    pin_id: &PinId,
-) -> PinPayload {
+    snapshot_id: &SnapshotId,
+) -> SnapshotPayload {
     let bytes = store
-        .get(&pin(namespace_id, pin_id), None)
+        .get(&snapshot_record(namespace_id, snapshot_id), None)
         .await
-        .expect("read pin")
-        .expect("pin exists");
-    decode_control_object::<PinPayload>(&bytes, ControlObjectKind::Pin)
-        .expect("decode pin")
+        .expect("read snapshot")
+        .expect("snapshot exists");
+    decode_control_object::<SnapshotPayload>(&bytes, ControlObjectKind::Snapshot)
+        .expect("decode snapshot")
         .into_payload()
 }
 
@@ -107,7 +111,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         )
         .await
         .expect("snapshot");
-    let snapshot_record = load_pin(&store, &source, &snapshot.snapshot_id).await;
+    let snapshot_record = load_snapshot_record(&store, &source, &snapshot.snapshot_id).await;
     NamespaceFixture::new(&store, &source, &context)
         .write_file_bytes("/docs/later.txt", b"later", Some(&commit_id("later")))
         .await
@@ -124,7 +128,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 4;
     let collected = namespace_store(&store, &source)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("collect source before fork");
     assert!(collected.deleted.metadata_segments > 0);
@@ -148,7 +152,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         ["later.txt", "shared.txt"]
     );
     assert_eq!(
-        load_pin(&store, &source, &snapshot.snapshot_id).await,
+        load_snapshot_record(&store, &source, &snapshot.snapshot_id).await,
         snapshot_record
     );
     engine
@@ -157,7 +161,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .expect("release snapshot");
     aged.now_ms = u64::MAX / 2;
     namespace_store(&store, &source)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("collect source past grace window");
     assert_eq!(listed_names(&store, &target).await, ["shared.txt"]);
@@ -242,13 +246,13 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let store = BlockingStore::new(
         BlockingStore::new(
             store,
-            KeyPredicate::exact(loonfs_objectstore::keys::pin(
+            KeyPredicate::exact(loonfs_objectstore::keys::snapshot_record(
                 &source,
                 &snapshot.snapshot_id,
             )),
             OperationSelector::Read,
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::pin_prefix(&source)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::snapshot_prefix(&source)),
         OperationSelector::PutCreateIfAbsent,
     );
     let engine = namespace_engine(&store, &source, &context);
@@ -262,16 +266,16 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
         store.inner().wait_until_blocked().await;
         assert_eq!(
             store
-                .list_prefix(&loonfs_objectstore::keys::pin_prefix(&source))
+                .list_prefix(&loonfs_objectstore::keys::snapshot_prefix(&source))
                 .await
-                .expect("durable pins")
+                .expect("durable snapshots")
                 .len(),
             2
         );
         namespace_engine(store.inner().inner(), &source, &context)
             .delete_snapshot(&snapshot.snapshot_id)
             .await
-            .expect("delete snapshot after fork pin is durable");
+            .expect("delete snapshot after fork snapshot is durable");
         store.inner().release();
     };
     let (result, ()) = tokio::join!(forking, deleting);
@@ -279,7 +283,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let records = store
-        .list_prefix(&format!("namespaces/{source}/pins/"))
+        .list_prefix(&format!("namespaces/{source}/snapshots/"))
         .await
         .expect("list records");
     assert!(records.is_empty());
@@ -382,8 +386,8 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .await
         .expect("bootstrap namespace");
     assert_eq!(created.namespace_id, namespace_id);
-    assert_eq!(created.head_seq, ChangeSeq(0));
-    assert_eq!(created.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(created.head_seq, CommitSeq(0));
+    assert_eq!(created.retention_floor_seq, CommitSeq(0));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
         vec![
@@ -405,7 +409,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .await
         .expect("status");
     assert_eq!(status.current_manifest_no, ManifestNo(1));
-    assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(status.retention_floor_seq, CommitSeq(0));
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/first.txt", b"hello", Some(&commit_id("first-write")))
@@ -416,7 +420,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .expect("read back");
     assert_eq!(file.bytes, b"hello");
     let content_ref = file.entry.content_ref().expect("content reference");
-    let content_key = content_blob(&namespace_id, &content_ref.content_id);
+    let content_key = content_blob(&created.pool_id, &content_ref.content_id);
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
         keys.iter().all(|key| key == &hint(&namespace_id)
@@ -568,7 +572,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .expect("seed shared file");
     namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
-            "test-pin".to_owned(),
+            "test-snapshot".to_owned(),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(
                 &store,
@@ -578,18 +582,18 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             .expect("fold the WAL tail"),
         )
         .await
-        .expect("create source checkpoint before fork");
+        .expect("create source snapshot before fork");
 
     let source_head = head_state(&store, &source_namespace_id).await;
-    assert_eq!(source_head.seq, ChangeSeq(1));
+    assert_eq!(source_head.seq, CommitSeq(1));
     store.reset();
     store.inner().reset();
     let forked = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .await
         .expect("fork namespace");
     assert_eq!(forked.namespace_id, clone_namespace_id);
-    assert_eq!(forked.head_seq, ChangeSeq(1));
-    assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(forked.head_seq, CommitSeq(1));
+    assert_eq!(forked.retention_floor_seq, CommitSeq(1));
     assert_eq!(
         store.count(OperationSelector::Read),
         0,
@@ -607,31 +611,32 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
 
     let clone_head = head_state(&store, &clone_namespace_id).await;
 
-    assert_eq!(clone_head.seq, ChangeSeq(1));
+    assert_eq!(clone_head.seq, CommitSeq(1));
     let clone_status = namespace_store(&store, &clone_namespace_id)
         .load_diagnostics()
         .await
         .expect("clone status");
     assert_eq!(
         clone_status.retention_floor_seq,
-        ChangeSeq(1),
+        CommitSeq(1),
         "a fork's first manifest starts its retention floor at the fork point"
     );
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
-    assert_eq!(fork_basis.manifest.head_seq, ChangeSeq(1));
+    assert_eq!(fork_basis.manifest.head_seq, CommitSeq(1));
     assert_eq!(
-        fork_basis.source_pin_id.manifest_no(),
+        fork_basis.source_snapshot_id.manifest_no(),
         fork_basis.manifest.manifest_no
     );
 
-    let source_record = load_pin(&store, &source_namespace_id, &fork_basis.source_pin_id).await;
-    assert_eq!(source_record.head_seq, ChangeSeq(1));
-    // The fork basis and pin must use the same manifest.
+    let source_record =
+        load_snapshot_record(&store, &source_namespace_id, &fork_basis.source_snapshot_id).await;
+    assert_eq!(source_record.head_seq, CommitSeq(1));
+    // The fork basis and the fork snapshot must use the same manifest.
     assert_eq!(source_record.manifest(), fork_basis.manifest);
     assert_matches!(
         &source_record.owner,
-        PinOwner::Fork {
+        SnapshotOwner::Fork {
             target_namespace_id,
             ..
         }
@@ -673,16 +678,16 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(store.inner().counts().puts, 0);
     assert_eq!(
         store.inner().take_get_keys(),
-        vec![format!(
-            "namespaces/demo/content/{}",
-            inherited_ref.content_id
+        vec![loonfs_objectstore::keys::content_blob(
+            &forked.pool_id,
+            &inherited_ref.content_id
         )]
     );
-    let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(0))
+    let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, CommitSeq(0))
         .await
         .expect_err("old cursor");
-    assert_eq!(stale_clone_changes.code(), ErrorCode::RebootstrapRequired);
-    let empty_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(1))
+    assert_eq!(stale_clone_changes.code(), ErrorCode::BelowRetentionFloor);
+    let empty_clone_changes = list_changes_after(&store, &clone_namespace_id, CommitSeq(1))
         .await
         .expect("empty changes");
     assert!(empty_clone_changes.changes.is_empty());
@@ -720,16 +725,14 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     )
     .await
     .expect("clone replace");
-    assert_eq!(clone_write.committed_seq, ChangeSeq(2));
-    // An upload in a fork is stored under the family root's prefix, so the
-    // fork's own content and uploads prefixes stay empty.
+    assert_eq!(clone_write.committed_seq, CommitSeq(2));
+    // An upload in a fork is stored under the prefix of its source's pool,
+    // so the fork's own prefix stores no content and no upload records.
+    let pool_id = &forked.pool_id;
     assert!(store
-        .head(&content_blob(
-            &source_namespace_id,
-            &uploaded_ref.content_id
-        ))
+        .head(&content_blob(pool_id, &uploaded_ref.content_id))
         .await
-        .expect("family root content")
+        .expect("pool content")
         .is_some());
     assert!(namespace_keys(&store, &clone_namespace_id)
         .await
@@ -750,11 +753,11 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         b"clone-after-fork"
     );
 
-    let clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(1))
+    let clone_changes = list_changes_after(&store, &clone_namespace_id, CommitSeq(1))
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);
-    assert_eq!(clone_changes.changes[0].committed_seq, ChangeSeq(2));
+    assert_eq!(clone_changes.changes[0].committed_seq, CommitSeq(2));
 
     // The target's own first fold inherits the source's segments by
     // reference and adds only its own delta run.
@@ -898,7 +901,7 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
     assert_eq!(
         inode_rows(&store, &source_namespace_id).await,
         source_rows,
-        "the source keeps the rows of its recoverable deletion"
+        "the source keeps the rows of its deletion in the trash"
     );
     let after_compaction = head_state(&store, &fork_namespace_id).await;
     assert_eq!(after_compaction.seq, fork_head.seq);
@@ -932,7 +935,7 @@ async fn fork_clone_survives_source_delete() {
         .expect("delete source");
 
     let clone_head = head_state(&store, &clone).await;
-    assert_eq!(clone_head.seq, ChangeSeq(1));
+    assert_eq!(clone_head.seq, CommitSeq(1));
     assert_eq!(
         read_file_bytes(&store, &clone, "/docs/shared.txt")
             .await
@@ -983,7 +986,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     namespace_store(&store, &ancestor)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("collect ancestor");
 
@@ -1006,15 +1009,15 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
             .grace_window_ms
             .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
     let parent_waiting = namespace_store(&store, &parent)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
         .expect("parent waits");
-    assert_eq!(parent_waiting.reclaimable_at_ms, Some(parent_deadline));
+    assert_eq!(parent_waiting.retires_at_ms, Some(parent_deadline));
     let ancestor_waiting = namespace_store(&store, &ancestor)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
         .expect("ancestor waits");
-    assert_eq!(ancestor_waiting.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(ancestor_waiting.deleted_snapshots_by_owner.fork, 0);
     namespace_engine(&store, &descendant, &aged)
         .delete_namespace(Default::default())
         .await
@@ -1027,35 +1030,34 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .deleted_at_ms()
         .expect("deletion stamp");
     let retired = namespace_store(&store, &descendant)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
         .expect("retire descendant");
     let descendant_deadline = retired
-        .reclaimable_at_ms
+        .retires_at_ms
         .expect("descendant retired despite compaction");
-    assert_eq!(retired.deleted.content_objects, 0);
     let waiting = namespace_store(&store, &parent)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
         .expect("wait for descendant grace");
-    assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(waiting.deleted_snapshots_by_owner.fork, 0);
     aged.now_ms = descendant_deadline;
     namespace_store(&store, &descendant)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
-        .expect("descendant releases its source pin");
+        .expect("descendant releases its fork snapshot");
     let released = namespace_store(&store, &parent)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
-        .expect("parent releases its source pin");
-    assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
-    assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
+        .expect("parent releases its fork snapshot");
+    assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
+    assert_eq!(released.retires_at_ms, Some(parent_deadline));
     let released = namespace_store(&store, &ancestor)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
-        .expect("collect ancestor after parent releases its pin");
-    assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
-    assert!(released.reclaimable_at_ms.is_some());
+        .expect("collect ancestor after parent releases its snapshot");
+    assert_eq!(released.deleted_snapshots_by_owner.fork, 0);
+    assert!(released.retires_at_ms.is_some());
 }
 
 #[tokio::test]
@@ -1071,7 +1073,7 @@ async fn a_fork_survives_a_concurrent_collection() {
     let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
     let source_store = namespace_store(store.as_ref(), &source);
     let clock = context.clock();
-    let collecting = source_store.gc(None, &gc_options, &clock);
+    let collecting = source_store.gc(&gc_options, &clock);
     let (forked, collected) = tokio::join!(forking, collecting);
     forked.expect("creation grace protects the fork");
     collected.expect("the collection finishes");
@@ -1097,9 +1099,9 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
-    let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
+    let snapshot = namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
-            "test-pin".to_owned(),
+            "test-snapshot".to_owned(),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(
                 &store,
@@ -1109,11 +1111,14 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
             .expect("fold the WAL tail"),
         )
         .await
-        .expect("create source checkpoint");
+        .expect("create source snapshot");
 
-    let source_record = load_pin(&store, &source_namespace_id, &checkpoint.snapshot_id).await;
-    let manifest_key =
-        metadata_manifest_object(&source_namespace_id, &source_record.pin_id.manifest_no());
+    let source_record =
+        load_snapshot_record(&store, &source_namespace_id, &snapshot.snapshot_id).await;
+    let manifest_key = metadata_manifest_object(
+        &source_namespace_id,
+        &source_record.snapshot_id.manifest_no(),
+    );
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await
@@ -1149,27 +1154,30 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
 }
 
 #[tokio::test]
-async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
+async fn fork_source_snapshot_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = default_writer();
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(format!("namespaces/{}/pins/", source_namespace_id.as_str())),
+        KeyPredicate::prefix(format!(
+            "namespaces/{}/snapshots/",
+            source_namespace_id.as_str()
+        )),
         OperationSelector::PutCreateIfAbsent,
-        InjectedError::PermissionDenied("injected source checkpoint failure".to_owned()),
+        InjectedError::PermissionDenied("injected source snapshot failure".to_owned()),
     );
     store.fail_next(1);
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .await
-        .expect_err("source checkpoint failure should abort fork before target publication");
+        .expect_err("source snapshot failure should abort fork before target publication");
     assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
     assert!(
         namespace_keys(&store, &clone_namespace_id).await.is_empty(),
-        "the target must not be installed before the source basis is pinned"
+        "the target must not be installed before the fork snapshot keeps the source basis"
     );
     assert!(
         store
@@ -1190,6 +1198,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     // Another writer's complete head for the same id, already durable.
     let foreign = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
         namespace_id.clone(),
+        loonfs_types::PoolId::generate(),
         1_000,
         loonfs_test_support::test_actor(),
         loonfs_types::NamespaceAccess::Unrestricted {},
@@ -1261,7 +1270,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
     let engine = namespace_engine(&store, &namespace_id, &context);
     let stale = engine
         .delete_namespace(loonfs_core::DeleteNamespaceOptions {
-            expected_head_seq: Some(ChangeSeq(0)),
+            expected_head_seq: Some(CommitSeq(0)),
         })
         .await
         .expect_err("stale precondition");
@@ -1271,7 +1280,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
-    assert_eq!(response.head_seq, ChangeSeq(1));
+    assert_eq!(response.head_seq, CommitSeq(1));
 
     // Reads, commits, status, repeat deletes, and forks observe the deleted head.
     let read = resolve_path(&store, &namespace_id, "/")
@@ -1325,7 +1334,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     let report = namespace_store(&store, &namespace_id)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("gc a namespace with no root");
     assert_eq!(report.deleted.wal_objects, 0, "{report:?}");
@@ -1353,12 +1362,12 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .await
         .expect("raise the hint");
     let report = namespace_store(&store, &namespace_id)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("gc the tombstone");
     assert!(report.deleted.wal_objects >= 1, "{report:?}");
     namespace_store(&store, &namespace_id)
-        .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
         .await
         .expect("collect obsolete tombstone version");
     let current = namespace_store(&store, &namespace_id)
@@ -1392,7 +1401,7 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
     );
     let context = default_writer();
     let source = namespace_id("source");
-    NamespaceFixture::new(&store, &source, &context)
+    let created = NamespaceFixture::new(&store, &source, &context)
         .create()
         .await
         .expect("bootstrap");
@@ -1408,6 +1417,7 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         puts,
         vec![
             (hint(&source), PutMode::CreateIfAbsent),
+            (pool_record(&created.pool_id), PutMode::CreateIfAbsent),
             (
                 metadata_manifest_object(&source, &ManifestNo(1)),
                 PutMode::CreateIfAbsent
@@ -1444,8 +1454,8 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         .await
         .expect_err("target exists");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    // The fork writes its source pin, has the target's hint put refused, and
-    // deletes the pin.
+    // The fork writes its fork snapshot, has the target's hint put refused, and
+    // deletes the snapshot.
     assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(store.counts().deletes, 1);
@@ -1472,7 +1482,8 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
                 ErrorCode::NamespaceExists
             );
         }
-        // The hint put is refused, and nothing is deleted.
+        // The hint put is refused, and the create makes no request under
+        // `pools/` and deletes nothing.
         let counts = store.counts();
         assert_eq!(
             (
@@ -1482,6 +1493,10 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
             ),
             (1, 0, 0)
         );
+        assert!(store
+            .take()
+            .iter()
+            .all(|operation| !operation.key().starts_with("pools/")));
     }
 }
 
@@ -1626,7 +1641,7 @@ async fn a_create_after_the_collection_of_manifest_one_reports_the_id_as_taken()
     aged.now_ms = u64::MAX / 2;
     for _ in 0..2 {
         namespace
-            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
+            .gc(&loonfs_core::GcOptions::default(), &aged.clock())
             .await
             .expect("collect manifest 1");
     }
@@ -1713,9 +1728,9 @@ async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
     );
 }
 
-/// Checks that a fork's retirement deletes no content, and that the family
-/// root's collection collects the content that only a retired fork wrote, while
-/// the content of live members stays.
+/// Checks that a fork's retirement deletes no content, and that the pool's
+/// collection collects the content that only a retired fork wrote, while the
+/// content of live members stays.
 #[tokio::test]
 async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_content() {
     let directory = tempdir().expect("tempdir");
@@ -1726,28 +1741,32 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     let setup = default_writer();
     let source = namespace_id("template");
     let sibling = namespace_id("sibling");
-    seed_source_namespace_for_fork(&store, &source, &setup).await;
+    let pool_id = NamespaceFixture::new(&store, &source, &setup)
+        .create()
+        .await
+        .expect("bootstrap source namespace")
+        .pool_id;
+    let write = async |namespace_id: &NamespaceId, path, bytes, number| {
+        NamespaceFixture::new(&store, namespace_id, &setup)
+            .write_file_bytes_with_content_id(path, bytes, numbered_content_id(number))
+            .await
+            .expect("write a file");
+    };
+    write(&source, "/docs/shared.txt", b"base", 1).await;
     fork_namespace(&store, &source, &sibling, &setup)
         .await
         .expect("fork sibling");
-    NamespaceFixture::new(&store, &sibling, &setup)
-        .write_file_bytes(
-            "/docs/sibling.txt",
-            b"sibling",
-            Some(&commit_id("sibling-write")),
-        )
-        .await
-        .expect("write sibling");
+    write(&sibling, "/docs/sibling.txt", b"sibling", 2).await;
     let source_file = read_file_bytes(&store, &source, "/docs/shared.txt")
         .await
         .expect("source");
     let source_ref = source_file.entry.content_ref().expect("source content");
-    let source_key = content_blob(&source, &source_ref.content_id);
+    let source_key = content_blob(&pool_id, &source_ref.content_id);
     let sibling_file = read_file_bytes(&store, &sibling, "/docs/sibling.txt")
         .await
         .expect("sibling");
     let sibling_ref = sibling_file.entry.content_ref().expect("sibling content");
-    let sibling_key = content_blob(&source, &sibling_ref.content_id);
+    let sibling_key = content_blob(&pool_id, &sibling_ref.content_id);
     let options = loonfs_core::GcOptions::default();
     let mut aged = setup.clone();
     aged.now_ms = u64::MAX / 4;
@@ -1756,10 +1775,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         fork_namespace(&store, &source, &leaf, &setup)
             .await
             .expect("fork leaf");
-        NamespaceFixture::new(&store, &leaf, &setup)
-            .write_file_bytes("/docs/own.txt", b"leaf", Some(&commit_id("leaf-write")))
-            .await
-            .expect("write leaf");
+        write(&leaf, "/docs/own.txt", b"leaf", 3 + number).await;
         submit_operation(
             &store,
             &leaf,
@@ -1778,8 +1794,8 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .await
             .expect("leaf");
         let leaf_ref = leaf_file.entry.content_ref().expect("leaf content");
-        // The leaf's content is stored under the family root's prefix.
-        let leaf_key = content_blob(&source, &leaf_ref.content_id);
+        // The leaf's content is stored under the prefix of its source's pool.
+        let leaf_key = content_blob(&pool_id, &leaf_ref.content_id);
         assert!(namespace_keys(&store, &leaf)
             .await
             .iter()
@@ -1790,28 +1806,22 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .expect("delete leaf");
         store.reset();
         let report = namespace_store(&store, &leaf)
-            .gc(None, &options, &aged.clock())
+            .gc(&options, &aged.clock())
             .await
             .expect("retire leaf");
-        assert_eq!(report.deleted.retired_content_objects, 0);
-        assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
-        let content_lists = store
-            .snapshot()
-            .into_iter()
-            .filter(|operation| {
-                matches!(operation, RecordedOperation::List { prefix, .. }
-                    if prefix.contains("/content/") || prefix.contains("/uploads/"))
-            })
-            .count();
-        assert_eq!(
-            content_lists, 0,
-            "a fork's collection lists no content and no sessions"
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
+        assert!(
+            store
+                .snapshot()
+                .iter()
+                .all(|operation| !operation.key().starts_with("pools/")),
+            "a fork's collection makes no request under its pool's prefix"
         );
         assert!(store.head(&leaf_key).await.expect("leaf content").is_some());
-        let report = namespace_store(&store, &source)
+        let report = pool_store(&store, &pool_id)
             .gc(None, &options, &aged.clock())
             .await
-            .expect("collect the family's content");
+            .expect("collect the pool's content");
         assert_eq!(report.deleted.content_objects, 1);
         assert!(store.head(&leaf_key).await.expect("leaf content").is_none());
         for key in [&source_key, &sibling_key] {
@@ -1856,11 +1866,10 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     for _ in 0..3 {
         aged.now_ms += options.grace_window_ms;
         let report = namespace_store(&store, &source)
-            .gc(None, &options, &aged.clock())
+            .gc(&options, &aged.clock())
             .await
             .expect("collect deleted source");
-        assert_eq!(report.reclaimable_at_ms, Some(source_deadline));
-        assert_eq!(report.deleted.retired_content_objects, 0);
+        assert_eq!(report.retires_at_ms, Some(source_deadline));
         assert!(store
             .head(&source_key)
             .await

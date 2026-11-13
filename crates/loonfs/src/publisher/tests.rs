@@ -30,7 +30,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::Commit;
-use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, DestinationBehavior};
+use loonfs_types::{AbsolutePath, ActorId, CommitSeq, DestinationBehavior};
 use std::assert_matches;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -695,7 +695,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
             })
             .collect::<Vec<_>>();
         assert_eq!(batches, expected_batches);
-        for (response, expected_seq) in responses.into_iter().zip([ChangeSeq(2), ChangeSeq(3)]) {
+        for (response, expected_seq) in responses.into_iter().zip([CommitSeq(2), CommitSeq(3)]) {
             assert_eq!(
                 recv_commit(response, "bounded").await.committed_seq,
                 expected_seq
@@ -781,7 +781,7 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
         }
         let expected_batches = if extra_values == 0 { 1 } else { 2 };
         assert_eq!(publisher_state(&publisher).queue.len(), expected_batches);
-        for (response, expected_seq) in responses.into_iter().zip([ChangeSeq(2), ChangeSeq(3)]) {
+        for (response, expected_seq) in responses.into_iter().zip([CommitSeq(2), CommitSeq(3)]) {
             assert_eq!(
                 recv_commit(response, "inline commit").await.committed_seq,
                 expected_seq
@@ -925,8 +925,8 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
     store.release();
     let active_response = recv_commit(active, "active").await;
     let pending_response = recv_commit(pending, "pending").await;
-    assert_eq!(active_response.committed_seq, ChangeSeq(1));
-    assert_eq!(pending_response.committed_seq, ChangeSeq(2));
+    assert_eq!(active_response.committed_seq, CommitSeq(1));
+    assert_eq!(pending_response.committed_seq, CommitSeq(2));
 
     let wal_keys = shared
         .list_prefix(&wal_prefix(
@@ -974,14 +974,14 @@ async fn publisher_contender_waits_for_active_request_receipt() {
         .await
         .expect("conflict task")
         .expect_err("different request conflicts after the primary is committed");
-    assert_eq!(active_response.committed_seq, ChangeSeq(1));
-    assert_eq!(duplicate_response.committed_seq, ChangeSeq(1));
+    assert_eq!(active_response.committed_seq, CommitSeq(1));
+    assert_eq!(duplicate_response.committed_seq, CommitSeq(1));
     assert_matches!(
         conflict,
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
             committed: Some(loonfs_types::CommittedReceipt {
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 committed_fingerprint: fingerprint,
             }),
         }) if commit_id == "active" && fingerprint == active_identity
@@ -1041,7 +1041,7 @@ async fn publisher_contender_retries_after_active_request_fails() {
         .expect("contender task")
         .expect("contender publishes after the failed primary");
     assert_eq!(response.commit_id, commit_id);
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
     assert_eq!(publisher.context.admission.used_requests(), 0);
 }
 
@@ -1167,17 +1167,17 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
     store.release();
     assert_eq!(
         recv_commit(active, "active").await.committed_seq,
-        ChangeSeq(1)
+        CommitSeq(1)
     );
     for (index, receiver) in pending.into_iter().enumerate() {
         assert_eq!(
             recv_commit(receiver, "pending").await.committed_seq,
-            ChangeSeq(index as u64 + 2)
+            CommitSeq(index as u64 + 2)
         );
     }
     assert_eq!(
         recv_commit(duplicate, "duplicate").await.committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     let conflict = conflict
         .await
@@ -1188,7 +1188,7 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
         Error::Core(CoreError::CommitIdReuseConflict {
             commit_id,
             committed: Some(loonfs_types::CommittedReceipt {
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 ..
             }),
         }) if commit_id == "pending-0"
@@ -1228,7 +1228,7 @@ async fn publisher_takes_a_cold_full_batch_immediately() {
     for (index, receiver) in receivers.into_iter().enumerate() {
         assert_eq!(
             recv_commit(receiver, "full").await.committed_seq,
-            ChangeSeq(index as u64 + 1)
+            CommitSeq(index as u64 + 1)
         );
     }
 }
@@ -1253,7 +1253,7 @@ async fn cold_submission_publishes_without_a_coalescing_delay() {
         "a cold batch must be taken immediately, not held for a coalescing timer"
     );
     let response = recv_commit(receiver, "cold").await;
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1356,11 +1356,11 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
         "warm-epoch",
     )
     .await;
-    assert_eq!(warm.committed_seq, ChangeSeq(1));
+    assert_eq!(warm.committed_seq, CommitSeq(1));
 
     // The commit is written but the CAS acknowledgement is lost. The publisher
     // retries with the same commit id and replays the durable receipt
-    // instead of reporting `commit_outcome_unknown` to the waiter.
+    // instead of reporting `outcome_unknown` to the waiter.
     store.fail_next(1);
     let response = recv_commit(
         admit_commit(
@@ -1371,14 +1371,14 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
         "unknown-ack",
     )
     .await;
-    assert_eq!(response.committed_seq, ChangeSeq(2));
+    assert_eq!(response.committed_seq, CommitSeq(2));
 }
 
 /// Checks that a candidate whose attempt settled keeps that result while the
 /// publisher publishes another candidate of its batch again. A replay of a
 /// committed request settles from its receipt, the new commit's WAL put is
 /// written but loses its answer, and every later request to the namespace
-/// fails, so the new commit stays `commit_outcome_unknown`.
+/// fails, so the new commit stays `outcome_unknown`.
 #[tokio::test]
 async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1434,7 +1434,7 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
         .await
         .expect("unresolved receiver")
         .expect_err("the lost answer stays unknown");
-    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
     assert_eq!(
         recv_commit(replay, "replay").await.committed_seq,
         first.committed_seq,
@@ -1477,10 +1477,10 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
         .await
         .expect("doomed waiter is answered, not abandoned")
         .expect_err("doomed commit did not complete");
-    assert_eq!(doomed_error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(doomed_error.code(), ErrorCode::OutcomeUnknown);
 
     let queued_response = recv_commit(queued, "queued").await;
-    assert_eq!(queued_response.committed_seq, ChangeSeq(1));
+    assert_eq!(queued_response.committed_seq, CommitSeq(1));
 
     // The publisher is fully serviceable after the panic.
     let after = admit_commit(
@@ -1490,7 +1490,7 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
     );
     assert_eq!(
         recv_commit(after, "after").await.committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
 }
 
@@ -1541,17 +1541,17 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
     // Admitted-before work publishes; the delete is published after it.
     assert_eq!(
         recv_commit(before_a, "before-a").await.committed_seq,
-        ChangeSeq(1)
+        CommitSeq(1)
     );
     assert_eq!(
         recv_commit(before_b, "before-b").await.committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     let response = delete_task
         .await
         .expect("delete task")
         .expect("delete succeeds");
-    assert_eq!(response.head_seq, ChangeSeq(2));
+    assert_eq!(response.head_seq, CommitSeq(2));
     let statistics = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .load_statistics()
         .await
@@ -1687,7 +1687,7 @@ async fn second_delete_during_inflight_delete_settles_both() {
         .await
         .expect("first delete task")
         .expect("first delete succeeds");
-    assert_eq!(first_response.head_seq, ChangeSeq(1));
+    assert_eq!(first_response.head_seq, CommitSeq(1));
 
     // Bounded: a stranded waiter is a hang, and a hang must fail the test.
     let second_error = bounded(Duration::from_secs(10), second)
@@ -1734,7 +1734,7 @@ async fn identical_pending_deletes_coalesce_into_one_outcome() {
     store.wait_until_blocked().await;
 
     let options = DeleteNamespaceOptions {
-        expected_head_seq: Some(ChangeSeq(2)),
+        expected_head_seq: Some(CommitSeq(2)),
     };
     let first = spawn_delete(&publisher, options);
     wait_for_queued_delete_waiters(&publisher, 1).await;
@@ -1754,8 +1754,8 @@ async fn identical_pending_deletes_coalesce_into_one_outcome() {
     let second = settle_delete(second, "second delete")
         .await
         .expect("second delete succeeds");
-    assert_eq!(first.head_seq, ChangeSeq(2));
-    assert_eq!(second.head_seq, ChangeSeq(2));
+    assert_eq!(first.head_seq, CommitSeq(2));
+    assert_eq!(second.head_seq, CommitSeq(2));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1789,7 +1789,7 @@ async fn pending_deletes_with_different_preconditions_settle_separately() {
     let stale = spawn_delete(
         &publisher,
         DeleteNamespaceOptions {
-            expected_head_seq: Some(ChangeSeq(1)),
+            expected_head_seq: Some(CommitSeq(1)),
         },
     );
     wait_for_queued_delete_waiters(&publisher, 1).await;
@@ -1810,7 +1810,7 @@ async fn pending_deletes_with_different_preconditions_settle_separately() {
     let deleted = settle_delete(unconditional, "unconditional delete")
         .await
         .expect("the unconditional delete is published after the stale one fails");
-    assert_eq!(deleted.head_seq, ChangeSeq(2));
+    assert_eq!(deleted.head_seq, CommitSeq(2));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1844,14 +1844,14 @@ async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
     let valid = spawn_delete(
         &publisher,
         DeleteNamespaceOptions {
-            expected_head_seq: Some(ChangeSeq(2)),
+            expected_head_seq: Some(CommitSeq(2)),
         },
     );
     wait_for_queued_delete_waiters(&publisher, 1).await;
     let stale = spawn_delete(
         &publisher,
         DeleteNamespaceOptions {
-            expected_head_seq: Some(ChangeSeq(1)),
+            expected_head_seq: Some(CommitSeq(1)),
         },
     );
     wait_for_queued_delete_waiters(&publisher, 2).await;
@@ -1861,7 +1861,7 @@ async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
     let deleted = settle_delete(valid, "valid delete")
         .await
         .expect("the delete whose precondition holds is published");
-    assert_eq!(deleted.head_seq, ChangeSeq(2));
+    assert_eq!(deleted.head_seq, CommitSeq(2));
     let stale_error = settle_delete(stale, "stale delete")
         .await
         .expect_err("a precondition the tombstone outran");
@@ -1931,7 +1931,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_object() {
             .expect("warmup task")
             .expect("warmup response")
             .committed_seq,
-        ChangeSeq(1)
+        CommitSeq(1)
     );
     let response_a = response_a
         .await
@@ -1943,7 +1943,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_object() {
         .expect("response b");
     let mut committed_seqs = [response_a.committed_seq, response_b.committed_seq];
     committed_seqs.sort_unstable();
-    assert_eq!(committed_seqs, [ChangeSeq(2), ChangeSeq(3)]);
+    assert_eq!(committed_seqs, [CommitSeq(2), CommitSeq(3)]);
 
     // The warmup published alone; the two concurrent submissions share
     // one WAL object.
@@ -1973,7 +1973,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_object() {
     assert_eq!(batched_actors.get("req-b"), Some(&actor_b));
 
     let changes = namespace
-        .list_changes(ChangeSeq(0))
+        .list_changes(CommitSeq(0))
         .page()
         .await
         .expect("read change feed");
@@ -2071,7 +2071,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
             .expect("warmup task")
             .expect("warmup response")
             .committed_seq,
-        ChangeSeq(1)
+        CommitSeq(1)
     );
     let plain_response = plain_response
         .await
@@ -2086,7 +2086,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         prepared_response.committed_seq,
     ];
     committed_seqs.sort_unstable();
-    assert_eq!(committed_seqs, [ChangeSeq(2), ChangeSeq(3)]);
+    assert_eq!(committed_seqs, [CommitSeq(2), CommitSeq(3)]);
 
     let wal_keys = shared
         .list_prefix(&wal_prefix(
@@ -2164,7 +2164,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .await
         .expect("submit task")
         .expect("admitted commit publishes");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
     writer.drain().await.expect("drain settles publish tasks");
     assert!(registry
         .shared
@@ -2225,12 +2225,12 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         .await
         .expect("doomed submit task")
         .expect_err("doomed commit did not complete");
-    assert_eq!(doomed_error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(doomed_error.code(), ErrorCode::OutcomeUnknown);
     let queued_response = queued
         .await
         .expect("queued submit task")
         .expect("the surviving worker publishes queued work");
-    assert_eq!(queued_response.committed_seq, ChangeSeq(1));
+    assert_eq!(queued_response.committed_seq, CommitSeq(1));
 
     let drain_error = writer
         .drain()
@@ -3004,11 +3004,11 @@ async fn a_delete_admitted_before_close_admission_publishes_and_is_terminal() {
         .await
         .expect("submit task")
         .expect("admitted commit publishes");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
     let deleted = settle_delete(delete, "delete admitted before close_admission")
         .await
         .expect("an admitted delete is published after admission closes");
-    assert_eq!(deleted.head_seq, ChangeSeq(1));
+    assert_eq!(deleted.head_seq, CommitSeq(1));
 
     assert!(matches!(
         publisher_state(&publisher).admission,
@@ -3118,17 +3118,17 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         .await
         .expect("before submit task")
         .expect("parked commit publishes before the delete");
-    assert_eq!(before_response.committed_seq, ChangeSeq(1));
+    assert_eq!(before_response.committed_seq, CommitSeq(1));
     let second_response = second
         .await
         .expect("second submit task")
         .expect("queued batch publishes before the delete");
-    assert_eq!(second_response.committed_seq, ChangeSeq(2));
+    assert_eq!(second_response.committed_seq, CommitSeq(2));
     let delete_response = delete
         .await
         .expect("delete task")
         .expect("delete succeeds after the queued batch");
-    assert_eq!(delete_response.head_seq, ChangeSeq(2));
+    assert_eq!(delete_response.head_seq, CommitSeq(2));
     writer.shutdown().await.expect("drain settles both units");
 }
 
@@ -3661,8 +3661,8 @@ mod head_positions;
 mod hints;
 mod inline_writer;
 mod merges;
-mod pin_folds;
 mod publication_clock;
 mod retention_expiry;
 mod session_compaction;
+mod snapshot_folds;
 mod write_stop_wait;

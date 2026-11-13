@@ -5,10 +5,10 @@
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::pagers::encode_next_list_cursor;
 use crate::{
-    ChangeSeq, ContentRef, CoreError, CurrentFileState, DiffOptions, DownloadOptions, Error,
+    CommitSeq, ContentRef, CoreError, CurrentFileState, DiffOptions, DownloadOptions, Error,
     FileBytes, FileContentStream, InodeId, ListChangesResponse, ListInodeChildrenResponse,
-    ListOptions, ListPathEntriesResponse, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
-    Result, RevisionNo, SharedObjectStore, StatOptions,
+    ListOptions, ListPathEntriesResponse, NamespaceId, PathEntry, ReadFileStreamOptions, Result,
+    RevisionNo, SharedObjectStore, SnapshotId, StatOptions,
 };
 use loonfs_core::{
     DiffPage, NamespaceReaderEngine, RetainedRevisionsPage, RetainedRevisionsPageCursor,
@@ -31,7 +31,7 @@ impl PinnedRead {
 
     /// Returns the sequence that this read reads at: the head, or the
     /// retained sequence below the head that the read's context sets.
-    pub(crate) fn head_seq(&self) -> ChangeSeq {
+    pub(crate) fn head_seq(&self) -> CommitSeq {
         self.context.visible_seq()
     }
 
@@ -60,7 +60,7 @@ impl PinnedRead {
     /// requires an administrator, as the change feed does.
     pub(crate) async fn diff_page(
         &self,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
         options: &DiffOptions,
     ) -> Result<DiffPage> {
         self.engine.ensure_administrator(&self.context).await?;
@@ -93,20 +93,20 @@ impl PinnedRead {
     }
 
     /// Lists one page of the directory at `listed_path`, and marks the next
-    /// cursor with `pin_id`, the snapshot that the read reads.
+    /// cursor with `snapshot_id`, the snapshot that the read reads.
     pub(crate) async fn path_entries_page(
         &self,
         listed_path: AbsolutePath,
         request: PageRequest<ListPageCursor>,
         options: ListOptions,
-        pin_id: Option<&PinId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<ListPathEntriesResponse> {
         let mut page = self
             .engine
             .list_path_page(listed_path.as_str(), request, options, &self.context)
             .await?;
         if let Some(cursor) = page.next_cursor.as_mut() {
-            *cursor.pin_id_mut() = pin_id.cloned();
+            *cursor.snapshot_id_mut() = snapshot_id.cloned();
         }
         Ok(ListPathEntriesResponse {
             namespace_id: self.namespace_id().clone(),
@@ -118,20 +118,20 @@ impl PinnedRead {
     }
 
     /// Lists one page of the children of the directory inode `inode_id`, and
-    /// marks the next cursor with `pin_id`, the snapshot that the read reads.
+    /// marks the next cursor with `snapshot_id`, the snapshot that the read reads.
     pub(crate) async fn inode_children_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<ListPageCursor>,
         options: ListOptions,
-        pin_id: Option<&PinId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<ListInodeChildrenResponse> {
         let mut page = self
             .engine
             .list_inode_children_page(inode_id, request, options, &self.context)
             .await?;
         if let Some(cursor) = page.next_cursor.as_mut() {
-            *cursor.pin_id_mut() = pin_id.cloned();
+            *cursor.snapshot_id_mut() = snapshot_id.cloned();
         }
         Ok(ListInodeChildrenResponse {
             namespace_id: self.namespace_id().clone(),

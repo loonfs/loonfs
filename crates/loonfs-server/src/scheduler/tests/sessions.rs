@@ -5,7 +5,6 @@ use super::{
     SchedulerServer, DAY_MS,
 };
 use crate::scheduler::retries::MaintenanceCall;
-use crate::scheduler::GarbageCollection;
 use loonfs::SharedObjectStore;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_http::WriterSessions as _;
@@ -153,12 +152,12 @@ async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
         .await
         .expect("publish");
     }
-    let content_prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
+    let content_objects = KeyPredicate::content_blob();
     assert!(
         store
             .take()
             .iter()
-            .all(|operation| !operation.key().starts_with(&content_prefix)),
+            .all(|operation| !content_objects.matches(operation.key())),
         "every value is written inline, so the tail has 3 MiB of inline bytes"
     );
     let tail_objects = server.wal_tail_objects(&namespace_id).await;
@@ -305,11 +304,7 @@ async fn a_sweep_folds_every_idle_tail() {
     );
     assert!(server.wal_tail_objects(&positioned).await > 0);
     server.clock.advance_ms(idle_fold_after_ms(&config));
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Skip)
-        .await
-        .expect("sweep");
+    server.scheduler.run_sweep().await.expect("sweep");
     for namespace_id in [&positioned, &unpositioned, &unheld] {
         assert_eq!(
             server.wal_tail_objects(namespace_id).await,
@@ -461,14 +456,7 @@ async fn session_steps_leave_unheld_namespaces_for_the_sweep() {
     }
     assert!(store.take().is_empty());
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
-    assert_eq!(
-        server
-            .scheduler
-            .run_sweep(GarbageCollection::Collect)
-            .await
-            .expect("sweep"),
-        1
-    );
+    assert_eq!(server.scheduler.run_sweep().await.expect("sweep"), 1);
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
 }
 
@@ -686,7 +674,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     let operations = store.take();
     assert_eq!(
         list_count(&operations),
-        9,
+        5,
         "collection lists the namespace's garbage without listing namespaces"
     );
     assert!(operations.iter().all(|op| op
@@ -706,7 +694,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .await;
     assert_eq!(
         list_count(&store.take()),
-        9,
+        5,
         "the first run after the commit collects, because collection comes before the \
          index step"
     );

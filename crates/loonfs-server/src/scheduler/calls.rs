@@ -1,11 +1,11 @@
-//! The scheduler's claim on a namespace, and the metadata, retention,
-//! garbage collection, and index calls that a namespace's steps make.
+//! The scheduler's claim on a namespace, the metadata, retention, garbage
+//! collection, and index calls that a namespace's steps make, and the
+//! collection call that a sweep makes on a pool.
 
 use crate::scheduler::contain;
 use crate::scheduler::lock;
 use crate::scheduler::retries::CallFailure;
 use crate::scheduler::retries::MaintenanceCall;
-use crate::scheduler::GarbageCollection;
 use crate::scheduler::GrepIndexing;
 use crate::scheduler::Scheduler;
 use crate::scheduler::SchedulerInner;
@@ -14,8 +14,8 @@ use crate::scheduler::MAX_GREP_STEPS_PER_INDEX_STEP;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
-    AdvanceRetentionFloorOptions, ChangeSeq, ErrorCode, GcOptions, MetadataMaintenanceOutcome,
-    NamespaceId, RetentionTarget,
+    AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, GcOptions, MetadataMaintenanceOutcome,
+    NamespaceId, PoolId, RetentionTarget,
 };
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepProgress, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
@@ -28,11 +28,7 @@ use tokio::sync::SemaphorePermit;
 
 impl Scheduler {
     /// Runs every step of one namespace for a sweep.
-    pub(super) async fn sweep_namespace(
-        &self,
-        namespace_id: NamespaceId,
-        garbage: GarbageCollection,
-    ) {
+    pub(super) async fn sweep_namespace(&self, namespace_id: NamespaceId) {
         let inner = &self.inner;
         let Some((claim, _permit)) = self
             .claim(&namespace_id, Overlap::LeaveRetentionAdvance)
@@ -52,9 +48,7 @@ impl Scheduler {
         // The advance reads only folded commits, so it runs after the
         // metadata call, which can fold an idle tail.
         self.advance_retention(&namespace_id, entry).await;
-        if garbage == GarbageCollection::Collect {
-            self.gc(&namespace_id, entry, seq).await;
-        }
+        self.gc(&namespace_id, entry, seq).await;
         self.finish_claim(claim).await;
     }
 
@@ -124,7 +118,7 @@ impl Scheduler {
         grep: &GrepIndexing,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
-        seq: Option<ChangeSeq>,
+        seq: Option<CommitSeq>,
     ) -> bool {
         if let Some(entry) = entry {
             lock(entry).index_dirty = false;
@@ -211,7 +205,7 @@ impl Scheduler {
         &self,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
-        seq: Option<ChangeSeq>,
+        seq: Option<CommitSeq>,
     ) -> bool {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
@@ -238,15 +232,43 @@ impl Scheduler {
         gone
     }
 
+    /// Makes one collection call on a pool.
+    ///
+    /// A pool whose record is gone is skipped without a failure, because a
+    /// create call can delete its pool record after the listing found it.
+    pub(super) async fn gc_pool(&self, pool_id: &PoolId) {
+        let inner = &self.inner;
+        if inner.stop.is_cancelled() {
+            return;
+        }
+        let result = contain(
+            inner
+                .maintenance
+                .gc_pool_with_options(pool_id, &GcOptions::default())
+                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+        )
+        .await;
+        match result {
+            Ok(_) => {}
+            Err(failure)
+                if matches!(
+                    failure.code(),
+                    ErrorCode::PoolNotFound | ErrorCode::ShuttingDown
+                ) => {}
+            Err(failure) => self.record_pool_failure(pool_id, &failure),
+        }
+    }
+
     /// Advances the namespace's retention floor to the last commit at or
-    /// before the current time minus the namespace's retention window, or
-    /// minus `retention_window_ms` for a namespace that has no window of its
-    /// own, with the same advance as the `retention` job. A namespace with
-    /// neither window keeps its floor. A deleted namespace returns
+    /// before the current time minus the namespace's retention window, with
+    /// the same advance as the `retention` job. A namespace without a window
+    /// keeps its floor. A deleted namespace returns
     /// `namespace_deleted`, which isn't a failure.
     ///
-    /// A floor that moves is advanced through the namespace's writer session
-    /// in this server, which the advance opens when the server has none. For
+    /// A floor that moves is recorded in a floor object in the WAL, through
+    /// the namespace's writer session in this server when the server has
+    /// one, and the advance then folds the namespace, so a manifest records
+    /// the floor. The advance opens no session and fences no writer. For
     /// when the deletions below the new floor expire, and when their rows are
     /// removed, see [Advancing the floor on a
     /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).
@@ -260,9 +282,7 @@ impl Scheduler {
             return;
         }
         let options = AdvanceRetentionFloorOptions {
-            target: RetentionTarget::Window {
-                default_window_ms: inner.config.retention_window_ms,
-            },
+            target: RetentionTarget::Window,
         };
         // Boxed so the spawned scheduler's `Send` check does not recurse
         // through every engine future the advance awaits.

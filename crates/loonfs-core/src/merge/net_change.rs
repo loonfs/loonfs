@@ -2,18 +2,35 @@
 //! range's commits touched, what the fork changed in each of them, and the
 //! layouts that the change's content references record.
 
+use super::memory::PlanningMemory;
 use super::state::{InodeState, StateReader};
 use crate::commit::wal_size::{MAX_MERGED_INODES, MIN_MERGE_OPERATION_BYTES};
 use crate::error::{CoreError, MergeBound, Result};
+use crate::heap_bytes::HeapBytes;
 use crate::metadata::MetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES;
-use loonfs_types::{ChangeSeq, ContentLayout, ContentRef, InodeId, NamespaceId};
+use loonfs_types::{CommitSeq, ContentLayout, ContentRef, InodeId, NamespaceId};
 use std::collections::BTreeSet;
+use std::mem::size_of;
 
 /// The most of the fork's commits that one read of a merge's range returns.
 /// A page includes each commit's deltas, so it stays at tens of commits.
 const MERGE_COMMITS_PAGE: usize = 64;
+
+/// The most heap bytes of the fork's commits that one read of a merge's
+/// range returns.
+///
+/// A read ends with the commit that takes the page to this bound or past
+/// it, so a page is at most this bound plus one commit.
+pub const MERGE_COMMITS_PAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// The estimated bytes of one inode in the set of inodes that a merge's
+/// range touched.
+///
+/// The estimate is the inode ID, and as much again for the B-tree's node
+/// headers and unfilled slots.
+const TOUCHED_INODE_BYTES: usize = 2 * size_of::<InodeId>();
 
 /// Which components of an inode's state the fork changed in the range.
 pub(super) struct Changed {
@@ -90,9 +107,15 @@ pub(super) async fn inode_change<S: ObjectStore + ?Sized>(
 /// change. The error's `split_at_seq` is the last commit before the one that
 /// crossed the bound, so the caller can merge the range through that commit,
 /// unless the first commit of the range crossed it.
+///
+/// After each page of commits, the function reports the set and the page to
+/// `memory`, which checks the merge allowance. When the set and the page
+/// exceed the allowance, the error's `split_at_seq` is the last commit
+/// before the page, unless the first page crossed the allowance.
 pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
     view: MetadataView<'_, '_, S>,
-    source_after_seq: ChangeSeq,
+    source_after_seq: CommitSeq,
+    memory: &PlanningMemory,
 ) -> Result<BTreeSet<InodeId>> {
     let mut touched = BTreeSet::new();
     let mut after_seq = source_after_seq;
@@ -100,11 +123,13 @@ pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
     // ends at the range's end, so the loop ends when a page is empty.
     loop {
         let page = view
-            .commits_after(after_seq, MERGE_COMMITS_PAGE, usize::MAX)
+            .commits_after(after_seq, MERGE_COMMITS_PAGE, MERGE_COMMITS_PAGE_BYTES)
             .await?;
         if page.is_empty() {
+            memory.release_page();
             return Ok(touched);
         }
+        let page_after_seq = after_seq;
         for commit in &page {
             touched.extend(crate::diff::touched_inodes(&commit.deltas));
             if touched.len() > MAX_MERGED_INODES {
@@ -116,6 +141,23 @@ pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
                 });
             }
             after_seq = commit.committed_seq;
+        }
+        let touched_bytes = touched.len().saturating_mul(TOUCHED_INODE_BYTES);
+        match memory.check_commits(touched_bytes, page.heap_bytes()) {
+            Err(CoreError::MergeTooLarge {
+                bound: MergeBound::MergeAllowance,
+                estimated_bytes,
+                max_bytes,
+                ..
+            }) => {
+                return Err(CoreError::MergeTooLarge {
+                    bound: MergeBound::MergeAllowance,
+                    estimated_bytes,
+                    max_bytes,
+                    split_at_seq: (page_after_seq > source_after_seq).then_some(page_after_seq),
+                });
+            }
+            result => result?,
         }
     }
 }

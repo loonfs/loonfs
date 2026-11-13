@@ -13,7 +13,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
-use loonfs_types::{ErrorCode, ErrorResponse, NamespaceId};
+use loonfs_types::{ErrorCode, ErrorResponse, NamespaceId, PoolId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -32,6 +32,8 @@ struct Fixture {
     recording: Arc<RecordingStore<LocalFsStore>>,
     router: axum::Router,
     namespace_id: NamespaceId,
+    /// The pool whose prefix stores the namespace's content objects.
+    pool_id: PoolId,
     /// Revision 2 of the file: the folded bytes and then the appended ones.
     bytes: Vec<u8>,
     /// The file's inode ID, in its public form.
@@ -95,6 +97,7 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
     let entry = namespace.stat(PATH).await.expect("stat");
     writer.shutdown().await.expect("writer shutdown");
     let content_ref = entry.content_ref().expect("file content");
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
     let mut options = test_options(directory.path(), "ranged-server");
     options.grep = JobMode::Disabled;
     configure(&mut options);
@@ -108,11 +111,12 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
     .await
     .expect("app");
     Fixture {
-        folded_object: content_blob(&namespace_id, &content_ref.content_id),
+        folded_object: content_blob(&pool_id, &content_ref.content_id),
         _directory: directory,
         recording,
         router,
         namespace_id,
+        pool_id,
         bytes,
         inode: entry.inode_id.to_string(),
         snapshot_id: snapshot.snapshot_id.to_string(),
@@ -193,7 +197,7 @@ impl Fixture {
 
     async fn content_objects(&self) -> Vec<String> {
         self.recording
-            .list_prefix(&content_prefix(&self.namespace_id))
+            .list_prefix(&content_prefix(&self.pool_id))
             .await
             .expect("list content objects")
     }

@@ -1,4 +1,4 @@
-//! Fork installation pins a source manifest and lists its run references in
+//! Fork installation takes a snapshot of a source manifest and lists its run references in
 //! a new namespace's first manifest; no segment or content object is copied.
 
 use crate::engine::{NamespaceEngine, Writable};
@@ -8,29 +8,31 @@ use crate::merge::merge_start;
 use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::snapshot::record::write_pin;
-use crate::snapshot::{ensure_unexpired, load_pin_basis};
+use crate::snapshot::record::write_snapshot_record;
+use crate::snapshot::{ensure_unexpired, load_snapshot_basis};
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ForkBasis, ManifestRef, PinOwner, PinPayload, RebasedFrom};
+use loonfs_types::format::control::{
+    ForkBasis, ManifestRef, RebasedFrom, SnapshotOwner, SnapshotPayload,
+};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{ChangeSeq, NamespaceId, NamespaceMetadata, PinId};
+use loonfs_types::{CommitSeq, NamespaceId, NamespaceMetadata, SnapshotId};
 
 /// The fork whose commits a rebase replays into the new fork that it
 /// creates, and the sequence of the forked namespace that the fork was made
 /// at.
 struct Rebase<'a> {
     source_namespace_id: &'a NamespaceId,
-    fork_point_seq: ChangeSeq,
+    fork_point_seq: CommitSeq,
 }
 
-/// The state that a fork pins.
+/// The state that a fork keeps.
 enum ForkAt<'a> {
     /// The manifest that the caller's fold of the WAL tail published or
     /// found current.
     Head(ManifestRef),
     /// An unexpired snapshot of this namespace.
-    Snapshot(&'a PinId),
+    Snapshot(&'a SnapshotId),
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
@@ -39,8 +41,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
     /// Returns the target's status at the fork point. A manifest that stopped
-    /// being current before the fork pin's verification returns
-    /// `checkpoint_unavailable`, so the caller folds and forks again.
+    /// being current before the fork snapshot's verification returns
+    /// `snapshot_unavailable`, so the caller folds and forks again.
     pub async fn fork_namespace(
         &self,
         new_namespace_id: &NamespaceId,
@@ -57,7 +59,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
     ) -> Result<NamespaceMetadata> {
         self.install_fork(
             new_namespace_id,
@@ -75,15 +77,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// The new fork's fork basis records `rebased_from`, with the fork
     /// sequence that the fork's next merge into this namespace would start
-    /// after, read through the new fork's pin. A fork point below the pinned
-    /// manifest's retention floor returns `rebootstrap_required`, and the
-    /// call then deletes the pin and creates no namespace.
+    /// after, read through the new fork's snapshot. A fork point below the retention
+    /// floor of the snapshot's manifest returns `below_retention_floor`, and the
+    /// call then deletes the snapshot and creates no namespace.
     pub async fn fork_namespace_for_rebase(
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
         source_namespace_id: &NamespaceId,
-        fork_point_seq: ChangeSeq,
+        fork_point_seq: CommitSeq,
         manifest: ManifestRef,
     ) -> Result<NamespaceMetadata> {
         let rebase = Rebase {
@@ -108,25 +110,29 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<NamespaceMetadata> {
         let clock = self.namespace.start_clock();
         let target = self.namespace.with_namespace(new_namespace_id.clone());
-        let owner = PinOwner::Fork {
+        let owner = SnapshotOwner::Fork {
             target_namespace_id: new_namespace_id.clone(),
         };
         let source_record = match at {
-            ForkAt::Head(manifest) => self.namespace.create_pin(owner, manifest, &clock).await?,
+            ForkAt::Head(manifest) => {
+                self.namespace
+                    .create_snapshot_record(owner, manifest, &clock)
+                    .await?
+            }
             ForkAt::Snapshot(snapshot_id) => {
                 self.namespace
-                    .create_snapshot_fork_pin(snapshot_id, owner, &clock)
+                    .create_fork_snapshot_at_snapshot(snapshot_id, owner, &clock)
                     .await?
             }
         };
         let source_manifest = load_namespace_manifest_envelope(
             &self.namespace.store,
             &self.namespace.namespace_id,
-            &source_record.pin_id.manifest_no(),
+            &source_record.snapshot_id.manifest_no(),
         )
         .await?;
         crate::manifest::ensure_manifest_reference_matches(
-            "fork pin",
+            "fork snapshot",
             &source_record.manifest(),
             &source_manifest,
         )?;
@@ -135,7 +141,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 Ok(rebased_from) => Some(rebased_from),
                 Err(error) => {
                     self.namespace
-                        .delete_failed_pin(&source_record.pin_id, &error)
+                        .delete_failed_snapshot_record(&source_record.snapshot_id, &error)
                         .await;
                     return Err(error);
                 }
@@ -144,7 +150,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         };
         let fork_basis = ForkBasis {
             manifest: source_record.manifest(),
-            source_pin_id: source_record.pin_id.clone(),
+            source_snapshot_id: source_record.snapshot_id.clone(),
             rebased_from,
         };
         let manifest = NamespaceManifestPayload::initial_fork(
@@ -154,24 +160,31 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             fork_basis,
             source_manifest.payload(),
         );
-        if let Err(error) = target.create_manifest(manifest.clone(), &clock).await {
+        let installed = async {
+            target.publish_first_hint().await?;
+            target
+                .publish_first_manifest(manifest.clone(), &clock)
+                .await
+        }
+        .await;
+        if let Err(error) = installed {
             if matches!(
                 error,
                 CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }
             ) {
-                match target.target_retains_pin(&source_record).await {
+                match target.target_retains_snapshot(&source_record).await {
                     Ok(true) => {}
                     Ok(false) => {
                         self.namespace
-                            .delete_failed_pin(&source_record.pin_id, &error)
+                            .delete_failed_snapshot_record(&source_record.snapshot_id, &error)
                             .await;
                     }
                     Err(check_error) => tracing::warn!(
                         namespace_id = %self.namespace.namespace_id,
-                        pin_id = %source_record.pin_id,
+                        snapshot_id = %source_record.snapshot_id,
                         original_error = %error,
                         check_error = %check_error,
-                        "kept a fork pin whose target could not be read after installation failed"
+                        "kept a fork snapshot whose target could not be read after installation failed"
                     ),
                 }
             }
@@ -182,19 +195,23 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Returns the `rebased_from` of a rebase's new fork whose fork pin is
+    /// Returns the `rebased_from` of a rebase's new fork whose fork snapshot is
     /// `record`, with the fork sequence that the next merge of `rebase`'s
-    /// fork into this namespace starts after in the pinned manifest (see
-    /// [`merge_start`]), or `rebootstrap_required` when the fork point is
-    /// below the pinned manifest's retention floor.
+    /// fork into this namespace starts after in the snapshot's manifest (see
+    /// [`merge_start`]), or `below_retention_floor` when the fork point is
+    /// below the retention floor of the snapshot's manifest.
     ///
-    /// The pin keeps the manifest that the new fork starts from, so the
+    /// The snapshot keeps the manifest that the new fork starts from, so the
     /// floor check and the merge index read describe exactly the history that
     /// the new fork inherits.
-    async fn rebased_from(&self, record: &PinPayload, rebase: Rebase<'_>) -> Result<RebasedFrom> {
-        let pinned = load_pin_basis(&self.store, &self.segment_cache, record.clone()).await?;
-        let head = NamespaceReadState::from(pinned.segments.manifest().payload());
-        let view = MetadataView::over_manifest_segments(&pinned.segments, pinned.manifest.head_seq);
+    async fn rebased_from(
+        &self,
+        record: &SnapshotPayload,
+        rebase: Rebase<'_>,
+    ) -> Result<RebasedFrom> {
+        let basis = load_snapshot_basis(&self.store, &self.segment_cache, record.clone()).await?;
+        let head = NamespaceReadState::from(basis.segments.manifest().payload());
+        let view = MetadataView::over_manifest_segments(&basis.segments, basis.manifest.head_seq);
         let resume_after_seq = merge_start(
             &view,
             &head,
@@ -209,26 +226,27 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    async fn create_snapshot_fork_pin(
+    async fn create_fork_snapshot_at_snapshot(
         &self,
-        snapshot_id: &PinId,
-        owner: PinOwner,
+        snapshot_id: &SnapshotId,
+        owner: SnapshotOwner,
         clock: &OperationClock,
-    ) -> Result<PinPayload> {
+    ) -> Result<SnapshotPayload> {
         let snapshot = self.load_snapshot_fork_basis(snapshot_id, clock).await?;
-        let record = PinPayload {
-            pin_id: PinId::generate(snapshot.pin_id.manifest_no()),
+        let record = SnapshotPayload {
+            snapshot_id: SnapshotId::generate(snapshot.snapshot_id.manifest_no()),
             created_at_ms: clock.request_at_ms(),
             owner,
             ..snapshot
         };
         let verification = async {
-            write_pin(&self.store, &record).await?;
+            write_snapshot_record(&self.store, &record).await?;
             self.load_snapshot_fork_basis(snapshot_id, clock).await
         }
         .await;
         if let Err(error) = verification {
-            self.delete_failed_pin(&record.pin_id, &error).await;
+            self.delete_failed_snapshot_record(&record.snapshot_id, &error)
+                .await;
             return Err(error);
         }
         Ok(record)
@@ -237,32 +255,32 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads an unexpired snapshot of a live source namespace.
     async fn load_snapshot_fork_basis(
         &self,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
         clock: &OperationClock,
-    ) -> Result<PinPayload> {
+    ) -> Result<SnapshotPayload> {
         let source_head = self.load_read_anchor(clock.observe()).await?.read_state;
         crate::namespace::control::ensure_namespace_live(
             &source_head.namespace_id,
             source_head.status,
         )?;
-        let snapshot = self.load_user_pin(snapshot_id).await?;
+        let snapshot = self.load_user_snapshot(snapshot_id).await?;
         Ok(ensure_unexpired(snapshot, clock.now_ms())?.state)
     }
 
-    pub(crate) async fn target_retains_pin(&self, record: &PinPayload) -> Result<bool> {
+    pub(crate) async fn target_retains_snapshot(&self, record: &SnapshotPayload) -> Result<bool> {
         let Some(target) = self.load_current_manifest_if_present().await? else {
             return Ok(false);
         };
         let Some(basis) = target.payload().fork_basis.as_ref() else {
             return Ok(false);
         };
-        if basis.source_pin_id != record.pin_id {
+        if basis.source_snapshot_id != record.snapshot_id {
             return Ok(false);
         }
         if basis.manifest != record.manifest() {
             return Err(CoreError::NamespaceCorrupt(format!(
-                "fork target `{}` names pin `{}` with a different manifest reference",
-                self.namespace_id, record.pin_id
+                "fork target `{}` refers to snapshot `{}` with a different manifest reference",
+                self.namespace_id, record.snapshot_id
             )));
         }
         Ok(true)

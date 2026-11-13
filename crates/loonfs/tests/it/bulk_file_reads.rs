@@ -1,5 +1,5 @@
 //! Whole-namespace reads for a consumer that derives its own data from the
-//! filesystem: enumerating the files a snapshot pinned, asking where those
+//! filesystem: enumerating the files a snapshot kept, asking where those
 //! files are now, and reading one content object by reference.
 
 use crate::common::*;
@@ -88,12 +88,12 @@ async fn listed_files(
     found
 }
 
-/// Every file a snapshot pins, read one page at a time so the paging path
+/// Every file a snapshot keeps, read one page at a time so the paging path
 /// carries every assertion.
 async fn snapshot_files(
     reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
-    snapshot_id: &loonfs::PinId,
+    snapshot_id: &loonfs::SnapshotId,
     limit: usize,
 ) -> Vec<SnapshotFile> {
     let namespace = reader.namespace(namespace_id);
@@ -139,7 +139,7 @@ async fn snapshot_files(
 }
 
 /// A namespace with the shapes an enumeration has to get right: nested
-/// directories, a replaced file, a deleted subtree, an undeleted file, and a
+/// directories, a replaced file, a deleted subtree, a restored file, and a
 /// directory holding no files at all.
 async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
     fs.create_namespace(namespace_id, &loonfs_test_support::test_actor())
@@ -198,7 +198,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .await
         .expect("delete subtree");
 
-    // An undeleted file: visible again, at a new path.
+    // A restored file: visible again, at a new path.
     let recovered_inode_id = fs
         .stat(namespace_id, "/notes/recovered.txt")
         .await
@@ -210,20 +210,20 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .expect("delete file")
         .committed_seq;
     namespace
-        .undelete_with_options(
+        .restore_deleted_with_options(
             recovered_inode_id,
             deletion_seq,
             &loonfs_test_support::test_actor(),
-            &undelete_at("/notes/restored.txt"),
+            &restore_deleted_at("/notes/restored.txt"),
         )
         .await
-        .expect("undelete file");
+        .expect("restore file");
 }
 
 #[tokio::test]
-async fn checkpoint_enumeration_answers_the_state_it_pinned() {
+async fn snapshot_enumeration_answers_the_state_it_captured() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-test").await;
+    let fs = open_runtime_async(store(temp_dir.path()), "snapshot-files-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
     build_mixed_namespace(&fs, &namespace_id).await;
@@ -234,13 +234,13 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
 
     // Ground truth, collected through the ordinary read surface BEFORE the
     // later writes are committed.
-    let at_checkpoint = listed_files(&fs.reader, &namespace_id).await;
-    let checkpoint = fs
+    let at_snapshot = listed_files(&fs.reader, &namespace_id).await;
+    let snapshot = fs
         .create_snapshot(&namespace_id)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
-    // Everything after the checkpoint is the change feed's job, so none of
+    // Everything after the snapshot is the change feed's job, so none of
     // it may show up in the enumeration.
     fs.put_file(
         &namespace_id,
@@ -249,7 +249,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         &loonfs_test_support::test_actor(),
     )
     .await
-    .expect("create a file after the checkpoint");
+    .expect("create a file after the snapshot");
     fs.put_file_with_options(
         &namespace_id,
         "/docs/alpha.txt",
@@ -261,11 +261,11 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         },
     )
     .await
-    .expect("replace a file after the checkpoint");
+    .expect("replace a file after the snapshot");
     namespace_writer
         .delete_path("/docs/deep/bravo.txt", &loonfs_test_support::test_actor())
         .await
-        .expect("delete a file after the checkpoint");
+        .expect("delete a file after the snapshot");
     namespace_writer
         .move_path(
             "/docs/deep/charlie.txt",
@@ -273,9 +273,9 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
             &loonfs_test_support::test_actor(),
         )
         .await
-        .expect("move a file after the checkpoint");
+        .expect("move a file after the snapshot");
 
-    let enumerated = snapshot_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 2).await;
+    let enumerated = snapshot_files(&fs.reader, &namespace_id, &snapshot.snapshot_id, 2).await;
     let by_inode: BTreeMap<InodeId, SnapshotFile> = enumerated
         .iter()
         .map(|file| (file.inode_id, file.clone()))
@@ -283,10 +283,10 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
 
     assert_eq!(
         by_inode.keys().copied().collect::<Vec<_>>(),
-        at_checkpoint.keys().copied().collect::<Vec<_>>(),
-        "the enumeration must name exactly the files visible when the checkpoint was taken"
+        at_snapshot.keys().copied().collect::<Vec<_>>(),
+        "the enumeration must name exactly the files visible when the snapshot was taken"
     );
-    for (inode_id, listed) in &at_checkpoint {
+    for (inode_id, listed) in &at_snapshot {
         let file = &by_inode[inode_id];
         assert_eq!(
             file.revision_no, listed.revision_no,
@@ -298,25 +298,25 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         assert_eq!(file.size_bytes, file.content_ref.size_bytes);
     }
 
-    let checkpoint_paths: BTreeSet<&str> = at_checkpoint
+    let snapshot_paths: BTreeSet<&str> = at_snapshot
         .values()
         .map(|listed| listed.absolute_path.as_str())
         .collect();
     assert_eq!(
-        checkpoint_paths,
+        snapshot_paths,
         BTreeSet::from([
             "/docs/alpha.txt",
             "/docs/deep/bravo.txt",
             "/docs/deep/charlie.txt",
             "/notes/restored.txt",
         ]),
-        "the pinned state should hold the undeleted file and neither the \
+        "the snapshot's state should hold the restored file and neither the \
          deleted subtree nor anything written later"
     );
 
     let retained = namespace
         .list_snapshot_files_with_options(
-            &checkpoint.snapshot_id,
+            &snapshot.snapshot_id,
             &ListSnapshotFilesOptions {
                 include_deleted: true,
             },
@@ -324,11 +324,11 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         .page_limit(page_limit(100))
         .page()
         .await
-        .expect("list the files the checkpoint retains");
+        .expect("list the files the snapshot retains");
     let (visible, deleted): (Vec<_>, Vec<_>) = retained
         .files
         .into_iter()
-        .partition(|file| at_checkpoint.contains_key(&file.inode_id));
+        .partition(|file| at_snapshot.contains_key(&file.inode_id));
     assert_eq!(visible, enumerated);
     assert_eq!(
         deleted
@@ -339,7 +339,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         "include_deleted adds only the file under the deleted subtree"
     );
 
-    // The live namespace has moved on; the checkpoint has not.
+    // The live namespace has moved on; the snapshot has not.
     let now = listed_files(&fs.reader, &namespace_id).await;
     assert!(
         now.values()
@@ -351,17 +351,17 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
             now.get(&file.inode_id)
                 .is_some_and(|listed| listed.absolute_path == "/docs/added-later.txt")
         }),
-        "a file created after the checkpoint must not appear in the enumeration"
+        "a file created after the snapshot must not appear in the enumeration"
     );
-    let alpha_inode_id = at_checkpoint
+    let alpha_inode_id = at_snapshot
         .iter()
         .find(|(_, listed)| listed.absolute_path == "/docs/alpha.txt")
         .map(|(inode_id, _)| *inode_id)
-        .expect("alpha was visible at checkpoint time");
+        .expect("alpha was visible at snapshot time");
     assert_eq!(
         by_inode[&alpha_inode_id].revision_no,
         RevisionNo(1),
-        "the replacement was committed after the checkpoint, so the pinned revision stays"
+        "the replacement was committed after the snapshot, so the snapshot's revision stays"
     );
     assert_eq!(
         now[&alpha_inode_id].revision_no,
@@ -371,9 +371,9 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
 }
 
 #[tokio::test]
-async fn checkpoint_files_page_without_gaps_or_duplicates() {
+async fn snapshot_files_page_without_gaps_or_duplicates() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-paging-test").await;
+    let fs = open_runtime_async(store(temp_dir.path()), "snapshot-files-paging-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -389,14 +389,14 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
         .await
         .expect("put file");
     }
-    let checkpoint = fs
+    let snapshot = fs
         .create_snapshot(&namespace_id)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
-    let whole = snapshot_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 100).await;
+    let whole = snapshot_files(&fs.reader, &namespace_id, &snapshot.snapshot_id, 100).await;
     assert_eq!(whole.len(), 5);
-    let one_at_a_time = snapshot_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 1).await;
+    let one_at_a_time = snapshot_files(&fs.reader, &namespace_id, &snapshot.snapshot_id, 1).await;
     assert_eq!(
         one_at_a_time, whole,
         "paging one file at a time must produce the same sequence as one page"
@@ -406,7 +406,7 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
     // tail: no row is re-read, and none is skipped.
     for (index, file) in whole.iter().enumerate() {
         let resumed = namespace
-            .list_snapshot_files(&checkpoint.snapshot_id)
+            .list_snapshot_files(&snapshot.snapshot_id)
             .page_limit(page_limit(100))
             .cursor(Some(SnapshotFilesPageCursor {
                 after_inode_id: file.inode_id,
@@ -416,40 +416,40 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
             .expect("resume from a cursor");
         assert_eq!(resumed.files, whole[index + 1..]);
         assert!(resumed.next_cursor.is_none());
-        assert_eq!(resumed.captured_seq, checkpoint.captured_seq);
+        assert_eq!(resumed.captured_seq, snapshot.captured_seq);
     }
 }
 
 #[tokio::test]
 async fn an_empty_namespace_answers_one_empty_page() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-empty-test").await;
+    let fs = open_runtime_async(store(temp_dir.path()), "snapshot-files-empty-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    let checkpoint = fs
+    let snapshot = fs
         .create_snapshot(&namespace_id)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     let page = namespace
-        .list_snapshot_files(&checkpoint.snapshot_id)
+        .list_snapshot_files(&snapshot.snapshot_id)
         .page_limit(page_limit(10))
         .page()
         .await
         .expect("enumerate an empty namespace");
     assert!(page.files.is_empty());
     assert!(page.next_cursor.is_none());
-    assert_eq!(page.captured_seq, checkpoint.captured_seq);
+    assert_eq!(page.captured_seq, snapshot.captured_seq);
 }
 
 #[tokio::test]
-async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
+async fn a_fork_targets_snapshot_enumerates_the_source_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let fs = open_runtime_async(store.clone(), "checkpoint-files-fork-test").await;
+    let fs = open_runtime_async(store.clone(), "snapshot-files-fork-test").await;
     let source = namespace_id("source");
     let target = namespace_id("target");
     fs.create_namespace(&source, &loonfs_test_support::test_actor())
@@ -470,9 +470,9 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
         .await
         .expect("fork namespace");
 
-    // The target has published nothing of its own, so its checkpoint's
+    // The target has published nothing of its own, so its snapshot's
     // manifest names metadata files the source owns.
-    let checkpoint = fs
+    let snapshot = fs
         .create_snapshot(&target)
         .await
         .expect("snapshot the unfolded fork target");
@@ -483,7 +483,7 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
         "the fork target's basis manifest should still name source-owned metadata files"
     );
 
-    let enumerated = snapshot_files(&fs.reader, &target, &checkpoint.snapshot_id, 1).await;
+    let enumerated = snapshot_files(&fs.reader, &target, &snapshot.snapshot_id, 1).await;
     assert_eq!(
         enumerated
             .iter()
@@ -493,7 +493,7 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
             .iter()
             .map(|(inode_id, listed)| (*inode_id, listed.revision_no, listed.content_ref.clone()))
             .collect::<Vec<_>>(),
-        "a fork target's checkpoint should enumerate the source state at the fork point"
+        "a fork target's snapshot should enumerate the source state at the fork point"
     );
 }
 
@@ -527,9 +527,9 @@ async fn foreign_metadata_segment_owners(
 }
 
 #[tokio::test]
-async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_state() {
+async fn a_deleted_snapshot_refuses_enumeration_instead_of_answering_current_state() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-release-test").await;
+    let fs = open_runtime_async(store(temp_dir.path()), "snapshot-files-release-test").await;
     let namespace_id = namespace_id("demo");
     let namespace = fs.reader.namespace(&namespace_id);
     fs.create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -543,32 +543,32 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
     )
     .await
     .expect("put file");
-    let checkpoint = fs
+    let snapshot = fs
         .create_snapshot(&namespace_id)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     fs.namespace_writer(&namespace_id)
         .expect("open namespace")
-        .delete_snapshot(&checkpoint.snapshot_id)
+        .delete_snapshot(&snapshot.snapshot_id)
         .await
-        .expect("release checkpoint");
+        .expect("release snapshot");
 
     let error = namespace
-        .list_snapshot_files(&checkpoint.snapshot_id)
+        .list_snapshot_files(&snapshot.snapshot_id)
         .page_limit(page_limit(10))
         .page()
         .await
-        .expect_err("a deleted checkpoint pins nothing to enumerate");
+        .expect_err("a deleted snapshot keeps nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 
-    let missing = loonfs::PinId::parse("pin_00000000000000000001-0123456789abcdef")
-        .expect("valid checkpoint id");
+    let missing = loonfs::SnapshotId::parse("snp_00000000000000000001-00000000000123456789abcdef")
+        .expect("valid snapshot id");
     let error = namespace
         .list_snapshot_files(&missing)
         .page_limit(page_limit(10))
         .page()
         .await
-        .expect_err("a checkpoint that never existed pins nothing either");
+        .expect_err("a snapshot that never existed keeps nothing either");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 }
 
@@ -671,14 +671,14 @@ async fn stat_current_files_by_inode_answers_the_whole_matrix_in_input_order() {
         .expect("delete file")
         .committed_seq;
     namespace_writer
-        .undelete_with_options(
+        .restore_deleted_with_options(
             recovered,
             recovered_deletion_seq,
             &loonfs_test_support::test_actor(),
-            &undelete_at("/m/recovered-again.txt"),
+            &restore_deleted_at("/m/recovered-again.txt"),
         )
         .await
-        .expect("undelete file");
+        .expect("restore file");
 
     let unknown = InodeId(999_999);
     let requested = vec![
@@ -893,7 +893,8 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
 
     // Same length, different bytes: the size check passes and the digest
     // check is what has to catch it.
-    let object_key = loonfs_objectstore::keys::content_blob(&namespace_id, &content_ref.content_id);
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+    let object_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
     replace_object(
         &store,
         &object_key,
@@ -924,10 +925,10 @@ async fn a_standalone_reader_serves_every_operation() {
         .writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let checkpoint = fs
+    let snapshot = fs
         .create_snapshot(&namespace_id)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     namespace_writer
         .move_path(
             "/docs/alpha.txt",
@@ -935,7 +936,7 @@ async fn a_standalone_reader_serves_every_operation() {
             &loonfs_test_support::test_actor(),
         )
         .await
-        .expect("move a file after the checkpoint");
+        .expect("move a file after the snapshot");
 
     // No writer identity anywhere on this path: the reader opens its own
     // store client from configuration.
@@ -946,7 +947,7 @@ async fn a_standalone_reader_serves_every_operation() {
         .expect("build a standalone reader");
     let namespace = reader.namespace(&namespace_id);
 
-    let files = snapshot_files(&reader, &namespace_id, &checkpoint.snapshot_id, 2).await;
+    let files = snapshot_files(&reader, &namespace_id, &snapshot.snapshot_id, 2).await;
     assert_eq!(files.len(), 4);
 
     let states = namespace
@@ -961,7 +962,7 @@ async fn a_standalone_reader_serves_every_operation() {
             &state.file,
             CurrentFile::Visible { path, .. } if path.as_str() == "/docs/alpha-moved.txt"
         )),
-        "the standalone reader should see the move that was committed after the checkpoint"
+        "the standalone reader should see the move that was committed after the snapshot"
     );
 
     for file in &files {

@@ -4,7 +4,7 @@
 use crate::common::{expect_code, open_runtime_async, store};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    CommitId, CreateDirectoryOptions, CurrentFile, ErrorCode, FilesystemChange, InodeId, Namespace,
+    CommitId, CreateDirectoryOptions, CurrentFile, ErrorCode, FilesystemEvent, InodeId, Namespace,
     Writable,
 };
 use loonfs_test_support::ids::namespace_id;
@@ -31,7 +31,7 @@ async fn create_directory_by_inode(
         .await
         .expect("create directory by inode");
     match commit.events.as_slice() {
-        [FilesystemChange::DirectoryCreated { inode_id, .. }] => *inode_id,
+        [FilesystemEvent::DirectoryCreated { inode_id, .. }] => *inode_id,
         other => panic!("expected one created directory, got {other:?}"),
     }
 }

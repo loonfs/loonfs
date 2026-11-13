@@ -2,7 +2,7 @@
 //! with the next answer of its script and records the requests, and the
 //! helpers that drive a session to its end.
 
-use loonfs_client::{CheckpointsPager, ClientError, Result};
+use loonfs_client::{ClientError, Result, SnapshotRecordsPager};
 use loonfs_merge::{
     ConflictReport, Mechanics, MergeSession, MergeSessionOptions, MergeSessionOutcome,
     MergeSessionState, Resolver,
@@ -11,9 +11,9 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::test_actor;
 use loonfs_types::options::MergeForkOptions;
 use loonfs_types::{
-    ActorId, ChangeSeq, Commit, DeleteNamespaceResponse, ErrorCode, ErrorDetails, ErrorResponse,
-    ListCheckpointsResponse, Merge, MergeConflict, NamespaceId, NamespaceMetadata,
-    NextMergeRangeOutcome, NextMergeRangeResponse, Pager, RebaseForkResponse,
+    ActorId, Commit, CommitSeq, DeleteNamespaceResponse, ErrorCode, ErrorDetails, ErrorResponse,
+    ListSnapshotRecordsResponse, Merge, MergeConflict, NamespaceId, NamespaceMetadata,
+    NextMergeRangeOutcome, NextMergeRangeResponse, Pager, ReplayForkResponse,
 };
 use serde_json::json;
 use std::collections::VecDeque;
@@ -27,7 +27,11 @@ pub(crate) enum Sent {
         fork_id: NamespaceId,
         options: MergeForkOptions,
     },
-    Rebase {
+    ForkForRebase {
+        fork_id: NamespaceId,
+        new_fork_id: NamespaceId,
+    },
+    Replay {
         fork_id: NamespaceId,
         new_fork_id: NamespaceId,
         options: MergeForkOptions,
@@ -41,7 +45,7 @@ pub(crate) enum Sent {
     GetNamespace {
         namespace_id: NamespaceId,
     },
-    ListCheckpoints,
+    ListSnapshotRecords,
 }
 
 /// The answer to one request.
@@ -49,6 +53,8 @@ pub(crate) enum Sent {
 pub(crate) enum Answer {
     /// The merge commits at this sequence, under the request's commit ID.
     Committed(u64),
+    /// The rebase creates the new fork.
+    Forked,
     /// The replay commit commits with this conflict report, or without one,
     /// as when the request's commit ID identifies an earlier replay commit.
     Replayed(Option<Vec<MergeConflict>>),
@@ -69,8 +75,8 @@ pub(crate) enum Answer {
     /// The namespace is a fork of `main`, which a rebase of `rebased_from`
     /// created when it has one.
     Namespace { rebased_from: Option<NamespaceId> },
-    /// One page of `main`'s checkpoints: a fork pin for each namespace.
-    ForkPins(Vec<NamespaceId>),
+    /// One page of `main`'s snapshots: a fork snapshot for each namespace.
+    ForkSnapshots(Vec<NamespaceId>),
     /// The server refuses the request.
     Refused(ErrorCode, Box<ErrorDetails>),
 }
@@ -92,7 +98,7 @@ impl Answer {
         Self::Refused(
             ErrorCode::MergeTooLarge,
             Box::new(ErrorDetails {
-                split_at_seq: Some(ChangeSeq(split_at_seq)),
+                split_at_seq: Some(CommitSeq(split_at_seq)),
                 ..ErrorDetails::default()
             }),
         )
@@ -160,13 +166,13 @@ impl Mechanics for ScriptedMechanics {
             Answer::Committed(committed_seq) => Ok(Commit {
                 namespace_id: namespace_id.clone(),
                 commit_id: options.commit_id.clone().expect("a merge has a commit ID"),
-                committed_seq: ChangeSeq(committed_seq),
+                committed_seq: CommitSeq(committed_seq),
                 committed_by: actor.clone(),
                 committed_at_ms: 0,
                 message: None,
                 merge: Some(Merge {
                     source_namespace_id: source_namespace_id.clone(),
-                    source_after_seq: ChangeSeq(0),
+                    source_after_seq: CommitSeq(0),
                     source_through_seq: options.through_seq.expect("a merge has a sequence"),
                 }),
                 events: Vec::new(),
@@ -176,26 +182,47 @@ impl Mechanics for ScriptedMechanics {
         }
     }
 
-    async fn rebase_fork_with_options(
+    async fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         _actor: &ActorId,
-        options: &MergeForkOptions,
-    ) -> Result<RebaseForkResponse> {
-        let sent = Sent::Rebase {
+    ) -> Result<NamespaceMetadata> {
+        let sent = Sent::ForkForRebase {
             fork_id: source_namespace_id.clone(),
             new_fork_id: new_namespace_id.clone(),
+        };
+        match self.answer(sent) {
+            Answer::Forked => Ok(namespace(
+                new_namespace_id,
+                namespace_id,
+                Some(source_namespace_id),
+            )),
+            Answer::Refused(code, details) => Err(refused(code, details)),
+            answer => panic!("a rebase can't answer {answer:?}"),
+        }
+    }
+
+    async fn replay_fork_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        _actor: &ActorId,
+        options: &MergeForkOptions,
+    ) -> Result<ReplayForkResponse> {
+        let sent = Sent::Replay {
+            fork_id: source_namespace_id.clone(),
+            new_fork_id: namespace_id.clone(),
             options: options.clone(),
         };
         match self.answer(sent) {
-            Answer::Replayed(conflicts) => Ok(RebaseForkResponse {
-                namespace: namespace(new_namespace_id, namespace_id, Some(source_namespace_id)),
+            Answer::Replayed(conflicts) => Ok(ReplayForkResponse {
+                namespace: namespace(namespace_id, &main(), Some(source_namespace_id)),
                 conflicts,
             }),
             Answer::Refused(code, details) => Err(refused(code, details)),
-            answer => panic!("a rebase can't answer {answer:?}"),
+            answer => panic!("a replay can't answer {answer:?}"),
         }
     }
 
@@ -213,23 +240,23 @@ impl Mechanics for ScriptedMechanics {
                 source_head_seq,
                 merged,
             } => Ok(NextMergeRangeResponse {
-                fork_point_seq: ChangeSeq(0),
-                source_head_seq: ChangeSeq(source_head_seq),
+                fork_point_seq: CommitSeq(0),
+                source_head_seq: CommitSeq(source_head_seq),
                 outcome: NextMergeRangeOutcome::Open {
                     merge: merged.then(|| Merge {
                         source_namespace_id: source_namespace_id.clone(),
-                        source_after_seq: ChangeSeq(0),
-                        source_through_seq: ChangeSeq(next_after_seq),
+                        source_after_seq: CommitSeq(0),
+                        source_through_seq: CommitSeq(next_after_seq),
                     }),
-                    next_after_seq: ChangeSeq(next_after_seq),
+                    next_after_seq: CommitSeq(next_after_seq),
                 },
             }),
             Answer::RangeOutcome {
                 source_head_seq,
                 outcome,
             } => Ok(NextMergeRangeResponse {
-                fork_point_seq: ChangeSeq(0),
-                source_head_seq: ChangeSeq(source_head_seq),
+                fork_point_seq: CommitSeq(0),
+                source_head_seq: CommitSeq(source_head_seq),
                 outcome,
             }),
             Answer::Refused(code, details) => Err(refused(code, details)),
@@ -247,7 +274,7 @@ impl Mechanics for ScriptedMechanics {
         match self.answer(sent) {
             Answer::Deleted => Ok(DeleteNamespaceResponse {
                 namespace_id: namespace_id.clone(),
-                head_seq: ChangeSeq(0),
+                head_seq: CommitSeq(0),
             }),
             Answer::Refused(code, details) => Err(refused(code, details)),
             answer => panic!("a delete can't answer {answer:?}"),
@@ -267,23 +294,23 @@ impl Mechanics for ScriptedMechanics {
         }
     }
 
-    fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
-        let answer = self.answer(Sent::ListCheckpoints);
-        let Answer::ForkPins(targets) = answer else {
-            panic!("a checkpoint listing can't answer {answer:?}");
+    fn list_snapshot_records(&self, namespace_id: &NamespaceId) -> SnapshotRecordsPager {
+        let answer = self.answer(Sent::ListSnapshotRecords);
+        let Answer::ForkSnapshots(targets) = answer else {
+            panic!("a snapshot inventory listing can't answer {answer:?}");
         };
-        let page: ListCheckpointsResponse = serde_json::from_value(json!({
+        let page: ListSnapshotRecordsResponse = serde_json::from_value(json!({
             "namespace_id": namespace_id,
-            "checkpoints": targets.iter().enumerate().map(|(index, target)| json!({
+            "snapshots": targets.iter().enumerate().map(|(index, target)| json!({
                 "namespace_id": namespace_id,
-                "checkpoint_id": format!("pin_{:020}-{index:016x}", index + 1),
+                "snapshot_id": format!("snp_{:020}-{index:026x}", index + 1),
                 "owner": {"kind": "fork", "target_namespace_id": target},
                 "created_at_ms": 0,
                 "captured_seq": 10,
                 "manifest_no": index + 1,
             })).collect::<Vec<_>>(),
         }))
-        .expect("a checkpoint page should decode");
+        .expect("a snapshot page should decode");
         let mut page = Some(page);
         Pager::new(move |_request| {
             let page = page.take().expect("the listing has one page");
@@ -303,7 +330,7 @@ pub(crate) fn sandbox() -> NamespaceId {
 }
 
 /// Starts a session that merges `sandbox` into `main`, which first
-/// recovers what an earlier run did from the script's checkpoint listing.
+/// recovers what an earlier run did from the script's snapshot inventory.
 pub(crate) async fn recover<R: Resolver>(
     mechanics: &ScriptedMechanics,
     resolver: R,
@@ -421,8 +448,8 @@ fn namespace(
 ) -> NamespaceMetadata {
     let mut basis = json!({
         "source_namespace_id": source_namespace_id,
-        "source_head_seq": 10,
-        "source_pin_id": "pin_00000000000000000001-0000000000000001",
+        "fork_point_seq": 10,
+        "source_snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
     });
     if let Some(rebased_from) = rebased_from {
         basis["rebased_from"] =
@@ -434,7 +461,7 @@ fn namespace(
         "created_at_ms": 0,
         "created_by": "test-actor",
         "fork_basis": basis,
-        "family_root_id": source_namespace_id,
+        "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
         "head_seq": 10,
         "retention_floor_seq": 10,
     }))

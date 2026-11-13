@@ -1,14 +1,14 @@
 //! Overlapping retirement collections preserve other members and retry partial effects.
 
 use super::*;
-use loonfs_objectstore::keys::{content_prefix, pin};
+use loonfs_objectstore::keys::{content_prefix, snapshot_record};
 
-/// Checks that overlapping retirements of a fork tolerate a source pin
+/// Checks that overlapping retirements of a fork tolerate a fork snapshot
 /// delete whose acknowledgement was lost, that the fork's retirement deletes
-/// none of the content the fork wrote, and that the family root's collection later
+/// none of the content the fork wrote, and that the pool's collection later
 /// collects that content while a live sibling keeps what it inherited.
 #[tokio::test]
-async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_sibling() {
+async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_live_sibling() {
     let directory = tempdir().expect("directory");
     let inner = LocalFsStore::new(directory.path()).expect("store");
     let source = NamespaceId::parse("source").expect("source");
@@ -35,45 +35,45 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
             .expect("fork");
     }
     for number in 0..3 {
-        write_test_file(
+        put_file_content_with_id(
             &inner,
             &target,
             &format!("/owned-{number}"),
-            &format!("owned-{number}"),
-            &setup,
+            b"owned",
+            numbered_content_id(3 + number),
         )
         .await;
     }
-    // The target's content is stored under the family root's prefix.
+    // The target's content is stored under the prefix of the source's pool.
+    let pool_id = crate::test_support::load_pool_id(&inner, &source).await;
+    assert_eq!(
+        crate::test_support::load_pool_id(&inner, &target).await,
+        pool_id
+    );
     let target_keys = inner
-        .list_prefix(&content_prefix(&source))
+        .list_prefix(&content_prefix(&pool_id))
         .await
-        .expect("family content")
+        .expect("pool content")
         .into_iter()
         .filter(|key| !source_keys.contains(key))
         .collect::<Vec<_>>();
     assert_eq!(target_keys.len(), 3);
-    assert!(inner
-        .list_prefix(&content_prefix(&target))
-        .await
-        .expect("target content")
-        .is_empty());
-    let source_pin_of = |manifest: &crate::namespace::control::LoadedManifest| {
+    let source_snapshot_of = |manifest: &crate::namespace::control::LoadedManifest| {
         manifest
             .payload()
             .fork_basis
             .as_ref()
             .expect("fork basis")
-            .source_pin_id
+            .source_snapshot_id
             .clone()
     };
-    let target_pin = source_pin_of(
+    let target_snapshot = source_snapshot_of(
         &crate::test_support::namespace_store(&inner, &target)
             .load_current_manifest()
             .await
             .expect("target"),
     );
-    let sibling_pin = source_pin_of(
+    let sibling_snapshot = source_snapshot_of(
         &crate::test_support::namespace_store(&inner, &sibling)
             .load_current_manifest()
             .await
@@ -88,56 +88,52 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
     }
     let deadline = context(setup.now_ms + retirement_ms());
     let gc_options = options();
-    let target_pin_key = pin(&source, &target_pin);
+    let target_snapshot_key = snapshot_record(&source, &target_snapshot);
     let store = BlockingStore::new(
         FailStore::new(
             inner,
-            KeyPredicate::exact(&target_pin_key),
+            KeyPredicate::exact(&target_snapshot_key),
             OperationSelector::Delete,
             InjectedError::Transport("delete acknowledgement lost".to_owned()),
         )
         .apply_then_fail(),
-        KeyPredicate::exact(&target_pin_key),
+        KeyPredicate::exact(&target_snapshot_key),
         OperationSelector::Delete,
     );
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &target);
     let clock = deadline.clock();
-    let (delayed, ()) = tokio::join!(namespace.gc(None, &gc_options, &clock), async {
+    let (delayed, ()) = tokio::join!(namespace.gc(&gc_options, &clock), async {
         store.wait_until_blocked().await;
         store.inner().fail_next(1);
         crate::test_support::namespace_store(store.inner(), &target)
-            .gc(None, &gc_options, &deadline.clock())
+            .gc(&gc_options, &deadline.clock())
             .await
             .expect_err("a delete succeeded but its acknowledgement was lost");
-        assert!(!pin_exists(store.inner(), &source, &target_pin).await);
+        assert!(!snapshot_record_exists(store.inner(), &source, &target_snapshot).await);
         store.inner().clear();
         let retried = crate::test_support::namespace_store(store.inner(), &target)
-            .gc(None, &gc_options, &deadline.clock())
+            .gc(&gc_options, &deadline.clock())
             .await
             .expect("second collector retries from the beginning");
-        assert_eq!(retried.deleted.retired_content_objects, 0);
-        assert!(pin_exists(store.inner(), &source, &sibling_pin).await);
+        assert_eq!(retried.deleted_snapshots_by_owner.fork, 0);
+        assert!(snapshot_record_exists(store.inner(), &source, &sibling_snapshot).await);
         store.release();
     });
-    let delayed = delayed.expect("the older collector tolerates an already-deleted pin");
-    assert_eq!(delayed.deleted.retired_content_objects, 0);
+    delayed.expect("the older collector tolerates an already-deleted snapshot");
     for key in source_keys.iter().chain(&target_keys) {
-        assert!(store.head(key).await.expect("family content").is_some());
+        assert!(store.head(key).await.expect("pool content").is_some());
     }
-    // The deleted family root keeps collecting its family's content, and the
-    // retired target is no longer a member whose views protect it.
+    // The pool's collection keeps collecting while its deleted first member
+    // is retained, and the retired target is no longer a member whose views
+    // protect the content.
     let aged = context(
         now_after_newest_object(&store, &source, GRACE_MS + 1)
             .await
             .max(deadline.now_ms),
     );
-    let report = crate::test_support::namespace_store(&store, &source)
-        .gc(None, &gc_options, &aged.clock())
-        .await
-        .expect("the family root's collection");
+    let report = collect_pool(&store, &pool_id, &aged).await;
     assert_eq!(report.deleted.content_objects, target_keys.len() as u64);
-    assert_eq!(report.deleted.retired_content_objects, 0);
     for key in &target_keys {
         assert!(store.head(key).await.expect("target content").is_none());
     }

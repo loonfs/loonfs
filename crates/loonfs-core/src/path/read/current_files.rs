@@ -129,10 +129,29 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     })
 }
 
+/// The paths that path resolution keeps, so that each directory's walk to the
+/// root runs once.
+pub(crate) trait AncestorPaths {
+    /// Returns the kept path of `inode_id`.
+    fn get(&self, inode_id: &InodeId) -> Option<&AbsolutePath>;
+    /// Keeps `path` as the path of `inode_id`.
+    fn insert(&mut self, inode_id: InodeId, path: AbsolutePath);
+}
+
+impl AncestorPaths for HashMap<InodeId, AbsolutePath> {
+    fn get(&self, inode_id: &InodeId) -> Option<&AbsolutePath> {
+        HashMap::get(self, inode_id)
+    }
+
+    fn insert(&mut self, inode_id: InodeId, path: AbsolutePath) {
+        HashMap::insert(self, inode_id, path);
+    }
+}
+
 /// Resolves a visible inode and its current path through parent bindings.
 pub(crate) async fn resolve_visible_inode<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
-    ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
+    ancestor_paths: &mut impl AncestorPaths,
     inode_id: InodeId,
 ) -> Result<Option<ResolvedVisiblePath>> {
     let Some(inode) = session.visible_inode(inode_id).await? else {
@@ -186,7 +205,7 @@ fn missing(inode_id: InodeId, readable: bool) -> CurrentFileState {
 /// `namespace_corrupt` for a parent-binding cycle.
 async fn current_path<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
-    ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
+    ancestor_paths: &mut impl AncestorPaths,
     inode_id: InodeId,
 ) -> Result<Option<AbsolutePath>> {
     let mut climbed = Vec::new();

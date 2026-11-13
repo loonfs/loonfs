@@ -14,8 +14,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::{
-    AbsolutePath, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq,
-    DeleteDirectoryBehavior, DestinationBehavior, FilesystemChange, InodeId, NamespaceId,
+    AbsolutePath, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, CommitSeq,
+    DeleteDirectoryBehavior, DestinationBehavior, FilesystemEvent, InodeId, NamespaceId,
     RevisionNo, MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
 };
 use std::assert_matches;
@@ -141,7 +141,7 @@ async fn attribute_events<S: ObjectStore + ?Sized>(
         .into_iter()
         .flat_map(|change| change.events)
         .filter_map(|event| match event {
-            FilesystemChange::AttributesChanged {
+            FilesystemEvent::AttributesChanged {
                 inode_id,
                 attributes_revision_no,
                 attributes,
@@ -761,7 +761,7 @@ async fn a_put_and_an_update_of_the_new_path_commit_together() {
     )
     .await
     .expect("the batch commits");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
 
     let file_inode = inode_of(&store, &namespace_id, "/docs/a.txt").await;
     assert_eq!(
@@ -1121,7 +1121,7 @@ async fn move_rename_replace_and_restore_preserve_attributes() {
 }
 
 #[tokio::test]
-async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
+async fn a_delete_keeps_attributes_and_a_restore_gives_them_back() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     NamespaceFixture::new(&store, &namespace_id, &context)
         .put_file(
@@ -1171,16 +1171,16 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
     update(
         &store,
         &namespace_id,
-        "undelete",
-        FilesystemOperation::Undelete {
+        "restore_deleted",
+        FilesystemOperation::RestoreDeleted {
             inode_id: file_inode,
             deletion_seq: deleted.committed_seq,
-            destination: loonfs_types::options::UndeleteDestination::Recorded,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
         },
         &context,
     )
     .await
-    .expect("undelete the file");
+    .expect("restore the file");
 
     assert_eq!(
         attributes_of(&store, &namespace_id, file_inode).await,
@@ -1190,7 +1190,7 @@ async fn a_delete_keeps_attributes_and_an_undelete_gives_them_back() {
     update(
         &store,
         &namespace_id,
-        "repeat-after-undelete",
+        "repeat-after-restore",
         set_attributes("/docs/a.txt", &[("owner", "ada")]),
         &context,
     )
@@ -1253,7 +1253,7 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
 
     // The copy's commit reports two events: the creation, then the inherited
     // attributes, in that order.
-    let copy_events: Vec<&'static str> = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let copy_events: Vec<&'static str> = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("read the change feed")
         .changes
@@ -1263,8 +1263,8 @@ async fn a_copy_to_a_vacant_destination_inherits_the_sources_attributes() {
         .events
         .iter()
         .map(|event| match event {
-            FilesystemChange::FileCreated { .. } => "file_created",
-            FilesystemChange::AttributesChanged { .. } => "attributes_changed",
+            FilesystemEvent::FileCreated { .. } => "file_created",
+            FilesystemEvent::AttributesChanged { .. } => "attributes_changed",
             other => panic!("unexpected event: {other:?}"),
         })
         .collect();

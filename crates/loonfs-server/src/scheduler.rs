@@ -1,20 +1,20 @@
 //! The maintenance scheduler: the due steps of each open session, and the
-//! sweeps that list every namespace in the store.
+//! sweeps that list every namespace and every pool in the store.
 
 use crate::scheduler::calls::Claim;
 use crate::scheduler::metrics::SchedulerMetrics;
 use crate::scheduler::retries::CallFailure;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::MetricsRecorder;
-use loonfs::{ChangeSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
+use loonfs::{CommitSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
 use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
 use loonfs_http::{panic_message, HeldNamespace, HostState, Namespaces};
-use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE};
+use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::{EffectiveLimit, MonotonicTimer};
 use std::collections::HashMap;
 use std::future::Future;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -41,8 +41,8 @@ const MAX_STEP_BACKOFF_MS: u64 = 60 * 60 * 1000;
 /// last indexed and collected, what the last metadata step reported about
 /// the tail, and the retry state of each step that the scheduler retries.
 pub(crate) struct SchedulerState {
-    indexed_seq: Option<ChangeSeq>,
-    collected_seq: Option<ChangeSeq>,
+    indexed_seq: Option<CommitSeq>,
+    collected_seq: Option<CommitSeq>,
     collected_at_ms: u64,
     /// When the tail's idle fold comes due, on the scheduler's monotonic
     /// timer, as the last metadata step that succeeded reported it (see
@@ -52,7 +52,7 @@ pub(crate) struct SchedulerState {
     /// step started, whether or not that step succeeded, and `None` before
     /// the first step. A commit since then can leave work in the tail that
     /// no step has dated.
-    last_step_seq: Option<ChangeSeq>,
+    last_step_seq: Option<CommitSeq>,
     metadata_retry: StepRetry,
     index_retry: StepRetry,
     gc_retry: StepRetry,
@@ -79,7 +79,7 @@ impl SchedulerState {
     /// Whether garbage collection is due for a session at `seq`: the seq
     /// moved since the last collection, and at least `interval_ms` passed
     /// since that collection.
-    fn collection_pending(&self, seq: Option<ChangeSeq>, now_ms: u64, interval_ms: u64) -> bool {
+    fn collection_pending(&self, seq: Option<CommitSeq>, now_ms: u64, interval_ms: u64) -> bool {
         seq != self.collected_seq && now_ms.saturating_sub(self.collected_at_ms) >= interval_ms
     }
 }
@@ -87,7 +87,7 @@ impl SchedulerState {
 /// Whether the grep index has work for a session at `seq`: the index is
 /// marked dirty, or the scheduler last brought the index up to date at
 /// another seq.
-fn index_pending(held: &HeldNamespace<SchedulerState>, seq: Option<ChangeSeq>) -> bool {
+fn index_pending(held: &HeldNamespace<SchedulerState>, seq: Option<CommitSeq>) -> bool {
     held.index_dirty || held.host_state.indexed_seq != seq
 }
 
@@ -100,15 +100,6 @@ pub(crate) struct StepRetry {
     pub(crate) retry_at_ms: u64,
     /// The call's failures in a row, zero after an attempt that didn't fail.
     pub(crate) attempts: u32,
-}
-
-/// Whether a sweep also collects each namespace's garbage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GarbageCollection {
-    /// Collect each namespace's garbage.
-    Collect,
-    /// Run each namespace's other steps without collecting garbage.
-    Skip,
 }
 
 /// Runs each open session's due steps every `maintenance_interval_ms`, and
@@ -159,10 +150,9 @@ pub enum GarbageCollection {
 ///
 /// A sweep also advances each active namespace's retention floor to the last
 /// commit at or before the current time minus the namespace's retention
-/// window, or minus `retention_window_ms` for a namespace that has no window
-/// of its own. The advance reads the namespace's window from the manifest
-/// that it loads to find the floor, so a namespace with neither window costs
-/// that one load and publishes nothing. The session steps don't advance the
+/// window. The advance reads the namespace's window from the manifest that
+/// it loads to find the floor, so a namespace without a window costs that
+/// one load and publishes nothing. The session steps don't advance the
 /// floor on their own schedule, because an advance checks that the
 /// manifest's segments exist and publishes a manifest, and a window measured
 /// in days needs no finer schedule than the sweep. A namespace whose floor
@@ -173,14 +163,15 @@ pub enum GarbageCollection {
 /// advance would make the window a day longer for exactly the namespaces
 /// that are busiest.
 ///
-/// An advance whose floor moves runs in the namespace's writer session in
-/// this server, which folds the tail and publishes the floor under its
-/// writer epoch. For a namespace that the server holds no session for, the
-/// advance opens one, which acquires the writer epoch, and the session ends
-/// when the advance returns. A writer session of the namespace in another
-/// process returns `writer_fenced` to its next request, like after any
-/// takeover. A failed advance keeps no retry state either, and the next
-/// sweep tries it again.
+/// An advance whose floor moves creates a floor object in the WAL, through
+/// the namespace's writer session in this server when the server has one,
+/// and then folds the namespace, so a manifest records the new floor. For a
+/// namespace that the server has no session for, the advance creates the
+/// floor object itself and opens no session. The advance claims no writer
+/// epoch, so a writer session of the namespace in another process isn't
+/// fenced, and the session plans its next commit against the new floor. A
+/// failed advance keeps no retry state either, and the next sweep tries it
+/// again.
 ///
 /// The scheduler starts a session's steps without waiting for the steps
 /// that other sessions started at the interval before, so a long step on one
@@ -204,9 +195,6 @@ pub(crate) struct SchedulerConfig {
     pub(crate) metadata_retry_interval_ms: u64,
     pub(crate) gc_interval_ms: u64,
     pub(crate) sweep_interval_ms: u64,
-    /// The server's retention window, which applies to each namespace
-    /// without a window of its own.
-    pub(crate) retention_window_ms: Option<NonZeroU64>,
     pub(crate) idle_session_close_after_ms: u64,
 }
 
@@ -279,98 +267,136 @@ impl Scheduler {
         self
     }
 
-    /// Runs one sweep: the steps of every namespace that the store lists.
-    /// With [`GarbageCollection::Collect`], each namespace also gets a
-    /// collection. Each namespace's retention floor is advanced under its
-    /// retention window.
+    /// Runs one sweep: the steps of every namespace that the store lists,
+    /// including a collection, and then a collection of every pool that the
+    /// store lists.
+    /// Each namespace's retention floor is advanced under its retention window.
     ///
     /// Returns how many namespaces the sweep listed, or the listing failure
-    /// that ended it once the namespaces it had started returned. A failed
-    /// call on one namespace does not fail the sweep. After the [`Scheduler`]
-    /// is stopped, no namespace starts its steps, and a running compaction
-    /// unit stops at its next block.
-    pub async fn run_sweep(&self, garbage: GarbageCollection) -> Result<usize, ObjectStoreError> {
+    /// that ended it once the namespaces or pools it had started returned. A
+    /// failed call on one namespace or pool does not fail the sweep. After the
+    /// [`Scheduler`] is stopped, no namespace starts its steps, no pool starts
+    /// its collection, and a running compaction unit stops at its next block.
+    pub async fn run_sweep(&self) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         let started_at_ms = inner.timer.monotonic_now_ms();
-        let collect_garbage = garbage == GarbageCollection::Collect;
-        let listed = self.sweep_every_namespace(garbage).await;
+        let swept = async {
+            let namespaces = self.sweep_every_namespace().await?;
+            let pools = self.collect_every_pool().await?;
+            Ok((namespaces, pools))
+        }
+        .await;
         let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_at_ms);
         inner
             .metrics
             .sweep_seconds
             .record(Duration::from_millis(elapsed_ms).as_secs_f64());
-        match &listed {
-            Ok(namespaces) => {
+        match &swept {
+            Ok((namespaces, pools)) => {
                 inner.metrics.sweeps_ok.increment(1);
                 inner
                     .metrics
                     .namespaces
                     .set(i64::try_from(*namespaces).unwrap_or(i64::MAX));
-                tracing::info!(
-                    namespaces,
-                    collect_garbage,
-                    elapsed_ms,
-                    "maintenance sweep finished"
-                );
+                tracing::info!(namespaces, pools, elapsed_ms, "maintenance sweep finished");
             }
             Err(error) => {
                 inner.metrics.sweeps_failed.increment(1);
                 tracing::warn!(
                     error = %error,
-                    collect_garbage,
                     elapsed_ms,
-                    "namespace listing failed; the next sweep lists again"
+                    "namespace or pool listing failed; the next sweep lists again"
                 );
             }
         }
-        listed
+        swept.map(|(namespaces, _)| namespaces)
     }
 
-    async fn sweep_every_namespace(
-        &self,
-        garbage: GarbageCollection,
-    ) -> Result<usize, ObjectStoreError> {
+    /// Collects every pool that the store lists, with the concurrency of the
+    /// namespace sweep, and returns how many pools it listed, or the listing
+    /// failure that ended it once the collections it had started returned.
+    async fn collect_every_pool(&self) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
-        // Boxed for the same reason as a namespace's steps: the spawned
+        self.sweep_listed_ids(
+            |start_after| async move {
+                let page =
+                    list_pool_ids(&*inner.store, start_after.as_ref(), inner.page_limit).await?;
+                Ok((page.pool_ids, page.next_cursor))
+            },
+            |pool_id| async move { self.gc_pool(&pool_id).await },
+        )
+        .await
+    }
+
+    async fn sweep_every_namespace(&self) -> Result<usize, ObjectStoreError> {
+        let inner = &self.inner;
+        self.sweep_listed_ids(
+            |start_after| async move {
+                let page =
+                    list_namespace_ids(&*inner.store, start_after.as_ref(), inner.page_limit)
+                        .await?;
+                Ok((page.namespace_ids, page.next_cursor))
+            },
+            |namespace_id| self.sweep_namespace(namespace_id),
+        )
+        .await
+    }
+
+    /// Runs `work` on every ID that `list_page` lists, with
+    /// `max_concurrent_maintenance` at once, and returns how many IDs it
+    /// listed, or the listing failure that ended it once the work it had
+    /// started returned.
+    ///
+    /// `list_page` lists the page after a cursor, or the first page for
+    /// `None`, and returns the page's IDs and the next page's cursor. The
+    /// sweep lists a page when a slot is free, and starts no more work after
+    /// a listing failure or after the [`Scheduler`] is stopped.
+    async fn sweep_listed_ids<Id, Cursor, Page, Work>(
+        &self,
+        list_page: impl Fn(Option<Cursor>) -> Page + Send + Sync,
+        work: impl Fn(Id) -> Work + Send + Sync,
+    ) -> Result<usize, ObjectStoreError>
+    where
+        Id: Send,
+        Cursor: Send,
+        Page: Future<Output = Result<(Vec<Id>, Option<Cursor>), ObjectStoreError>> + Send,
+        Work: Future<Output = ()> + Send,
+    {
+        let inner = &self.inner;
+        let list_page = &list_page;
+        // Boxed for the same reason as the work on each ID: the spawned
         // scheduler's `Send` check fails on the unboxed listing future.
         let pages = futures::stream::try_unfold(Some(None), move |start_after| async move {
             let Some(start_after) = start_after else {
                 return Ok(None);
             };
-            let page =
-                list_namespace_ids(&*inner.store, start_after.as_ref(), inner.page_limit).await?;
-            Ok(Some((page.namespace_ids, page.next_cursor.map(Some))))
+            let (ids, next_cursor) = list_page(start_after).await?;
+            Ok(Some((ids, next_cursor.map(Some))))
         })
         .boxed();
         let mut listed = 0;
         let mut listing = Ok(());
         pages
             .filter_map(|page| {
-                let namespace_ids = match page {
-                    Ok(namespace_ids) => {
-                        listed += namespace_ids.len();
-                        Some(futures::stream::iter(namespace_ids))
+                let ids = match page {
+                    Ok(ids) => {
+                        listed += ids.len();
+                        Some(futures::stream::iter(ids))
                     }
                     Err(error) => {
                         listing = Err(error);
                         None
                     }
                 };
-                futures::future::ready(namespace_ids)
+                futures::future::ready(ids)
             })
             .flatten()
             .take_until(inner.stop.cancelled())
-            .for_each_concurrent(
-                inner.config.max_concurrent_maintenance.get(),
-                |namespace_id| {
-                    // Boxed so the spawned scheduler's `Send` check does not
-                    // recurse through every engine future a namespace's steps
-                    // await.
-                    self.sweep_namespace(namespace_id, garbage)
-                        .map(drop)
-                        .boxed()
-                },
-            )
+            .for_each_concurrent(inner.config.max_concurrent_maintenance.get(), |id| {
+                // Boxed so the spawned scheduler's `Send` check does not
+                // recurse through every engine future that the work awaits.
+                work(id).boxed()
+            })
             .await;
         listing.map(|()| listed)
     }

@@ -8,7 +8,7 @@ use crate::{
     MergeSessionStatus, PendingCommit, Resolver, Result,
 };
 use loonfs_types::{
-    generated_id, ChangeSeq, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome,
+    CommitSeq, ErrorCode, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome,
 };
 
 /// The most new forks that one session's rebases create.
@@ -26,7 +26,7 @@ pub const MAX_NEW_FORKS: usize = 8;
 pub struct MergeSessionOptions {
     /// The fork sequence to merge the original fork through, or `None` for
     /// the fork's head when the session starts.
-    pub through_seq: Option<ChangeSeq>,
+    pub through_seq: Option<CommitSeq>,
 }
 
 /// One fork's merge session, which merges the fork through a [`Mechanics`]
@@ -141,7 +141,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     async fn merge(
         &self,
         fork_id: &NamespaceId,
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         merge: &PendingCommit,
     ) -> Result<Transition> {
         let answer = self
@@ -202,26 +202,41 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
         })
     }
 
-    /// Sends the pending rebase of `fork_id` into `new_fork_id`, and moves on
-    /// to the rest of the range, to a smaller piece, or to the resolver.
+    /// Creates `new_fork_id` for the rebase of `fork_id` unless the new fork
+    /// exists, sends the pending replay commit into the new fork, and moves
+    /// on to the rest of the range, to a smaller piece, or to the resolver.
     async fn rebase(
         &self,
         fork_id: &NamespaceId,
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         new_fork_id: &NamespaceId,
         replay: &PendingCommit,
         reports: &[ConflictReport],
     ) -> Result<Transition> {
-        let answer = self
+        let created = self
             .mechanics
-            .rebase_fork_with_options(
+            .fork_namespace_for_rebase(
                 &self.state.namespace_id,
                 fork_id,
                 new_fork_id,
                 &self.state.actor_id,
-                &replay.options(),
             )
             .await;
+        // `namespace_exists` means that an earlier step created the new fork,
+        // so the replay commit goes into it.
+        let answer = match created {
+            Err(error) if error.code() != Some(ErrorCode::NamespaceExists) => Err(error),
+            _ => {
+                self.mechanics
+                    .replay_fork_with_options(
+                        new_fork_id,
+                        fork_id,
+                        &self.state.actor_id,
+                        &replay.options(),
+                    )
+                    .await
+            }
+        };
         let error = match answer {
             Ok(response) => match response.conflicts {
                 Some(conflicts) => {
@@ -268,7 +283,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     fn replace_new_fork(
         &self,
         fork_id: &NamespaceId,
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         new_fork_id: &NamespaceId,
     ) -> Transition {
         let Some(replacement_id) = self.new_fork_id() else {
@@ -339,10 +354,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
 /// Returns a new fork ID for a rebase to create, or `None` when
 /// `new_fork_ids` already lists [`MAX_NEW_FORKS`].
 pub(crate) fn new_fork_id(new_fork_ids: &[NamespaceId]) -> Option<NamespaceId> {
-    (new_fork_ids.len() < MAX_NEW_FORKS).then(|| {
-        NamespaceId::parse(generated_id("rebase"))
-            .expect("a generated ID should be a valid namespace ID")
-    })
+    (new_fork_ids.len() < MAX_NEW_FORKS).then(NamespaceId::generate)
 }
 
 /// Returns the transition to the request that follows `request` after the
@@ -384,7 +396,7 @@ fn next_request(
 /// doesn't know.
 pub(crate) fn status_after_range(
     fork_id: &NamespaceId,
-    through_seq: ChangeSeq,
+    through_seq: CommitSeq,
     outcome: &NextMergeRangeOutcome,
     reports: &[ConflictReport],
 ) -> MergeSessionStatus {
@@ -423,7 +435,7 @@ pub(crate) fn status_after_range(
 /// committed with `conflicts`: the rest of the range, or the resolver.
 fn replayed(
     fork_id: &NamespaceId,
-    through_seq: ChangeSeq,
+    through_seq: CommitSeq,
     new_fork_id: &NamespaceId,
     replay: &PendingCommit,
     reports: &[ConflictReport],

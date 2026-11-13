@@ -7,7 +7,6 @@ use super::{
     AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoBody, NoQuery, UploadBodyStream,
     MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
-use crate::WriterSessions;
 use axum::extract::State;
 use axum::Json;
 use loonfs::content_tokens::{
@@ -24,10 +23,9 @@ use loonfs_types::ErrorCode;
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
     options::DirectMultipartUploadOptions, CompleteUploadBody, ContentId, ContentRef,
-    CreateUploadBody, NamespaceId, SignUploadPartsRequest, SignUploadPartsResponse,
-    SignedUploadPart, UploadId, UploadSession, UploadSessionStatus,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
+    CreateUploadBody, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadId,
+    UploadSession, UploadSessionStatus, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
 };
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -74,17 +72,13 @@ impl<'a> ContentTokenVerifier<'a> {
 
     async fn prepare(
         self,
-        namespaces: &dyn WriterSessions,
         namespace: &Namespace<Writable>,
         token: &ContentToken,
     ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
         namespace
             .prepare_content_token(self.secret, token)
             .await
-            .map_err(ApiResponseError::for_namespace_writer(
-                namespaces,
-                namespace.id(),
-            ))
+            .map_err(ApiResponseError::runtime)
     }
 
     fn mint_token(
@@ -117,7 +111,7 @@ pub(super) struct UploadPathParams {
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
-        description = "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned upload capability.",
+        description = "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned URL for the upload.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body = CreateUploadBody,
         responses(
@@ -145,20 +139,16 @@ pub(super) async fn create_upload(
     // to check before dispatching on it.
     match request {
         CreateUploadBody::DirectPut { size_bytes } => {
-            begin_direct_put_upload(&state, &namespace, namespace_id, size_bytes).await
+            begin_direct_put_upload(&state, &namespace, size_bytes).await
         }
         CreateUploadBody::DirectMultipart { part_size_bytes } => {
-            begin_direct_multipart_upload(&state, &namespace, namespace_id, part_size_bytes).await
+            begin_direct_multipart_upload(&state, &namespace, part_size_bytes).await
         }
         CreateUploadBody::ServiceProxied {} => {
-            let response =
-                namespace
-                    .create_upload()
-                    .await
-                    .map_err(ApiResponseError::for_namespace_writer(
-                        state.namespaces.as_ref(),
-                        &namespace_id,
-                    ))?;
+            let response = namespace
+                .create_upload()
+                .await
+                .map_err(ApiResponseError::runtime)?;
             Ok(Json(response))
         }
     }
@@ -167,7 +157,6 @@ pub(super) async fn create_upload(
 async fn begin_direct_put_upload(
     state: &HttpState,
     namespace: &Namespace<Writable>,
-    namespace_id: NamespaceId,
     size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let Some(issuer) = state
@@ -197,9 +186,10 @@ async fn begin_direct_put_upload(
         .with_param("/size_bytes"));
     }
 
-    let mut prepared = namespace.create_direct_put_upload_target().await.map_err(
-        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
-    )?;
+    let mut prepared = namespace
+        .create_direct_put_upload_target()
+        .await
+        .map_err(ApiResponseError::runtime)?;
     fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
     Ok(Json(prepared.session))
 }
@@ -209,7 +199,7 @@ async fn fill_direct_put_access(
     object_key: &str,
     session: &mut UploadSession,
 ) -> Result<(), ApiResponseError> {
-    if let UploadSessionStatus::Open { access, .. } = &mut session.status {
+    if let UploadSessionStatus::Open { transfer, .. } = &mut session.status {
         let signed = issuer
             .presign_put(
                 PresignedPutRequest {
@@ -220,7 +210,7 @@ async fn fill_direct_put_access(
             )
             .await
             .map_err(presign_issuer_error)?;
-        *access = Some(signed.into());
+        *transfer = Some(signed.into());
     }
     Ok(())
 }
@@ -228,7 +218,6 @@ async fn fill_direct_put_access(
 async fn begin_direct_multipart_upload(
     state: &HttpState,
     namespace: &Namespace<Writable>,
-    namespace_id: NamespaceId,
     part_size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     if state
@@ -249,12 +238,7 @@ async fn begin_direct_multipart_upload(
         })
         .await
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                &namespace_id,
-                error,
-            )
-            .with_invalid_request_param("/part_size_bytes")
+            ApiResponseError::runtime(error).with_invalid_request_param("/part_size_bytes")
         })?;
 
     Ok(Json(prepared.session))
@@ -269,7 +253,7 @@ async fn begin_direct_multipart_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
         tag = "uploads",
         summary = "Sign multipart parts",
-        description = "Returns one short-lived upload capability for each requested part of an open `direct_multipart` session. Each capability is bound to the part's checksum. To retry a part, a client asks for its capability again.",
+        description = "Returns one short-lived presigned URL for each requested part of an open `direct_multipart` session. Each presigned URL is bound to the part's checksum. To retry a part, a client asks for its presigned URL again.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("upload_id" = String, Path, description = "The upload session ID.")
@@ -311,10 +295,7 @@ pub(super) async fn sign_upload_parts(
     let targets = namespace
         .sign_upload_parts(&upload_id, &request.parts)
         .await
-        .map_err(ApiResponseError::for_namespace_writer(
-            state.namespaces.as_ref(),
-            &namespace_id,
-        ))?;
+        .map_err(ApiResponseError::runtime)?;
     let parts = sign_parts(issuer.as_ref(), &targets).await?;
 
     Ok(Json(SignUploadPartsResponse {
@@ -346,7 +327,7 @@ async fn sign_parts(
             .map_err(presign_issuer_error)?;
         signed_parts.push(SignedUploadPart {
             part_number: part.part_number,
-            access: signed.into(),
+            transfer: signed.into(),
         });
     }
     Ok(signed_parts)
@@ -381,7 +362,6 @@ pub(super) fn presign_time() -> SystemTime {
 /// or minted for another namespace, is worth saying out
 /// loud even when the request it arrived in went on to publish.
 pub(super) async fn content_preparation_for_puts(
-    namespaces: &dyn WriterSessions,
     namespace: &Namespace<Writable>,
     verifier: ContentTokenVerifier<'_>,
     content_refs: &[&ContentRef],
@@ -393,7 +373,7 @@ pub(super) async fn content_preparation_for_puts(
         .iter()
         .filter(|token| content_refs.contains(&&token.content_ref))
     {
-        match verifier.prepare(namespaces, namespace, token).await? {
+        match verifier.prepare(namespace, token).await? {
             Ok(prepared) => prepared_content.push(prepared),
             Err(error) => {
                 let content_id = token.content_ref.content_id.clone();
@@ -502,13 +482,9 @@ pub(super) async fn put_upload_content(
         .await
     {
         Ok(response) => Ok(Json(response)),
-        Err(error) => Err(outcome.into_rejection().unwrap_or_else(|| {
-            ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                &namespace_id,
-                error,
-            )
-        })),
+        Err(error) => Err(outcome
+            .into_rejection()
+            .unwrap_or_else(|| ApiResponseError::runtime(error))),
     }
 }
 
@@ -554,10 +530,7 @@ pub(super) async fn complete_upload(
     let completed = namespace
         .complete_upload(&upload_id, completion)
         .await
-        .map_err(ApiResponseError::for_namespace_writer(
-            state.namespaces.as_ref(),
-            &namespace_id,
-        ))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(with_content_token(
         completed.response,
         state.content_tokens(),
@@ -575,7 +548,7 @@ pub(super) async fn complete_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Get upload session",
-        description = "Returns an upload session. An open `direct_put` session includes a newly signed upload capability. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
+        description = "Returns an upload session. An open `direct_put` session includes a new presigned URL for the upload. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("upload_id" = String, Path, description = "The upload session ID.")
@@ -598,14 +571,10 @@ pub(super) async fn get_upload(
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let namespace = state.open_writer(&namespace_id, subject).await?;
-    let mut view =
-        namespace
-            .get_upload(&upload_id)
-            .await
-            .map_err(ApiResponseError::for_namespace_writer(
-                state.namespaces.as_ref(),
-                &namespace_id,
-            ))?;
+    let mut view = namespace
+        .get_upload(&upload_id)
+        .await
+        .map_err(ApiResponseError::runtime)?;
     if let Some(object_key) = &view.direct_put_object_key {
         let issuer = state
             .direct_transfers
@@ -661,9 +630,10 @@ pub(super) async fn abort_upload(
     NoBody: NoBody,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let namespace = state.open_writer(&namespace_id, subject).await?;
-    let response = namespace.abort_upload(&upload_id).await.map_err(
-        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
-    )?;
+    let response = namespace
+        .abort_upload(&upload_id)
+        .await
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -673,7 +643,7 @@ mod completion_body_tests {
     use super::*;
     use loonfs::LoonFs;
     use loonfs_types::{
-        Checksum, ChecksumAlgorithm, CompletedUploadPart, UploadContentClaim,
+        Checksum, ChecksumAlgorithm, CompletedUploadPart, NamespaceId, UploadContentClaim,
         UploadPartChecksumClaim,
     };
 

@@ -7,7 +7,8 @@ use crate::scripted_transport::{self, Outcome};
 use crate::ClientConfig;
 use loonfs_types::options::{Consistency, ReadAt};
 use loonfs_types::{
-    AbsolutePath, CapabilityDocument, ContentId, PinId, API_GROUP_FILESYSTEM_V0, PROTOCOL_VERSION,
+    AbsolutePath, CapabilityDocument, ContentId, SnapshotId, API_GROUP_FILESYSTEM_V0,
+    PROTOCOL_VERSION,
 };
 use std::assert_matches;
 use std::collections::BTreeMap;
@@ -88,7 +89,7 @@ fn grant_from(content_ref: ContentRef, url: &str, start_offset: u64) -> CreateDo
         ranges: vec![DownloadRange {
             start_offset,
             length: content_ref.size_bytes - start_offset,
-            access: ObjectTransferAccess::PresignedUrl {
+            transfer: ObjectTransfer::PresignedUrl {
                 method: "GET".to_owned(),
                 url: url.to_owned(),
                 headers,
@@ -110,7 +111,7 @@ fn grant_of_ranges(content_ref: ContentRef, url: &str, lengths: &[u64]) -> Creat
             let range = DownloadRange {
                 start_offset,
                 length,
-                access: ObjectTransferAccess::PresignedUrl {
+                transfer: ObjectTransfer::PresignedUrl {
                     method: "GET".to_owned(),
                     url: format!("{url}?signed={index}"),
                     headers: BTreeMap::from([(
@@ -598,8 +599,8 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
         content_ref: path_grant.content_ref.clone(),
         ranges: path_grant.ranges.clone(),
     };
-    let snapshot_id =
-        PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot ID");
+    let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
+        .expect("snapshot ID");
     let cases = [
         (ReadAt::Live(None), serde_json::json!({})),
         (
@@ -697,7 +698,7 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
     let mut grant = grant(content_ref, "http://example.invalid/object");
-    let ObjectTransferAccess::PresignedUrl { method, .. } = &mut grant.ranges[0].access else {
+    let ObjectTransfer::PresignedUrl { method, .. } = &mut grant.ranges[0].transfer else {
         panic!("expected a presigned URL");
     };
     *method = "PUT".to_owned();
@@ -748,14 +749,14 @@ async fn ranges_verify_the_whole_revision_and_resume_inside_the_second_object() 
     let reference = crc32c_content_ref(payload);
     let mut whole = grant(reference.clone(), "http://example.invalid/first");
     whole.ranges[0].length = 5;
-    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut whole.ranges[0].access else {
+    let ObjectTransfer::PresignedUrl { headers, .. } = &mut whole.ranges[0].transfer else {
         panic!("expected a presigned URL");
     };
     headers.insert("range".to_owned(), "bytes=7-11".to_owned());
     let mut second = grant_from(reference, "http://example.invalid/second", 5)
         .ranges
         .remove(0);
-    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut second.access else {
+    let ObjectTransfer::PresignedUrl { headers, .. } = &mut second.transfer else {
         panic!("expected a presigned URL");
     };
     headers.insert("range".to_owned(), "bytes=0-5".to_owned());
@@ -764,7 +765,7 @@ async fn ranges_verify_the_whole_revision_and_resume_inside_the_second_object() 
     resumed.ranges.remove(0);
     resumed.ranges[0].start_offset = 7;
     resumed.ranges[0].length = 4;
-    let ObjectTransferAccess::PresignedUrl { headers, .. } = &mut resumed.ranges[0].access else {
+    let ObjectTransfer::PresignedUrl { headers, .. } = &mut resumed.ranges[0].transfer else {
         panic!("expected a presigned URL");
     };
     headers.insert("range".to_owned(), "bytes=2-5".to_owned());

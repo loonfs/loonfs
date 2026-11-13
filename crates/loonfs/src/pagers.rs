@@ -2,8 +2,8 @@
 //! use.
 
 use crate::{
-    ChangeSeq, CoreError, Error, InodeId, ListChangesResponse, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
+    CommitSeq, CoreError, Error, InodeId, ListChangesResponse, ListFileRevisionsResponse,
+    ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, ListSnapshotRecordsResponse,
     ListSnapshotsResponse, NamespaceId, SnapshotFilesPage,
 };
 use loonfs_types::{
@@ -17,16 +17,16 @@ pub type PathEntriesPager = loonfs_types::Pager<ListPathEntriesResponse, Error>;
 pub type InodeChildrenPager = loonfs_types::Pager<ListInodeChildrenResponse, Error>;
 /// A pager over retained file revisions.
 pub type FileRevisionsPager = loonfs_types::Pager<ListFileRevisionsResponse, Error>;
-/// A pager over recoverable deletions.
+/// A pager over the trash.
 pub type TrashPager = loonfs_types::Pager<loonfs_types::ListTrashResponse, Error>;
 /// A pager over committed changes.
 pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;
-/// A pager over the files a snapshot pins.
+/// A pager over the files a snapshot keeps.
 pub type SnapshotFilesPager = loonfs_types::Pager<SnapshotFilesPage, Error>;
 /// A pager over every retained file revision in a read view.
 pub type RetainedRevisionsPager = loonfs_types::Pager<loonfs_core::RetainedRevisionsPage, Error>;
-/// A pager over existing checkpoints.
-pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, Error>;
+/// A pager over existing snapshots.
+pub type SnapshotRecordsPager = loonfs_types::Pager<ListSnapshotRecordsResponse, Error>;
 /// A pager over snapshots.
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
 
@@ -85,7 +85,7 @@ pub(crate) fn encode_next_cursor<C: PageCursor>(
 
 pub(crate) fn file_revisions_page_response(
     namespace_id: NamespaceId,
-    head_seq: ChangeSeq,
+    head_seq: CommitSeq,
     page: Page<FileRevision, FileRevisionsPageCursor>,
     inode_id: InodeId,
 ) -> std::result::Result<ListFileRevisionsResponse, CoreError> {

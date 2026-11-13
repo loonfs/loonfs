@@ -5,8 +5,8 @@ use crate::digest::{sha256_digest, SHA256_DIGEST_BYTES};
 use crate::envelope::{self, EnvelopeCodecError, EnvelopeProbe};
 use crate::metadata_rows::{DeletedBinding, DeltaPosition, RevisionSummary};
 use crate::{
-    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitFingerprint,
-    CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, CommitFingerprint, CommitId,
+    CommitSeq, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
     RevisionNo, WalNo, WriterEpoch,
 };
 use ciborium::{de::from_reader, ser::into_writer};
@@ -27,7 +27,7 @@ pub enum WalCodecError {
     )]
     InvalidWalInlineContent {
         /// Commit containing the rejected entry.
-        seq: ChangeSeq,
+        seq: CommitSeq,
         /// Content whose entry violates a rule or exceeds the WAL object total.
         content_id: ContentId,
         /// Format rule violated by the entry.
@@ -37,7 +37,7 @@ pub enum WalCodecError {
     #[error("invalid WAL bind in commit `{seq}` for child inode `{child_inode_id}`: {reason}")]
     InvalidWalBind {
         /// Commit containing the rejected delta.
-        seq: ChangeSeq,
+        seq: CommitSeq,
         /// Child the rejected bind places.
         child_inode_id: InodeId,
         /// Format rule violated by the bind.
@@ -49,7 +49,7 @@ pub enum WalCodecError {
     )]
     InvalidWalRevisionLayout {
         /// Commit containing the rejected delta.
-        seq: ChangeSeq,
+        seq: CommitSeq,
         /// Chain the rejected layout names.
         content_id: ContentId,
         /// Format rule violated by the layout.
@@ -62,10 +62,19 @@ pub enum WalCodecError {
     )]
     InvalidWalMerge {
         /// Commit containing the rejected merge record.
-        seq: ChangeSeq,
+        seq: CommitSeq,
         /// The fork that the rejected merge record identifies.
         source_namespace_id: NamespaceId,
         /// Format rule violated by the merge record.
+        reason: &'static str,
+    },
+    /// Reports a floor object with records, or with a retention floor above
+    /// its `head_seq`.
+    #[error("invalid WAL floor object `{wal_no}`: {reason}")]
+    InvalidWalFloorObject {
+        /// The rejected WAL object's number.
+        wal_no: WalNo,
+        /// Format rule violated by the floor object.
         reason: &'static str,
     },
 }
@@ -107,6 +116,7 @@ pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("writer_epoch", 9),
     ("head_seq", 9),
     ("records", 9),
+    ("retention_floor_seq", 9),
 ]);
 
 // CBOR strings, collections, and u64 values need at most nine header bytes.
@@ -254,7 +264,7 @@ pub enum WalDelta {
         /// Inode at the root of the newly hidden subtree.
         root_inode_id: InodeId,
         /// Classification copied from the root's inode, which the
-        /// deletion's `listed` active-deletion row stores.
+        /// deletion's `listed` trash row stores.
         root_kind: InodeKind,
         /// The binding the delete removed, included so the deleted name
         /// survives on the immortal tombstone row after unbind rows age out.
@@ -394,9 +404,9 @@ pub struct MergeRecord {
     pub source_namespace_id: NamespaceId,
     /// The fork's commits above this sequence were applied. For a fork's
     /// first merge, this is the fork point.
-    pub source_after_seq: ChangeSeq,
+    pub source_after_seq: CommitSeq,
     /// The fork's commits at or below this sequence were applied.
-    pub source_through_seq: ChangeSeq,
+    pub source_through_seq: CommitSeq,
 }
 
 /// Contains one accepted logical commit inside a WAL object.
@@ -406,7 +416,7 @@ pub struct MergeRecord {
 #[serde(deny_unknown_fields)]
 pub struct WalCommitPayload {
     /// Namespace-wide commit position; the records in one WAL object must cover their range contiguously.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Caller idempotency key whose reuse must retain the same semantic fingerprint.
     pub commit_id: CommitId,
     /// Actor that committed the change, as supplied by the application.
@@ -445,9 +455,14 @@ pub struct WalObjectPayload {
     /// Fencing epoch of the writer that proposed this WAL object.
     pub writer_epoch: WriterEpoch,
     /// Visible sequence after this WAL object.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
+    /// The retention floor that a floor object records, omitted from every
+    /// other WAL object. A floor object has no records, and its floor is at
+    /// most its `head_seq`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_floor_seq: Option<CommitSeq>,
 }
 
 /// A WAL object decoded through its checked durable codec.
@@ -475,6 +490,7 @@ pub(crate) fn encode_wal_payload_cbor(
     validate_wal_revision_layouts(payload)?;
     validate_wal_bind_revisions(payload)?;
     validate_wal_merges(payload)?;
+    validate_wal_floor_object(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -542,6 +558,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
     validate_wal_revision_layouts(&payload)?;
     validate_wal_bind_revisions(&payload)?;
     validate_wal_merges(&payload)?;
+    validate_wal_floor_object(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
@@ -746,6 +763,25 @@ fn validate_wal_merges(payload: &WalObjectPayload) -> Result<(), WalCodecError> 
     Ok(())
 }
 
+/// Requires a floor object to have no records and a retention floor at or
+/// below its `head_seq`.
+fn validate_wal_floor_object(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
+    let Some(retention_floor_seq) = payload.retention_floor_seq else {
+        return Ok(());
+    };
+    let reason = if !payload.records.is_empty() {
+        "a floor object has no records"
+    } else if retention_floor_seq > payload.head_seq {
+        "`retention_floor_seq` is above `head_seq`"
+    } else {
+        return Ok(());
+    };
+    Err(WalCodecError::InvalidWalFloorObject {
+        wal_no: payload.wal_no,
+        reason,
+    })
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -812,7 +848,7 @@ mod tests {
                 let content_id =
                     ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id");
                 WalCommitPayload {
-                    committed_seq: ChangeSeq(index as u64 + 1),
+                    committed_seq: CommitSeq(index as u64 + 1),
                     commit_id: CommitId::parse(format!("c_{index:032x}")).expect("commit id"),
                     committed_by: crate::ActorId::parse("test").expect("actor"),
                     semantic_commit_fingerprint: CommitFingerprint::parse(format!(
@@ -832,7 +868,7 @@ mod tests {
                             name_key: NameKey::parse("file.txt").expect("name key"),
                             display_name: DisplayName::parse("file.txt").expect("display name"),
                             bind_position: DeltaPosition {
-                                seq: ChangeSeq(1),
+                                seq: CommitSeq(1),
                                 delta_index: 0,
                             },
                             child_created_by: crate::ActorId::parse("test").expect("actor"),
@@ -860,8 +896,9 @@ mod tests {
             namespace_id,
             wal_no: WalNo(1),
             writer_epoch: WriterEpoch(1),
-            head_seq: ChangeSeq(lengths.len() as u64),
+            head_seq: CommitSeq(lengths.len() as u64),
             records,
+            retention_floor_seq: None,
         }
     }
 
@@ -937,7 +974,7 @@ mod tests {
     /// Checks rule 1 of the WAL records: a layout of a chain with pieces in
     /// the commit records the WAL object's namespace as its creator, and a
     /// layout of a chain without pieces, such as a copy's, can record any
-    /// member of the fork family.
+    /// member of the pool.
     #[test]
     fn a_layout_of_a_chain_with_pieces_records_the_wal_namespace_as_its_creator() {
         let with_creator = |payload: &mut WalObjectPayload, creator: &str| {
@@ -1093,8 +1130,9 @@ mod tests {
             namespace_id: NamespaceId::parse("n".repeat(crate::MAX_ID_BYTES)).expect("namespace"),
             wal_no: WalNo(crate::MAX_PUBLIC_INTEGER),
             writer_epoch: WriterEpoch(crate::MAX_PUBLIC_INTEGER),
-            head_seq: ChangeSeq(crate::MAX_PUBLIC_INTEGER),
+            head_seq: CommitSeq(crate::MAX_PUBLIC_INTEGER),
             records: Vec::new(),
+            retention_floor_seq: Some(CommitSeq(crate::MAX_PUBLIC_INTEGER)),
         })
         .expect("encode");
         let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");
@@ -1192,8 +1230,8 @@ mod tests {
     fn a_merge_record_covers_at_least_one_commit_of_another_namespace() {
         let merge = |source: &str, after: u64, through: u64| MergeRecord {
             source_namespace_id: NamespaceId::parse(source).expect("namespace"),
-            source_after_seq: ChangeSeq(after),
-            source_through_seq: ChangeSeq(through),
+            source_after_seq: CommitSeq(after),
+            source_through_seq: CommitSeq(through),
         };
         let inverted = Some("`source_after_seq` must be below `source_through_seq`");
         for (record, rejected) in [
@@ -1220,7 +1258,7 @@ mod tests {
                         assert_matches!(
                             error,
                             Some(WalCodecError::InvalidWalMerge {
-                                seq: ChangeSeq(1),
+                                seq: CommitSeq(1),
                                 source_namespace_id,
                                 reason,
                             }) if reason == expected

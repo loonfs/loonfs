@@ -217,7 +217,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     assert_eq!(forked.attributes, source_before_fork.attributes);
 
     // The floor advances before the deletion below, so the deletion stays
-    // recoverable and listed after the advance. The advance takes the writer
+    // in the trash after the advance. The advance takes the writer
     // epoch, so the writes after it open a new writer session.
     drop(namespace);
     fs.advance_retention_floor_blocking(&source_id)
@@ -248,13 +248,13 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
             .page_limit(page_limit(10))
             .page(),
     )
-    .expect("list trash before checkpoint");
+    .expect("list trash before snapshot");
     assert_eq!(trash.entries.len(), 1);
     assert_eq!(trash.entries[0].deleted_by, deleter);
     assert_eq!(trash.entries[0].deletion_seq, deletion.committed_seq);
 
     fs.create_snapshot_blocking(&source_id)
-        .expect("checkpoint deletion rows");
+        .expect("snapshot deletion rows");
     drop(fs);
 
     let reopened = open_runtime(object_store, "attribution-projections-reopened");
@@ -265,7 +265,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
             .page_limit(page_limit(10))
             .page(),
     )
-    .expect("list trash after checkpoint, retention, and restart");
+    .expect("list trash after snapshot, retention, and restart");
     assert_eq!(trash.entries.len(), 1);
     assert_eq!(trash.entries[0].deleted_by, deleter);
     assert_eq!(trash.entries[0].deletion_seq, deletion.committed_seq);

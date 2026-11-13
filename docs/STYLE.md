@@ -304,6 +304,8 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 - **Use bare `#[tokio::test]` by default**, `multi_thread` only where a harness requires multiple threads (with a comment that says why), and `start_paused` for timer logic.
 
+- **Make a test's result independent of whether a Bloom filter matches a generated ID**, because a filter can match a key that nobody inserted, and a test that depends on that fails in a share of its runs. A test that expects a filter to reject a key writes its keys under fixed IDs (such as `numbered_content_id`), unless the filter has at least 4,096 bits (see [Filter sizes](specs/format.md#filter-sizes)) and 30 keys or fewer, which matches another key about once in a billion or less. A test that needs a false match finds one by probing the filter, among enough candidates that the search fails less than once in 10^9 runs, and a comment gives that figure.
+
 ### Observability
 
 - **Open a `loonfs.<op>` root span for every public handle operation**, and record internal stages as `loonfs.phase` spans from the closed enum that `phase_span!` requires. Don't keep an `.entered()` guard across an `.await`, because the span would collect other tasks' events.

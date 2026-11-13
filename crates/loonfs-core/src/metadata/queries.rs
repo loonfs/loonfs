@@ -10,7 +10,7 @@ use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
 use loonfs_types::format::manifest::DeltaPosition;
-use loonfs_types::{AbsolutePath, ActorId, ChangeSeq, ErrorCode, InodeId, InodeKind, NameKey};
+use loonfs_types::{AbsolutePath, ActorId, CommitSeq, ErrorCode, InodeId, InodeKind, NameKey};
 use std::future::Future;
 use thiserror::Error;
 
@@ -53,7 +53,7 @@ impl VisiblePathError {
         match self {
             Self::RootMissing | Self::ParentBindingCycle { .. } => ErrorCode::NamespaceCorrupt,
             Self::PathNotFound { .. } => ErrorCode::PathNotFound,
-            Self::PathComponentNotDirectory { .. } => ErrorCode::PathConflict,
+            Self::PathComponentNotDirectory { .. } => ErrorCode::WrongKind,
         }
     }
 }
@@ -62,7 +62,7 @@ impl MetadataState {
     pub(super) fn newest_access_row_at_seq(
         &self,
         inode_id: InodeId,
-        seq: ChangeSeq,
+        seq: CommitSeq,
     ) -> Option<AccessRevisionRecord> {
         self.access_revisions
             .iter()
@@ -77,14 +77,14 @@ impl MetadataState {
             .cloned()
     }
 
-    pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
+    pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: CommitSeq) -> Option<InodeRecord> {
         read_now(self.reads_at_seq(base_seq).find_inode(inode_id))
     }
 
     pub(super) fn inode_at_seq_scan(
         &self,
         inode_id: InodeId,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<InodeRecord> {
         self.inodes
             .iter()
@@ -97,7 +97,7 @@ impl MetadataState {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<DirentryBindingRecord> {
         read_now(
             self.reads_at_seq(base_seq)
@@ -109,7 +109,7 @@ impl MetadataState {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<DirentryBindingRecord> {
         self.direntry_binds
             .iter()
@@ -125,7 +125,7 @@ impl MetadataState {
     pub fn current_parent_binding_for_child(
         &self,
         child_inode_id: InodeId,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<DirentryBindingRecord> {
         read_now(
             self.reads_at_seq(base_seq)
@@ -136,7 +136,7 @@ impl MetadataState {
     pub fn hiding_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<SubtreeTombstoneRecord> {
         read_now(
             self.reads_at_seq(base_seq)
@@ -147,7 +147,7 @@ impl MetadataState {
     pub(super) fn hiding_subtree_tombstone_scan(
         &self,
         root_inode_id: InodeId,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<SubtreeTombstoneRecord> {
         super::rows::hiding_tombstone_from_records(
             self.subtree_tombstones
@@ -161,7 +161,7 @@ impl MetadataState {
     pub fn covering_subtree_tombstone(
         &self,
         inode_id: InodeId,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<SubtreeTombstoneRecord> {
         read_now(visibility::covering_subtree_tombstone(
             &mut self.reads_at_seq(base_seq),
@@ -169,7 +169,7 @@ impl MetadataState {
         ))
     }
 
-    pub fn visible_inode(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
+    pub fn visible_inode(&self, inode_id: InodeId, base_seq: CommitSeq) -> Option<InodeRecord> {
         read_now(visibility::visible_inode(
             &mut self.reads_at_seq(base_seq),
             inode_id,
@@ -180,7 +180,7 @@ impl MetadataState {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<DirentryBindingRecord> {
         read_now(visibility::visible_child(
             &mut self.reads_at_seq(base_seq),
@@ -192,7 +192,7 @@ impl MetadataState {
     pub fn resolve_visible_path(
         &self,
         absolute_path: &AbsolutePath,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Result<ResolvedVisiblePath, VisiblePathError> {
         resolve_in_memory_read(visibility::resolve_visible_path(
             &mut self.reads_at_seq(base_seq),
@@ -203,7 +203,7 @@ impl MetadataState {
     pub(super) fn latest_parent_binding_for_child_at_seq(
         &self,
         child_inode_id: InodeId,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> Option<DirentryBindingRecord> {
         self.direntry_binds
             .iter()
@@ -220,7 +220,7 @@ impl MetadataState {
         &self,
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
-        base_seq: ChangeSeq,
+        base_seq: CommitSeq,
     ) -> bool {
         read_now(visibility::would_create_directory_cycle(
             &mut self.reads_at_seq(base_seq),

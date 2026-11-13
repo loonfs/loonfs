@@ -6,25 +6,22 @@ use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
 use super::handlers_uploads::{content_preparation_for_puts, PutContentPreparation};
-use super::query_params::{
-    checked_cursor, checked_list_cursor, effective_page_limit, live_consistency, read_at,
-    required_query_param,
-};
+use super::query_params::{effective_page_limit, live_consistency, read_at, required_query_param};
 use super::{acquire_download_permit, AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    AbsolutePath, ChangeSeq, DiffOptions, ErrorCode, ListChangesOptions, ListFileRevisionsOptions,
-    ListOptions, ListTrashOptions, PinId, ReadConsistency, ReadFileStreamOptions, StatOptions,
+    AbsolutePath, CommitSeq, DiffOptions, ErrorCode, ListChangesOptions, ListFileRevisionsOptions,
+    ListOptions, ListTrashOptions, ReadConsistency, ReadFileStreamOptions, SnapshotId, StatOptions,
 };
 use loonfs_types::options::CommitSplitting;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    Commit, CommitRequest, DiffResponse, FileRevisionsPageCursor, FilesystemOperation,
-    ListChangesResponse, ListFileRevisionsResponse, ListTrashResponse, RevisionNo, TrashPageCursor,
+    Commit, CommitRequest, DiffResponse, FilesystemOperation, ListChangesResponse,
+    ListFileRevisionsResponse, ListTrashResponse, RevisionNo,
 };
 use std::sync::Arc;
 
@@ -42,7 +39,7 @@ pub(super) struct PathQuery {
     #[cfg_attr(feature = "openapi", param(default = true))]
     include_attributes: Option<bool>,
     /// The snapshot whose captured path state to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -112,7 +109,7 @@ pub(super) struct ListPathPageQuery {
     #[cfg_attr(feature = "openapi", param(default = false))]
     recursive: Option<bool>,
     /// The snapshot whose captured directory state to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -177,7 +174,7 @@ pub(super) struct ContentQuery {
     /// An earlier revision to read. It can't be combined with `snapshot_id`.
     revision_no: Option<RevisionNo>,
     /// The snapshot whose captured file revision to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -198,7 +195,7 @@ pub(super) struct ChangesQuery {
     /// The sequence after which to return committed changes. With `event_index`, the commit at
     /// this sequence that the page resumes.
     #[cfg_attr(feature = "openapi", param(required = true))]
-    after_seq: Option<ChangeSeq>,
+    after_seq: Option<CommitSeq>,
     /// Whether a page can end inside a commit that alone exceeds the page's budget. The default is
     /// `false`, which returns every commit whole.
     #[cfg_attr(feature = "openapi", param(default = false))]
@@ -215,7 +212,7 @@ pub(super) struct ChangesQuery {
     )]
     limit: Option<u32>,
     /// A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -236,15 +233,15 @@ pub(super) struct DiffQuery {
     /// The sequence that the diff starts after. Each entry compares an inode's state at this
     /// sequence with its state at `to_seq`. It can't be below the namespace's retention floor.
     #[cfg_attr(feature = "openapi", param(required = true))]
-    from_seq: Option<ChangeSeq>,
+    from_seq: Option<CommitSeq>,
     /// The sequence that the diff ends at, inclusive. The default is the head that the request
     /// reads. A later page passes the `to_seq` that the first page returned.
-    to_seq: Option<ChangeSeq>,
+    to_seq: Option<CommitSeq>,
     /// The absolute path of the directory whose subtree the diff reports. The default is the root.
     #[cfg_attr(feature = "openapi", param(value_type = Option<String>))]
     path: Option<AbsolutePath>,
     /// The `next_after_seq` that the previous page returned. The default is `from_seq`.
-    after_seq: Option<ChangeSeq>,
+    after_seq: Option<CommitSeq>,
     /// Whether a page can end inside a commit that alone touches more inodes than one page
     /// examines. The default is `false`, which reads every commit whole.
     #[cfg_attr(feature = "openapi", param(default = false))]
@@ -312,13 +309,12 @@ pub(super) async fn list_path_entries(
         options.recursive = recursive;
     }
     let limit = effective_page_limit(query.limit)?;
-    let cursor = checked_list_cursor(query.cursor, &options)?;
     options.at = read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?;
     let listing = runtime
         .namespace(&namespace_id)
         .list_with_options(&path, &options)
         .page_limit(limit)
-        .cursor(cursor)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
@@ -441,14 +437,14 @@ pub(super) async fn get_file_content(
         extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
-        summary = "List recoverable deletions",
-        description = "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's undeleted, or when the namespace's writer expires it after the retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that an undelete needs, and the directory binding that the delete removed.",
+        summary = "List the trash",
+        description = "Returns the namespace's trash entries, oldest deletion first. An entry leaves the trash when it's restored, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that a restore needs, and the directory binding that the delete removed.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             LivePageQuery
         ),
         responses(
-            (status = 200, description = "Recoverable deletions", body = ListTrashResponse),
+            (status = 200, description = "Trash entries", body = ListTrashResponse),
             (status = 400, description = "Invalid limit or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
@@ -471,7 +467,7 @@ pub(super) async fn list_trash(
     let response = namespace
         .list_trash_with_options(&options)
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(checked_cursor::<TrashPageCursor>(query.cursor)?)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -517,7 +513,7 @@ pub(super) async fn list_file_revisions(
     let response = namespace
         .list_file_revisions_with_options(&path, &options)
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
@@ -593,7 +589,6 @@ pub(super) async fn create_commit(
     } else {
         Some(
             content_preparation_for_puts(
-                state.namespaces.as_ref(),
                 &namespace,
                 state.content_tokens(),
                 &put_content_refs,
@@ -632,13 +627,9 @@ pub(super) async fn create_commit(
         namespace.commit(request).await
     };
     let response = response_result.map_err(|error| {
-        ApiResponseError::runtime_for_namespace_writer(
-            state.namespaces.as_ref(),
-            &namespace_id,
-            error,
-        )
-        .with_commit_field_param()
-        .with_commit_id(&commit_id_for_errors)
+        ApiResponseError::runtime(error)
+            .with_commit_field_param()
+            .with_commit_id(&commit_id_for_errors)
     })?;
     Ok(Json(response))
 }
@@ -752,7 +743,7 @@ fn commit_splitting(split_commits: Option<bool>) -> CommitSplitting {
 }
 
 pub(super) fn reject_snapshot_with_revision(
-    snapshot_id: Option<&PinId>,
+    snapshot_id: Option<&SnapshotId>,
     revision_no: Option<RevisionNo>,
     param: &str,
 ) -> Result<(), ApiResponseError> {

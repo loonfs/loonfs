@@ -49,13 +49,13 @@ pub(crate) struct InvalidBindingVersion;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_types::ChangeSeq;
+    use loonfs_types::CommitSeq;
 
     #[test]
     fn a_binding_version_matches_its_golden_bytes() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let position = DeltaPosition {
-            seq: ChangeSeq(12),
+            seq: CommitSeq(12),
             delta_index: 3,
         };
         let token = encode(position, &namespace_id);

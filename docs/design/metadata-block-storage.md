@@ -97,7 +97,7 @@ Block sizes, segment targets, the scan refill, and ordinary maintenance budgets 
 | Segment byte target | 8 MiB decoded | A segment can exceed the target by its final row. |
 | Segment row target | 65,536 rows | Segments are also split by row count. |
 | Filter | 10 bits per key | A filter has at least 64 bits. |
-| Extent filter | 20 bits per key | An extent filter has at least 64 bits. |
+| Extent filter | 20 bits per key | An extent filter has at least 4,096 bits. |
 | Compaction input limit | 8 complete runs | A compaction reads at most eight complete runs. |
 | Decoded input memory | 64 MiB decoded SST data | Every compaction keeps at most this much decoded data-block memory across its open inputs. This budget is separate from the size-tiering decisions, which use stored bytes. |
 

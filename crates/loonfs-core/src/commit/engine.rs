@@ -6,14 +6,19 @@ use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
-use crate::manifest::{ManifestLoadError, PublishedManifest};
+use crate::manifest::retention::verify_manifest_segments_exist;
+use crate::manifest::{FloorObjectReport, ManifestLoadError, PublishedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::time::{Observation, OperationClock};
+use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{Commit, CommitId, DeleteNamespaceResponse, ManifestNo, NamespaceId, WriterId};
+use loonfs_types::{
+    Commit, CommitId, CommitSeq, DeleteNamespaceResponse, ManifestNo, NamespaceId, WalNo, WriterId,
+};
 use std::sync::{Arc, Mutex};
 
 mod candidate;
@@ -51,8 +56,8 @@ pub enum TailSource {
     Store,
 }
 
-/// Tracks writer state for one namespace session: unacquired, acquired, or
-/// permanently fenced.
+/// Tracks writer state for one namespace session: unacquired, acquired,
+/// permanently fenced, or without a namespace that the store still has.
 ///
 /// Object storage cannot reconstruct whether the current session was fenced.
 /// Runtimes should therefore share one instance across engines for the same
@@ -70,6 +75,12 @@ pub enum WriterSessionStatus {
     /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
     /// requires an explicit caller action.
     Fenced(WriterFence),
+    /// The session's last read of its namespace for a publish found the
+    /// namespace deleted or missing. A runtime that keeps sessions open reads
+    /// this record to stop keeping the session. The record changes no later
+    /// publish: each one reads the store again, and acquires a writer epoch
+    /// if the namespace exists.
+    NamespaceGone,
 }
 
 /// Shared handle to one namespace's [`WriterSessionStatus`].
@@ -279,41 +290,62 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         }
     }
 
-    /// Acquires the session's writer epoch when the session has none, and
-    /// keeps a position at the namespace's tip, which is at or above the
-    /// session's fence and every WAL object that the session wrote.
+    /// Advances the retention floor to `target` with a floor object, as one
+    /// unit of the session's publication queue, so the floor object never
+    /// collides with the session's own commits (format spec, "Advancing the
+    /// retention floor").
     ///
-    /// A retention advance acquires the position before it folds, so the fold
-    /// covers every WAL object of an older epoch (format spec, "Advancing
-    /// the retention floor"). The position is the one that the next batch
-    /// would plan against: the engine's own while the store shows it current,
-    /// and otherwise the current manifest and WAL tail. A session that finds
-    /// another writer's epoch is fenced, and returns `writer_fenced`.
-    pub async fn acquire_position(&mut self, clock: &OperationClock) -> Result<AcquiredWriter> {
+    /// The call first checks that the segments of `planned`, the manifest
+    /// that the advance was planned from, exist. A session with its writer
+    /// epoch puts the floor object at the number after its position's tip,
+    /// after the same tip confirmation that a commit's put gets, and within
+    /// `WAL_PUBLISH_BUDGET_MS` of the tip observation. The position then
+    /// replays the floor object, so its tip is the floor object's number and
+    /// its floor is raised. A session without its writer epoch has no
+    /// position, so it creates the floor object as a process without a
+    /// session does (see [`NamespaceStore::publish_floor_object`]), and the
+    /// advance claims no epoch. A session that discovery finds fenced does
+    /// the same, and so does a session whose put finds the number taken or
+    /// is refused by the budget, after the put drops the position. The call
+    /// writes nothing when the view's floor is already at or above `target`.
+    pub async fn publish_floor_object(
+        &mut self,
+        planned: &LoadedManifest,
+        target: CommitSeq,
+        clock: &OperationClock,
+    ) -> Result<FloorObjectReport> {
+        verify_manifest_segments_exist(&self.namespace.store, planned.payload()).await?;
+        let acquired = matches!(
+            *self.position.lock_session(),
+            WriterSessionStatus::Acquired(_)
+        );
+        if !acquired {
+            return self.namespace.publish_floor_object_at_tip(target).await;
+        }
         let Self {
             namespace,
             writer_id,
             position,
         } = self;
-        let LoadedPublishView {
-            view,
-            projection_observed,
-            ..
-        } = position
+        let loaded = match position
             .load_publish_view(namespace, writer_id, clock)
-            .await?;
-        let acquired_writer = view.acquired_writer.clone();
-        position.projection_observed = Some(projection_observed);
-        position.current = Some(view.into_position());
-        Ok(acquired_writer)
-    }
-
-    /// Records that a publication under the session's epoch found another
-    /// writer's epoch, so the session publishes nothing more and drops its
-    /// position.
-    pub fn record_fenced(&mut self, fence: WriterFence) {
-        self.position.invalidate_projection();
-        *self.position.lock_session() = WriterSessionStatus::Fenced(fence);
+            .await
+        {
+            Ok(loaded) => loaded,
+            Err(CoreError::WriterFenced(_)) => {
+                return namespace.publish_floor_object_at_tip(target).await
+            }
+            Err(error) => return Err(error),
+        };
+        match position
+            .publish_floor_object_against(namespace, loaded, target)
+            .await
+        {
+            Err(CoreError::WalPublish(
+                WalPublishError::NumberTaken | WalPublishError::PublishBudgetExceeded { .. },
+            )) => namespace.publish_floor_object_at_tip(target).await,
+            result => result,
+        }
     }
 
     /// Publishes `candidates` as one batch. Retries share `clock`, so the
@@ -364,14 +396,39 @@ impl PositionState {
         self.projection_observed = None;
     }
 
-    /// The basis manifest that needs a successor check, either because its
-    /// last confirmation expired or because the tip observation expired, so
-    /// that the check also confirms the tip.
-    fn unconfirmed_basis(&self, attempt: &Observation, tip_expired: bool) -> Option<ManifestNo> {
+    /// The position's tip and basis manifest when they need a tip
+    /// confirmation, either because the basis's last confirmation expired or
+    /// because the tip observation expired.
+    fn unconfirmed_tip(
+        &self,
+        attempt: &Observation,
+        tip_expired: bool,
+    ) -> Option<(WalNo, ManifestNo)> {
         let position = self.current.as_ref()?;
         let confirmed_recently = !tip_expired
             && position.basis_checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS;
-        (!confirmed_recently).then(|| position.read_basis.basis.manifest_no())
+        (!confirmed_recently).then(|| {
+            (
+                position.read_basis.head.wal_no,
+                position.read_basis.basis.manifest_no(),
+            )
+        })
+    }
+
+    /// Records that the session found its namespace deleted or missing, when
+    /// `error` says so. Every caller passes an error from a read of the
+    /// session's own namespace, so an error about another namespace, such as
+    /// a merge's fork, is never recorded. A fence stays recorded.
+    fn record_namespace_gone(&self, error: &CoreError) {
+        if matches!(
+            error,
+            CoreError::NamespaceDeleted { .. } | CoreError::NamespaceNotFound { .. }
+        ) {
+            let mut session = self.lock_session();
+            if !matches!(*session, WriterSessionStatus::Fenced(_)) {
+                *session = WriterSessionStatus::NamespaceGone;
+            }
+        }
     }
 
     fn record_published_manifest_no(&mut self, manifest_no: ManifestNo) {
@@ -394,12 +451,15 @@ impl PositionState {
                 return Err(CoreError::WriterFenced(fence.clone()))
             }
             WriterSessionStatus::Acquired(acquired_writer) => Some(acquired_writer.clone()),
-            WriterSessionStatus::Unacquired => None,
+            WriterSessionStatus::Unacquired | WriterSessionStatus::NamespaceGone => None,
         };
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
         }
-        let acquisition = namespace.acquire_writer(writer_id).await?;
+        let acquisition = namespace
+            .acquire_writer(writer_id)
+            .await
+            .inspect_err(|error| self.record_namespace_gone(error))?;
         let acquired_writer = acquisition.writer;
         self.record_published_manifest_no(acquisition.claim.manifest.manifest_no);
         self.acquired_anchor = Some(acquisition.anchor);
@@ -442,16 +502,20 @@ impl PositionState {
         }
         // A put that took effect confirms the tip, not the manifest the batch was planned
         // against: a fold or compaction (including our own) may have succeeded.
-        // Another writer must claim a successor manifest before it writes a WAL
-        // object, so the probe also confirms the tip. A WAL object that another
-        // writer creates after the probe is too young to be collected before
+        // The confirmation is a discovery of one WAL object: a HEAD request
+        // for the number after the tip, then one for the manifest after the
+        // basis (format spec, "Publication and group commit"). Another writer
+        // claims a successor manifest before it writes a WAL object, but a
+        // floor object needs no claim and can be older than the last
+        // confirmation, so the WAL request looks for one. A WAL object
+        // created after the WAL response is too young to be collected before
         // the put, so the put collides with it. After this session's own put
         // with an unknown outcome, the engine has already dropped the
         // position. Bound the response by the previous basis confirmation so a
-        // collected successor can't look absent. A probe that finds a manifest
-        // or fails reloads the view.
-        if let Some(manifest_no) = self.unconfirmed_basis(&attempt, tip_expired) {
-            let successor = namespace.manifest_has_successor(manifest_no).await;
+        // collected successor can't look absent. A confirmation that finds an
+        // object or a manifest, or fails, reloads the view.
+        if let Some((tip, manifest_no)) = self.unconfirmed_tip(&attempt, tip_expired) {
+            let successor = namespace.tip_has_successor(tip, manifest_no).await;
             match (successor, self.current.as_mut()) {
                 (Ok(false), Some(position))
                     if position.basis_checked.is_within_revalidation_bound() =>
@@ -482,6 +546,7 @@ impl PositionState {
                 if let CoreError::WriterFenced(fence) = &error {
                     *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
                 }
+                self.record_namespace_gone(&error);
                 return Err(error);
             }
         };
@@ -552,6 +617,67 @@ impl PositionState {
                 },
             }),
         }
+    }
+
+    /// Puts a floor object for `target` at the number after the tip of
+    /// `loaded`, unless the view's floor is already at or above `target`, and
+    /// keeps the position that the put leaves.
+    async fn publish_floor_object_against<S: ObjectStore>(
+        &mut self,
+        namespace: &NamespaceStore<S>,
+        loaded: LoadedPublishView<'_, S>,
+        target: CommitSeq,
+    ) -> Result<FloorObjectReport> {
+        let LoadedPublishView {
+            view,
+            attempt,
+            projection_observed,
+        } = loaded;
+        let head = view.head().clone();
+        let manifest_retention_floor_seq = view.manifest_retention_floor_seq();
+        self.projection_observed = Some(projection_observed.clone());
+        if head.retention_floor_seq >= target {
+            self.current = Some(view.into_position());
+            return Ok(FloorObjectReport {
+                retention_floor_seq: head.retention_floor_seq,
+                manifest_retention_floor_seq,
+            });
+        }
+        let floor_object = prepare_floor_object(
+            head.namespace_id.clone(),
+            view.acquired_writer.writer_epoch,
+            &head,
+            target,
+        )?;
+        let published = publish_wal_object(view.store(), &floor_object, &projection_observed).await;
+        let position = view.into_position();
+        if let Err(error) = published {
+            self.update_publish_tail_projection(
+                &namespace.namespace_id,
+                position,
+                PublishViewEffect::Invalidated,
+            );
+            return Err(error);
+        }
+        let head = head.after_wal_object(floor_object.envelope().payload());
+        let retention_floor_seq = head.retention_floor_seq;
+        let update = self.update_publish_tail_projection(
+            &namespace.namespace_id,
+            position,
+            PublishViewEffect::Advanced {
+                records: Vec::new(),
+                head,
+                wal_bytes: floor_object.as_bytes().len(),
+            },
+        );
+        // The put is an observation of the tip it created, as a commit's is.
+        if update.advanced && self.current.is_some() {
+            self.projection_observed = Some(attempt);
+        }
+        Ok(FloorObjectReport {
+            retention_floor_seq,
+            manifest_retention_floor_seq,
+        })
     }
 
     /// Folds one batch's effect into the unit's position and its tail, keeps
@@ -632,7 +758,7 @@ struct TailProjectionUpdate {
 /// replaced by `ManifestReplaced`, and the batch's effect set to drop the
 /// position, when the store shows a manifest above the batch's basis.
 /// Garbage collection keeps the segments of the current manifest and of
-/// pinned manifests, so a successor can drop the basis's, and the next unit
+/// snapshots' manifests, so a successor can drop the basis's, and the next unit
 /// plans on the current manifest. Without a successor, the segment is
 /// missing from the current manifest, and the result stays
 /// `namespace_corrupt`.

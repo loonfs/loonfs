@@ -11,7 +11,7 @@ use crate::metadata::{
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AccessRevisionNo, Attributes, AttributesProjection, AttributesRevisionNo, ChangeSeq, InodeId,
+    AccessRevisionNo, Attributes, AttributesProjection, AttributesRevisionNo, CommitSeq, InodeId,
     InodeKind, NamespaceId, RevisionNo,
 };
 
@@ -150,7 +150,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// sequence, or `None` when the inode has never had attributes written.
     ///
     /// Both legs filter by `visible_seq`. Each attribute record replaces the
-    /// one before it, so a checkpoint-basis or fork-basis read that let a
+    /// one before it, so a snapshot-basis or fork-basis read that let a
     /// newer manifest row through would return a map that sequence never saw.
     pub(crate) async fn latest_attributes_revision(
         &self,
@@ -320,7 +320,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 
 fn attributes_order_key(
     record: &AttributesRevisionRecord,
-) -> (AttributesRevisionNo, ChangeSeq, u32) {
+) -> (AttributesRevisionNo, CommitSeq, u32) {
     (
         record.attributes_revision_no,
         record.committed_seq,
@@ -328,7 +328,7 @@ fn attributes_order_key(
     )
 }
 
-fn access_order_key(record: &AccessRevisionRecord) -> (AccessRevisionNo, ChangeSeq, u32) {
+fn access_order_key(record: &AccessRevisionRecord) -> (AccessRevisionNo, CommitSeq, u32) {
     (
         record.access_revision_no,
         record.committed_seq,
@@ -346,6 +346,6 @@ fn revision_row_key(revision: &RevisionRecord) -> String {
     )
 }
 
-fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, loonfs_types::ChangeSeq, u32) {
+fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, loonfs_types::CommitSeq, u32) {
     (record.revision_no, record.committed_seq, record.delta_index)
 }

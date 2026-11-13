@@ -4,9 +4,9 @@ use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{CreateNamespaceOptions, CreateSnapshotOptions, LoonFs, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::FilesystemChange;
+use loonfs_types::FilesystemEvent;
 use loonfs_types::{
-    AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, ChangeSeq, CommitId,
+    AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId, CommitSeq,
     ErrorCode, NamespaceAccess, NamespaceAccessMode, NamespaceId, PrincipalId, PrincipalScope,
     PrincipalSet, Subject, SubjectId, ROOT_INODE_ID,
 };
@@ -294,7 +294,7 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     .await
     .expect("administrator again");
     let feed = namespace_reader
-        .list_changes(ChangeSeq(0))
+        .list_changes(CommitSeq(0))
         .page()
         .await
         .expect("feed");
@@ -303,7 +303,7 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
         .iter()
         .flat_map(|commit| &commit.events)
         .filter_map(|event| match event {
-            FilesystemChange::AccessChanged {
+            FilesystemEvent::AccessChanged {
                 inode_id,
                 access_revision_no,
                 grants,
@@ -451,7 +451,7 @@ async fn snapshot_after_administrator_change() -> (
     tempfile::TempDir,
     loonfs::LoonFs<loonfs::ReadOnly>,
     NamespaceId,
-    loonfs_types::PinId,
+    loonfs_types::SnapshotId,
     loonfs_types::ContentRef,
 ) {
     let (directory, writer, namespace) = create_namespace().await;
@@ -519,7 +519,7 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
     let namespace_reader = revoked.namespace(&namespace);
     assert_eq!(
         namespace_reader
-            .list_changes(ChangeSeq(0))
+            .list_changes(CommitSeq(0))
             .page()
             .await
             .expect_err("live feed rejects the old administrator")
@@ -538,7 +538,7 @@ async fn snapshot_admin_reads_reject_a_revoked_administrator() {
         ErrorCode::PathNotFound
     );
     let changes = view
-        .list_changes(ChangeSeq(0))
+        .list_changes(CommitSeq(0))
         .page_limit(loonfs_types::EffectiveLimit::new(
             std::num::NonZeroU32::new(10).expect("limit"),
         ))
@@ -569,7 +569,7 @@ async fn snapshot_admin_reads_accept_the_current_administrator() {
         .await
         .expect("load historical view");
     let changes = view
-        .list_changes(ChangeSeq(0))
+        .list_changes(CommitSeq(0))
         .page_limit(loonfs_types::EffectiveLimit::new(
             std::num::NonZeroU32::new(10).expect("limit"),
         ))

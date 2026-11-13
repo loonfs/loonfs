@@ -21,7 +21,7 @@ mod uploads;
 
 pub use commits::{
     Commit, CommitPrecondition, CommitRequest, DiffEntry, DiffEntryKind, DiffResponse,
-    DirectoryBinding, FilesystemChange, ListChangesResponse, Merge,
+    DirectoryBinding, FilesystemEvent, ListChangesResponse, Merge,
 };
 pub use downloads::{
     CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
@@ -29,19 +29,21 @@ pub use downloads::{
 };
 pub use errors::{ActiveWriter, CommittedReceipt, ErrorDetails, ErrorResponse};
 pub use gc::{
-    DeletedCheckpointsByOwner, DeletedObjectCounts, GcRequest, GcResponse, RetainedCandidates,
-    RetainedReason,
+    DeletedObjectCounts, DeletedSnapshotsByOwner, GcRequest, GcResponse, GcSkippedWork,
+    PoolDeletedObjectCounts, PoolGcResponse, PoolRetainedCandidates, PoolRetainedReason,
+    RetainedCandidates, RetainedReason,
 };
 pub use maintenance::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, MetadataMaintenanceOutcome,
-    MetadataMaintenanceRequest, MetadataMaintenanceResponse, RecoverAdministratorRequest,
-    RecoverAdministratorResponse, RunMaintenanceRequest, RunMaintenanceResponse,
+    MetadataMaintenanceRequest, MetadataMaintenanceResponse, MetadataSkippedWork,
+    RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceJobRequest,
+    RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest, RunPoolMaintenanceJobResponse,
     SetRetentionWindowRequest, SetRetentionWindowResponse,
 };
 pub use merges::{
-    MergeBound, MergeConflict, MergeConflictKind, MergeConflictRevision, MergeConflictVersion,
-    MergeForkRequest, NextMergeRangeOutcome, NextMergeRangeResponse, RebaseForkRequest,
-    RebaseForkResponse,
+    ForkNamespaceForRebaseRequest, MergeBound, MergeConflict, MergeConflictKind,
+    MergeConflictRevision, MergeConflictVersion, MergeForkRequest, NextMergeRangeOutcome,
+    NextMergeRangeResponse, ReplayForkRequest, ReplayForkResponse,
 };
 pub use namespaces::{
     CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceAccessMode,
@@ -56,14 +58,15 @@ pub use reads::{
 };
 pub use search::{GrepIndex, GrepIndexStatus, GrepMatch, GrepRequest, GrepResponse, GrepScope};
 pub use snapshots::{
-    Checkpoint, CheckpointOwner, CreateSnapshotRequest, DeleteSnapshotResponse,
-    ExtendSnapshotRequest, ListCheckpointsResponse, ListSnapshotsResponse, Snapshot,
+    CreateSnapshotRequest, DeleteSnapshotResponse, ExtendSnapshotRequest,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, Snapshot, SnapshotRecord,
+    SnapshotRecordOwner,
 };
 pub use store_probe::{
     StoreProbeCheck, StoreProbeCheckOutcome, StoreProbeRequest, StoreProbeResponse,
 };
 pub use uploads::{
-    CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransferAccess,
+    CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransfer,
     SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentClaim,
     UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };

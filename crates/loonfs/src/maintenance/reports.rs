@@ -1,6 +1,8 @@
 //! What a metadata maintenance step and a compaction unit report.
 
-use crate::{FoldWalResponse, ManifestNo, MetadataMaintenanceResponse, NamespaceId};
+use crate::{
+    FoldWalResponse, ManifestNo, MetadataMaintenanceResponse, MetadataSkippedWork, NamespaceId,
+};
 
 /// What one [`Maintenance::maintain_metadata_while_due`](crate::Maintenance::maintain_metadata_while_due)
 /// call did, and when its work next comes due.
@@ -32,7 +34,7 @@ pub struct MaintainMetadataReport {
 /// What one metadata compaction unit did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataCompactionReport {
-    /// The namespace that this run compacted.
+    /// The namespace that this job compacted.
     pub namespace_id: NamespaceId,
     /// The outcome of the compaction.
     pub compaction: MetadataCompactionOutcome,
@@ -57,6 +59,8 @@ pub enum MetadataCompactionOutcome {
         output_bytes: u64,
         /// The output segments that the compaction wrote.
         output_segments: u64,
+        /// The work that the compaction skipped at a limit, each reason once.
+        skipped: Vec<MetadataSkippedWork>,
     },
     /// The run was cancelled, so the current manifest didn't change.
     Cancelled,

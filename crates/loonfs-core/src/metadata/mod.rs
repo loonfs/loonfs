@@ -35,15 +35,14 @@ pub(crate) use self::durable_cache::DurableVisibilityCache;
 #[cfg(test)]
 pub(crate) use self::rows::hiding_tombstone_from_records;
 pub(crate) use self::rows::{
-    active_deletion_from_tombstone, recoverable_deletion_from_active_record, ActiveDeletionRange,
-    RecoverableDeletion,
+    listed_trash_entry_from_record, trash_record_from_tombstone, ListedTrashEntry, TrashRange,
 };
 pub(crate) use self::view::MetadataView;
 pub(crate) use self::view_session::{
     preload_inode_groups, LeafRevisionPreload, MetadataViewSession,
     METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
-pub(crate) use loonfs_types::format::manifest::ActiveDeletionRecord;
+pub(crate) use loonfs_types::format::manifest::TrashRecord;
 
 #[cfg(test)]
 pub(crate) use self::rows::MetadataStateBuilder;

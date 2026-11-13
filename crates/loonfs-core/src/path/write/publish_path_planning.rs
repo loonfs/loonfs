@@ -155,7 +155,7 @@ impl<'a> ResolvedTarget<'a> {
     }
 }
 
-/// Where a create, move, copy, or undelete binds its inode.
+/// Where a create, move, copy, or restore binds its inode.
 #[derive(Clone, Copy)]
 pub(super) enum Destination<'a> {
     Path(&'a AbsolutePath),

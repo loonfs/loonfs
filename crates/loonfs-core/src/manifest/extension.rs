@@ -5,14 +5,14 @@ use super::publish::ManifestChange;
 use super::published::PublicationReport;
 use super::validate::validate_manifest;
 use crate::engine::{NamespaceEngine, RuntimeReadContext, Writable};
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::manifest::load_basis_metadata_segments;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::PublicationBasis;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionEntry, NamespaceManifestPayload};
-use loonfs_types::{ExtensionName, RunNo};
+use loonfs_types::ExtensionName;
 
 /// The manifest that an extension's change builds on, and the clock of the
 /// publication that ends the change.
@@ -76,17 +76,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// after `basis`, or after the manifest that followed `basis` when that
     /// manifest has the same entry.
     ///
-    /// `entry_at` returns the changed entry and the next run number when the
-    /// change's new runs are numbered from the run number it's called with,
-    /// which is the `next_run_no` of the manifest that the change is
-    /// published over. Every other field is that manifest's. The publication
-    /// is a maintainer publication, so it copies the epochs of its
-    /// predecessor and claims neither.
+    /// The manifest lists `entry` as the extension's entry, and every other
+    /// field is the field of the manifest that the change is published over.
+    /// The publication is a maintainer publication, so it copies the epochs
+    /// of its predecessor and claims neither.
     ///
     /// After a lost put, the change is rebuilt over the manifest that won
     /// when that manifest's entry of `name` is the basis's (both can be
-    /// absent), because a fold, a compaction, a claim, or a retention advance
-    /// copies the entry and leaves the change valid. When the entry differs,
+    /// absent), because a fold, a compaction, or a claim copies the entry and
+    /// leaves the change valid. When the entry differs,
     /// another process planned a change from a different state, so the call
     /// returns [`ExtensionPublication::Superseded`] and publishes nothing
     /// (format spec, "Extensions"). The report includes the manifest that the
@@ -95,13 +93,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// # Panics
     ///
     /// Panics if the manifest would be invalid, such as when the entry lists
-    /// a run at or above the next run number that `entry_at` returns, or that
-    /// number is below the one it was called with.
+    /// a segment twice.
     pub async fn publish_extension(
         &self,
         basis: &ExtensionBasis,
         name: &ExtensionName,
-        mut entry_at: impl FnMut(RunNo) -> (ExtensionEntry, RunNo),
+        entry: ExtensionEntry,
     ) -> Result<PublicationReport<ExtensionPublication>> {
         let built_on = basis.find_entry(name);
         let checked = basis.clock.observe();
@@ -111,7 +108,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 Some(basis.basis.clone()),
                 &basis.clock,
                 |current: LoadedManifest| {
-                    let change = extension_change(&current, name, built_on, &mut entry_at);
+                    let change = extension_change(&current, name, built_on, &entry);
                     async move { change }
                 },
             )
@@ -136,35 +133,24 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 }
 
-/// Returns the manifest after `current` with the change from `entry_at` as
-/// the entry of extension `name`, or `Finished` when `current`'s entry
-/// of `name` isn't `built_on`.
+/// Returns the manifest after `current` with `entry` as the entry of
+/// extension `name`, or `Finished` when `current`'s entry of `name` isn't
+/// `built_on`.
 ///
 /// Returns `namespace_deleted` when `current` is a tombstone.
 fn extension_change(
     current: &LoadedManifest,
     name: &ExtensionName,
     built_on: Option<&ExtensionEntry>,
-    entry_at: &mut impl FnMut(RunNo) -> (ExtensionEntry, RunNo),
+    entry: &ExtensionEntry,
 ) -> Result<ManifestChange<()>> {
     let payload = current.payload();
     ensure_namespace_live(&payload.namespace_id, payload.status)?;
     if payload.extensions.get(name) != built_on {
         return Ok(ManifestChange::Finished(()));
     }
-    let (entry, next_run_no) = entry_at(payload.next_run_no);
-    // A run number above the public maximum wouldn't decode, so the
-    // namespace would be unreadable.
-    let next_run_no = RunNo::parse(next_run_no.0).map_err(|_| {
-        CoreError::NamespaceCorrupt(format!(
-            "the manifest's next run number is {}, too close to the largest run number for \
-             the runs of extension `{name}`",
-            payload.next_run_no
-        ))
-    })?;
     let mut next = payload.clone();
-    next.extensions.insert(name.clone(), entry);
-    next.next_run_no = next_run_no;
+    next.extensions.insert(name.clone(), entry.clone());
     validate_manifest(&current.object_key, &next)
         .expect("an extension's publication should list valid runs");
     Ok(ManifestChange::Next(Box::new(next), ()))

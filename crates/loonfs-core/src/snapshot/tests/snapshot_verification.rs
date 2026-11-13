@@ -1,18 +1,18 @@
-//! Pin publication races and verification request counts.
+//! Snapshot publication races and verification request counts.
 
 use super::*;
-use loonfs_objectstore::keys::pin_prefix;
+use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::MetadataMapStore;
-use loonfs_types::format::control::PinOwner;
+use loonfs_types::format::control::SnapshotOwner;
 use std::assert_matches;
 
-/// Checks that a pin of a manifest that compaction, or a fold of a newer
-/// head, replaces before the pin's verification returns
-/// `checkpoint_unavailable` and deletes the pin, so the caller folds and pins
-/// again.
+/// Checks that a snapshot of a manifest that compaction, or a fold of a newer
+/// head, replaces before the snapshot's verification returns
+/// `snapshot_unavailable` and deletes the snapshot, so the caller folds and takes a
+/// snapshot again.
 #[tokio::test]
-async fn a_pin_of_a_manifest_replaced_before_verification_is_refused_and_deleted() {
+async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_deleted() {
     for advance_head in [false, true] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -21,7 +21,7 @@ async fn a_pin_of_a_manifest_replaced_before_verification_is_refused_and_deleted
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::metadata_segment(),
             ),
-            KeyPredicate::prefix(pin_prefix(&namespace_id)),
+            KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
             OperationSelector::PutCreateIfAbsent,
         );
         let context = test_context();
@@ -43,33 +43,32 @@ async fn a_pin_of_a_manifest_replaced_before_verification_is_refused_and_deleted
             .await
             .expect("selected manifest");
         store.block_next();
-        let (created, ()) =
-            tokio::join!(create_checkpoint(&store, &namespace_id, &context), async {
-                store.wait_until_blocked().await;
-                if advance_head {
-                    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-                        .write_file_bytes("/three", b"data", None)
-                        .await
-                        .expect("advance head");
-                    crate::test_support::namespace_store(&store, &namespace_id)
-                        .fold_wal()
-                        .await
-                        .expect("fold newer head");
-                }
-                let current =
-                    compact_and_collect_replaced_segments(&store, &namespace_id, &selected).await;
-                assert_eq!(
-                    selected.manifest().head_seq != current.head_seq,
-                    advance_head
-                );
-                store.release();
-            });
+        let (created, ()) = tokio::join!(create_snapshot(&store, &namespace_id, &context), async {
+            store.wait_until_blocked().await;
+            if advance_head {
+                crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                    .write_file_bytes("/three", b"data", None)
+                    .await
+                    .expect("advance head");
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .fold_wal()
+                    .await
+                    .expect("fold newer head");
+            }
+            let current =
+                compact_and_collect_replaced_segments(&store, &namespace_id, &selected).await;
+            assert_eq!(
+                selected.manifest().head_seq != current.head_seq,
+                advance_head
+            );
+            store.release();
+        });
         let error = created.expect_err("the selected manifest is no longer current");
-        assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+        assert_eq!(error.code(), ErrorCode::SnapshotUnavailable);
         assert!(store
-            .list_prefix(&pin_prefix(&namespace_id))
+            .list_prefix(&snapshot_prefix(&namespace_id))
             .await
-            .expect("pins")
+            .expect("snapshots")
             .is_empty());
     }
 }
@@ -120,9 +119,9 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .collect();
     assert!(!replaced.is_empty());
     assert!(store
-        .list_prefix(&pin_prefix(namespace_id))
+        .list_prefix(&snapshot_prefix(namespace_id))
         .await
-        .expect("pins")
+        .expect("snapshots")
         .is_empty());
     let options = crate::gc::GcOptions::default();
     // The replaced segments report an ancient age, and the collection runs
@@ -138,7 +137,6 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .expect("test store provides a timestamp");
     let collection = crate::test_support::namespace_store(store, namespace_id)
         .gc(
-            None,
             &options,
             &writer_at(
                 "collector",
@@ -148,7 +146,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
             .clock(),
         )
         .await
-        .expect("collect before pin write");
+        .expect("collect before snapshot write");
     assert!(collection.deleted.metadata_segments >= replaced.len() as u64);
     for key in replaced {
         assert!(store.head(&key).await.expect("replaced segment").is_none());
@@ -157,7 +155,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
 }
 
 #[tokio::test]
-async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
+async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = BlockingStore::new(
@@ -181,8 +179,8 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = context.clock();
     let (result, ()) = tokio::join!(
-        namespace.create_pin(
-            PinOwner::User {
+        namespace.create_snapshot_record(
+            SnapshotOwner::User {
                 name: "racing".to_owned(),
                 expires_at_ms: None
             },
@@ -194,9 +192,9 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
             assert_eq!(
                 store
                     .inner()
-                    .list_prefix(&pin_prefix(&namespace_id))
+                    .list_prefix(&snapshot_prefix(&namespace_id))
                     .await
-                    .expect("durable pin")
+                    .expect("durable snapshot")
                     .len(),
                 1
             );
@@ -207,16 +205,16 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
             store.release();
         }
     );
-    assert_matches!(result, Err(CoreError::CheckpointUnavailable(_)));
+    assert_matches!(result, Err(CoreError::SnapshotUnavailable(_)));
     assert!(store
-        .list_prefix(&pin_prefix(&namespace_id))
+        .list_prefix(&snapshot_prefix(&namespace_id))
         .await
-        .expect("pins")
+        .expect("snapshots")
         .is_empty());
 }
 
 #[tokio::test]
-async fn pin_verification_checks_manifest_identity_with_only_the_current_manifest_load() {
+async fn snapshot_verification_checks_manifest_identity_with_only_the_current_manifest_load() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = RecordingStore::new(
@@ -227,14 +225,14 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&checkpoint.checkpoint_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
-        .expect("load pin")
-        .expect("pin exists")
+        .expect("load snapshot")
+        .expect("snapshot exists")
         .state;
     store.reset();
     crate::test_support::namespace_store(&store, &namespace_id)
@@ -244,9 +242,9 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
     let mut expected = store.take();
     loonfs_test_support::stores::sort_head_runs(&mut expected);
     let mut changed_number = record.clone();
-    changed_number.pin_id = PinId::generate(
+    changed_number.snapshot_id = SnapshotId::generate(
         record
-            .pin_id
+            .snapshot_id
             .manifest_no()
             .successor()
             .expect("next number"),
@@ -254,13 +252,13 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
     let mut changed_checksum = record.clone();
     changed_checksum.payload_checksum = loonfs_types::sha256_digest(b"different");
     for (record, expected_verification) in [
-        (record, record::PinBasisVerification::Verified),
-        (changed_number, record::PinBasisVerification::Invalid),
-        (changed_checksum, record::PinBasisVerification::Invalid),
+        (record, record::SnapshotBasisVerification::Verified),
+        (changed_number, record::SnapshotBasisVerification::Invalid),
+        (changed_checksum, record::SnapshotBasisVerification::Invalid),
     ] {
         assert_eq!(
             crate::test_support::namespace_store(&store, &record.namespace_id)
-                .verify_pin_basis(&record)
+                .verify_snapshot_basis(&record)
                 .await
                 .expect("verification"),
             expected_verification
@@ -272,14 +270,14 @@ async fn pin_verification_checks_manifest_identity_with_only_the_current_manifes
 }
 
 #[tokio::test]
-async fn a_pin_write_that_is_stored_and_fails_its_read_back_leaves_no_pin() {
+async fn a_snapshot_write_that_is_stored_and_fails_its_read_back_leaves_no_snapshot() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(pin_prefix(&namespace_id)),
+        KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
         OperationSelector::Any,
-        InjectedError::Transport("lost pin acknowledgement".to_owned()),
+        InjectedError::Transport("lost snapshot acknowledgement".to_owned()),
     )
     .apply_then_fail();
     let context = test_context();
@@ -287,23 +285,24 @@ async fn a_pin_write_that_is_stored_and_fails_its_read_back_leaves_no_pin() {
         .await
         .expect("bootstrap");
     store.fail_next(2);
-    let error = create_checkpoint(&store, &namespace_id, &context)
+    let error = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect_err("an unconfirmed pin write fails creation");
+        .expect_err("an unconfirmed snapshot write fails creation");
     assert_matches!(error, CoreError::Store { .. });
     assert_eq!(store.attempts(), 3, "put, read-back, and cleanup delete");
     assert!(store
-        .list_prefix(&pin_prefix(&namespace_id))
+        .list_prefix(&snapshot_prefix(&namespace_id))
         .await
-        .expect("pins")
+        .expect("snapshots")
         .is_empty());
 }
 
-/// Checks that a snapshot read accepts a user pin with or without an
-/// expiry and a fork pin, and that every other snapshot operation refuses a
-/// fork pin's ID with `snapshot_not_found` and leaves the pin in place.
+/// Checks that a snapshot read accepts a user snapshot with or without an
+/// expiry and a fork snapshot, and that every other snapshot operation refuses a
+/// fork snapshot's ID with `snapshot_not_found` and leaves the snapshot in place.
 #[tokio::test]
-async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapshot_operation() {
+async fn a_fork_snapshot_id_is_read_like_a_user_snapshot_and_refused_by_every_other_snapshot_operation(
+) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -313,23 +312,23 @@ async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapsh
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let mut pins = Vec::new();
+    let mut snapshots = Vec::new();
     for owner in [
-        PinOwner::User {
+        SnapshotOwner::User {
             name: "user".to_owned(),
             expires_at_ms: None,
         },
-        PinOwner::User {
+        SnapshotOwner::User {
             name: "snapshot".to_owned(),
             expires_at_ms: Some(u64::MAX),
         },
-        PinOwner::Fork {
+        SnapshotOwner::Fork {
             target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
         },
     ] {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-        let pin = namespace
-            .create_pin(
+        let created = namespace
+            .create_snapshot_record(
                 owner,
                 crate::test_support::folded_manifest(&namespace)
                     .await
@@ -337,11 +336,11 @@ async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapsh
                 &setup.clock(),
             )
             .await
-            .expect("pin");
-        pins.push(pin.pin_id);
+            .expect("snapshot");
+        snapshots.push(created.snapshot_id);
     }
-    let [user, snapshot, fork] = &pins[..] else {
-        panic!("expected three pins, got {pins:?}");
+    let [user, snapshot, fork] = &snapshots[..] else {
+        panic!("expected three snapshots, got {snapshots:?}");
     };
     let head = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_state()
@@ -352,14 +351,14 @@ async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapsh
     let snapshot_read = |id| namespace.load_snapshot_read_basis(&head, id);
     snapshot_read(user)
         .await
-        .expect("read a pin without an expiry");
+        .expect("read a snapshot without an expiry");
     snapshot_read(snapshot)
         .await
-        .expect("read a pin with an expiry");
-    snapshot_read(fork).await.expect("read a fork pin");
+        .expect("read a snapshot with an expiry");
+    snapshot_read(fork).await.expect("read a fork snapshot");
     let cases = [
         (
-            "retrieve of a fork pin",
+            "retrieve of a fork snapshot",
             crate::NamespaceEngine::reader(crate::test_support::namespace_store(
                 &store,
                 &namespace_id,
@@ -369,7 +368,7 @@ async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapsh
             .map(drop),
         ),
         (
-            "delete of a fork pin",
+            "delete of a fork snapshot",
             crate::test_support::NamespaceFixture::new(
                 &store,
                 &namespace_id,
@@ -390,9 +389,9 @@ async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapsh
     }
     assert_eq!(
         store
-            .list_prefix(&pin_prefix(&namespace_id))
+            .list_prefix(&snapshot_prefix(&namespace_id))
             .await
-            .expect("pins")
+            .expect("snapshots")
             .len(),
         3
     );

@@ -7,7 +7,7 @@
 # and last 60 output lines. Full logs remain in the printed temporary directory.
 # A missing, renamed, or ignored test fails the gate. Success removes the logs.
 # Each selected test holds competing write-path work open: a fold, a compaction,
-# a permit wait, or a sweep visit. Tests that only repeat work are left out.
+# a permit wait, or a sweep of a namespace. Tests that only repeat work are left out.
 
 set -eu
 
@@ -77,15 +77,15 @@ core|manifest::tests::fold_races::a_fold_that_loses_to_a_compaction_reads_no_wal
 core|manifest::tests::fold_races::a_fold_that_loses_to_a_fold_still_takes_the_cold_path
 core|manifest::tests::fold_races::a_fold_survives_repeated_compaction_publications
 core|manifest::tests::fold_races::a_retried_fold_leaves_the_session_where_an_unraced_fold_does
-core|manifest::tests::fold_races::a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object
+core|manifest::tests::fold_races::a_snapshot_that_loses_its_fold_to_a_compaction_reads_no_wal_object
 runtime|execution_budget::tests::runtimes_sharing_a_budget_never_exceed_its_limits
 runtime|execution_budget::tests::an_idle_runtime_strands_no_capacity
 runtime|execution_budget::tests::shutting_down_one_runtime_leaves_the_budget_usable
 runtime|execution_budget::tests::admitted_bytes_are_shared_and_refunded
 runtime|execution_budget::tests::one_namespace_id_in_two_stores_is_charged_separately
-runtime|publisher::tests::pin_folds::creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded
-runtime|publisher::tests::pin_folds::creations_started_together_fold_one_at_a_time_at_a_limit_of_one
-runtime|publisher::tests::pin_folds::dropped_creations_return_their_fold_permits
+runtime|publisher::tests::snapshot_folds::creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded
+runtime|publisher::tests::snapshot_folds::creations_started_together_fold_one_at_a_time_at_a_limit_of_one
+runtime|publisher::tests::snapshot_folds::dropped_creations_return_their_fold_permits
 server|scheduler::tests::a_parked_namespace_does_not_hold_up_later_pages
 server|scheduler::tests::a_listing_failure_on_a_later_page_lets_started_namespaces_finish_and_fails_the_sweep
 TESTS

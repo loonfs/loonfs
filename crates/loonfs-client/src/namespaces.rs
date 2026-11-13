@@ -9,8 +9,8 @@ use loonfs_types::options::{
 };
 use loonfs_types::{
     headers, ActorId, Commit, CommitId, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NamespaceMetadata, NextMergeRangeResponse,
-    RebaseForkRequest, RebaseForkResponse,
+    ForkNamespaceForRebaseRequest, ForkNamespaceRequest, MergeForkRequest, NamespaceId,
+    NamespaceMetadata, NextMergeRangeResponse, ReplayForkRequest, ReplayForkResponse,
 };
 
 impl Client {
@@ -44,7 +44,7 @@ impl Client {
                     .header(headers::ACTOR, actor.as_str())
                     .json(&CreateNamespaceRequest {
                         access: options.access.clone(),
-                        namespace_id: namespace_id.clone(),
+                        namespace_id: Some(namespace_id.clone()),
                         retention_window_ms: options.retention_window_ms,
                     })?,
             )
@@ -130,7 +130,7 @@ impl Client {
             self.request(operations::FORK_NAMESPACE, &url)
                 .header(headers::ACTOR, actor.as_str())
                 .json(&ForkNamespaceRequest {
-                    new_namespace_id: new_namespace_id.clone(),
+                    new_namespace_id: Some(new_namespace_id.clone()),
                     snapshot_id: options.snapshot_id.clone(),
                 })?,
         )
@@ -182,7 +182,7 @@ impl Client {
 
     /// Returns where the fork `source_namespace_id`'s next merge into
     /// `namespace_id` starts, without planning the merge. When a retention
-    /// floor would refuse the merge with `rebootstrap_required`, the
+    /// floor would refuse the merge with `below_retention_floor`, the
     /// response's outcome says which floor.
     pub async fn next_merge_range(
         &self,
@@ -195,49 +195,69 @@ impl Client {
             .await
     }
 
-    /// Rebases the fork `source_namespace_id` of `namespace_id`: replays
-    /// its unmerged commits, through the fork's head, into
-    /// `new_namespace_id`, a new fork of `namespace_id` that the first
-    /// rebase creates.
-    pub async fn rebase_fork(
+    /// Creates `new_namespace_id` as a rebase's new fork of `namespace_id`'s
+    /// head for the fork `source_namespace_id`, and returns the new fork's
+    /// state at its fork point. A `new_namespace_id` that already exists
+    /// returns `namespace_exists`.
+    pub async fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         actor: &ActorId,
-    ) -> Result<RebaseForkResponse> {
-        self.rebase_fork_with_options(
+    ) -> Result<NamespaceMetadata> {
+        let url = self.namespace_url(namespace_id, "/rebases");
+        // Namespace forks have no durable request identity to replay after an ambiguous success.
+        self.send_json(
+            self.request(operations::FORK_NAMESPACE_FOR_REBASE, &url)
+                .header(headers::ACTOR, actor.as_str())
+                .json(&ForkNamespaceForRebaseRequest {
+                    source_namespace_id: source_namespace_id.clone(),
+                    new_namespace_id: Some(new_namespace_id.clone()),
+                })?,
+        )
+        .await
+    }
+
+    /// Replays the fork `source_namespace_id`'s unmerged commits into
+    /// `namespace_id`, a rebase's new fork for the fork, as one replay
+    /// commit, through the fork's head.
+    pub async fn replay_fork(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        actor: &ActorId,
+    ) -> Result<ReplayForkResponse> {
+        self.replay_fork_with_options(
             namespace_id,
             source_namespace_id,
-            new_namespace_id,
             actor,
             &MergeForkOptions::default(),
         )
         .await
     }
 
-    /// Rebases the fork `source_namespace_id` of `namespace_id` into
-    /// `new_namespace_id`, through `options.through_seq` or the fork's head,
-    /// under `options.commit_id` or a generated commit ID. The response's
-    /// conflict report is absent when the commit ID identifies a replay
-    /// commit that an earlier request committed.
-    pub async fn rebase_fork_with_options(
+    /// Replays the fork `source_namespace_id`'s unmerged commits into
+    /// `namespace_id`, a rebase's new fork for the fork, as one replay
+    /// commit, through `options.through_seq` or the fork's head, under
+    /// `options.commit_id` or a generated commit ID. The response's conflict
+    /// report is absent when the commit ID identifies a replay commit that an
+    /// earlier request committed.
+    pub async fn replay_fork_with_options(
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
         actor: &ActorId,
         options: &MergeForkOptions,
-    ) -> Result<RebaseForkResponse> {
-        let url = self.namespace_url(namespace_id, "/rebases");
+    ) -> Result<ReplayForkResponse> {
+        let url = self.namespace_url(namespace_id, "/replays");
         // The request's commit ID resolves an ambiguous resend through the
         // replay commit's durable receipt.
         self.send_json(
-            self.request(operations::REBASE_FORK, &url)
+            self.request(operations::REPLAY_FORK, &url)
                 .header(headers::ACTOR, actor.as_str())
-                .json(&RebaseForkRequest {
+                .json(&ReplayForkRequest {
                     source_namespace_id: source_namespace_id.clone(),
-                    new_namespace_id: new_namespace_id.clone(),
                     through_seq: options.through_seq,
                     commit_id: options.commit_id.clone().unwrap_or_else(CommitId::generate),
                     message: options.message.clone(),

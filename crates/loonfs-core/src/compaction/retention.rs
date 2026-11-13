@@ -3,9 +3,9 @@
 use super::run_iterator::LocalityGrouping;
 use crate::error::{CoreError, Result};
 use crate::metadata::DirentryBindingRecord;
-use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
+use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, TrashRowAction};
 use loonfs_types::MetadataFamilyGroup;
-use loonfs_types::{ChangeSeq, InodeId, NameKey};
+use loonfs_types::{CommitSeq, InodeId, NameKey};
 
 /// One row a retention operator kept, and the family it belongs to.
 pub(super) type KeptRow = (MetadataRowFamily, MetadataRow);
@@ -31,7 +31,7 @@ pub(crate) enum RetentionRule {
     WholeState,
     /// Remove cancelled deletion pairs and the listed rows of expired
     /// deletions.
-    ActiveDeletions,
+    Trash,
     /// Per edge and per kind of row, retains the values above the floor and
     /// the newest value at or below it, unless the edge is unbound at the
     /// floor.
@@ -48,9 +48,7 @@ impl RetentionRule {
             Self::WholeState => RetentionOperator::WholeState(WholeStateRetention {
                 previous_at_floor: None,
             }),
-            Self::ActiveDeletions => {
-                RetentionOperator::ActiveDeletions(ActiveDeletionRetention { revoked: false })
-            }
+            Self::Trash => RetentionOperator::Trash(TrashRetention { revoked: false }),
             Self::Bindings => RetentionOperator::Bindings(BindingRetention::default()),
         }
     }
@@ -63,7 +61,7 @@ pub(crate) enum RetentionOperator {
     FirstPerGroup(bool),
     CommitHistory,
     WholeState(WholeStateRetention),
-    ActiveDeletions(ActiveDeletionRetention),
+    Trash(TrashRetention),
     Bindings(BindingRetention),
 }
 
@@ -73,14 +71,14 @@ impl RetentionOperator {
         &mut self,
         family: MetadataRowFamily,
         row: MetadataRow,
-        floor_seq: ChangeSeq,
+        floor_seq: CommitSeq,
     ) -> Result<Option<KeptRow>> {
         let kept = match self {
             Self::KeepEveryRow => Some(row),
             Self::FirstPerGroup(kept) => (!std::mem::replace(kept, true)).then_some(row),
             Self::CommitHistory => keep_commit_history_row(row, floor_seq),
             Self::WholeState(state) => state.push(family, row, floor_seq)?,
-            Self::ActiveDeletions(state) => state.push(row, floor_seq),
+            Self::Trash(state) => state.push(row, floor_seq),
             Self::Bindings(state) => state.push(family, row, floor_seq)?,
         };
         Ok(kept.map(|row| (family, row)))
@@ -93,13 +91,13 @@ impl RetentionOperator {
             Self::KeepEveryRow | Self::CommitHistory => {}
             Self::FirstPerGroup(kept) => *kept = false,
             Self::WholeState(state) => state.close_group(),
-            Self::ActiveDeletions(state) => state.close_group(),
+            Self::Trash(state) => state.close_group(),
             Self::Bindings(state) => state.close_group(),
         }
     }
 }
 
-fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
+fn keep_commit_history_row(row: MetadataRow, floor_seq: CommitSeq) -> Option<MetadataRow> {
     match &row {
         MetadataRow::CommitReceipt(crate::metadata::CommitReceiptRecord {
             committed_seq, ..
@@ -115,15 +113,17 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
 ///
 /// Whole-state row keys sort each inode's revisions newest first. The first row
 /// at or below the floor is the inode's state at that floor, including a
-/// cleared state, and the floor keeps no older history. The operator keeps a
-/// recoverably deleted inode's rows like any other inode's, so an undelete
+/// cleared state, and the floor keeps no older history. The operator keeps the
+/// rows of an inode in the trash like any other inode's, so a restore
 /// restores the prior state, and a base compaction removes the rows of an
 /// inode that an expired deletion hides before they reach the operator. The
 /// operator processes this order without retaining the complete history.
 ///
-/// Only the holder of the writer epoch advances the floor, after it has
-/// folded every commit validated against the old floor, so every restore
-/// that copied a revision the advance passed is already folded into the basis
+/// A manifest records a floor only through the fold that covers the floor's
+/// floor object, which also folds every WAL object below the floor object,
+/// and a writer validates every restore above the floor object against the
+/// new floor, so every restore that copied a revision the advance passed is
+/// already folded into the basis
 /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 #[derive(Debug)]
 pub(crate) struct WholeStateRetention {
@@ -139,7 +139,7 @@ impl WholeStateRetention {
         &mut self,
         family: MetadataRowFamily,
         row: MetadataRow,
-        floor_seq: ChangeSeq,
+        floor_seq: CommitSeq,
     ) -> Result<Option<MetadataRow>> {
         let Some((inode_id, revision, committed_seq)) = whole_state_revision(&row) else {
             return Ok(Some(row));
@@ -170,7 +170,7 @@ impl WholeStateRetention {
     }
 }
 
-fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, ChangeSeq)> {
+fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, CommitSeq)> {
     match row {
         MetadataRow::FileRevision(record) => {
             Some((record.inode_id, record.revision_no.0, record.committed_seq))
@@ -189,7 +189,7 @@ fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, ChangeSeq)> 
     }
 }
 
-/// Processes active-deletion rows one deletion identity at a time.
+/// Processes trash rows one deletion identity at a time.
 ///
 /// The operator removes a listed row paired with its removal marker, and the
 /// listed row of a deletion at or below the retention floor, which has
@@ -198,14 +198,14 @@ fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, ChangeSeq)> 
 /// Row-key order places the marker first, allowing one flag to determine
 /// whether the listed row is retained.
 #[derive(Debug)]
-pub(crate) struct ActiveDeletionRetention {
+pub(crate) struct TrashRetention {
     /// Whether this deletion's removal marker has already arrived.
     revoked: bool,
 }
 
-impl ActiveDeletionRetention {
-    fn push(&mut self, row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
-        let MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
+impl TrashRetention {
+    fn push(&mut self, row: MetadataRow, floor_seq: CommitSeq) -> Option<MetadataRow> {
+        let MetadataRow::Trash(crate::metadata::TrashRecord {
             action,
             deletion_seq,
             ..
@@ -216,16 +216,12 @@ impl ActiveDeletionRetention {
         match action {
             // Every removal marker goes; what this code determines is whether
             // the listed row goes with it.
-            ActiveDeletionRowAction::Removed { .. } => {
+            TrashRowAction::Removed { .. } => {
                 self.revoked = true;
                 None
             }
-            ActiveDeletionRowAction::Listed { .. }
-                if self.revoked || *deletion_seq <= floor_seq =>
-            {
-                None
-            }
-            ActiveDeletionRowAction::Listed { .. } => Some(row),
+            TrashRowAction::Listed { .. } if self.revoked || *deletion_seq <= floor_seq => None,
+            TrashRowAction::Listed { .. } => Some(row),
         }
     }
 
@@ -280,7 +276,7 @@ impl BindingRetention {
         &mut self,
         family: MetadataRowFamily,
         row: MetadataRow,
-        floor_seq: ChangeSeq,
+        floor_seq: CommitSeq,
     ) -> Result<Option<MetadataRow>> {
         let MetadataRow::DirentryBinding(binding) = &row else {
             return Ok(Some(row));
@@ -404,10 +400,10 @@ const COMMIT_CLUSTERS: [RetentionCluster; 3] = [
         rule: RetentionRule::CommitHistory,
     },
 ];
-const ACTIVE_DELETION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
-    families: &[MetadataRowFamily::ActiveDeletions],
+const TRASH_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
+    families: &[MetadataRowFamily::Trash],
     locality: LocalityGrouping::LeadingKeyComponents(2),
-    rule: RetentionRule::ActiveDeletions,
+    rule: RetentionRule::Trash,
 }];
 const REVISION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataRowFamily::Revisions],
@@ -431,7 +427,7 @@ pub(crate) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
         MetadataFamilyGroup::Revisions => &REVISION_CLUSTERS,
         MetadataFamilyGroup::Inodes => &INODE_CLUSTERS,
         MetadataFamilyGroup::Tombstones => &TOMBSTONE_CLUSTERS,
-        MetadataFamilyGroup::ActiveDeletions => &ACTIVE_DELETION_CLUSTERS,
+        MetadataFamilyGroup::Trash => &TRASH_CLUSTERS,
         MetadataFamilyGroup::Commits => &COMMIT_CLUSTERS,
         MetadataFamilyGroup::ContentLayouts => &LAYOUT_CLUSTERS,
         MetadataFamilyGroup::Attributes => &ATTRIBUTE_CLUSTERS,
@@ -460,7 +456,7 @@ mod tests {
         let row = |content_id: ContentId, committed_seq| {
             MetadataRow::ContentLayout(ContentLayoutRecord {
                 content_id: content_id.clone(),
-                committed_seq: ChangeSeq(committed_seq),
+                committed_seq: CommitSeq(committed_seq),
                 size_bytes: 1,
                 layout: ContentLayout {
                     creator_namespace_id: creator.clone(),
@@ -491,7 +487,7 @@ mod tests {
                 operator.close_group();
                 previous = group.to_owned();
             }
-            if let Some((_, row)) = operator.push(family, row, ChangeSeq(0)).expect("push") {
+            if let Some((_, row)) = operator.push(family, row, CommitSeq(0)).expect("push") {
                 kept.push(row);
             }
         }
@@ -506,8 +502,8 @@ mod tests {
         MetadataRowFamily::Access,
     ];
 
-    fn floor() -> ChangeSeq {
-        ChangeSeq(100)
+    fn floor() -> CommitSeq {
+        CommitSeq(100)
     }
 
     fn whole_state_row(
@@ -523,7 +519,7 @@ mod tests {
                 MetadataRow::AccessRevision(crate::metadata::AccessRevisionRecord {
                     inode_id: InodeId(u128::from(inode)),
                     access_revision_no: AccessRevisionNo(revision),
-                    committed_seq: ChangeSeq(committed_seq),
+                    committed_seq: CommitSeq(committed_seq),
                     commit_id,
                     delta_index: 0,
                     committed_by: loonfs_types::ActorId::loonfs(),
@@ -536,7 +532,7 @@ mod tests {
                 MetadataRow::FileRevision(crate::metadata::RevisionRecord {
                     inode_id: InodeId(u128::from(inode)),
                     revision_no: RevisionNo(revision),
-                    committed_seq: ChangeSeq(committed_seq),
+                    committed_seq: CommitSeq(committed_seq),
                     commit_id,
                     committed_by: loonfs_types::ActorId::loonfs(),
                     committed_at_ms: 1_000 + committed_seq,
@@ -552,7 +548,7 @@ mod tests {
             _ => MetadataRow::AttributesRevision(crate::metadata::AttributesRevisionRecord {
                 inode_id: InodeId(u128::from(inode)),
                 attributes_revision_no: AttributesRevisionNo(revision),
-                committed_seq: ChangeSeq(committed_seq),
+                committed_seq: CommitSeq(committed_seq),
                 commit_id,
                 delta_index: 0,
                 committed_by: loonfs_types::ActorId::loonfs(),
@@ -573,7 +569,7 @@ mod tests {
         bound: bool,
     ) -> MetadataRow {
         let mut record = crate::test_support::binding_row(parent, name, child, seq);
-        record.bind_position.seq = ChangeSeq(bind_seq);
+        record.bind_position.seq = CommitSeq(bind_seq);
         if !bound {
             record.state = loonfs_types::format::manifest::DirentryBindingState::Unbound;
         }
@@ -662,7 +658,7 @@ mod tests {
     /// kept at the floor is the newest at or below it.
     #[test]
     fn a_whole_state_row_leaves_only_at_or_below_the_floor() {
-        let floor = ChangeSeq(40);
+        let floor = CommitSeq(40);
         for family in WHOLE_STATE_FAMILIES {
             let mut operator = RetentionRule::WholeState.operator();
             let mut kept = Vec::new();
@@ -708,18 +704,18 @@ mod tests {
         }
     }
 
-    fn active_deletion_row(deletion_seq: u64, action: ActiveDeletionRowAction) -> MetadataRow {
-        MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
+    fn trash_row(deletion_seq: u64, action: TrashRowAction) -> MetadataRow {
+        MetadataRow::Trash(crate::metadata::TrashRecord {
             root_inode_id: InodeId(9),
-            deletion_seq: ChangeSeq(deletion_seq),
+            deletion_seq: CommitSeq(deletion_seq),
             action,
         })
     }
 
     fn listed(deletion_seq: u64) -> MetadataRow {
-        active_deletion_row(
+        trash_row(
             deletion_seq,
-            ActiveDeletionRowAction::Listed {
+            TrashRowAction::Listed {
                 inode_kind: loonfs_types::InodeKind::Directory,
                 deleted_at_ms: 1_000,
                 deleted_by: loonfs_types::ActorId::loonfs(),
@@ -737,26 +733,26 @@ mod tests {
     fn a_cancelled_deletion_leaves_and_a_live_one_stays() {
         // The floor is below the deletion, so only a removal marker removes
         // its listed row.
-        let mut operator = RetentionRule::ActiveDeletions.operator();
-        let removed = active_deletion_row(
+        let mut operator = RetentionRule::Trash.operator();
+        let removed = trash_row(
             3,
-            ActiveDeletionRowAction::Removed {
-                removed_seq: ChangeSeq(4),
+            TrashRowAction::Removed {
+                removed_seq: CommitSeq(4),
             },
         );
         assert!(operator
-            .push(MetadataRowFamily::ActiveDeletions, removed, ChangeSeq(0))
+            .push(MetadataRowFamily::Trash, removed, CommitSeq(0))
             .expect("push")
             .is_none());
         assert!(operator
-            .push(MetadataRowFamily::ActiveDeletions, listed(3), ChangeSeq(0))
+            .push(MetadataRowFamily::Trash, listed(3), CommitSeq(0))
             .expect("push")
             .is_none());
 
         operator.close_group();
         assert!(
             operator
-                .push(MetadataRowFamily::ActiveDeletions, listed(3), ChangeSeq(0))
+                .push(MetadataRowFamily::Trash, listed(3), CommitSeq(0))
                 .expect("push")
                 .is_some(),
             "the next deletion is decided on its own markers, not the previous one's"
@@ -767,15 +763,15 @@ mod tests {
     /// above it stays.
     #[test]
     fn a_listed_row_leaves_at_or_below_the_floor() {
-        let mut operator = RetentionRule::ActiveDeletions.operator();
+        let mut operator = RetentionRule::Trash.operator();
         let mut kept = Vec::new();
         for deletion_seq in [39, 40, 41, 99] {
             operator.close_group();
             if let Some((_, row)) = operator
                 .push(
-                    MetadataRowFamily::ActiveDeletions,
+                    MetadataRowFamily::Trash,
                     listed(deletion_seq),
-                    ChangeSeq(40),
+                    CommitSeq(40),
                 )
                 .expect("push")
             {
@@ -815,7 +811,7 @@ mod tests {
         let tombstone = |seq: u64, set: bool| {
             MetadataRow::Tombstone(crate::metadata::SubtreeTombstoneRecord {
                 root_inode_id: InodeId(42),
-                committed_seq: ChangeSeq(seq),
+                committed_seq: CommitSeq(seq),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 action: if set {
@@ -830,7 +826,7 @@ mod tests {
                 } else {
                     crate::metadata::TombstoneRowAction::Revoke {
                         target: loonfs_types::format::manifest::DeltaPosition {
-                            seq: ChangeSeq(seq - 1),
+                            seq: CommitSeq(seq - 1),
                             delta_index: 0,
                         },
                     }

@@ -2,7 +2,7 @@
 //!
 //! The probe runs only when requested because it writes and deletes objects.
 //! It runs every check even after a failure so operators receive a complete
-//! report. Objects use the `probe-runs/{run_id}/` prefix, and the final check
+//! report. Objects use the `probe-runs/{probe_id}/` prefix, and the final check
 //! removes them.
 //!
 //! This probe does not test presigned direct transfers. Those are enabled only
@@ -16,13 +16,13 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_types::{Checksum, ProbeRunId};
+use loonfs_types::{Checksum, ProbeId};
 
 /// Results from one store probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreProbeReport {
     /// Label used to isolate this run's objects.
-    pub run_id: ProbeRunId,
+    pub probe_id: ProbeId,
     /// Checks in execution order.
     pub checks: Vec<StoreProbeCheck>,
 }
@@ -30,7 +30,7 @@ pub struct StoreProbeReport {
 impl From<StoreProbeReport> for loonfs_types::StoreProbeResponse {
     fn from(report: StoreProbeReport) -> Self {
         Self {
-            run_id: report.run_id,
+            probe_id: report.probe_id,
             checks: report
                 .checks
                 .into_iter()
@@ -74,16 +74,16 @@ pub enum StoreProbeOutcome {
     },
 }
 
-/// Runs every contract check and stores temporary objects under `run_id`.
+/// Runs every contract check and stores temporary objects under `probe_id`.
 ///
 /// A failed check does not stop the remaining checks. Callers must provide a
-/// unique `run_id` when probes may run at the same time.
+/// unique `probe_id` when probes may run at the same time.
 pub async fn run_store_contract_probe(
     store: &dyn ObjectStore,
-    run_id: &ProbeRunId,
+    probe_id: &ProbeId,
 ) -> StoreProbeReport {
     let run = ProbeRun {
-        prefix: crate::keys::probe_run_prefix(run_id),
+        prefix: crate::keys::probe_run_prefix(probe_id),
     };
     let checks = vec![
         check(
@@ -136,7 +136,7 @@ pub async fn run_store_contract_probe(
     ];
 
     StoreProbeReport {
-        run_id: run_id.clone(),
+        probe_id: probe_id.clone(),
         checks,
     }
 }
@@ -842,9 +842,9 @@ mod tests {
 
     #[tokio::test]
     async fn provider_failures_make_every_probe_message_safe_to_paste() {
-        let run_id = ProbeRunId::generate();
-        let run_prefix = crate::keys::probe_run_prefix(&run_id);
-        let report = run_store_contract_probe(&PoisonPermissionStore, &run_id).await;
+        let probe_id = ProbeId::generate();
+        let run_prefix = crate::keys::probe_run_prefix(&probe_id);
+        let report = run_store_contract_probe(&PoisonPermissionStore, &probe_id).await;
         let messages: Vec<_> = report
             .checks
             .iter()
@@ -883,10 +883,10 @@ mod tests {
         let temp_dir = TempDir::new().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
 
-        let run_id = ProbeRunId::generate();
-        let report = run_store_contract_probe(&store, &run_id).await;
+        let probe_id = ProbeId::generate();
+        let report = run_store_contract_probe(&store, &probe_id).await;
 
-        assert_eq!(report.run_id, run_id);
+        assert_eq!(report.probe_id, probe_id);
         let failures: Vec<_> = report
             .checks
             .iter()
@@ -901,7 +901,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
 
-        let report = run_store_contract_probe(&store, &ProbeRunId::generate()).await;
+        let report = run_store_contract_probe(&store, &ProbeId::generate()).await;
 
         let expected = std::collections::BTreeSet::from([
             "create_if_absent_enforced",
@@ -936,7 +936,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
 
-        let report = run_store_contract_probe(&store, &ProbeRunId::generate()).await;
+        let report = run_store_contract_probe(&store, &ProbeId::generate()).await;
 
         assert_eq!(
             outcome(&report, "cleanup_leaves_prefix_empty"),
@@ -1037,7 +1037,7 @@ mod tests {
             accepted_a_stale_swap: Arc::clone(&accepted_a_stale_swap),
         };
 
-        let report = run_store_contract_probe(&store, &ProbeRunId::generate()).await;
+        let report = run_store_contract_probe(&store, &ProbeId::generate()).await;
 
         assert!(accepted_a_stale_swap.load(Ordering::SeqCst));
         assert!(!StoreProbeResponse::from(report.clone()).all_passed());
@@ -1226,7 +1226,7 @@ mod tests {
             inner: LocalFsStore::new(temp_dir.path()).expect("create local object store"),
         };
 
-        let report = run_store_contract_probe(&store, &ProbeRunId::generate()).await;
+        let report = run_store_contract_probe(&store, &ProbeId::generate()).await;
 
         assert!(!StoreProbeResponse::from(report.clone()).all_passed());
         assert_matches!(
@@ -1242,7 +1242,7 @@ mod tests {
             inner: LocalFsStore::new(temp_dir.path()).expect("create local object store"),
         };
 
-        let report = run_store_contract_probe(&store, &ProbeRunId::generate()).await;
+        let report = run_store_contract_probe(&store, &ProbeId::generate()).await;
 
         assert_matches!(
             outcome(&report, "stored_checksum_readback"),

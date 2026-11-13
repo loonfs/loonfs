@@ -1,11 +1,10 @@
-//! Checkpoint retention, compaction, and publication budgets.
+//! Snapshot retention, compaction, and publication budgets.
 
-use super::super::PublicationReport;
 use super::*;
 use crate::publish::SharedWriterSessionStatus;
 use crate::segment::block_memo::SessionBlockMemo;
 use crate::time::OperationClock;
-use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
+use loonfs_objectstore::keys::{snapshot_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
 use std::assert_matches;
 
@@ -155,7 +154,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     .await
     .expect("initial manifest already covers floor zero")
     .response;
-    assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(unchanged.retention_floor_seq, CommitSeq(0));
     assert_eq!(
         store.count(OperationSelector::Read),
         0,
@@ -196,7 +195,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     .await
     .expect("load current manifest");
     let head_seq = segments.manifest().payload().head_seq;
-    assert_eq!(head_seq, ChangeSeq(3));
+    assert_eq!(head_seq, CommitSeq(3));
     let referenced = segments
         .manifest()
         .payload()
@@ -257,7 +256,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     assert_eq!(
         after.len(),
         wal_objects.len() + 1,
-        "the advance writes one WAL object, its fence"
+        "the advance writes one WAL object, its floor object"
     );
     assert!(store
         .head(&current_manifest_key(&store, &namespace_id).await)
@@ -292,7 +291,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             .await
             .expect("commit");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
 
@@ -301,7 +300,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             RetentionTarget::Cutoff {
                 cutoff_at_ms: 1_999,
             },
-            ChangeSeq(0),
+            CommitSeq(0),
         ),
         // Commit 3 is stamped before the cutoff, but the later commit 2
         // ends the scan first.
@@ -309,16 +308,16 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             RetentionTarget::Cutoff {
                 cutoff_at_ms: 2_999,
             },
-            ChangeSeq(1),
+            CommitSeq(1),
         ),
         (
             RetentionTarget::Cutoff {
                 cutoff_at_ms: 3_000,
             },
-            ChangeSeq(3),
+            CommitSeq(3),
         ),
-        (RetentionTarget::Seq(ChangeSeq(2)), ChangeSeq(3)),
-        (RetentionTarget::Seq(ChangeSeq(99)), ChangeSeq(4)),
+        (RetentionTarget::Seq(CommitSeq(2)), CommitSeq(3)),
+        (RetentionTarget::Seq(CommitSeq(99)), CommitSeq(4)),
     ] {
         let before = current_manifest_no(&store, &namespace_id).await;
         let floor = crate::test_support::NamespaceFixture::new(
@@ -337,7 +336,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
         .retention_floor_seq;
         assert_eq!(floor, expected_floor, "{target:?}");
         assert_eq!(read_floor_seq(&store, &namespace_id).await, expected_floor);
-        if target == RetentionTarget::Seq(ChangeSeq(2)) {
+        if target == RetentionTarget::Seq(CommitSeq(2)) {
             assert_eq!(
                 current_manifest_no(&store, &namespace_id).await,
                 before,
@@ -356,7 +355,7 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let grace_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 10 * grace_ms;
     // Commit 3 is stamped before commit 2, and commits 5 and 6 are stamped
     // after `now_ms`.
@@ -377,7 +376,7 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
             .await
             .expect("commit");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
 
@@ -389,23 +388,23 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
                 cutoff_at_ms: now_ms - 3 * grace_ms,
             },
             now_ms,
-            ChangeSeq(1),
+            CommitSeq(1),
         ),
         // Commit 3 is two windows old, but commit 2 is half a window old, so
         // the walk stops before commit 2 and the floor stays at 1. A commit
         // dated out of order can only stop the floor earlier.
-        (RetentionTarget::Seq(ChangeSeq(3)), now_ms, ChangeSeq(1)),
+        (RetentionTarget::Seq(CommitSeq(3)), now_ms, CommitSeq(1)),
         // Commit 5 is half a window old, so the floor stops at commit 4.
-        (RetentionTarget::Head, now_ms + grace_ms, ChangeSeq(4)),
+        (RetentionTarget::Head, now_ms + grace_ms, CommitSeq(4)),
         // A sequence above the head targets the head, and commit 6 is still
         // dated after the advance's clock.
         (
-            RetentionTarget::Seq(ChangeSeq(99)),
+            RetentionTarget::Seq(CommitSeq(99)),
             now_ms + 2 * grace_ms,
-            ChangeSeq(5),
+            CommitSeq(5),
         ),
         // Commit 6 is exactly one window old, so the floor reaches the head.
-        (RetentionTarget::Head, now_ms + 4 * grace_ms, ChangeSeq(6)),
+        (RetentionTarget::Head, now_ms + 4 * grace_ms, CommitSeq(6)),
     ] {
         let floor = crate::test_support::NamespaceFixture::new(
             &store,
@@ -546,7 +545,7 @@ impl LongCommitHistory {
         let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
         assert_eq!(
             index[0].last_row_key,
-            lookup_keys::commit_row_key(ChangeSeq(14)),
+            lookup_keys::commit_row_key(CommitSeq(14)),
             "each data block contains 14 commit rows"
         );
         store.reset();
@@ -579,7 +578,7 @@ impl LongCommitHistory {
     /// next blocks of the commit range up to `MAX_SCAN_REFILL_BYTES` of
     /// stored bytes, from the block of commit `first` through the refill
     /// that reads the block of commit `last`.
-    fn ranges_from_through(&self, first: ChangeSeq, last: ChangeSeq) -> Vec<(u64, u64)> {
+    fn ranges_from_through(&self, first: CommitSeq, last: CommitSeq) -> Vec<(u64, u64)> {
         let block_of = |seq| {
             let key = lookup_keys::commit_row_key(seq);
             self.index.partition_point(|entry| entry.last_row_key < key)
@@ -619,24 +618,24 @@ fn cache_for_a_walk() -> MetadataSegmentCache {
 /// one ranged GET for each refill of commit blocks that it reaches.
 #[tokio::test]
 async fn an_advance_sends_one_get_for_each_refill_of_commit_blocks_up_to_where_it_stops() {
-    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let grace_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 10 * grace_ms;
     for (target, expected_floor, last_read) in [
         // Commit 65 is the first commit younger than the window, so the walk
         // reads commits 1 to 65, and the floor moves to commit 64.
-        (RetentionTarget::Head, ChangeSeq(64), ChangeSeq(65)),
+        (RetentionTarget::Head, CommitSeq(64), CommitSeq(65)),
         // The sequence ends the walk after commit 14, the last row of the
         // first block, so the walk sends no GET after its first refill.
         (
-            RetentionTarget::Seq(ChangeSeq(14)),
-            ChangeSeq(14),
-            ChangeSeq(14),
+            RetentionTarget::Seq(CommitSeq(14)),
+            CommitSeq(14),
+            CommitSeq(14),
         ),
         // Commit 65 ends the walk below the sequence.
         (
-            RetentionTarget::Seq(ChangeSeq(100)),
-            ChangeSeq(64),
-            ChangeSeq(65),
+            RetentionTarget::Seq(CommitSeq(100)),
+            CommitSeq(64),
+            CommitSeq(65),
         ),
     ] {
         // Commits 1 to 64 are two windows old, and commits 65 to 128 are half
@@ -662,7 +661,7 @@ async fn an_advance_sends_one_get_for_each_refill_of_commit_blocks_up_to_where_i
         assert_eq!(floor, expected_floor, "{target:?}");
         assert_eq!(
             history.take_commit_ranges(),
-            history.ranges_from_through(ChangeSeq(1), last_read),
+            history.ranges_from_through(CommitSeq(1), last_read),
             "{target:?}: one GET for the index, then one for each refill through the block of commit {last_read}"
         );
     }
@@ -673,7 +672,7 @@ async fn an_advance_sends_one_get_for_each_refill_of_commit_blocks_up_to_where_i
 /// namespace is, and leaves the floor where it is.
 #[tokio::test]
 async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_is_young() {
-    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let grace_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 10 * grace_ms;
     // With no old commits, the namespace is fresh, and the walk reads commit
     // 1. With 13 old commits, a first advance moves the floor to 13, and the
@@ -685,7 +684,7 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
             (128 - old_commits, now_ms - grace_ms / 2),
         ])
         .await;
-        let floor = ChangeSeq(u64::try_from(old_commits).expect("a count fits a u64"));
+        let floor = CommitSeq(u64::try_from(old_commits).expect("a count fits a u64"));
         for advance in ["first", "second"] {
             history.store.reset();
             let report = {
@@ -713,7 +712,7 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
         }
         assert_eq!(
             history.take_commit_ranges(),
-            history.ranges_from_through(ChangeSeq(floor.0 + 1), ChangeSeq(floor.0 + 1)),
+            history.ranges_from_through(CommitSeq(floor.0 + 1), CommitSeq(floor.0 + 1)),
             "{old_commits} old commits: one GET for the index and one for the first refill"
         );
     }
@@ -723,46 +722,56 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
 /// older than the grace window reads the commits up to that cutoff once.
 #[tokio::test]
 async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once() {
-    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let grace_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 10 * grace_ms;
-    for target in [
-        RetentionTarget::Cutoff {
-            cutoff_at_ms: now_ms - 5 * grace_ms / 2,
-        },
-        RetentionTarget::Window {
-            default_window_ms: std::num::NonZeroU64::new(5 * grace_ms / 2),
-        },
+    for (target, retention_window_ms) in [
+        (
+            RetentionTarget::Cutoff {
+                cutoff_at_ms: now_ms - 5 * grace_ms / 2,
+            },
+            None,
+        ),
+        (
+            RetentionTarget::Window,
+            std::num::NonZeroU64::new(5 * grace_ms / 2),
+        ),
     ] {
         // Commits 1 to 64 are older than the target's cutoff, and commits 65
         // to 128 are between that cutoff and the grace window's.
         let history =
             LongCommitHistory::new(&[(64, now_ms - 3 * grace_ms), (64, now_ms - 2 * grace_ms)])
                 .await;
-        let floor = crate::test_support::NamespaceFixture::new(
+        let engine = crate::test_support::NamespaceFixture::new(
             &history.store,
             &history.namespace_id,
             &crate::test_support::writer_at("test-writer", now_ms),
         )
         .with_segment_cache()
-        .engine()
-        .advance_retention_floor(target)
-        .await
-        .expect("advance the floor")
-        .response
-        .retention_floor_seq;
-        assert_eq!(floor, ChangeSeq(64), "{target:?}");
+        .engine();
+        engine
+            .set_retention_window(retention_window_ms)
+            .await
+            .expect("set the window");
+        history.store.reset();
+        let floor = engine
+            .advance_retention_floor(target)
+            .await
+            .expect("advance the floor")
+            .response
+            .retention_floor_seq;
+        assert_eq!(floor, CommitSeq(64), "{target:?}");
         // The walk's later refills find the index and the blocks that an
         // earlier one fetched in the block cache.
         assert_eq!(
             history.take_commit_ranges(),
-            history.ranges_from_through(ChangeSeq(1), ChangeSeq(128)),
+            history.ranges_from_through(CommitSeq(1), CommitSeq(128)),
             "{target:?}: one GET for the index and one for each refill"
         );
     }
 }
 
 #[tokio::test]
-async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_without_one() {
+async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_one() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -770,7 +779,7 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let hour_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let hour_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 5 * hour_ms;
     for (path, committed_at_ms) in [
         ("/a.txt", 2 * hour_ms),
@@ -786,7 +795,7 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
             .await
             .expect("commit");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
     let window = |window_ms: u64| std::num::NonZeroU64::new(window_ms);
@@ -799,16 +808,16 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
     let set_window =
         |window_ms: Option<u64>| engine.set_retention_window(window_ms.and_then(window));
 
-    // Each step sets the namespace's window, then advances at five hours
-    // with a default window. The cutoffs are five hours minus the window
-    // that applies, and all three commits are at least an hour old.
-    for (namespace_window_ms, default_window_ms, expected_floor) in [
-        (None, None, ChangeSeq(0)),
-        (None, Some(5 * hour_ms / 2), ChangeSeq(1)),
-        // The namespace's window applies, so the cutoff is 3.5 hours, not 2.5.
-        (Some(3 * hour_ms / 2), Some(5 * hour_ms / 2), ChangeSeq(2)),
-        // Once the window is cleared, the default applies again.
-        (None, Some(hour_ms / 2), ChangeSeq(3)),
+    // Each step sets the namespace's window, then advances at five hours.
+    // The cutoffs are five hours minus the window, and all three commits are
+    // at least an hour old.
+    for (namespace_window_ms, expected_floor) in [
+        (None, CommitSeq(0)),
+        (Some(5 * hour_ms / 2), CommitSeq(1)),
+        (Some(3 * hour_ms / 2), CommitSeq(2)),
+        // Once the window is cleared, the floor stays where it is.
+        (None, CommitSeq(2)),
+        (Some(hour_ms / 2), CommitSeq(3)),
     ] {
         let set = set_window(namespace_window_ms)
             .await
@@ -827,9 +836,7 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
             "setting the window that the namespace has publishes nothing"
         );
         assert_eq!(current_manifest_no(&store, &namespace_id).await, before);
-        let target = RetentionTarget::Window {
-            default_window_ms: default_window_ms.and_then(window),
-        };
+        let target = RetentionTarget::Window;
         let floor = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
@@ -870,7 +877,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
             .await
             .expect("commit");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
 
@@ -904,7 +911,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
     .expect("advance to the newest commit")
     .response
     .retention_floor_seq;
-    assert_eq!(floor, ChangeSeq(2));
+    assert_eq!(floor, CommitSeq(2));
     assert!(
         peak.0.load(Ordering::SeqCst) > 0,
         "the cutoff scan charges the caller's read budget"
@@ -924,9 +931,9 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     let manifest = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
@@ -974,7 +981,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
     );
     assert_eq!(
         read_floor_seq(&store, &namespace_id).await,
-        ChangeSeq(0),
+        CommitSeq(0),
         "the missing basis remains replayable from the prior floor"
     );
 }
@@ -992,9 +999,9 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&setup_store, &namespace_id, &context)
+    create_snapshot(&setup_store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     let manifest = crate::test_support::namespace_store(&setup_store, &namespace_id)
         .load_current_manifest()
@@ -1053,7 +1060,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     assert_eq!(store.attempts(), 1);
     assert_eq!(
         read_floor_seq(store.inner(), &namespace_id).await,
-        ChangeSeq(0),
+        CommitSeq(0),
         "the failed probe leaves the prior floor in place"
     );
 }
@@ -1087,32 +1094,64 @@ async fn publish_directories<S: ObjectStore>(
     }
 }
 
-/// Advances the floor to the folded head, at a time when every commit is a
-/// grace window old.
-async fn advance_to_folded_head<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> PublicationReport<loonfs_types::AdvanceRetentionResponse> {
-    crate::test_support::NamespaceFixture::new(
-        store,
-        namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(test_context().now_ms),
-        ),
+/// Creates and deletes the directory `/{name}` through `writer`, and returns
+/// the deleted inode and the deletion's sequence.
+async fn create_and_delete<S: ObjectStore>(
+    writer: &mut NamespaceCommitEngine<S>,
+    name: &str,
+) -> (InodeId, CommitSeq) {
+    publish_directories(writer, name, 1).await;
+    let deleted = publish_one(
+        writer,
+        FilesystemOperation::DeletePath {
+            path: AbsolutePath::parse(format!("/{name}-0")).expect("path"),
+            behavior: loonfs_types::DeleteDirectoryBehavior::Recursive,
+            expected_inode_id: None,
+        },
     )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
     .await
-    .expect("advance the floor")
+    .expect("delete the directory");
+    let inode_id = deleted
+        .events
+        .iter()
+        .find_map(|event| match event {
+            loonfs_types::FilesystemEvent::Deleted { inode_id, .. } => Some(*inode_id),
+            _ => None,
+        })
+        .expect("a delete reports its deletion");
+    (inode_id, deleted.committed_seq)
 }
 
-/// Checks that an advance without a writer session takes the writer epoch,
-/// folds the tail through the fence, and publishes the floor under its
-/// epoch, so the writer it took over returns `writer_fenced` and every
-/// commit that writer made is in the manifest before the advance.
+/// Publishes one commit of `operation` through `writer`.
+async fn publish_one<S: ObjectStore>(
+    writer: &mut NamespaceCommitEngine<S>,
+    operation: FilesystemOperation,
+) -> crate::error::Result<loonfs_types::Commit> {
+    writer
+        .publish_batch(
+            vec![CommitCandidate::new(CommitIntent::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                operation,
+            ))],
+            &test_context().clock(),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+}
+
+/// Checks the second example of a retention advance in the WAL: a process
+/// without a writer session creates a floor object at the tip, and a writer
+/// session in another process then commits a restore of a deletion below
+/// the new floor. The session's put collides with the floor object, the
+/// session replays the floor object, and the restore returns
+/// `not_deleted`. The session isn't fenced, and its next commit is written
+/// above the floor object.
 #[tokio::test]
-async fn an_advance_without_a_session_takes_the_epoch_and_folds_before_the_floor() {
+async fn a_session_that_collides_with_a_floor_object_replays_it_and_isnt_fenced() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1124,142 +1163,194 @@ async fn an_advance_without_a_session_takes_the_epoch_and_folds_before_the_floor
         test_context().writer_id,
     )
     .writer_session(SharedWriterSessionStatus::default());
-    publish_directories(&mut writer, "folded", 2).await;
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
-    publish_directories(&mut writer, "unfolded", 1).await;
-    let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the manifest before the advance");
-
-    let advance = advance_to_folded_head(&store, &namespace_id).await;
-    assert_eq!(advance.response.retention_floor_seq, ChangeSeq(2));
+    let (gone, deletion_seq) = create_and_delete(&mut writer, "gone").await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let advanced = namespace
+    let planned = namespace
         .load_current_manifest()
         .await
-        .expect("load the advance's manifest");
-    let head = namespace.load_read_state().await.expect("read the head");
-    assert_eq!(advanced.retention_floor_seq(), ChangeSeq(2));
-    assert_eq!(
-        advanced.payload().writer_epoch,
-        before
-            .payload()
-            .writer_epoch
-            .successor()
-            .expect("next epoch"),
-        "the advance claims the next epoch"
-    );
-    assert_eq!(
-        advanced.payload().head_seq,
-        ChangeSeq(3),
-        "the fold before the floor covers the unfolded commit"
-    );
-    assert_eq!(
-        advanced.folded_wal_no(),
-        head.wal_no,
-        "the fold covers the fence, and the advance commits nothing after it"
-    );
+        .expect("load the planned manifest");
 
-    // The writer's put collides with the fence, and its retry finds the
-    // advance's epoch.
-    let mut codes = Vec::new();
-    for _ in 0..2 {
-        let error = writer
-            .publish_batch(
-                vec![CommitCandidate::new(CommitIntent::single(
-                    CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::CreateDirectory {
-                        path: AbsolutePath::parse("/after").expect("path"),
-                        parents: false,
-                    },
-                ))],
-                &test_context().clock(),
-            )
-            .await
-            .results
-            .pop()
-            .expect("one result")
-            .expect_err("the writer the advance took over commits nothing");
-        codes.push(error.code());
-    }
-    assert_eq!(codes, [ErrorCode::StaleHead, ErrorCode::WriterFenced]);
+    let report = namespace
+        .publish_floor_object(&planned, deletion_seq)
+        .await
+        .expect("create the floor object");
+    assert_eq!(report.retention_floor_seq, deletion_seq);
+    assert_eq!(report.manifest_retention_floor_seq, CommitSeq(0));
+    let floor_object = namespace.load_read_state().await.expect("read the head");
+    let restore_deleted = || FilesystemOperation::RestoreDeleted {
+        inode_id: gone,
+        deletion_seq,
+        destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
+    };
+    let collided = publish_one(&mut writer, restore_deleted())
+        .await
+        .expect_err("the put collides with the floor object");
+    assert_eq!(collided.code(), ErrorCode::StaleHead, "{collided:?}");
+    let refused = publish_one(&mut writer, restore_deleted())
+        .await
+        .expect_err("the restore is below the replayed floor");
+    assert_eq!(refused.code(), ErrorCode::NotDeleted, "{refused:?}");
+    publish_directories(&mut writer, "next", 1).await;
+
+    let head = namespace.load_read_state().await.expect("read the head");
+    assert_eq!(head.wal_no.0, floor_object.wal_no.0 + 1);
+    assert_eq!(head.writer_epoch, planned.payload().writer_epoch);
+    assert_eq!(head.retention_floor_seq, deletion_seq);
+    assert_eq!(
+        read_floor_seq(&store, &namespace_id).await,
+        CommitSeq(0),
+        "no manifest records the floor before a fold"
+    );
 }
 
-/// Checks that a floor publication under an epoch that another writer has
-/// since claimed returns `writer_fenced` and publishes nothing, and that one
-/// whose target the current floor already reached publishes nothing either.
+/// Checks that a view that replays a floor object reports the floor before
+/// any manifest records it, so the change feed refuses a start below the
+/// floor. The fold that covers the floor object publishes the higher of its
+/// predecessor's floor and the floor object's, and a later floor object with
+/// a lower floor leaves the next fold's floor where it is.
 #[tokio::test]
-async fn a_floor_publication_refuses_another_writers_epoch() {
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test writes a floor object with a lower floor, which no process creates"
+)]
+async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_floor() {
+    use loonfs_types::format::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
+
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
-    for path in ["/a.txt", "/b.txt"] {
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .write_file_bytes(path, b"body\n", None)
-            .await
-            .expect("commit");
-    }
+    let mut writer = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        test_context().writer_id,
+    );
+    let (_, deletion_seq) = create_and_delete(&mut writer, "gone").await;
+    publish_directories(&mut writer, "after", 1).await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let mine = namespace
-        .acquire_writer_epoch(&context.writer_id)
-        .await
-        .expect("acquire the writer epoch")
-        .writer_epoch;
-    namespace.fold_wal().await.expect("fold");
+    let planned = namespace.load_current_manifest().await.expect("planned");
     namespace
-        .acquire_writer_epoch(&context.writer_id)
+        .publish_floor_object(&planned, deletion_seq)
         .await
-        .expect("another writer takes the namespace over");
-    let unchanged = current_manifest_no(&store, &namespace_id).await;
+        .expect("create the floor object");
 
-    let error = namespace
-        .publish_retention_floor(None, mine, ChangeSeq(2))
+    let anchor = namespace
+        .load_read_anchor(crate::test_support::observed_now())
         .await
-        .expect_err("the epoch was taken over");
-    assert_matches!(&error, CoreError::WriterFenced(fence) if fence.fenced_epoch == mine);
-    assert_eq!(current_manifest_no(&store, &namespace_id).await, unchanged);
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
+        .expect("load the view");
+    assert_eq!(anchor.retention_floor_seq(), deletion_seq);
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(0));
+    let context = crate::RuntimeReadContext {
+        read_basis: crate::control::ReadBasis {
+            basis: anchor.basis(),
+            head: anchor.read_state.clone(),
+        },
+        tail: None,
+        visible_seq: None,
+    };
+    let error =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
+            .list_changes_after(
+                loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
+                EffectiveLimit::new(std::num::NonZeroU32::new(4).expect("nonzero")),
+                loonfs_types::options::CommitSplitting::Whole,
+                &context,
+            )
+            .await
+            .expect_err("the feed starts below the view's floor");
+    assert_matches!(
+        error,
+        CoreError::BelowRetentionFloor { retention_floor_seq, .. }
+            if retention_floor_seq == deletion_seq
+    );
 
-    let current = namespace
-        .load_current_manifest()
+    namespace.fold_wal().await.expect("fold the floor object");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
+    let head = namespace.load_read_state().await.expect("read the head");
+    let lower = WalObjectPayload {
+        namespace_id: namespace_id.clone(),
+        wal_no: head.wal_no.successor().expect("next WAL number"),
+        writer_epoch: head.writer_epoch,
+        head_seq: head.seq,
+        records: Vec::new(),
+        retention_floor_seq: Some(CommitSeq(1)),
+    };
+    let key = loonfs_objectstore::keys::wal_object(&namespace_id, &lower.wal_no);
+    store
+        .put(
+            &key,
+            encode_wal_object_envelope_zstd(lower)
+                .expect("encode a floor object")
+                .into_bytes()
+                .into(),
+            loonfs_objectstore::PutMode::CreateIfAbsent,
+        )
         .await
-        .expect("load the current manifest")
-        .payload()
-        .writer_epoch;
-    let raised = namespace
-        .publish_retention_floor(None, current, ChangeSeq(1))
+        .expect("put a floor object with a lower floor");
+    namespace
+        .fold_wal()
         .await
-        .expect("raise the floor");
-    assert_eq!(raised.response, ChangeSeq(1));
-    assert!(raised.published.is_some());
-    let reached = namespace
-        .publish_retention_floor(None, mine, ChangeSeq(1))
-        .await
-        .expect("a target the floor reached");
-    assert_eq!(reached.response, ChangeSeq(1));
-    assert!(reached.published.is_none());
+        .expect("fold the lower floor object");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
 }
 
-/// Reads the files one checkpoint pins at the test clock, or the error that
-/// says it no longer pins anything.
-async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
+/// Checks that two processes that advance the same namespace to different
+/// floors leave the higher floor, in either order. An advance whose target
+/// another process's floor object already reached writes nothing, and the
+/// fold after both advances publishes the higher floor.
+#[tokio::test]
+async fn two_advances_to_different_floors_leave_the_higher_floor() {
+    for (first, second) in [(CommitSeq(2), CommitSeq(1)), (CommitSeq(1), CommitSeq(2))] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(&store, &namespace_id, &test_context())
+            .await
+            .expect("bootstrap");
+        let mut writer = NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &namespace_id),
+            test_context().writer_id,
+        );
+        publish_directories(&mut writer, "dir", 2).await;
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let planned = namespace
+            .load_current_manifest()
+            .await
+            .expect("load the planned manifest");
+        let tip = namespace
+            .load_read_state()
+            .await
+            .expect("read the head")
+            .wal_no;
+
+        namespace
+            .publish_floor_object(&planned, first)
+            .await
+            .expect("the first advance");
+        let report = namespace
+            .publish_floor_object(&planned, second)
+            .await
+            .expect("the second advance");
+        assert_eq!(report.retention_floor_seq, CommitSeq(2));
+        let head = namespace.load_read_state().await.expect("read the head");
+        let floor_objects = if first > second { 1 } else { 2 };
+        assert_eq!(head.wal_no.0, tip.0 + floor_objects);
+        namespace.fold_wal().await.expect("fold");
+        assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(2));
+    }
+}
+
+/// Reads the files one snapshot keeps at the test clock, or the error that
+/// says it no longer keeps anything.
+async fn read_snapshot_files<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &PinId,
+    snapshot_id: &SnapshotId,
 ) -> crate::error::Result<Vec<InodeId>> {
     let page = crate::test_support::namespace_store(store, namespace_id)
         .list_snapshot_files_page(
-            checkpoint_id,
+            snapshot_id,
             loonfs_types::PageRequest {
                 cursor: None,
                 limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
@@ -1271,9 +1362,9 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn deleting_a_pin_never_reuses_its_id() {
-    // A deleted pin id is never reused. A caller asking for
-    // a pin again — even at the same instant, over the same basis, under the
+async fn deleting_a_snapshot_never_reuses_its_id() {
+    // A deleted snapshot id is never reused. A caller asking for
+    // a snapshot again — even at the same instant, over the same basis, under the
     // same owner name — gets a brand new record, so the delete can never be
     // undone by racing it.
     let temp_dir = tempdir().expect("tempdir");
@@ -1287,13 +1378,13 @@ async fn deleting_a_pin_never_reuses_its_id() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let first = create_checkpoint(&store, &namespace_id, &context)
+    let first = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     assert!(
-        !read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
+        !read_snapshot_files(&store, &namespace_id, &first.snapshot_id)
             .await
-            .expect("the first pin serves")
+            .expect("the first snapshot serves")
             .is_empty()
     );
 
@@ -1303,29 +1394,29 @@ async fn deleting_a_pin_never_reuses_its_id() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine();
-    let delete = engine.delete_snapshot(&first.checkpoint_id);
-    let recreate = create_checkpoint(&store, &namespace_id, &context);
+    let delete = engine.delete_snapshot(&first.snapshot_id);
+    let recreate = create_snapshot(&store, &namespace_id, &context);
     let (delete, second) = tokio::join!(delete, recreate);
-    assert_eq!(delete.expect("delete").snapshot_id, first.checkpoint_id);
-    let second = second.expect("a concurrent create takes a fresh pin");
+    assert_eq!(delete.expect("delete").snapshot_id, first.snapshot_id);
+    let second = second.expect("a concurrent create takes a fresh snapshot");
     assert_ne!(
-        second.checkpoint_id, first.checkpoint_id,
-        "a new pin is never written at a deleted record's key"
+        second.snapshot_id, first.snapshot_id,
+        "a new snapshot is never written at a deleted record's key"
     );
 
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&first.checkpoint_id)
+        .load_snapshot_record(&first.snapshot_id)
         .await
-        .expect("load pin")
+        .expect("load snapshot")
         .is_none());
-    let error = read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
+    let error = read_snapshot_files(&store, &namespace_id, &first.snapshot_id)
         .await
         .expect_err("a deleted record serves no read");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert!(
-        !read_checkpoint_files(&store, &namespace_id, &second.checkpoint_id)
+        !read_snapshot_files(&store, &namespace_id, &second.snapshot_id)
             .await
-            .expect("the new pin serves")
+            .expect("the new snapshot serves")
             .is_empty()
     );
 
@@ -1335,21 +1426,21 @@ async fn deleting_a_pin_never_reuses_its_id() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&first.checkpoint_id)
+    .delete_snapshot(&first.snapshot_id)
     .await
     .expect("a second delete succeeds");
 }
 
 #[tokio::test]
 async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
-    // Re-creating a checkpoint is not a renewal of an earlier one. Every
-    // call is its own pin with its own id, its own creation instant, and
+    // Re-creating a snapshot is not a renewal of an earlier one. Every
+    // call is its own snapshot with its own id, its own creation instant, and
     // exactly the expiry it asked for; earlier records are left alone.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let owner = |expires_at_ms| loonfs_types::format::control::PinOwner::User {
-        name: "test-pin".to_owned(),
+    let owner = |expires_at_ms| loonfs_types::format::control::SnapshotOwner::User {
+        name: "test-snapshot".to_owned(),
         expires_at_ms,
     };
     let context = test_context();
@@ -1363,7 +1454,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let first = namespace
-        .create_pin(
+        .create_snapshot_record(
             owner(Some(10_000)),
             crate::test_support::folded_manifest(&namespace)
                 .await
@@ -1371,17 +1462,17 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
-        .expect("create checkpoint");
+        .map(crate::snapshot::snapshot_record_summary)
+        .expect("create snapshot");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
     let mut later_context = test_context();
     later_context.now_ms = 2_000;
-    let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
+    let mut minted = BTreeSet::from([first.snapshot_id.clone()]);
     for expiry in [Some(99_000), Some(5_000), None] {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         let next = namespace
-            .create_pin(
+            .create_snapshot_record(
                 owner(expiry),
                 crate::test_support::folded_manifest(&namespace)
                     .await
@@ -1389,29 +1480,29 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
                 &later_context.clock(),
             )
             .await
-            .map(crate::snapshot::checkpoint_summary)
-            .expect("create checkpoint");
+            .map(crate::snapshot::snapshot_record_summary)
+            .expect("create snapshot");
         assert!(
-            minted.insert(next.checkpoint_id.clone()),
-            "each pin gets an id of its own"
+            minted.insert(next.snapshot_id.clone()),
+            "each snapshot gets an id of its own"
         );
         assert_eq!(next.expires_at_ms, expiry);
         let record = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_pin(&next.checkpoint_id)
+            .load_snapshot_record(&next.snapshot_id)
             .await
-            .expect("read pin")
+            .expect("read snapshot")
             .expect("record exists")
             .state;
         assert_eq!(record.owner.expires_at_ms(), expiry);
         assert_eq!(record.created_at_ms, 2_000);
     }
 
-    // The very first record is untouched by any of it: a pin taken without
+    // The very first record is untouched by any of it: a snapshot taken without
     // an expiry, or with one, is held until something deletes it.
     let original = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&first.checkpoint_id)
+        .load_snapshot_record(&first.snapshot_id)
         .await
-        .expect("read pin")
+        .expect("read snapshot")
         .expect("record exists")
         .state;
     assert_eq!(original.created_at_ms, 1_000, "creation instant is history");
@@ -1419,8 +1510,8 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 }
 
 #[tokio::test]
-async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it() {
-    // A read refuses an expired pin, but the record is still a
+async fn an_expired_snapshot_serves_no_reads_but_stays_until_a_collection_deletes_it() {
+    // A read refuses an expired snapshot, but the record is still a
     // garbage-collection root until a collection deletes it, so its state stays
     // in place.
     let temp_dir = tempdir().expect("tempdir");
@@ -1436,9 +1527,9 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it(
         .expect("write");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let already_expired = namespace
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
-                name: "test-pin".to_owned(),
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
+                name: "test-snapshot".to_owned(),
                 expires_at_ms: Some(context.now_ms),
             },
             crate::test_support::folded_manifest(&namespace)
@@ -1447,22 +1538,21 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it(
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
-        .expect("create checkpoint whose expiry has already passed");
+        .map(crate::snapshot::snapshot_record_summary)
+        .expect("create snapshot whose expiry has already passed");
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&already_expired.checkpoint_id)
+        .load_snapshot_record(&already_expired.snapshot_id)
         .await
-        .expect("load pin")
+        .expect("load snapshot")
         .is_some());
-    let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
+    let error = read_snapshot_files(&store, &namespace_id, &already_expired.snapshot_id)
         .await
-        .expect_err("an expired pin serves no read");
+        .expect_err("an expired snapshot serves no read");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 
     // The collection after the grace deletes the record.
     crate::test_support::namespace_store(&store, &namespace_id)
         .gc(
-            None,
             &crate::gc::GcOptions::default(),
             &writer_at(
                 "expired",
@@ -1472,20 +1562,20 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it(
         )
         .await
         .expect("collection");
-    let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
+    let error = read_snapshot_files(&store, &namespace_id, &already_expired.snapshot_id)
         .await
-        .expect_err("a deleted pin serves nothing");
+        .expect_err("a deleted snapshot serves nothing");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&already_expired.checkpoint_id)
+        .load_snapshot_record(&already_expired.snapshot_id)
         .await
-        .expect("load pin")
+        .expect("load snapshot")
         .is_none());
 }
 
 #[tokio::test]
-async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
-    // No expiry means no clock: the record stays a serving pin however far
+async fn a_snapshot_without_a_ttl_is_kept_until_it_is_deleted() {
+    // No expiry means no clock: the record stays a serving snapshot however far
     // the wall clock moves, and only an explicit delete ends it.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1498,28 +1588,28 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let pin = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
-    assert_eq!(pin.expires_at_ms, None);
+        .expect("create snapshot");
+    assert_eq!(snapshot.expires_at_ms, None);
 
     let mut distant = test_context();
     distant.now_ms = u64::MAX / 2;
     for _ in 0..3 {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(None, &crate::gc::GcOptions::default(), &distant.clock())
+            .gc(&crate::gc::GcOptions::default(), &distant.clock())
             .await
             .expect("collection");
     }
     crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&pin.checkpoint_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
-        .expect("read pin")
-        .expect("an unexpiring pin survives every collection");
+        .expect("read snapshot")
+        .expect("an unexpiring snapshot survives every collection");
     assert!(
-        !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        !read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
             .await
-            .expect("the pin still serves")
+            .expect("the snapshot still serves")
             .is_empty()
     );
 
@@ -1529,17 +1619,17 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&pin.checkpoint_id)
+    .delete_snapshot(&snapshot.snapshot_id)
     .await
     .expect("delete");
-    let error = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+    let error = read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
         .await
         .expect_err("delete ends it");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 }
 
 #[tokio::test]
-async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest() {
+async fn snapshot_creation_deletes_its_record_when_the_floor_passed_its_manifest() {
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1573,11 +1663,11 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     .expect("advance floor");
     let store = loonfs_test_support::stores::RecordingStore::new(
         store,
-        loonfs_test_support::stores::KeyPredicate::prefix(pin_prefix(&namespace_id)),
+        loonfs_test_support::stores::KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
     );
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
                 name: "old".to_owned(),
                 expires_at_ms: None,
             },
@@ -1585,20 +1675,20 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
-        .expect_err("floor passed pin");
-    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+        .map(crate::snapshot::snapshot_record_summary)
+        .expect_err("floor passed snapshot");
+    assert_eq!(error.code(), ErrorCode::SnapshotUnavailable);
     assert!(store
-        .list_prefix(&pin_prefix(&namespace_id))
+        .list_prefix(&snapshot_prefix(&namespace_id))
         .await
-        .expect("pins")
+        .expect("snapshots")
         .is_empty());
     assert_eq!(store.counts().create_if_absent_puts, 1);
     assert_eq!(store.counts().deletes, 1);
 }
 
 #[tokio::test]
-async fn pin_verification_rejects_a_deleted_namespace() {
+async fn snapshot_verification_rejects_a_deleted_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1610,14 +1700,14 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&checkpoint.checkpoint_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
-        .expect("load checkpoint")
-        .expect("checkpoint exists")
+        .expect("load snapshot")
+        .expect("snapshot exists")
         .state;
 
     let acquired = crate::test_support::namespace_store(&store, &namespace_id)
@@ -1630,18 +1720,18 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         .expect("delete");
 
     let verified = crate::test_support::namespace_store(&store, &record.namespace_id)
-        .verify_pin_basis(&record)
+        .verify_snapshot_basis(&record)
         .await
         .expect("verification runs");
     assert_eq!(
         verified,
-        crate::snapshot::record::PinBasisVerification::Invalid,
-        "a tombstoned namespace cannot acquire a new checkpoint dependency"
+        crate::snapshot::record::SnapshotBasisVerification::Invalid,
+        "a tombstoned namespace cannot acquire a new snapshot dependency"
     );
 }
 
 #[tokio::test]
-async fn pin_basis_verification_store_failure_deletes_the_record() {
+async fn snapshot_basis_verification_store_failure_deletes_the_record() {
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1663,8 +1753,8 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
     );
     store.fail_next(1);
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
                 name: "failed".to_owned(),
                 expires_at_ms: None,
             },
@@ -1672,13 +1762,13 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
         .expect_err("verification failed");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(store
-        .list_prefix(&pin_prefix(&namespace_id))
+        .list_prefix(&snapshot_prefix(&namespace_id))
         .await
-        .expect("pins")
+        .expect("snapshots")
         .is_empty());
 }
 
@@ -1838,7 +1928,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         .expect("load feed view");
     let changes = list_changes_after(
         &view,
-        loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+        loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
         EffectiveLimit::new(NonZeroU32::new(200).expect("nonzero")),
         loonfs_types::options::CommitSplitting::Whole,
     )
@@ -1846,12 +1936,12 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     .expect("list changes");
     assert_eq!(
         changes.head_seq,
-        ChangeSeq(u64::try_from(boundary - 1).expect("data WAL objects"))
+        CommitSeq(u64::try_from(boundary - 1).expect("data WAL objects"))
     );
 }
 
 #[tokio::test]
-async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
+async fn snapshots_append_past_the_threshold_and_compaction_drains() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1866,7 +1956,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
 
     let rounds = DEFAULT_MAX_DELTA_RUNS.get() + 2;
     for index in 1..=u64::try_from(rounds).expect("round count fits") {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+        write_file_and_create_snapshot(&store, &namespace_id, &context, index).await;
     }
 
     let appended = load_manifest_state_for_inspection(
@@ -1878,7 +1968,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     .expect("load appended manifest");
     assert_eq!(delta_runs(&appended.manifest).len(), rounds);
     assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_DELTA_RUNS.get());
-    assert_eq!(appended.manifest.payload().base_seq(), ChangeSeq(0));
+    assert_eq!(appended.manifest.payload().base_seq(), CommitSeq(0));
 
     // Compaction rewrites one family group per unit, each publishing its
     // own manifest — the manifest chain is the progress record.
@@ -1933,7 +2023,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     assert!(delta_runs(&drained.manifest).is_empty());
     assert_eq!(
         drained.manifest.payload().base_seq(),
-        ChangeSeq(u64::try_from(rounds).expect("round count fits"))
+        CommitSeq(u64::try_from(rounds).expect("round count fits"))
     );
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
@@ -1958,9 +2048,9 @@ async fn a_unit_honors_its_run_budget_and_reads_only_the_selected_runs() {
             .write_file_bytes(&format!("/docs/file-{index}.txt"), b"body\n", None)
             .await
             .expect("write file");
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
     }
 
     let policy = MetadataRunPolicy {
@@ -2026,9 +2116,9 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
             )
             .await
             .expect("write file");
-        create_checkpoint(&bounded_store, &namespace_id, &context)
+        create_snapshot(&bounded_store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
     }
     // The two compactions start from the same objects, so their results have
     // the same inode IDs.
@@ -2112,7 +2202,7 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
             .iter()
             .map(|run| run.run_seq)
             .collect::<Vec<_>>(),
-        [ChangeSeq(5), ChangeSeq(6)]
+        [CommitSeq(5), CommitSeq(6)]
     );
 
     let later_commit = CommitId::parse("bounded-convergence-later").expect("commit id");
@@ -2120,9 +2210,9 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         .write_file_bytes("/docs/later.txt", b"later\n", Some(&later_commit))
         .await
         .expect("write later file");
-    create_checkpoint(&unbounded_store, &namespace_id, &context)
+    create_snapshot(&unbounded_store, &namespace_id, &context)
         .await
-        .expect("checkpoint later file");
+        .expect("snapshot later file");
     let below_trigger = {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &unbounded_store,
@@ -2167,7 +2257,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .await
         .expect("write cold");
 
-    let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    let first_manifest_no = snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     let first_materialized =
         load_manifest_state_for_inspection(&store, &namespace_id, first_manifest_no)
             .await
@@ -2178,14 +2268,14 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .write_file_bytes("/hot/after-delta.txt", b"hot 2\n", None)
         .await
         .expect("write hot delta");
-    checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/hot/after-compact.txt", b"hot 3\n", None)
         .await
         .expect("write hot compact");
-    let compacted = create_checkpoint(&store, &namespace_id, &context)
+    let compacted = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("compacted checkpoint");
+        .expect("compacted snapshot");
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
@@ -2257,7 +2347,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
             .expect("write initial file");
     }
 
-    let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    let first_manifest_no = snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     let first_materialized =
         load_manifest_state_for_inspection(&store, &namespace_id, first_manifest_no)
             .await
@@ -2272,14 +2362,14 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
         .write_file_bytes("/docs/file-0.txt", b"delta\n", None)
         .await
         .expect("write delta revision");
-    checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/file-0.txt", b"compact\n", None)
         .await
         .expect("write compaction revision");
-    let _compacted = create_checkpoint(&store, &namespace_id, &context)
+    let _compacted = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("compacted checkpoint");
+        .expect("compacted snapshot");
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
@@ -2332,7 +2422,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         .await
         .expect("bootstrap");
     for index in 1..=3 {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+        write_file_and_create_snapshot(&store, &namespace_id, &context, index).await;
     }
 
     // One unit runs, then the process "crashes": nothing is carried over
@@ -2361,11 +2451,11 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         panic!("expected a published unit, got {:?}", first_report);
     };
 
-    // A checkpoint is published in between, adding a fresh delta run.
-    write_file_and_checkpoint(&store, &namespace_id, &context, 9).await;
+    // A snapshot is published in between, adding a fresh delta run.
+    write_file_and_create_snapshot(&store, &namespace_id, &context, 9).await;
 
     // A fresh sequence of steps reads the live manifest and finishes the
-    // job, including the delta the interleaved checkpoint added.
+    // job, including the delta the interleaved snapshot added.
     let mut compacted_groups = vec![first_group];
     loop {
         let report = {
@@ -2679,7 +2769,7 @@ async fn a_base_comparable_to_its_deltas_is_rebuilt_whole_with_them() {
 
     // A compacted base first, then delta runs stacked above it.
     for index in 1..=4 {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+        write_file_and_create_snapshot(&store, &namespace_id, &context, index).await;
     }
     drain_compaction(
         &store,
@@ -2691,7 +2781,7 @@ async fn a_base_comparable_to_its_deltas_is_rebuilt_whole_with_them() {
     )
     .await;
     for index in 5..=8 {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+        write_file_and_create_snapshot(&store, &namespace_id, &context, index).await;
     }
 
     let before = load_manifest_state_for_inspection(
@@ -2782,9 +2872,9 @@ async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
             .await
             .expect("grow the base");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint the seed");
+        .expect("snapshot the seed");
     drain_compaction(
         &store,
         &namespace_id,
@@ -2802,17 +2892,17 @@ async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
         .delete_path("/docs/gone.txt", None)
         .await
         .expect("delete");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint the delete");
+        .expect("snapshot the delete");
     for extra in 1..MetadataRunPolicy::default().min_compaction_runs.get() {
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
             .write_file_bytes(&format!("/docs/extra-{extra}.txt"), b"body\n", None)
             .await
             .expect("write extra");
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("checkpoint the extra file");
+            .expect("snapshot the extra file");
     }
     crate::test_support::NamespaceFixture::new(
         &store,
@@ -2950,18 +3040,18 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 .await
                 .expect("write file");
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("checkpoint the writes");
+            .expect("snapshot the writes");
         for file in 0..3u64 {
             crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
                 .delete_path(&format!("/d{cycle}/f{file}.txt"), None)
                 .await
                 .expect("delete a file");
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("checkpoint the deletions");
+            .expect("snapshot the deletions");
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
@@ -3027,10 +3117,10 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
 }
 
 #[tokio::test]
-async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion() {
+async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_deletion() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("retained-pin").expect("namespace");
+    let namespace_id = NamespaceId::parse("retained-snapshot").expect("namespace");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
@@ -3039,13 +3129,14 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .write_file_bytes("/first", b"first", None)
         .await
         .expect("first write");
-    let pin = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("pin");
-    let pinned_files = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        .expect("snapshot");
+    let snapshot_files = read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
         .await
-        .expect("pinned files");
-    let pinned_segments = super::segment_keys_of_the_current_manifest(&store, &namespace_id).await;
+        .expect("snapshot files");
+    let snapshot_segments =
+        super::segment_keys_of_the_current_manifest(&store, &namespace_id).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/second", b"second", None)
         .await
@@ -3055,11 +3146,11 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await
         .expect("fold");
     let current_segments = super::compact_a_family_group(&store, &namespace_id, &context).await;
-    let only_pinned: Vec<_> = pinned_segments
+    let only_snapshot: Vec<_> = snapshot_segments
         .difference(&current_segments)
         .cloned()
         .collect();
-    assert!(!only_pinned.is_empty());
+    assert!(!only_snapshot.is_empty());
     let floor = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -3073,30 +3164,30 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     .await
     .expect("advance floor")
     .response;
-    assert!(floor.retention_floor_seq > pin.captured_seq);
+    assert!(floor.retention_floor_seq > snapshot.captured_seq);
     // The runtime that published the advance raises the hint.
     crate::test_support::namespace_store(&store, &namespace_id)
         .raise_hint_to_current_manifest()
         .await;
     let aged = writer_at("gc", u64::MAX / 2);
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &crate::gc::GcOptions::default(), &aged.clock())
+        .gc(&crate::gc::GcOptions::default(), &aged.clock())
         .await
         .expect("collect past the floor");
     assert_eq!(
-        read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
             .await
-            .expect("pin readable"),
-        pinned_files
+            .expect("snapshot readable"),
+        snapshot_files
     );
-    for key in &pinned_segments {
-        assert!(store.head(key).await.expect("pinned segment").is_some());
+    for key in &snapshot_segments {
+        assert!(store.head(key).await.expect("snapshot segment").is_some());
     }
-    let manifest_key = metadata_manifest_object(&namespace_id, &pin.manifest_no);
+    let manifest_key = metadata_manifest_object(&namespace_id, &snapshot.manifest_no);
     assert!(store
         .head(&manifest_key)
         .await
-        .expect("pinned manifest")
+        .expect("snapshot's manifest")
         .is_some());
     crate::test_support::NamespaceFixture::new(
         &store,
@@ -3104,11 +3195,11 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&pin.checkpoint_id)
+    .delete_snapshot(&snapshot.snapshot_id)
     .await
-    .expect("delete pin");
+    .expect("delete snapshot");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &crate::gc::GcOptions::default(), &aged.clock())
+        .gc(&crate::gc::GcOptions::default(), &aged.clock())
         .await
         .expect("collect deleted basis");
     assert!(store
@@ -3116,7 +3207,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await
         .expect("deleted manifest")
         .is_none());
-    for key in &only_pinned {
+    for key in &only_snapshot {
         assert!(store.head(key).await.expect("deleted segment").is_none());
     }
 }

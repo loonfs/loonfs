@@ -4,23 +4,25 @@
 
 use loonfs_types::format::manifest::{ExtensionSegmentRef, MetadataSegmentRef};
 use loonfs_types::{
-    ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId,
-    ProbeRunId, UploadId, WalNo,
+    ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId, PoolId,
+    ProbeId, SnapshotId, UploadId, WalNo,
 };
 
 /// Prefix for objects created by store probes.
 pub const PROBE_RUN_PREFIX: &str = "probe-runs";
 
 pub(crate) const NAMESPACES_DIRECTORY: &str = "namespaces";
+pub(crate) const POOLS_DIRECTORY: &str = "pools";
+pub(crate) const POOL_RECORD_NAME: &str = "pool.json";
 pub(crate) const HINT_NAME: &str = "hint.json";
 pub(crate) const WAL_DIRECTORY: &str = "wal";
 pub(crate) const WAL_SUFFIX: &str = ".wal.zst";
 pub(crate) const MANIFEST_DIRECTORY: &str = "manifests";
 pub(crate) const MANIFEST_SUFFIX: &str = ".json.zst";
 pub(crate) const SEGMENT_DIRECTORY: &str = "segments";
-pub(crate) const SEGMENT_SUFFIX: &str = ".sst.zst";
-pub(crate) const PIN_DIRECTORY: &str = "pins";
-pub(crate) const PIN_SUFFIX: &str = ".json";
+pub(crate) const SEGMENT_SUFFIX: &str = ".sst";
+pub(crate) const SNAPSHOT_DIRECTORY: &str = "snapshots";
+pub(crate) const SNAPSHOT_SUFFIX: &str = ".json";
 pub(crate) const UPLOAD_DIRECTORY: &str = "uploads";
 pub(crate) const UPLOAD_SESSION_SUFFIX: &str = ".json";
 pub(crate) const UPLOAD_OUTCOME_SUFFIX: &str = ".outcome.json";
@@ -125,101 +127,108 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
     metadata_segment(&descriptor.owner_namespace_id, &descriptor.segment_id)
 }
 
-/// Builds a pin key with its manifest number in the id.
-pub fn pin(namespace_id: &NamespaceId, pin_id: &PinId) -> String {
-    format!("{}{pin_id}{PIN_SUFFIX}", pin_prefix(namespace_id))
+/// Builds a snapshot key with its manifest number in the id.
+pub fn snapshot_record(namespace_id: &NamespaceId, snapshot_id: &SnapshotId) -> String {
+    format!(
+        "{}{snapshot_id}{SNAPSHOT_SUFFIX}",
+        snapshot_prefix(namespace_id)
+    )
 }
 
-/// Builds the listing prefix containing pins for one namespace.
-pub fn pin_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{PIN_DIRECTORY}/", namespace_prefix(namespace_id))
+/// Builds the listing prefix containing snapshots for one namespace.
+pub fn snapshot_prefix(namespace_id: &NamespaceId) -> String {
+    format!("{}{SNAPSHOT_DIRECTORY}/", namespace_prefix(namespace_id))
+}
+
+/// Builds the listing prefix containing every object that one pool stores.
+pub fn pool_prefix(pool_id: &PoolId) -> String {
+    format!("{POOLS_DIRECTORY}/{pool_id}/")
+}
+
+/// Builds the key of the record that the create call of one pool's first
+/// member writes.
+pub fn pool_record(pool_id: &PoolId) -> String {
+    format!("{}{POOL_RECORD_NAME}", pool_prefix(pool_id))
 }
 
 /// Builds the listing prefix containing the upload session and outcome
-/// records of every member of the fork family whose root is
-/// `family_root_id`.
-pub fn upload_session_prefix(family_root_id: &NamespaceId) -> String {
-    format!("{}{UPLOAD_DIRECTORY}/", namespace_prefix(family_root_id))
+/// records of every member of one pool.
+pub fn upload_session_prefix(pool_id: &PoolId) -> String {
+    format!("{}{UPLOAD_DIRECTORY}/", pool_prefix(pool_id))
 }
 
 /// Builds the key of the record that starts one upload session, under the
-/// prefix of the family root of the namespace that created the session.
-pub fn upload_session(family_root_id: &NamespaceId, upload_id: &UploadId) -> String {
+/// prefix of the pool of the namespace that created the session.
+pub fn upload_session(pool_id: &PoolId, upload_id: &UploadId) -> String {
     format!(
         "{}{upload_id}{UPLOAD_SESSION_SUFFIX}",
-        upload_session_prefix(family_root_id)
+        upload_session_prefix(pool_id)
     )
 }
 
 /// Builds the key of the record of how one upload session ended, under the
-/// prefix of the family root of the namespace that created the session.
+/// prefix of the pool of the namespace that created the session.
 ///
 /// The key sorts directly after the session record's key, so a listing of
 /// the uploads prefix returns a session's two records next to each other.
-pub fn upload_outcome(family_root_id: &NamespaceId, upload_id: &UploadId) -> String {
+pub fn upload_outcome(pool_id: &PoolId, upload_id: &UploadId) -> String {
     format!(
         "{}{upload_id}{UPLOAD_OUTCOME_SUFFIX}",
-        upload_session_prefix(family_root_id)
+        upload_session_prefix(pool_id)
     )
 }
 
-/// Builds the listing prefix containing every content object of the fork
-/// family whose root is `family_root_id`.
-pub fn content_prefix(family_root_id: &NamespaceId) -> String {
-    format!("{}{CONTENT_DIRECTORY}/", namespace_prefix(family_root_id))
+/// Builds the listing prefix containing every content object of one pool.
+pub fn content_prefix(pool_id: &PoolId) -> String {
+    format!("{}{CONTENT_DIRECTORY}/", pool_prefix(pool_id))
 }
 
 /// Builds the immutable key of a chain's whole object, under the prefix of
-/// the reading namespace's family root.
-pub fn content_blob(family_root_id: &NamespaceId, content_id: &ContentId) -> String {
+/// the reading namespace's pool.
+pub fn content_blob(pool_id: &PoolId, content_id: &ContentId) -> String {
     format!(
         "{}{}",
-        content_prefix(family_root_id),
+        content_prefix(pool_id),
         content_blob_name(content_id)
     )
 }
 
-/// Builds the name of a chain's whole object: its key with the family root's
+/// Builds the name of a chain's whole object: its key with the pool's
 /// content prefix removed.
 pub fn content_blob_name(content_id: &ContentId) -> String {
     content_id.to_string()
 }
 
 /// Builds the immutable key of the span object that stores one run of chain
-/// bytes, under the prefix of the reading namespace's family root.
-pub fn content_span(
-    family_root_id: &NamespaceId,
-    content_id: &ContentId,
-    start: u64,
-    end: u64,
-) -> String {
+/// bytes, under the prefix of the reading namespace's pool.
+pub fn content_span(pool_id: &PoolId, content_id: &ContentId, start: u64, end: u64) -> String {
     format!(
         "{}{}",
-        content_prefix(family_root_id),
+        content_prefix(pool_id),
         content_span_name(content_id, start, end)
     )
 }
 
-/// Builds the name of a span object: its key with the family root's content
-/// prefix removed.
+/// Builds the name of a span object: its key with the pool's content prefix
+/// removed.
 pub fn content_span_name(content_id: &ContentId, start: u64, end: u64) -> String {
     format!("{content_id}-{start:020}-{end:020}")
 }
 
-/// Builds a fresh key for a temporary object that an assembly writes and
-/// deletes under one namespace.
-pub fn temporary_object(namespace_id: &NamespaceId) -> String {
+/// Builds a fresh key for a temporary object that an assembly of one of a
+/// pool's content objects writes and deletes.
+pub fn temporary_object(pool_id: &PoolId) -> String {
     format!(
         "{}{}",
-        temporary_prefix(namespace_id),
+        temporary_prefix(pool_id),
         loonfs_types::generated_id("tmp")
     )
 }
 
-/// Builds the listing prefix for the temporary objects that an assembly writes
-/// and deletes under one namespace.
-pub fn temporary_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{TEMPORARY_DIRECTORY}/", namespace_prefix(namespace_id))
+/// Builds the listing prefix for the temporary objects that assemblies of a
+/// pool's content objects write and delete.
+pub fn temporary_prefix(pool_id: &PoolId) -> String {
+    format!("{}{TEMPORARY_DIRECTORY}/", pool_prefix(pool_id))
 }
 
 /// Builds the listing prefix containing the objects of every store probe run.
@@ -229,8 +238,8 @@ pub fn probe_runs_prefix() -> String {
 
 /// Builds the listing prefix containing the objects one store probe run writes
 /// and deletes.
-pub fn probe_run_prefix(run_id: &ProbeRunId) -> String {
-    format!("{PROBE_RUN_PREFIX}/{run_id}/")
+pub fn probe_run_prefix(probe_id: &ProbeId) -> String {
+    format!("{PROBE_RUN_PREFIX}/{probe_id}/")
 }
 
 #[cfg(test)]
@@ -241,8 +250,8 @@ mod tests {
     use super::{
         content_blob, content_blob_name, content_prefix, content_span, content_span_name,
         extension_segment, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_object_key, pin, probe_run_prefix, probe_runs_prefix, temporary_object,
-        upload_outcome, upload_session, wal_object, wal_prefix,
+        metadata_segment_object_key, pool_prefix, pool_record, probe_run_prefix, probe_runs_prefix,
+        snapshot_record, temporary_object, upload_outcome, upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -250,7 +259,7 @@ mod tests {
     use loonfs_types::format::segment_blocks::BlockHandle;
     use loonfs_types::{
         ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
-        PinId, ProbeRunId, UploadId, WalNo,
+        PoolId, ProbeId, SnapshotId, UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_5bsqqg28t5cy4tqkff04hmasw9";
@@ -268,12 +277,13 @@ mod tests {
         loonfs_test_support::ids::namespace_id("owner-1")
     }
 
-    fn family_root_id() -> NamespaceId {
-        loonfs_test_support::ids::namespace_id("root-1")
+    fn pool_id() -> PoolId {
+        loonfs_test_support::ids::numbered_pool_id(1)
     }
 
-    fn pin_id() -> PinId {
-        PinId::parse("pin_00000000000000000001-0000000000000001").expect("valid pin id")
+    fn snapshot_id() -> SnapshotId {
+        SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
+            .expect("valid snapshot id")
     }
 
     fn metadata_segment_id() -> MetadataSegmentId {
@@ -318,7 +328,7 @@ mod tests {
             patterns.insert(family.to_owned(), pattern.to_owned());
         }
 
-        let temporary = temporary_object(&namespace_id());
+        let temporary = temporary_object(&pool_id());
         let temporary_id = temporary
             .rsplit('/')
             .next()
@@ -336,13 +346,13 @@ mod tests {
             pattern
                 .replace("{namespace_id}", "ns-1")
                 .replace("{owner_namespace_id}", "owner-1")
-                .replace("{family_root_id}", "root-1")
+                .replace("{pool_id}", pool_id().as_str())
                 .replace("{wal_no:020}", &format!("{:020}", 42))
-                .replace("{suffix}", "0123456789abcdef")
                 .replace("{manifest_no:020}", "00000000000000000400")
-                .replace("{pin_id}", "pin_00000000000000000001-0000000000000001")
-                .replace("{job_id}", "cmp_00000000000000000000000001")
-                .replace("{group}", "bindings")
+                .replace(
+                    "{snapshot_id}",
+                    "snp_00000000000000000001-00000000000000000000000001",
+                )
                 .replace("{extension_name}", "grep")
                 .replace("{segment_id}", segment_id)
                 .replace("{upload_id}", "upl_00000000000000000000000001")
@@ -358,7 +368,10 @@ mod tests {
                 "Namespace manifests",
                 metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
             ),
-            ("Pin records", pin(&namespace_id(), &pin_id())),
+            (
+                "Snapshot records",
+                snapshot_record(&namespace_id(), &snapshot_id()),
+            ),
             (
                 "Metadata segments",
                 metadata_segment(&owner_namespace_id(), &metadata_segment_id()),
@@ -372,22 +385,14 @@ mod tests {
                         .expect("valid index segment id"),
                 ),
             ),
-            (
-                "Upload sessions",
-                upload_session(&family_root_id(), &upload_id()),
-            ),
-            (
-                "Upload outcomes",
-                upload_outcome(&family_root_id(), &upload_id()),
-            ),
+            ("Upload sessions", upload_session(&pool_id(), &upload_id())),
+            ("Upload outcomes", upload_outcome(&pool_id(), &upload_id())),
             ("Hint", hint(&namespace_id())),
-            (
-                "Content objects",
-                content_blob(&family_root_id(), &content_id()),
-            ),
+            ("Pool records", pool_record(&pool_id())),
+            ("Content objects", content_blob(&pool_id(), &content_id())),
             (
                 "Content span objects",
-                content_span(&family_root_id(), &content_id(), 2, 19),
+                content_span(&pool_id(), &content_id(), 2, 19),
             ),
             ("Temporary objects", temporary),
         ];
@@ -415,19 +420,25 @@ mod tests {
         assert_eq!(wal_prefix(&namespace_id()), "namespaces/ns-1/wal/");
         assert!(wal_object(&namespace_id(), &WalNo(42)).starts_with(&wal_prefix(&namespace_id())));
         assert_eq!(probe_runs_prefix(), "probe-runs/");
-        let run_id = ProbeRunId::parse(PROBE_RUN_ID).expect("valid probe run id");
-        assert!(probe_run_prefix(&run_id).starts_with(&probe_runs_prefix()));
+        let probe_id = ProbeId::parse(PROBE_RUN_ID).expect("valid probe run id");
+        assert!(probe_run_prefix(&probe_id).starts_with(&probe_runs_prefix()));
     }
 
     #[test]
     fn content_keys_are_the_content_prefix_and_a_name() {
-        let prefix = content_prefix(&family_root_id());
+        let prefix = content_prefix(&pool_id());
+        assert_eq!(pool_prefix(&pool_id()), format!("pools/{}/", pool_id()));
         assert_eq!(
-            content_blob(&family_root_id(), &content_id()),
+            pool_record(&pool_id()),
+            format!("{}pool.json", pool_prefix(&pool_id()))
+        );
+        assert_eq!(prefix, format!("{}content/", pool_prefix(&pool_id())));
+        assert_eq!(
+            content_blob(&pool_id(), &content_id()),
             format!("{prefix}{}", content_blob_name(&content_id()))
         );
         assert_eq!(
-            content_span(&family_root_id(), &content_id(), 2, 19),
+            content_span(&pool_id(), &content_id(), 2, 19),
             format!("{prefix}{}", content_span_name(&content_id(), 2, 19))
         );
     }

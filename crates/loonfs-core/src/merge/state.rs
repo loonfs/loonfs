@@ -1,12 +1,14 @@
 //! One inode's state at one sequence, as a merge compares it, and the reads
 //! that build it.
 
+use super::memory::PlanningMemory;
 use crate::error::Result;
+use crate::heap_bytes::HeapBytes;
 use crate::metadata::{
     AccessRevisionRecord, AttributesRevisionRecord, MetadataView, MetadataViewSession,
     RevisionRecord,
 };
-use crate::path::read::resolve_visible_inode;
+use crate::path::read::{resolve_visible_inode, AncestorPaths};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::{
@@ -14,6 +16,14 @@ use loonfs_types::{
     MergeConflictVersion,
 };
 use std::collections::HashMap;
+use std::mem::size_of;
+use std::sync::Arc;
+
+/// The estimated bytes of one path cache entry beyond its path's heap bytes.
+///
+/// The estimate is the entry's slot in the hash table, twice over, because
+/// a hash table that just grew has about twice as many slots as entries.
+const PATH_ENTRY_BYTES: usize = 2 * size_of::<(InodeId, AbsolutePath)>();
 
 /// One inode's rows at one sequence: whether and where it's visible, and its
 /// newest revision, attribute, and access rows.
@@ -129,15 +139,38 @@ pub(super) struct StateReader<'a, 'store, S: ObjectStore + ?Sized> {
     /// from. It grows with the inodes that a merge reads, which
     /// [`MAX_MERGED_INODES`](crate::commit::wal_size::MAX_MERGED_INODES)
     /// bounds, and with their ancestors.
+    paths: MeasuredPaths,
+}
+
+/// A path cache that adds the bytes of each entry to the plan's memory as
+/// the entry is inserted.
+struct MeasuredPaths {
     paths: HashMap<InodeId, AbsolutePath>,
+    memory: Arc<PlanningMemory>,
+}
+
+impl AncestorPaths for MeasuredPaths {
+    fn get(&self, inode_id: &InodeId) -> Option<&AbsolutePath> {
+        self.paths.get(inode_id)
+    }
+
+    fn insert(&mut self, inode_id: InodeId, path: AbsolutePath) {
+        self.memory
+            .add_path_bytes(PATH_ENTRY_BYTES.saturating_add(path.heap_bytes()));
+        self.paths.insert(inode_id, path);
+    }
 }
 
 impl<'a, 'store, S: ObjectStore + ?Sized> StateReader<'a, 'store, S> {
-    pub(super) fn new(view: MetadataView<'a, 'store, S>) -> Self {
+    /// Returns a reader of `view` whose path cache reports to `memory`.
+    pub(super) fn new(view: MetadataView<'a, 'store, S>, memory: &Arc<PlanningMemory>) -> Self {
         Self {
             view,
             session: view.session(),
-            paths: HashMap::new(),
+            paths: MeasuredPaths {
+                paths: HashMap::new(),
+                memory: Arc::clone(memory),
+            },
         }
     }
 
@@ -150,23 +183,24 @@ impl<'a, 'store, S: ObjectStore + ?Sized> StateReader<'a, 'store, S> {
     }
 
     /// Reads `inode_id`'s state, or `None` when the inode doesn't exist at
-    /// this sequence.
+    /// this sequence. The read checks the merge allowance when the plan's
+    /// path caches have grown by 1 MiB since the last check.
     pub(super) async fn state(&mut self, inode_id: InodeId) -> Result<Option<InodeState>> {
         let Some(inode) = self.session.inode_at_seq(inode_id).await? else {
             return Ok(None);
         };
-        let visible = resolve_visible_inode(&mut self.session, &mut self.paths, inode_id)
-            .await?
-            .map(|resolved| Visible {
-                path: resolved.absolute_path,
-                edge: resolved.parent_inode_id.zip(resolved.binding_version).map(
-                    |(parent_inode_id, binding)| Edge {
-                        parent_inode_id,
-                        display_name: resolved.display_name,
-                        binding,
-                    },
-                ),
-            });
+        let resolved = resolve_visible_inode(&mut self.session, &mut self.paths, inode_id).await?;
+        self.paths.memory.check_paths()?;
+        let visible = resolved.map(|resolved| Visible {
+            path: resolved.absolute_path,
+            edge: resolved.parent_inode_id.zip(resolved.binding_version).map(
+                |(parent_inode_id, binding)| Edge {
+                    parent_inode_id,
+                    display_name: resolved.display_name,
+                    binding,
+                },
+            ),
+        });
         let revision = match inode.inode_kind {
             InodeKind::File => self.view.latest_revision_record(inode_id).await?,
             InodeKind::Directory => None,

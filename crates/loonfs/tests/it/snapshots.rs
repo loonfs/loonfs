@@ -2,11 +2,11 @@
 
 use crate::common::*;
 use loonfs::{
-    ChangeSeq, CheckpointOwner, CreateSnapshotOptions, DownloadOptions, ErrorCode,
-    ForkNamespaceOptions, ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadAt,
-    ReadFileOptions, ReadOnly, RevisionNo, SharedObjectStore,
+    CommitSeq, CreateSnapshotOptions, DownloadOptions, ErrorCode, ForkNamespaceOptions,
+    ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadAt, ReadFileOptions,
+    ReadOnly, RevisionNo, SharedObjectStore, SnapshotRecordOwner,
 };
-use loonfs_objectstore::keys::pin_prefix;
+use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
@@ -88,9 +88,9 @@ async fn snapshot_create_recovers_a_record_write_with_an_ambiguous_outcome() {
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(pin_prefix(&namespace_id)),
+            KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
             OperationSelector::PutCreateIfAbsent,
-            InjectedError::Transport("lost checkpoint write acknowledgement".to_owned()),
+            InjectedError::Transport("lost snapshot write acknowledgement".to_owned()),
         )
         .apply_then_fail(),
     );
@@ -125,11 +125,11 @@ async fn snapshot_create_recovers_a_record_write_with_an_ambiguous_outcome() {
 async fn snapshot_extension_recovers_a_record_write_with_an_ambiguous_outcome() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("snapshot-ambiguous-extension");
-    let pin_key_prefix = pin_prefix(&namespace_id);
+    let snapshot_key_prefix = snapshot_prefix(&namespace_id);
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(pin_key_prefix),
+            KeyPredicate::prefix(snapshot_key_prefix),
             OperationSelector::CompareAndSwap,
             InjectedError::Transport("lost snapshot extension acknowledgement".to_owned()),
         )
@@ -168,7 +168,7 @@ async fn snapshot_extension_recovers_a_record_write_with_an_ambiguous_outcome() 
 }
 
 /// Checks that a delete whose acknowledgement is lost reports the error, and
-/// that the retry succeeds without recreating the pin.
+/// that the retry succeeds without recreating the snapshot.
 #[tokio::test]
 async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
     let temp_dir = tempdir().expect("tempdir");
@@ -176,7 +176,7 @@ async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(pin_prefix(&namespace_id)),
+            KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
             OperationSelector::Delete,
             InjectedError::Transport("lost snapshot delete acknowledgement".to_owned()),
         )
@@ -214,14 +214,14 @@ async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
     assert!(listed.snapshots.is_empty());
 }
 
-/// Checks that after a namespace is deleted, the checkpoint inventory still
-/// lists its snapshot and fork pin, the snapshot can still be deleted, and a
-/// fork pin's ID returns `snapshot_not_found`.
+/// Checks that after a namespace is deleted, the snapshot inventory still
+/// lists its snapshot and fork snapshot, the snapshot can still be deleted, and a
+/// fork snapshot's ID returns `snapshot_not_found`.
 #[tokio::test]
-async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete() {
+async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let fs = open_runtime_async(store.clone(), "checkpoint-tombstone-setup").await;
+    let fs = open_runtime_async(store.clone(), "snapshot-tombstone-setup").await;
     let source = namespace_id("source");
     let target = namespace_id("target");
 
@@ -245,27 +245,27 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
         .await
         .expect("create a snapshot without an expiry");
 
-    let before_delete = collect_checkpoints(&fs.maintenance, &source)
+    let before_delete = collect_snapshot_records(&fs.maintenance, &source)
         .await
-        .expect("list checkpoints before deletion");
-    let fork_checkpoint = before_delete
-        .checkpoints
+        .expect("list snapshots before deletion");
+    let fork_snapshot_id = before_delete
+        .snapshots
         .iter()
-        .find(|checkpoint| {
+        .find(|record| {
             matches!(
-                &checkpoint.owner,
-                CheckpointOwner::Fork {
+                &record.owner,
+                SnapshotRecordOwner::Fork {
                     target_namespace_id
                 } if target_namespace_id == &target
             )
         })
-        .expect("fork-owned checkpoint")
-        .checkpoint_id
+        .expect("fork-owned snapshot")
+        .snapshot_id
         .clone();
 
     let deleter = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
-            "checkpoint-tombstone-deleter",
+            "snapshot-tombstone-deleter",
         ))
         .build()
         .await
@@ -275,26 +275,26 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
 
     let observer = LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id(
-            "checkpoint-tombstone-observer",
+            "snapshot-tombstone-observer",
         ))
         .build()
         .await
         .expect("build post-delete runtime");
     let maintenance = observer.maintenance(loonfs_test_support::ids::writer_id(
-        "checkpoint-tombstone-observer",
+        "snapshot-tombstone-observer",
     ));
-    let listed = collect_checkpoints(&maintenance, &source)
+    let listed = collect_snapshot_records(&maintenance, &source)
         .await
-        .expect("list checkpoints on deleted namespace");
-    assert_eq!(listed.checkpoints.len(), 2);
+        .expect("list snapshots on deleted namespace");
+    assert_eq!(listed.snapshots.len(), 2);
     assert!(listed
-        .checkpoints
+        .snapshots
         .iter()
-        .any(|checkpoint| checkpoint.checkpoint_id == snapshot.snapshot_id));
+        .any(|record| record.snapshot_id == snapshot.snapshot_id));
     assert!(listed
-        .checkpoints
+        .snapshots
         .iter()
-        .any(|checkpoint| checkpoint.checkpoint_id == fork_checkpoint));
+        .any(|record| record.snapshot_id == fork_snapshot_id));
 
     let namespace = observer.open_namespace(&source).expect("open namespace");
     let deleted = namespace
@@ -303,7 +303,7 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
         .expect("delete a snapshot on a deleted namespace");
     assert_eq!(deleted.snapshot_id, snapshot.snapshot_id);
     assert_core_error_kind(
-        namespace.delete_snapshot(&fork_checkpoint).await,
+        namespace.delete_snapshot(&fork_snapshot_id).await,
         ErrorCode::SnapshotNotFound,
     );
     assert_core_error_kind(
@@ -317,7 +317,7 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
 }
 
 /// Checks that an expired snapshot can't be read or forked, and that it
-/// stays in the snapshot listing and the checkpoint inventory with its past
+/// stays in the snapshot listing and the snapshot inventory with its past
 /// expiry.
 #[tokio::test]
 async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed() {
@@ -405,14 +405,11 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
         snapshot
     );
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("snapshot-expiry"));
-    let checkpoints = collect_checkpoints(&maintenance, &source)
+    let snapshots = collect_snapshot_records(&maintenance, &source)
         .await
-        .expect("list checkpoints");
-    assert_eq!(checkpoints.checkpoints.len(), 1);
-    assert_eq!(
-        checkpoints.checkpoints[0].expires_at_ms,
-        Some(expires_at_ms)
-    );
+        .expect("list snapshots");
+    assert_eq!(snapshots.snapshots.len(), 1);
+    assert_eq!(snapshots.snapshots[0].expires_at_ms, Some(expires_at_ms));
     writer.shutdown().await.expect("shutdown");
 }
 
@@ -568,7 +565,7 @@ async fn shared_file_and_download_options_select_the_snapshot() {
     assert_eq!(by_inode.bytes, b"before");
     let feed = reader
         .list_changes_with_options(
-            ChangeSeq(0),
+            CommitSeq(0),
             &ListChangesOptions {
                 at: at.clone(),
                 ..ListChangesOptions::default()
@@ -618,18 +615,19 @@ async fn shared_file_and_download_options_select_the_snapshot() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a read of the source through a fork pin returns a revision
+/// Checks that a read of the source through a fork snapshot returns a revision
 /// after the source's retention floor and a compaction removed it from the
-/// source's live history, and that a fork pin's ID still isn't a snapshot to
-/// fork from.
+/// source's live history, and that a fork snapshot's ID still isn't a user snapshot
+/// to fork from.
 #[tokio::test]
-async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
+async fn a_fork_snapshot_reads_a_revision_after_the_sources_floor_passes_it() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs =
-        open_compacting_runtime_with_async(store(temp_dir.path()), "fork-pin-reads", |builder| {
-            builder
-        })
-        .await;
+    let fs = open_compacting_runtime_with_async(
+        store(temp_dir.path()),
+        "fork-snapshot-reads",
+        |builder| builder,
+    )
+    .await;
     let actor = loonfs_test_support::test_actor();
     let source = namespace_id("source");
     fs.create_namespace(&source, &actor)
@@ -643,7 +641,7 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
         .fork_namespace(&source, &namespace_id("fork"), &actor)
         .await
         .expect("fork source namespace");
-    let pin_id = forked.fork_basis.expect("fork basis").source_pin_id;
+    let snapshot_id = forked.fork_basis.expect("fork basis").source_snapshot_id;
     let replace = loonfs::PutFileOptions {
         behavior: loonfs::DestinationBehavior::Replace,
         ..Default::default()
@@ -673,14 +671,14 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
             .map(drop),
         ErrorCode::RevisionNotFound,
     );
-    let pinned = loonfs::ReadFileStreamOptions {
-        at: ReadAt::Snapshot(pin_id.clone()),
+    let snapshot_options = loonfs::ReadFileStreamOptions {
+        at: ReadAt::Snapshot(snapshot_id.clone()),
         ..Default::default()
     };
     let mut stream = namespace
-        .read_file_revision_stream_by_inode_with_options(inode_id, RevisionNo(1), &pinned)
+        .read_file_revision_stream_by_inode_with_options(inode_id, RevisionNo(1), &snapshot_options)
         .await
-        .expect("read the revision through the fork pin");
+        .expect("read the revision through the fork snapshot");
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next_chunk().await.expect("verified chunk") {
         bytes.extend_from_slice(&chunk);
@@ -694,7 +692,7 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
                 &namespace_id("again"),
                 &actor,
                 &ForkNamespaceOptions {
-                    snapshot_id: Some(pin_id),
+                    snapshot_id: Some(snapshot_id),
                 },
             )
             .await,

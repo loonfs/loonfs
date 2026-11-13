@@ -46,8 +46,18 @@ pub const RESTART_INTERVAL: usize = 16;
 pub const FILTER_BITS_PER_KEY: usize = 10;
 /// Bloom filter probe count, chosen for [`FILTER_BITS_PER_KEY`].
 pub const FILTER_HASH_COUNT: u32 = 7;
+/// Bloom filter sizing: the fewest bits of a filter.
+pub const FILTER_MIN_BITS: usize = 64;
 /// Extent filter sizing: bits reserved per inserted content object name.
 pub const EXTENT_FILTER_BITS_PER_KEY: usize = 20;
+/// Bloom filter sizing: the fewest bits of a filter whose match keeps data.
+///
+/// The extent filter, a compaction's layout filter and kept inode filter,
+/// and grep's pruning filters keep data that LoonFS would otherwise delete
+/// when they match a key. A filter with 10 bits for each key matches another
+/// key about once in 100 to 120 at any size, and a 4,096-bit filter of 30
+/// keys matches about once in 1.2 billion.
+pub const MIN_KEEP_FILTER_BITS: usize = 4096;
 
 const FILTER_HASH_SEED_ONE: u64 = 0;
 const FILTER_HASH_SEED_TWO: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -394,12 +404,13 @@ impl SegmentBlocksBuilder {
         let extent_filter = match &self.extent_hashes {
             Some(hashes) => Some(append_section(
                 &mut bytes,
-                &build_filter_payload(hashes, EXTENT_FILTER_BITS_PER_KEY),
+                &build_filter_payload(hashes, EXTENT_FILTER_BITS_PER_KEY, MIN_KEEP_FILTER_BITS),
                 false,
             )?),
             None => None,
         };
-        let filter_payload = build_filter_payload(&self.filter_hashes, FILTER_BITS_PER_KEY);
+        let filter_payload =
+            build_filter_payload(&self.filter_hashes, FILTER_BITS_PER_KEY, FILTER_MIN_BITS);
         let filter = append_section(&mut bytes, &filter_payload, false)?;
 
         let mut index_payload = Vec::new();
@@ -593,7 +604,7 @@ impl SegmentFilter {
                 "filter hash count must be seven".to_owned(),
             ));
         }
-        if bit_len < 64 {
+        if bit_len < FILTER_MIN_BITS as u64 {
             return Err(SegmentBlockCodecError::Malformed(
                 "filter bit length must be at least 64".to_owned(),
             ));
@@ -627,7 +638,7 @@ impl SegmentFilter {
     /// hashes the key once.
     pub fn may_contain_hashes(&self, (h1, h2): (u64, u64)) -> bool {
         for probe in 0..u64::from(self.n_hashes) {
-            let bit = h1.wrapping_add(probe.wrapping_mul(h2)) % self.bit_len;
+            let bit = filter_bit((h1, h2), probe, self.bit_len);
             let byte = self.bits[crate::usize_from_u64(bit / 8)];
             if byte & (1 << (bit % 8)) == 0 {
                 return false;
@@ -747,8 +758,8 @@ fn decode_section(
     Ok(payload)
 }
 
-fn build_filter_payload(hashes: &[(u64, u64)], bits_per_key: usize) -> Vec<u8> {
-    let mut builder = SegmentFilterBuilder::with_bits_per_key(hashes.len(), bits_per_key);
+fn build_filter_payload(hashes: &[(u64, u64)], bits_per_key: usize, min_bits: usize) -> Vec<u8> {
+    let mut builder = SegmentFilterBuilder::with_sizing(hashes.len(), bits_per_key, min_bits);
     for hash in hashes {
         builder.insert_hashes(*hash);
     }
@@ -765,16 +776,23 @@ pub struct SegmentFilterBuilder {
 
 impl SegmentFilterBuilder {
     /// Returns a builder with [`FILTER_BITS_PER_KEY`] bits for each of
-    /// `expected_keys` keys, and at least 64 bits. Inserting more keys than
-    /// expected raises the filter's false positive rate.
+    /// `expected_keys` keys, and at least [`FILTER_MIN_BITS`] bits. Inserting
+    /// more keys than expected raises the filter's false positive rate.
     pub fn new(expected_keys: usize) -> Self {
-        Self::with_bits_per_key(expected_keys, FILTER_BITS_PER_KEY)
+        Self::with_sizing(expected_keys, FILTER_BITS_PER_KEY, FILTER_MIN_BITS)
     }
 
-    /// Returns a builder with `bits_per_key` bits for each of `expected_keys`
-    /// keys, and at least 64 bits.
-    pub fn with_bits_per_key(expected_keys: usize, bits_per_key: usize) -> Self {
-        let bit_len = expected_keys.saturating_mul(bits_per_key).max(64);
+    /// Returns a builder for a filter whose false match keeps data, with
+    /// [`FILTER_BITS_PER_KEY`] bits for each of `expected_keys` keys, and at
+    /// least [`MIN_KEEP_FILTER_BITS`] bits.
+    pub fn keep_filter(expected_keys: usize) -> Self {
+        Self::with_sizing(expected_keys, FILTER_BITS_PER_KEY, MIN_KEEP_FILTER_BITS)
+    }
+
+    fn with_sizing(expected_keys: usize, bits_per_key: usize, min_bits: usize) -> Self {
+        let bit_len = expected_keys
+            .saturating_mul(bits_per_key)
+            .max(min_bits.max(FILTER_MIN_BITS));
         Self {
             bit_len: bit_len as u64,
             bits: vec![0; bit_len.div_ceil(8)],
@@ -786,9 +804,9 @@ impl SegmentFilterBuilder {
         self.insert_hashes(filter_key_hashes(filter_key));
     }
 
-    fn insert_hashes(&mut self, (h1, h2): (u64, u64)) {
+    fn insert_hashes(&mut self, hashes: (u64, u64)) {
         for probe in 0..u64::from(FILTER_HASH_COUNT) {
-            let bit = h1.wrapping_add(probe.wrapping_mul(h2)) % self.bit_len;
+            let bit = filter_bit(hashes, probe, self.bit_len);
             self.bits[crate::usize_from_u64(bit / 8)] |= 1 << (bit % 8);
         }
     }
@@ -802,6 +820,17 @@ impl SegmentFilterBuilder {
         payload.extend_from_slice(&self.bits);
         payload
     }
+}
+
+/// Returns the bit of a `bit_len`-bit filter that probe `probe` of a key with
+/// the two hashes `(h1, h2)` sets and tests.
+///
+/// The bit depends on all 64 bits of both hashes. Without the mix, the bit
+/// would depend only on each hash modulo `bit_len`, so a small filter would
+/// have few distinct probe sequences, and a step of a small order (such as
+/// zero) would test the same one or two bits seven times.
+pub fn filter_bit((h1, h2): (u64, u64), probe: u64, bit_len: u64) -> u64 {
+    crate::entropy::mix64(h1.wrapping_add(probe.wrapping_mul(h2))) % bit_len
 }
 
 /// Returns the two hashes of `filter_key` that every probe of a filter
@@ -890,7 +919,7 @@ fn take_slice<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ChangeSeq, InodeId, InodeKind};
+    use crate::{CommitSeq, InodeId, InodeKind};
     use std::assert_matches;
 
     #[test]
@@ -924,7 +953,7 @@ mod tests {
         let row = MetadataRow::Inode(crate::metadata_rows::InodeRecord {
             inode_id: InodeId(u128::from(inode_id)),
             inode_kind: InodeKind::File,
-            committed_seq: ChangeSeq(inode_id),
+            committed_seq: CommitSeq(inode_id),
             commit_id: crate::CommitId::parse(format!("c_row_{inode_id}"))
                 .expect("valid commit id"),
             committed_by: crate::ActorId::loonfs(),
@@ -1327,6 +1356,20 @@ mod tests {
 
     #[test]
     fn filter_has_no_false_negatives_and_few_false_positives() {
+        for (mut builder, min_bits) in [
+            (SegmentFilterBuilder::new(0), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::new(1), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::keep_filter(0), MIN_KEEP_FILTER_BITS),
+            (SegmentFilterBuilder::keep_filter(1), MIN_KEEP_FILTER_BITS),
+            (SegmentFilterBuilder::with_sizing(1, 1, 1), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::with_sizing(0, 0, 0), FILTER_MIN_BITS),
+        ] {
+            builder.insert("inserted");
+            let payload = builder.finish();
+            assert_eq!(payload.len(), 12 + min_bits / 8);
+            let filter = SegmentFilter::from_payload(&payload).expect("a valid filter");
+            assert!(filter.may_contain("inserted"));
+        }
         let rows = 2_000;
         let built = build_segment(rows);
         let filter = decode_filter_block(section(&built.bytes, &built.filter), &built.filter)
@@ -1421,8 +1464,10 @@ mod tests {
             builder.push(&key, &filter_key, &row).expect("push row");
             let built = builder.build().expect("segment");
             assert_eq!(
-                built.extent_filter.map(|handle| handle.decoded_bytes),
-                enabled.then_some(12 + 8)
+                built
+                    .extent_filter
+                    .map(|handle| handle.decoded_bytes as usize),
+                enabled.then_some(12 + MIN_KEEP_FILTER_BITS / 8)
             );
         }
     }

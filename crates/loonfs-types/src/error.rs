@@ -119,11 +119,13 @@ error_codes! {
     StoragePermissionDenied => "storage_permission_denied",
     ContentTooLarge => "content_too_large",
     MergeTooLarge => "merge_too_large",
+    CommitTooLarge => "commit_too_large",
     RangeNotSatisfiable => "range_not_satisfiable",
     NotSupported => "not_supported",
     RouteNotFound => "route_not_found",
     MethodNotAllowed => "method_not_allowed",
     NamespaceNotFound => "namespace_not_found",
+    PoolNotFound => "pool_not_found",
     NamespaceDeleted => "namespace_deleted",
     NamespaceExists => "namespace_exists",
     SnapshotNotFound => "snapshot_not_found",
@@ -132,6 +134,7 @@ error_codes! {
     InodeNotFound => "inode_not_found",
     RevisionNotFound => "revision_not_found",
     PathConflict => "path_conflict",
+    WrongKind => "wrong_kind",
     DirectoryNotEmpty => "directory_not_empty",
     StaleHead => "stale_head",
     StaleRevision => "stale_revision",
@@ -145,7 +148,6 @@ error_codes! {
     CommitIdReuseConflict => "commit_id_reuse_conflict",
     MergeRangeConflict => "merge_range_conflict",
     MergeConflict => "merge_conflict",
-    CommitOutcomeUnknown => "commit_outcome_unknown",
     OutcomeUnknown => "outcome_unknown",
     CommitQueueFull => "commit_queue_full",
     WriterSessionClosed => "writer_session_closed",
@@ -153,13 +155,13 @@ error_codes! {
     ShuttingDown => "shutting_down",
     StoreContention => "store_contention",
     DeadlineExceeded => "deadline_exceeded",
-    CheckpointUnavailable => "checkpoint_unavailable",
+    SnapshotUnavailable => "snapshot_unavailable",
     ContentNotMaterialized => "content_not_materialized",
     MaintenanceRequired => "maintenance_required",
     UploadNotFound => "upload_not_found",
     UploadAlreadyCompleted => "upload_already_completed",
     UploadContentConflict => "upload_content_conflict",
-    RebootstrapRequired => "rebootstrap_required",
+    BelowRetentionFloor => "below_retention_floor",
     QueryUnindexable => "query_unindexable",
     IndexLagging => "index_lagging",
     IndexCorrupt => "index_corrupt",
@@ -185,10 +187,13 @@ impl ErrorCode {
             ErrorCode::StoragePermissionDenied => ErrorKind::StoragePermissionDenied,
             // A merge that doesn't fit in one WAL object, which the caller
             // splits by the fork's commit range.
-            ErrorCode::ContentTooLarge | ErrorCode::MergeTooLarge => ErrorKind::ContentTooLarge,
+            ErrorCode::ContentTooLarge | ErrorCode::CommitTooLarge | ErrorCode::MergeTooLarge => {
+                ErrorKind::ContentTooLarge
+            }
             ErrorCode::RangeNotSatisfiable => ErrorKind::RangeNotSatisfiable,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
+            | ErrorCode::PoolNotFound
             | ErrorCode::SnapshotNotFound
             | ErrorCode::PathNotFound
             | ErrorCode::InodeNotFound
@@ -204,11 +209,11 @@ impl ErrorCode {
             | ErrorCode::ServerBusy
             | ErrorCode::ShuttingDown
             | ErrorCode::StoreContention
-            | ErrorCode::CheckpointUnavailable
+            | ErrorCode::SnapshotUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::IndexLagging
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
-            ErrorCode::CommitOutcomeUnknown | ErrorCode::OutcomeUnknown => ErrorKind::OutcomeUnknown,
+            ErrorCode::OutcomeUnknown => ErrorKind::OutcomeUnknown,
             ErrorCode::IndexCorrupt | ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
             ErrorCode::ServerError => ErrorKind::Internal,
             // The spec deliberately reports precondition failures
@@ -217,6 +222,7 @@ impl ErrorCode {
             // contract").
             ErrorCode::ContentNotPrepared
             | ErrorCode::PathConflict
+            | ErrorCode::WrongKind
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
@@ -229,7 +235,7 @@ impl ErrorCode {
             // The namespace's access mode is unrestricted, so it has no access rows.
             | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingVersionMismatch
-            // Undelete's target is not the root of a live deletion: a
+            // A restore's target is not the root of a deletion in the trash: a
             // state conflict, resolved by re-reading namespace state.
             | ErrorCode::NotDeleted
             | ErrorCode::WriterFenced
@@ -242,7 +248,7 @@ impl ErrorCode {
             | ErrorCode::MergeConflict
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
-            | ErrorCode::RebootstrapRequired => ErrorKind::Conflict,
+            | ErrorCode::BelowRetentionFloor => ErrorKind::Conflict,
         }
     }
 
@@ -265,11 +271,13 @@ impl ErrorCode {
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
             | ErrorCode::MergeTooLarge
+            | ErrorCode::CommitTooLarge
             | ErrorCode::RangeNotSatisfiable
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound
             | ErrorCode::MethodNotAllowed
             | ErrorCode::NamespaceNotFound
+            | ErrorCode::PoolNotFound
             | ErrorCode::NamespaceDeleted
             | ErrorCode::NamespaceExists
             | ErrorCode::SnapshotNotFound
@@ -278,6 +286,7 @@ impl ErrorCode {
             | ErrorCode::InodeNotFound
             | ErrorCode::RevisionNotFound
             | ErrorCode::PathConflict
+            | ErrorCode::WrongKind
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
@@ -291,18 +300,17 @@ impl ErrorCode {
             | ErrorCode::CommitIdReuseConflict
             | ErrorCode::MergeRangeConflict
             | ErrorCode::MergeConflict
-            | ErrorCode::CommitOutcomeUnknown
             | ErrorCode::OutcomeUnknown
             | ErrorCode::WriterSessionClosed
             | ErrorCode::StoreContention
             | ErrorCode::DeadlineExceeded
-            | ErrorCode::CheckpointUnavailable
+            | ErrorCode::SnapshotUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
-            | ErrorCode::RebootstrapRequired
+            | ErrorCode::BelowRetentionFloor
             | ErrorCode::QueryUnindexable
             | ErrorCode::IndexLagging
             | ErrorCode::IndexCorrupt
@@ -324,6 +332,7 @@ impl ErrorCode {
             | ErrorCode::InodeNotFound
             | ErrorCode::RevisionNotFound
             | ErrorCode::PathConflict
+            | ErrorCode::WrongKind
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
@@ -341,6 +350,7 @@ impl ErrorCode {
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
             | ErrorCode::MergeTooLarge
+            | ErrorCode::CommitTooLarge
             | ErrorCode::RangeNotSatisfiable
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound
@@ -351,7 +361,6 @@ impl ErrorCode {
             | ErrorCode::SnapshotNotFound
             | ErrorCode::WriterFenced
             | ErrorCode::CommitIdReuseConflict
-            | ErrorCode::CommitOutcomeUnknown
             | ErrorCode::OutcomeUnknown
             | ErrorCode::CommitQueueFull
             | ErrorCode::ServerBusy
@@ -359,13 +368,14 @@ impl ErrorCode {
             | ErrorCode::WriterSessionClosed
             | ErrorCode::StoreContention
             | ErrorCode::DeadlineExceeded
-            | ErrorCode::CheckpointUnavailable
+            | ErrorCode::SnapshotUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound
+            | ErrorCode::PoolNotFound
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
-            | ErrorCode::RebootstrapRequired
+            | ErrorCode::BelowRetentionFloor
             | ErrorCode::QueryUnindexable
             | ErrorCode::IndexLagging
             | ErrorCode::IndexCorrupt
@@ -381,10 +391,10 @@ impl ErrorCode {
     /// The commit's preconditions return `stale_head`, `stale_revision`,
     /// `stale_attributes`, `stale_access`, and `binding_version_mismatch`.
     /// The commit returns `path_conflict` when another inode took a name that
-    /// a create, move, or undelete needs, `inode_not_found` when a deletion
+    /// a create, move, or restore needs, `inode_not_found` when a deletion
     /// hid an inode that the merge changes or the directory that an inode
-    /// goes into, and `not_deleted` when another writer undeleted an inode
-    /// that the merge undeletes. A later plan reports a changed row that isn't
+    /// goes into, and `not_deleted` when another writer restored an inode
+    /// that the merge restores. A later plan reports a changed row that isn't
     /// the fork's own as `merge_conflict`. The plan checks a subject's rights
     /// as the commit does, so the commit's `inode_not_found` isn't a subject's
     /// missing rights.
@@ -404,17 +414,20 @@ impl ErrorCode {
             | ErrorCode::StoragePermissionDenied
             | ErrorCode::ContentTooLarge
             | ErrorCode::MergeTooLarge
+            | ErrorCode::CommitTooLarge
             | ErrorCode::RangeNotSatisfiable
             | ErrorCode::NotSupported
             | ErrorCode::RouteNotFound
             | ErrorCode::MethodNotAllowed
             | ErrorCode::NamespaceNotFound
+            | ErrorCode::PoolNotFound
             | ErrorCode::NamespaceDeleted
             | ErrorCode::NamespaceExists
             | ErrorCode::SnapshotNotFound
             | ErrorCode::ContentNotPrepared
             | ErrorCode::PathNotFound
             | ErrorCode::RevisionNotFound
+            | ErrorCode::WrongKind
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::NamespaceUnrestricted
             | ErrorCode::WriterFenced
@@ -422,7 +435,6 @@ impl ErrorCode {
             | ErrorCode::CommitIdReuseConflict
             | ErrorCode::MergeRangeConflict
             | ErrorCode::MergeConflict
-            | ErrorCode::CommitOutcomeUnknown
             | ErrorCode::OutcomeUnknown
             | ErrorCode::CommitQueueFull
             | ErrorCode::ServerBusy
@@ -430,13 +442,13 @@ impl ErrorCode {
             | ErrorCode::WriterSessionClosed
             | ErrorCode::StoreContention
             | ErrorCode::DeadlineExceeded
-            | ErrorCode::CheckpointUnavailable
+            | ErrorCode::SnapshotUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
-            | ErrorCode::RebootstrapRequired
+            | ErrorCode::BelowRetentionFloor
             | ErrorCode::QueryUnindexable
             | ErrorCode::IndexLagging
             | ErrorCode::IndexCorrupt

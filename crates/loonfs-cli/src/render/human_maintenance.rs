@@ -7,9 +7,10 @@ use loonfs_merge::{
     MAX_NEW_FORKS,
 };
 use loonfs_types::{
-    ChangeSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
-    ListCheckpointsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome, NamespaceMetadata,
-    RunMaintenanceResponse, Snapshot, StoreProbeResponse,
+    CommitSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome,
+    MetadataSkippedWork, NamespaceMetadata, RunMaintenanceJobResponse,
+    RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
 };
 use loonfs_types::{MergeConflict, MergeConflictKind};
 
@@ -34,17 +35,18 @@ pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
     };
     format!(
         "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\n\
-         retention_window_ms: {}",
+         retention_window_ms: {}\npool: {}",
         namespace.namespace_id,
         namespace.head_seq.0,
         namespace.retention_floor_seq.0,
         namespace.created_by,
         retention_window(namespace.retention_window_ms),
+        namespace.pool_id,
     )
 }
 
 /// Formats a namespace's retention window, or `-` when the namespace has no
-/// window of its own and the server's window applies.
+/// window.
 fn retention_window(retention_window_ms: Option<u64>) -> String {
     retention_window_ms.map_or_else(|| "-".to_owned(), |window_ms| window_ms.to_string())
 }
@@ -114,24 +116,24 @@ pub(super) fn human_snapshot_deleted(response: &DeleteSnapshotResponse) -> Strin
     )
 }
 
-pub(super) fn human_checkpoints_listed(response: &ListCheckpointsResponse) -> String {
+pub(super) fn human_snapshot_records_listed(response: &ListSnapshotRecordsResponse) -> String {
     let mut lines = vec![
-        format!("checkpoints for {}", response.namespace_id),
-        "CREATED\tEXPIRES\tSEQ\tOWNER\tCHECKPOINT".to_owned(),
+        format!("snapshots for {}", response.namespace_id),
+        "CREATED\tEXPIRES\tSEQ\tOWNER\tSNAPSHOT".to_owned(),
     ];
-    for checkpoint in &response.checkpoints {
-        let owner = checkpoint_owner_label(&checkpoint.owner);
-        let expiry = checkpoint
+    for snapshot in &response.snapshots {
+        let owner = snapshot_record_owner_label(&snapshot.owner);
+        let expiry = snapshot
             .expires_at_ms
             .map_or_else(|| "-".to_owned(), format_utc_ms);
         lines.push(format!(
             "{}\t{expiry}\t{}\t{owner}\t{}",
-            format_utc_ms(checkpoint.created_at_ms),
-            checkpoint.captured_seq.0,
-            checkpoint.checkpoint_id,
+            format_utc_ms(snapshot.created_at_ms),
+            snapshot.captured_seq.0,
+            snapshot.snapshot_id,
         ));
     }
-    if response.checkpoints.is_empty() {
+    if response.snapshots.is_empty() {
         lines.push("(none)".to_owned());
     }
     if let Some(cursor) = &response.next_cursor {
@@ -142,24 +144,36 @@ pub(super) fn human_checkpoints_listed(response: &ListCheckpointsResponse) -> St
 
 pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
     match &ran.response {
-        RunMaintenanceResponse::RecoverAdministrator(recovery) => format!(
+        RunMaintenanceJobResponse::RecoverAdministrator(recovery) => format!(
             "administrator recovery for {}: access revision {} at seq {}",
             recovery.namespace_id, recovery.access_revision_no, recovery.committed_seq,
         ),
-        RunMaintenanceResponse::Metadata(metadata) => format!(
-            "metadata maintenance for {}: {} ({} compaction units published)",
-            metadata.namespace_id,
-            match metadata.outcome {
-                MetadataMaintenanceOutcome::CaughtUp => "caught up",
-                MetadataMaintenanceOutcome::Due => "work still due, run again later",
-                MetadataMaintenanceOutcome::Unknown => "outcome unknown to this CLI",
-            },
-            metadata.compaction_units,
-        ),
-        RunMaintenanceResponse::Gc(gc) => {
+        RunMaintenanceJobResponse::Metadata(metadata) => {
+            let mut lines = vec![format!(
+                "metadata maintenance for {}: {} ({} compaction units published)",
+                metadata.namespace_id,
+                match metadata.outcome {
+                    MetadataMaintenanceOutcome::CaughtUp => "caught up",
+                    MetadataMaintenanceOutcome::Due => "work still due, run again later",
+                    MetadataMaintenanceOutcome::Unknown => "outcome unknown to this CLI",
+                },
+                metadata.compaction_units,
+            )];
+            lines.extend(metadata.skipped.iter().map(|reason| {
+                match reason {
+                    MetadataSkippedWork::ExpiredRowRemovalWalkLimit => {
+                        "skipped the removal of rows that expired deletions hide: the kept inode walk reached its limit of 4,096 open directories"
+                    }
+                    MetadataSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
+                }
+                .to_owned()
+            }));
+            lines.join("\n")
+        }
+        RunMaintenanceJobResponse::Gc(gc) => {
             format!("gc for {}: {}", gc.namespace_id, gc_summary(gc))
         }
-        RunMaintenanceResponse::Retention(retention) => {
+        RunMaintenanceJobResponse::Retention(retention) => {
             let state = if ran
                 .retention_floor_before
                 .is_some_and(|before| retention.retention_floor_seq > before)
@@ -173,17 +187,26 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 retention.namespace_id, retention.retention_floor_seq.0
             )
         }
-        RunMaintenanceResponse::RetentionWindow(window) => match window.retention_window_ms {
+        RunMaintenanceJobResponse::RetentionWindow(window) => match window.retention_window_ms {
             Some(window_ms) => format!(
                 "retention window for {}: {window_ms} ms",
                 window.namespace_id
             ),
             None => format!(
-                "retention window for {}: none, so the server's window applies",
+                "retention window for {}: none, so the sweep doesn't advance the floor",
                 window.namespace_id
             ),
         },
-        RunMaintenanceResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
+        RunMaintenanceJobResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
+    }
+}
+
+pub(super) fn human_pool_maintenance_ran(response: &RunPoolMaintenanceJobResponse) -> String {
+    match response {
+        RunPoolMaintenanceJobResponse::Gc(gc) => {
+            format!("gc for {}: {}", gc.pool_id, pool_gc_summary(gc))
+        }
+        RunPoolMaintenanceJobResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
     }
 }
 
@@ -212,7 +235,7 @@ pub(super) fn human_changes(response: &ListChangesResponse) -> String {
 
 pub(super) fn human_grep_index_enabled(
     response: &GrepIndex,
-    waited_for_seq: Option<ChangeSeq>,
+    waited_for_seq: Option<CommitSeq>,
     steps: u64,
     budget_exhausted: bool,
 ) -> String {

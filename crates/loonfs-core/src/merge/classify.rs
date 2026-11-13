@@ -3,15 +3,14 @@
 //! ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#62-validation)),
 //! and plans what the merge's commit does to each inode.
 
+use super::memory::PlanningMemory;
 use super::net_change::{fork_layout, inode_change, touched_inodes, Changed, InodeChange};
 use super::operations::{
     access_update, attributes_update, binding_change, create_plan, revision_update, BindingChange,
     InodePlan,
 };
 use super::replay::Replay;
-use super::size::check_planned_bytes;
 use super::state::{Edge, InodeState, StateReader};
-use super::MergeAllowance;
 use crate::authorize::{require, Absence, Authorizer};
 use crate::commit::wal_size::merge_operation_bytes;
 use crate::error::{CoreError, Result};
@@ -20,11 +19,12 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::options::DiffOptions;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ChangeSeq, ContentLayout, ContentRef, DisplayName, InodeId,
+    AbsolutePath, AccessRight, CommitSeq, ContentLayout, ContentRef, DisplayName, InodeId,
     InodeKind, MergeConflict, MergeConflictKind, MergeConflictVersion, NameKey, MAX_PATH_DEPTH,
     ROOT_INODE_ID,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 /// A directory that the fork deleted or moved, whose subtree in the
 /// merged-into namespace a merge checks for changes that aren't the fork's
@@ -63,14 +63,14 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     /// whose change the merge applies.
     pub(super) fork_authorizer: Authorizer<'v>,
     pub(super) record: &'v MergeRecord,
-    pub(super) fork_point_seq: ChangeSeq,
-    /// The publisher's merge allowance, which the running size bound checks
-    /// too.
-    pub(super) allowance: MergeAllowance,
+    pub(super) fork_point_seq: CommitSeq,
+    /// The memory that the plan uses, which the running size bound checks
+    /// against the merge allowance with the planned bytes.
+    pub(super) memory: Arc<PlanningMemory>,
     /// The sequences above the fork point whose commits the check of a row's
     /// provenance read, and whether each commit is a merge from this fork.
     /// It grows with the rows that the merge replaces.
-    pub(super) own_seqs: HashMap<ChangeSeq, bool>,
+    pub(super) own_seqs: HashMap<CommitSeq, bool>,
     pub(super) plans: Vec<InodePlan>,
     /// The layout of each content reference that the plans write, from the
     /// fork's view after the fork's fold.
@@ -92,11 +92,14 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Classifies each inode that the fork's commits in the range touched,
-    /// in inode ID order.
+    /// in inode ID order, and checks the merge allowance against the plan's
+    /// memory after each inode.
     pub(super) async fn classify(&mut self) -> Result<()> {
-        let touched = touched_inodes(self.ours.view(), self.record.source_after_seq).await?;
+        let touched =
+            touched_inodes(self.ours.view(), self.record.source_after_seq, &self.memory).await?;
         for inode_id in touched {
             self.classify_inode(inode_id).await?;
+            self.memory.check()?;
         }
         self.check_subtrees().await
     }
@@ -160,9 +163,9 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             };
             // A deletion that an earlier merge of this fork made, and that
             // the fork has since undone, is undone by this merge too, while
-            // the deletion is recoverable here. Any other deletion conflicts.
-            let deletion_seq = self.undeletion(inode_id).await?;
-            if deletion_seq.is_none() && !self.hidden_by_undeleted_ancestor(inode_id, edge).await? {
+            // the deletion is in the trash here. Any other deletion conflicts.
+            let deletion_seq = self.restored_deletion(inode_id).await?;
+            if deletion_seq.is_none() && !self.hidden_by_restored_ancestor(inode_id, edge).await? {
                 self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
                     .await?;
                 return Ok(());
@@ -191,10 +194,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// merged-into namespace, when the merge undoes the deletion. That's a
     /// deletion of the inode itself that's the fork's own (see
     /// [`Self::is_own`]), which an earlier merge of the fork made, that's
-    /// still recoverable there, and that the fork undid, so the inode is
+    /// still in the trash there, and that the fork undid, so the inode is
     /// visible in the fork.
-    async fn undeletion(&mut self, inode_id: InodeId) -> Result<Option<ChangeSeq>> {
-        let Some(deletion) = self.theirs.view().recoverable_deletion(inode_id).await? else {
+    async fn restored_deletion(&mut self, inode_id: InodeId) -> Result<Option<CommitSeq>> {
+        let Some(deletion) = self.theirs.view().tombstone_in_trash(inode_id).await? else {
             return Ok(None);
         };
         if !self.is_own(deletion.committed_seq).await? {
@@ -210,10 +213,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
 
     /// Returns whether `inode_id` is hidden in the merged-into namespace
     /// only by deletions of its ancestors that the merge undoes (see
-    /// [`Self::undeletion`]), and keeps there the parent and the name that
+    /// [`Self::restored_deletion`]), and keeps there the parent and the name that
     /// `edge` gives it in the fork. Undoing those deletions shows the inode
     /// again without a change of its own.
-    async fn hidden_by_undeleted_ancestor(
+    async fn hidden_by_restored_ancestor(
         &mut self,
         inode_id: InodeId,
         edge: &Edge,
@@ -227,18 +230,18 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         {
             return Ok(false);
         }
-        let mut undeleted = false;
+        let mut restored = false;
         let mut ancestor = binding.parent_inode_id;
         // A binding cycle would be corrupt, and the bound ends the walk.
         for _ in 0..=MAX_PATH_DEPTH {
             if view.hiding_subtree_tombstone(ancestor).await?.is_some() {
-                if self.undeletion(ancestor).await?.is_none() {
+                if self.restored_deletion(ancestor).await?.is_none() {
                     return Ok(false);
                 }
-                undeleted = true;
+                restored = true;
             }
             if ancestor == ROOT_INODE_ID {
-                return Ok(undeleted);
+                return Ok(restored);
             }
             let Some(binding) = view.current_parent_binding_for_child(ancestor).await? else {
                 return Ok(false);
@@ -334,12 +337,12 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     ///
     /// The running bound stops the merge with `merge_too_large` as soon as
     /// the plans so far exceed one WAL object or the merge allowance (see
-    /// [`check_planned_bytes`]), so the plans keep at most about that much
-    /// memory, and a merge that admission would refuse isn't planned in
-    /// full. It adds operations up as the merge commit's own bound does. The
-    /// commit's bound also includes the temporary moves that ordering the
-    /// operations can add, and the planner checks the ordered commit against
-    /// the same bounds.
+    /// [`MergeAllowance::check`](super::MergeAllowance::check)), so the
+    /// plans keep at most about that much memory, and a merge that admission
+    /// would refuse isn't planned in full. It adds operations up as the merge
+    /// commit's own bound does. The commit's bound also includes the
+    /// temporary moves that ordering the operations can add, and the planner
+    /// checks the ordered commit against the same bounds.
     async fn add_plan(&mut self, plan: InodePlan) -> Result<()> {
         let operations = plan.operations();
         if operations.is_empty() {
@@ -354,7 +357,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 .planned_bytes
                 .saturating_add(merge_operation_bytes(operation, layout_extents));
         }
-        check_planned_bytes(self.planned_bytes, self.allowance)?;
+        self.memory.check_planned(self.planned_bytes)?;
         self.plans.push(plan);
         Ok(())
     }
@@ -377,8 +380,8 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Returns whether the row committed at `seq` is the fork's own. A row is
     /// the fork's own when it was committed at or below the fork point, or by
     /// a merge from this fork. A replay commit reads the commit at or below
-    /// the new fork's fork point through the pin.
-    pub(super) async fn is_own(&mut self, seq: ChangeSeq) -> Result<bool> {
+    /// the new fork's fork point through the snapshot.
+    pub(super) async fn is_own(&mut self, seq: CommitSeq) -> Result<bool> {
         if seq <= self.fork_point_seq {
             return Ok(true);
         }
@@ -386,7 +389,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             return Ok(*own);
         }
         let history = match &self.replay {
-            Some(replay) if seq <= replay.pinned.head().seq => replay.pinned.metadata_view(),
+            Some(replay) if seq <= replay.snapshot.head().seq => replay.snapshot.metadata_view(),
             _ => self.theirs.view(),
         };
         let commit = history.commit_at_seq(seq).await?.ok_or_else(|| {

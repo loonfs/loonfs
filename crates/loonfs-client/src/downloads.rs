@@ -14,7 +14,7 @@ use loonfs_types::{
 };
 use loonfs_types::{
     CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
-    CreateDownloadResponse, DownloadRange, ObjectTransferAccess,
+    CreateDownloadResponse, DownloadRange, ObjectTransfer,
 };
 use std::collections::VecDeque;
 use std::task::{Context, Poll};
@@ -361,10 +361,10 @@ impl Client {
             .await
     }
 
-    /// Opens a download grant, sending the grant's headers unchanged.
+    /// Opens a download's presigned URLs, sending their headers unchanged.
     ///
-    /// The grant names `[start_offset, size_bytes)` of the revision and the
-    /// stream starts where it does. For a grant from a nonzero offset, call
+    /// The download names `[start_offset, size_bytes)` of the revision and the
+    /// stream starts where it does. For a download from a nonzero offset, call
     /// [`DirectDownloadStream::fold_resumed_prefix`] with the bytes below it
     /// before reading, so the final checksum covers the complete revision.
     pub async fn open_direct_download(
@@ -379,7 +379,7 @@ impl Client {
         .await
     }
 
-    /// Opens an inode download grant.
+    /// Opens the presigned URLs of a download by inode.
     ///
     /// See [`Self::open_direct_download`].
     pub async fn open_direct_download_by_inode(
@@ -427,7 +427,7 @@ impl Client {
         if range.length == 0 {
             return Ok(futures::stream::empty().boxed());
         }
-        let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &range.access else {
+        let ObjectTransfer::PresignedUrl { url, headers, .. } = &range.transfer else {
             return Err(unsupported_download_access());
         };
         // A presigned GET reads an immutable object, so a resend is safe.
@@ -493,7 +493,7 @@ fn granted_start(ranges: &[DownloadRange], content_ref: &ContentRef, target: &st
     }
     let mut offset = start;
     for range in ranges {
-        let ObjectTransferAccess::PresignedUrl { method, .. } = &range.access else {
+        let ObjectTransfer::PresignedUrl { method, .. } = &range.transfer else {
             return Err(unsupported_download_access());
         };
         if method != "GET" {

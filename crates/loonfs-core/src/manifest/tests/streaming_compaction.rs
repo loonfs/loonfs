@@ -109,9 +109,9 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
                 .await
                 .expect("write file");
         }
-        create_checkpoint(store, namespace_id, &context)
+        create_snapshot(store, namespace_id, &context)
             .await
-            .expect("checkpoint");
+            .expect("snapshot");
     }
     for directory in 0..3u64 {
         crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
@@ -127,15 +127,15 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
             .await
             .expect("move file");
     }
-    // One deleted directory, so a tombstone and an active deletion travel
+    // One deleted directory, so a tombstone and a trash row travel
     // with the bindings the job drops.
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
         .delete_path("/d5", None)
         .await
         .expect("delete directory");
-    create_checkpoint(store, namespace_id, &context)
+    create_snapshot(store, namespace_id, &context)
         .await
-        .expect("checkpoint the deletions");
+        .expect("snapshot the deletions");
 
     // Compact everything into one base run, so the input has a base under its
     // delta runs the way a real over-budget group does. The base is cut into
@@ -179,17 +179,17 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
                 .await
                 .expect("write late file");
         }
-        create_checkpoint(store, namespace_id, &context)
+        create_snapshot(store, namespace_id, &context)
             .await
-            .expect("checkpoint late writes");
+            .expect("snapshot late writes");
     }
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
         .delete_path("/d6/f0.txt", None)
         .await
         .expect("delete a late file");
-    create_checkpoint(store, namespace_id, &context)
+    create_snapshot(store, namespace_id, &context)
         .await
-        .expect("checkpoint the late deletion");
+        .expect("snapshot the late deletion");
 }
 
 /// A namespace whose bindings group is dominated by one directory, so one
@@ -213,9 +213,9 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
             .await
             .expect("write file");
     }
-    create_checkpoint(store, namespace_id, &context)
+    create_snapshot(store, namespace_id, &context)
         .await
-        .expect("checkpoint the writes");
+        .expect("snapshot the writes");
     for round in 0..10u64 {
         for file in 0..6u64 {
             let from = match round {
@@ -227,9 +227,9 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
                 .await
                 .expect("rename file");
         }
-        create_checkpoint(store, namespace_id, &context)
+        create_snapshot(store, namespace_id, &context)
             .await
-            .expect("checkpoint the renames");
+            .expect("snapshot the renames");
     }
     drain_compaction(
         store,
@@ -260,9 +260,9 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
         .write_file_bytes("/wide/late.txt", b"late body\n", None)
         .await
         .expect("write a late file");
-    create_checkpoint(store, namespace_id, &context)
+    create_snapshot(store, namespace_id, &context)
         .await
-        .expect("checkpoint the late write");
+        .expect("snapshot the late write");
 }
 
 // -------------------------------------------------------------------------
@@ -726,7 +726,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group)
         .await
-        .with_frozen_floor_seq(ChangeSeq(0));
+        .with_frozen_floor_seq(CommitSeq(0));
     let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let Ok(result) = run_compaction(
         &store,
@@ -772,9 +772,9 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
                 .await
                 .expect("write a revision");
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("checkpoint the revisions");
+            .expect("snapshot the revisions");
     }
     let live = crate::test_support::visible_inode_id(&store, &namespace_id, "/live.txt").await;
     let deleted =
@@ -784,11 +784,11 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         .await
         .expect("delete a file")
         .committed_seq;
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint the deletion");
+        .expect("snapshot the deletion");
     // The floor stops just below the deletion, so the deletion stays
-    // recoverable.
+    // in the trash.
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -798,7 +798,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         ),
     )
     .engine()
-    .advance_retention_floor(RetentionTarget::Seq(ChangeSeq(deletion_seq.0 - 1)))
+    .advance_retention_floor(RetentionTarget::Seq(CommitSeq(deletion_seq.0 - 1)))
     .await
     .expect("advance the floor to the last revision");
     // Above the floor: two more revisions of the file that stays.
@@ -807,9 +807,9 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
             .write_file_bytes("/live.txt", body.as_bytes(), None)
             .await
             .expect("write a revision above the floor");
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("checkpoint the revision");
+            .expect("snapshot the revision");
     }
 
     for group in [
@@ -866,7 +866,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         assert_eq!(
             kept, expected,
             "each file keeps the revisions above the floor and its newest at or below it, \
-             and the recoverably deleted file keeps its newest"
+             and the file in the trash keeps its newest"
         );
         assert!(
             after[&ApiMetadataRowFamily::Revisions]
@@ -970,9 +970,9 @@ async fn a_repeated_revision_row_key_is_refused() {
         .write_file_bytes("/late.txt", b"late\n", None)
         .await
         .expect("write a late file");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint the late write");
+        .expect("snapshot the late write");
 
     // Loading descriptors does not read the duplicate rows. The compaction must
     // detect them before publishing its output.
@@ -1089,10 +1089,10 @@ async fn seed_binding_history(
                 .await
                 .expect("write file");
         }
-        // The WAL tail is capped, so each round is checkpointed as it is made.
-        create_checkpoint(store, namespace_id, &context)
+        // The WAL tail is capped, so each round is captured in a snapshot as it is made.
+        create_snapshot(store, namespace_id, &context)
             .await
-            .expect("checkpoint the writes");
+            .expect("snapshot the writes");
     }
     for round in 0..rounds {
         for parent in 0..parents {
@@ -1101,9 +1101,9 @@ async fn seed_binding_history(
                 .await
                 .expect("delete file");
         }
-        create_checkpoint(store, namespace_id, &context)
+        create_snapshot(store, namespace_id, &context)
             .await
-            .expect("checkpoint the deletions");
+            .expect("snapshot the deletions");
     }
     drain_compaction(
         store,
@@ -1133,9 +1133,9 @@ async fn seed_binding_history(
         .write_file_bytes("/late.txt", b"late\n", None)
         .await
         .expect("write a late file");
-    create_checkpoint(store, namespace_id, &context)
+    create_snapshot(store, namespace_id, &context)
         .await
-        .expect("checkpoint the late write");
+        .expect("snapshot the late write");
 }
 
 async fn install_synthetic_bindings_base(
@@ -1169,13 +1169,13 @@ async fn install_synthetic_bindings_base(
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 delta_index: delta,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: delta,
                 },
             },
@@ -1188,13 +1188,13 @@ async fn install_synthetic_bindings_base(
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 delta_index: delta,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(2),
+                    seq: CommitSeq(2),
                     delta_index: delta,
                 },
                 state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
@@ -1547,7 +1547,7 @@ async fn large_compaction_inputs(
             rows.push(MetadataRow::AttributesRevision(AttributesRevisionRecord {
                 inode_id: InodeId(u128::from(index * 3 + run + 1)),
                 attributes_revision_no: AttributesRevisionNo(1),
-                committed_seq: ChangeSeq(run + 1),
+                committed_seq: CommitSeq(run + 1),
                 commit_id: CommitId::parse(format!("c_{run}")).expect("commit id"),
                 delta_index: 0,
                 committed_by: loonfs_types::ActorId::loonfs(),
@@ -1579,7 +1579,7 @@ async fn large_compaction_inputs(
         .expect("input segments");
         runs.push(MetadataRunManifest {
             run_no: RunNo(run + 1),
-            run_seq: ChangeSeq(run + 1),
+            run_seq: CommitSeq(run + 1),
             tier: if run == 0 {
                 RunTier::Base
             } else {
@@ -1638,9 +1638,9 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
         // A delta compaction: these attribute rows have no inodes or bindings,
         // so a base compaction's kept inode filter would remove every one.
         plan::CompactionPlacement::Delta {
-            output_seq: ChangeSeq(3),
+            output_seq: CommitSeq(3),
         },
-        ChangeSeq(0),
+        CommitSeq(0),
     );
     let Ok(result) = run_metadata_compaction(
         &segments,
@@ -1693,7 +1693,7 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
         .map(|_| {
             MetadataSegmentRowIterator::metadata(
                 ApiMetadataRowFamily::Attributes,
-                ChangeSeq(3),
+                CommitSeq(3),
                 vec![descriptor.clone()],
             )
         })
@@ -1929,7 +1929,7 @@ async fn a_fold_published_during_finalization_is_retried_over() {
         panic!("nothing cancelled this job");
     };
 
-    // A write with no checkpoint behind it leaves a WAL tail, which is what
+    // A write with no snapshot behind it leaves a WAL tail, which is what
     // the competing fold publishes.
     let activity_before = crate::test_support::namespace_store(&store, &namespace_id)
         .load_statistics()
@@ -2114,7 +2114,7 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             .write_file_bytes("/above-the-floor.txt", b"above\n", None)
             .await
             .expect("write a file");
-        create_checkpoint(&store, &namespace_id, &test_context())
+        create_snapshot(&store, &namespace_id, &test_context())
             .await
             .expect("fold the file");
         let before = crate::test_support::namespace_store(&store, &namespace_id)
@@ -2358,7 +2358,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
             .write_file_bytes(&format!("/f{index}.txt"), b"body\n", None)
             .await
             .expect("write a file");
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
             .expect("fold the file");
     }
@@ -2588,7 +2588,7 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
             .write_file_bytes(&format!("/file-{index}.txt"), b"data", None)
             .await
             .expect("write");
-        create_checkpoint(&store, &namespace, &context)
+        create_snapshot(&store, &namespace, &context)
             .await
             .expect("fold");
     }
@@ -3145,7 +3145,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         .write_file_bytes("/late/f.txt", b"late\n", None)
         .await
         .expect("write a later file");
-    create_checkpoint(&store, &namespace, &test_context())
+    create_snapshot(&store, &namespace, &test_context())
         .await
         .expect("fold the later write");
     let current_keys = referenced_segment_keys(&store, &namespace).await;
@@ -3190,7 +3190,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     ] {
         crate::test_support::namespace_store(&store, &namespace)
-            .gc(None, &options, &writer_at("collector", age_ms).clock())
+            .gc(&options, &writer_at("collector", age_ms).clock())
             .await
             .expect("collect");
         for key in &orphans {
@@ -3225,7 +3225,7 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
     state.push_revision(RevisionRecord {
         inode_id: InodeId(2),
         revision_no: RevisionNo(1),
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         commit_id: CommitId::parse("first").expect("commit"),
         committed_at_ms: 0,
         committed_by: loonfs_types::ActorId::loonfs(),
@@ -3233,9 +3233,9 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
         content_ref: reference.clone(),
     });
     for (content_id, size_bytes, committed_seq) in [
-        (reference.content_id.clone(), 8, ChangeSeq(1)),
-        (reference.content_id.clone(), 4, ChangeSeq(2)),
-        (absent.clone(), 4, ChangeSeq(1)),
+        (reference.content_id.clone(), 8, CommitSeq(1)),
+        (reference.content_id.clone(), 4, CommitSeq(2)),
+        (absent.clone(), 4, CommitSeq(1)),
     ] {
         state.push_content_layout(ContentLayoutRecord {
             content_id: content_id.clone(),
@@ -3255,7 +3255,7 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
     let state = state.build();
     let mut head =
         NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_types::ActorId::loonfs());
-    head.seq = ChangeSeq(2);
+    head.seq = CommitSeq(2);
     let policy = MetadataRunPolicy::default();
     let manifest = build_namespace_manifest_from_metadata_state(
         &store,

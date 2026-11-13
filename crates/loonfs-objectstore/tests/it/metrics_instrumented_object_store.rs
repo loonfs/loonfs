@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use futures::TryStreamExt;
-use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_segment, pin, wal_object};
+use loonfs_objectstore::keys::{
+    hint, metadata_manifest_object, metadata_segment, snapshot_record, wal_object,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, ObjectKeyKind,
@@ -112,7 +114,7 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let key = "namespaces/ns-1/content/con_00000000000000000000000001";
+    let key = "pools/pool_00000000000000000000000001/content/con_00000000000000000000000001";
     let metadata = store
         .put("source", bytes(b"base"), PutMode::CreateIfAbsent)
         .await
@@ -179,7 +181,7 @@ async fn a_verified_write_reaches_the_inner_store_and_records_one_put() {
 
     store
         .put_immutable_verified(
-            "namespaces/ns-1/content/con_00000000000000000000000001",
+            "pools/pool_00000000000000000000000001/content/con_00000000000000000000000001",
             bytes(b"content"),
         )
         .await
@@ -205,14 +207,14 @@ async fn records_get_success_bytes_out() {
 
     store
         .put_if_absent(
-            "namespaces/demo/content/con_5bsqqg28t5cy4tqkff04hmasw9",
+            "pools/pool_00000000000000000000000001/content/con_5bsqqg28t5cy4tqkff04hmasw9",
             bytes(b"abcdef"),
         )
         .await
         .expect("put object");
     let bytes = store
         .get(
-            "namespaces/demo/content/con_5bsqqg28t5cy4tqkff04hmasw9",
+            "pools/pool_00000000000000000000000001/content/con_5bsqqg28t5cy4tqkff04hmasw9",
             Some(ByteRange {
                 start_inclusive: 1,
                 end_exclusive: 4,
@@ -317,14 +319,14 @@ async fn instrumented_store_forwards_start_after_listing() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let prefix = "namespaces/ns-1/pins/";
-    let first = format!("{prefix}pin_00000000000000000001-0000000000000001.json");
-    let second = format!("{prefix}pin_00000000000000000001-0000000000000002.json");
+    let prefix = "namespaces/ns-1/snapshots/";
+    let first = format!("{prefix}snp_00000000000000000001-00000000000000000000000001.json");
+    let second = format!("{prefix}snp_00000000000000000001-00000000000000000000000002.json");
     for key in [&first, &second] {
         store
-            .put_if_absent(key, bytes(b"pin"))
+            .put_if_absent(key, bytes(b"snapshot"))
             .await
-            .expect("put pin");
+            .expect("put snapshot");
     }
 
     let keys = store
@@ -378,15 +380,17 @@ async fn classifies_durable_key_families() {
         .expect("put segment");
     store
         .put_if_absent(
-            &pin(
+            &snapshot_record(
                 &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_types::PinId::parse("pin_00000000000000000001-0000000000000001")
-                    .expect("valid pin id"),
+                &loonfs_types::SnapshotId::parse(
+                    "snp_00000000000000000001-00000000000000000000000001",
+                )
+                .expect("valid snapshot id"),
             ),
-            bytes(b"pin"),
+            bytes(b"snapshot"),
         )
         .await
-        .expect("put pin");
+        .expect("put snapshot");
 
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, ObjectKeyKind::WalObject);

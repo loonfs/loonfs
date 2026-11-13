@@ -32,13 +32,22 @@ pub(crate) fn store_kind_label(kind: Option<ConfiguredObjectStoreKind>) -> &'sta
 }
 
 /// Opens the `loonfs.<operation>` debug span of a public handle operation,
-/// with the runtime's mode and store kind, the namespace when one is given,
-/// and the fields that follow.
+/// with the runtime's mode and store kind, the namespace or the pool when one
+/// is given, and the fields that follow a namespace.
 macro_rules! operation_span {
     ($core:expr, $operation:literal) => {
         tracing::debug_span!(
             concat!("loonfs.", $operation),
             operation = $operation,
+            mode = $core.trace_mode(),
+            store_kind = $core.trace_store_kind(),
+        )
+    };
+    ($core:expr, $operation:literal, pool_id = $pool_id:expr) => {
+        tracing::debug_span!(
+            concat!("loonfs.", $operation),
+            operation = $operation,
+            pool_id = %$pool_id,
             mode = $core.trace_mode(),
             store_kind = $core.trace_store_kind(),
         )

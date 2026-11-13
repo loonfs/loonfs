@@ -9,7 +9,7 @@ use loonfs_client::{
 };
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    AbsolutePath, ActorId, ChangeSeq, CommitId, CommitRequest, DestinationBehavior,
+    AbsolutePath, ActorId, CommitId, CommitRequest, CommitSeq, DestinationBehavior,
     FilesystemOperation, RevisionNo,
 };
 use tempfile::tempdir;
@@ -337,7 +337,7 @@ async fn http_put_conflict_stands_when_only_the_message_changed() {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("list changes");
@@ -763,12 +763,12 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         .await
         .expect("first put");
 
-    // Pin the head, then give up incremental replay below it.
+    // Take a snapshot of the head, then give up incremental replay below it.
     harness
         .client
         .create_snapshot(&namespace, "trimmed")
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let advanced = maintenance_past_the_grace_window(harness.store.clone())
         .await
         .advance_retention_floor(&namespace)

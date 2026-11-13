@@ -9,7 +9,7 @@ On an embedded profile, `loonfs maintenance index enable` runs its bounded index
 Requests through an embedded profile work as follows:
 
 - **Validation and errors.** Requests go through the HTTP API's validation, error envelope, and JSON body limits. A failed request reports the HTTP API's request ID and error details.
-- **Deadline.** The HTTP API cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content and maintenance runs aren't subject to that deadline.
+- **Deadline.** The HTTP API cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content and maintenance jobs aren't subject to that deadline.
 - **Concurrency.** The HTTP API admits at most 8 concurrent uploads and 16 concurrent downloads, the same defaults as the server.
 - **Transfer size.** The upload and download size limits are `u64::MAX`, so embedded transfers aren't limited in size.
 - **Downloads.** An interrupted embedded download starts again from the beginning. Progress for a single-file `loonfs get` counts the bytes received, but doesn't show a total.
@@ -89,7 +89,7 @@ Selectors
       Default namespace for the current environment. --namespace takes
       precedence over it, and it takes precedence over the profile default
 
-  Commands that commit (put, mkdir, rm, mv, cp, restore, undelete) accept:
+  Commands that commit (put, mkdir, rm, mv, cp, restore) accept:
     -m, --message <message>
       Annotation recorded on the commit and shown by `loonfs changes`
 
@@ -168,21 +168,28 @@ Profile management
     Make a profile the default
 
 Namespace management
-  loonfs namespace create <namespace> [--access acl --principal-scope <scope> --administrator <principal>...]
+  loonfs namespace create [namespace] [--access acl --principal-scope <scope> --administrator <principal>...]
                             [--retention-window-ms <ms>] [--actor-id <stable-id>]
-    Create a new empty namespace. --retention-window-ms sets how many
-    milliseconds of the namespace's history the server's maintenance sweep
-    keeps, in place of the server's retention_window_ms
+    Create a new empty namespace. Without a namespace ID, the CLI generates
+    an ID, prints it on stderr before it sends the request, and shows it
+    with the new namespace. With --json, the ID appears only in the result.
+    --retention-window-ms sets how many milliseconds of the namespace's
+    history the server's maintenance sweep keeps. Without this option, the
+    namespace's window is the server's retention_window_ms setting, if the
+    server has that setting
 
   loonfs namespace show [namespace]
-    Show the selected namespace's status, creator, and retention window
+    Show the selected namespace's status, creator, retention window, and
+    pool ID
 
-  loonfs namespace fork <source> <new-namespace> [--snapshot <id>] [--actor-id <stable-id>]
-    Fork a namespace into a new one. The fork shares the source's existing
-    content and metadata objects without copying the filesystem. Forking
-    the current head might first fold the source's outstanding WAL tail.
-    Use --snapshot to fork from an unexpired snapshot instead of the current
-    head.
+  loonfs namespace fork <source> [new-namespace] [--snapshot <id>] [--actor-id <stable-id>]
+    Fork a namespace into a new one. Without a new namespace ID, the CLI
+    generates an ID, prints it on stderr before it sends the request, and
+    shows it with the new namespace. With --json, the ID appears only in the
+    result. The fork shares the source's existing content and metadata
+    objects without copying the filesystem. Forking the current head might
+    first fold the source's outstanding WAL tail. Use --snapshot to fork
+    from an unexpired snapshot instead of the current head.
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
     Delete a namespace and retire its ID. The deletion can't be undone. To
@@ -190,7 +197,7 @@ Namespace management
     --expected-head-seq, the command deletes only if the namespace head is
     still at that sequence
 
-  loonfs merge <namespace> --from <fork> [--through <seq>] [--record <path>]
+  loonfs merge <namespace> --source <fork> [--through <seq>] [--record <path>]
                [--abandon] [--actor-id <stable-id>]
     Merge a fork into the namespace it was forked from. A merge that's too
     large is merged in pieces. A merge that conflicts is rebased into a new
@@ -206,7 +213,7 @@ Namespace management
     resumes the session, and it has to use the same actor, subject, and
     --through. The command removes the record once the session is merged
     or abandoned. Without a record, it recovers the session's new forks
-    from the namespace's fork pins. --abandon abandons a failed session and
+    from the namespace's fork snapshots. --abandon abandons a failed session and
     deletes the new forks that its rebases created
 
   loonfs use <namespace>
@@ -239,7 +246,7 @@ Snapshot management
 
 Pagination
   ls, grep, revisions, trash, changes, snapshot list, and maintenance
-  checkpoint list return one page by default. --limit sets the total
+  snapshot list return one page by default. --limit sets the total
   maximum across pages, --page-size sets the size of each request, and
   --cursor resumes a previous result. --all fetches every page for human
   output. --json returns a bounded document and can't be combined with
@@ -338,7 +345,7 @@ Writing
 
   loonfs rm <path> [-r] [--actor-id <id>]
     Delete a file, or with -r a directory and everything under it, as one
-    commit. The output includes the handle that `loonfs undelete` needs
+    commit. The output includes the handle that `loonfs restore` needs
 
   loonfs mv <source> <dest> [--force]
             [--expected-destination-inode-id <id>]
@@ -366,19 +373,19 @@ History and recovery
                  [--actor-id <id>]
     Write a prior revision's content as the file's next revision
 
-  loonfs trash [--limit <n>] [--page-size <n>] [--cursor <cursor>]
-               [--all] [--jsonl]
-    List recoverable deletions, including when each item was deleted and the
-    exact `loonfs undelete` command that restores it
-
-  loonfs undelete [<path>] --inode <id> --deletion-seq <seq>
-                  [--actor-id <id>]
-    Recover a deleted file or directory. --inode and --deletion-seq come
+  loonfs restore --inode <id> --deletion-seq <seq> [--to <path>]
+                 [--actor-id <id>]
+    Restore a deleted file or directory. --inode and --deletion-seq come
     from `loonfs trash` or the `rm` output, and together they identify one
     exact deletion, so a stale command can't cancel a later delete. Omit
-    <path> to restore the item in place, under the parent and name recorded
+    --to to restore the item in place, under the parent and name recorded
     with its deletion. That works even if an enclosing directory was
-    renamed since. Pass <path> to restore it somewhere else
+    renamed since. Pass --to to restore it somewhere else
+
+  loonfs trash [--limit <n>] [--page-size <n>] [--cursor <cursor>]
+               [--all] [--jsonl]
+    List the trash, including when each item was deleted and the
+    exact `loonfs restore` command that restores it
 
   loonfs changes [--after <seq>] [--limit <n>] [--page-size <n>]
                  [--all] [--jsonl] [--snapshot-id <id>]
@@ -403,7 +410,7 @@ Maintenance
     Fold the WAL tail if it's due, and compact metadata until nothing is
     due. A compaction unit can take minutes, so the command can too.
     It stops after 16 compaction units. A `due` outcome means that work
-    remains, and a later run continues it. --max-wal-tail-objects
+    remains, and a later job continues it. --max-wal-tail-objects
     overrides the default fold threshold.
 
   loonfs maintenance fold
@@ -420,42 +427,57 @@ Maintenance
     Unix time in milliseconds. Whatever the target, the floor doesn't
     pass a commit that's less than one hour old, and the output shows the
     floor that the advance reached. An embedded advance against a bucket
-    opens a writer session, which takes the namespace's writer epoch, so a
-    server's session for that namespace returns writer_fenced to its next
-    request.
+    writes the new floor to the namespace's WAL as a floor object and
+    claims no writer epoch, so a server's session for that namespace isn't
+    fenced.
 
   loonfs maintenance retention window (--retention-window-ms <ms> | --clear)
     Set or clear the namespace's retention window. The server's
     maintenance sweep keeps this much of the namespace's history, in
-    milliseconds, instead of applying the server's retention_window_ms.
-    --clear removes the namespace's window, so that the server's window
-    applies again. The new window takes effect at the sweep's next full
-    pass, and the command doesn't move the floor itself.
+    milliseconds. --clear removes the namespace's window, so the sweep
+    doesn't advance the namespace's floor. The new window takes effect at
+    the sweep's next full pass, and the command doesn't move the floor
+    itself.
 
   loonfs maintenance gc [--grace-window-ms <ms>]
-    Run one complete pass and print its report. Each call reads the current
-    manifest and hint, then lists every family from the beginning and
-    sweeps each family to the end.
+    Run one collection of the namespace and print its report. Each
+    call reads the current manifest and hint, lists the snapshots, then lists
+    every family under the namespace's prefix from the beginning and
+    sweeps each family to the end. The collection deletes the namespace's
+    unreferenced manifests, WAL objects, metadata segments, extension
+    segments, and snapshots. The namespace's content objects, upload records,
+    and temporary objects are stored in its pool, and this command doesn't
+    delete them. `loonfs maintenance pool gc` collects them, and a
+    server's sweep runs a collection of each pool.
     --grace-window-ms protects objects younger than the window.
     --json includes every retention reason.
-    deleted.content_objects counts the content objects that no retained
-    view references, which are deleted once they're older than the grace
-    window. Once a deleted namespace is retired, repeated GC runs delete
-    its own content, and deleted.retired_content_objects counts the listed
-    content objects that were deleted. A pass with nothing left under the
-    content prefix reports zero.
-    deleted.temporary_objects counts store temporary objects older than the
-    window.
     deleted.extension_segments counts the gram content index's segments
     that no retained manifest lists. Like metadata segments, they're
     deleted once they're more than 24 hours old, whatever the window.
 
-  loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
-                               [--cursor <cursor>] [--all] [--jsonl]
-    List every pin in checkpoint ID order: snapshots and the pins that
-    forks keep on their source. This is the inventory of what keeps old
-    manifests from garbage collection. Expired snapshots remain listed
-    until garbage collection deletes them.
+  loonfs maintenance pool gc [<pool-id>] [--grace-window-ms <ms>]
+    Run one collection of a pool and print its report. A pool stores the
+    content objects, upload records, and temporary objects of a namespace
+    and its forks. This command deletes the pool's unreferenced content
+    objects, upload records, and temporary objects, and
+    `loonfs maintenance gc` doesn't. Without <pool-id>, the command
+    collects the pool of the selected namespace, which
+    `loonfs namespace show` prints as `pool`. With <pool-id>, the command
+    doesn't read a namespace. --grace-window-ms protects objects younger
+    than the window. --json includes every retention reason. For example:
+
+      gc for pool_3s0drmj8em84yb4mnetqkz2j0x: gc deleted 12 content objects, 1 upload sessions, 0 temporary objects (240 retained); mostly referenced: 236
+      listed 734003200 bytes under the pool
+      next reclamation at 2026-11-11 09:30:00Z
+
+    A pool with no pool record returns `pool_not_found`.
+
+  loonfs maintenance snapshot list [--limit <n>] [--page-size <n>]
+                             [--cursor <cursor>] [--all] [--jsonl]
+    List every snapshot in snapshot ID order: user snapshots and the fork
+    snapshots that forks keep on their source. This is the inventory of what
+    keeps old manifests from garbage collection. Expired snapshots remain
+    listed until garbage collection deletes them.
 
   loonfs maintenance index enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
     Enable the gram content index and wait for its backfill to reach the
@@ -780,7 +802,8 @@ Behavior notes
   LoonFS folds the namespace's WAL tail when the tail reaches the
   threshold, and compacts metadata after the fold. Everything else needs
   a one-off command: `loonfs maintenance metadata` folds an idle tail,
-  `loonfs maintenance gc` collects garbage, and
+  `loonfs maintenance gc` collects the namespace's garbage,
+  `loonfs maintenance pool gc` collects the namespace's pool, and
   `loonfs maintenance index enable` brings the grep index up to the
   namespace head. By default, servers maintain every namespace in their
   store on a regular schedule.

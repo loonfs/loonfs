@@ -3,10 +3,10 @@
 
 use super::calls::Overlap;
 use super::retries::MaintenanceCall;
-use super::{index_pending, lock, GarbageCollection, RunningScheduler, Scheduler, SchedulerState};
+use super::{index_pending, lock, RunningScheduler, Scheduler, SchedulerState};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
-use loonfs::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
+use loonfs::{CommitSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
 use loonfs_http::{panic_message, HeldNamespace};
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
@@ -169,7 +169,7 @@ impl Scheduler {
     async fn close_session(
         &self,
         namespace_id: &NamespaceId,
-        seq: Option<ChangeSeq>,
+        seq: Option<CommitSeq>,
         close: Close,
     ) {
         let inner = &self.inner;
@@ -227,7 +227,6 @@ impl Scheduler {
             metadata_retry_interval_ms = config.metadata_retry_interval_ms,
             gc_interval_ms = config.gc_interval_ms,
             sweep_interval_ms = config.sweep_interval_ms,
-            retention_window_ms = config.retention_window_ms.map(std::num::NonZeroU64::get),
             max_concurrent_maintenance = config.max_concurrent_maintenance.get(),
             maintains_grep_index = inner.grep.is_some(),
             "maintenance scheduler started"
@@ -256,7 +255,7 @@ impl Scheduler {
                 () = inner.stop.cancelled() => return,
                 _ = interval.tick() => {}
             }
-            let _ = self.run_sweep(GarbageCollection::Collect).await;
+            let _ = self.run_sweep().await;
         }
     }
 

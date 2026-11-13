@@ -15,7 +15,7 @@ use crate::storage::tail_content::{cut_layout, materialize_content_layout, Conte
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{next_public_ordinal, ChangeSeq, ContentRef, InodeId};
+use loonfs_types::{next_public_ordinal, CommitSeq, ContentRef, InodeId};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
@@ -153,7 +153,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         let head = &self.head;
         let request = candidate.intent();
         let committed_seq = next_public_ordinal(head.seq.0)
-            .map(ChangeSeq)
+            .map(CommitSeq)
             .ok_or_else(|| {
                 CoreError::NamespaceCorrupt(format!(
                     "the namespace head is at sequence {}, the largest sequence number, so no \
@@ -218,7 +218,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             if let CreatedInodeIds::Merge(Some(inode_id)) = operation_session.created_inode_ids {
                 // Only a bug in the merge's planner assigns an ID to an
                 // operation that creates no inode. A panic would return
-                // `commit_outcome_unknown` and panic again on every retry, so
+                // `outcome_unknown` and panic again on every retry, so
                 // the merge fails with an error that the caller doesn't retry.
                 return Err(CoreError::InvalidCommitRequest(format!(
                     "a merge assigned inode `{inode_id}` to an operation that creates no inode"

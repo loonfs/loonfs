@@ -369,7 +369,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_objectstore::ObjectStoreExtension;
-    use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, NamespaceId, MAX_PUBLIC_INTEGER};
+    use loonfs_types::{AbsolutePath, CommitId, CommitSeq, NamespaceId, MAX_PUBLIC_INTEGER};
     use std::assert_matches;
     use tempfile::tempdir;
 
@@ -498,7 +498,7 @@ mod tests {
 
         // Change only the in-memory head so this exercises the sequence limit
         // without modifying the stored metadata.
-        view.position.read_basis.head.seq = ChangeSeq(MAX_PUBLIC_INTEGER);
+        view.position.read_basis.head.seq = CommitSeq(MAX_PUBLIC_INTEGER);
         let candidate = CommitCandidate::new(CommitIntent::single(
             CommitId::parse("past-sequence-limit").expect("commit id"),
             loonfs_test_support::test_actor(),

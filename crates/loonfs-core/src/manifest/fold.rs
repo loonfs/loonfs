@@ -23,7 +23,7 @@ use futures::{stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
-use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo};
+use loonfs_types::{CommitSeq, ContentId, ManifestNo, NamespaceId, RunNo};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
@@ -44,11 +44,11 @@ pub struct FoldWalResponse {
     /// Namespace whose WAL tail was folded.
     pub namespace_id: NamespaceId,
     /// Head sequence the fold attempted to cover.
-    pub target_head_seq: ChangeSeq,
+    pub target_head_seq: CommitSeq,
     /// Current manifest number after the operation.
     pub manifest_no: ManifestNo,
     /// Sequence covered by that manifest.
-    pub manifest_head_seq: ChangeSeq,
+    pub manifest_head_seq: CommitSeq,
     /// Whether this call published the current manifest.
     pub outcome: FoldWalOutcome,
 }
@@ -59,8 +59,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// This is the latest-state maintenance operation: it absorbs the visible
     /// WAL tail into a new manifest, creating no
-    /// pin. Superseded manifests become garbage-collection
-    /// candidates once nothing pins them. The report includes the manifest
+    /// snapshot. Superseded manifests become garbage-collection
+    /// candidates once nothing keeps them. The report includes the manifest
     /// this call published.
     pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
         let folded = self
@@ -89,7 +89,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         projection: &ManifestProjection<'_, S>,
     ) -> Result<HashMap<ContentId, ContentLayoutRecord>> {
         let tail = projection.tail_state.as_ref();
-        // The fold writes every extent under the family root's prefix and
+        // The fold writes every extent under the pool's prefix and
         // records this namespace as the creator of every layout it writes,
         // because this namespace's WAL includes pieces only for chains that
         // it created.
@@ -98,7 +98,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .contents()
             .into_iter()
             .map(|content| {
-                let pieces = assemble_tail_content(&head.family_root_id, &content)?;
+                let pieces = assemble_tail_content(&head.pool_id, &content)?;
                 Ok((content, pieces))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -133,8 +133,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     /// Folds the WAL tail and publishes the next manifest as the maintainer.
     ///
-    /// The manifest copies both epochs from its predecessor (format spec,
-    /// "Publishing a manifest"). A writer session passes the tail
+    /// The manifest copies both epochs from its predecessor, and its
+    /// retention floor is the higher of its predecessor's floor and the
+    /// floors of the floor objects that the fold covers (format spec,
+    /// "Publishing a manifest"). A tail of floor objects and no commits is
+    /// folded too, into a manifest with no new run. A writer session passes the tail
     /// it keeps as `held`, and every other caller passes `None`, which loads the
     /// tail from the store. A tail passed as `held` whose last check is at the revalidation
     /// bound is discarded, and the tail is loaded from the store too: a check
@@ -311,12 +314,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
 
         let previous = projection.manifest_segments.manifest().payload();
+        // The head's floor includes every floor object in the tail that the
+        // fold covers (format spec, "Publishing a manifest").
         Ok(NamespaceManifestPayload {
             activity,
             head_seq,
             writer_epoch: projection.head.writer_epoch,
             next_run_no,
             folded_wal_no: projection.head.wal_no,
+            retention_floor_seq: previous
+                .retention_floor_seq
+                .max(projection.head.retention_floor_seq),
             ..previous
                 .successor(runs)
                 .map_err(|_| no_manifest_after(previous.manifest_no))?
@@ -329,6 +337,7 @@ fn covers_tail(current: &NamespaceManifestPayload, head: &NamespaceReadState) ->
     current.folded_wal_no >= head.wal_no && current.head_seq >= head.seq
 }
 
+#[derive(Clone)]
 pub struct FoldedWalTail {
     pub response: FoldWalResponse,
     /// The manifest that covers the tail after the call: the one it
@@ -339,7 +348,7 @@ pub struct FoldedWalTail {
 impl FoldedWalTail {
     fn new(
         namespace_id: &NamespaceId,
-        target_head_seq: ChangeSeq,
+        target_head_seq: CommitSeq,
         manifest: PublishedManifest,
         outcome: FoldWalOutcome,
     ) -> Self {
@@ -481,7 +490,7 @@ pub(crate) fn no_manifest_after(current: ManifestNo) -> CoreError {
 
 /// Advances the manifest's run allocator after a producer has taken
 /// `current`.
-pub fn next_run_no_after(current: RunNo) -> Result<RunNo> {
+pub(crate) fn next_run_no_after(current: RunNo) -> Result<RunNo> {
     current.successor().map_err(|_| {
         CoreError::NamespaceCorrupt(format!(
             "the manifest's next run number is {current}, the largest run number, so no \

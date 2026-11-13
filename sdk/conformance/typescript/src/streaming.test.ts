@@ -79,7 +79,7 @@ function fakeFetch(
                 ranges: fixture.ranges?.map((part, index) => ({
                     start_offset: part.start_offset,
                     length: part.length,
-                    access: {
+                    transfer: {
                         kind: "presigned_url",
                         method: "GET",
                         url: `http://objects.test/object/${index}`,
@@ -90,7 +90,7 @@ function fakeFetch(
                     {
                         start_offset: 0,
                         length: fixture.size_bytes,
-                        access: {
+                        transfer: {
                             kind: "presigned_url",
                             method: "GET",
                             url: "http://objects.test/object",

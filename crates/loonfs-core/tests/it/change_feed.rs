@@ -6,30 +6,30 @@ use loonfs_core::test_support::NamespaceFixture;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::commit_id;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
+    AbsolutePath, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
 };
-use loonfs_types::{FilesystemChange, ListChangesResponse};
+use loonfs_types::{FilesystemEvent, ListChangesResponse};
 use tempfile::tempdir;
 
 fn path(value: &str) -> AbsolutePath {
     AbsolutePath::parse(value).expect("valid absolute path")
 }
 
-fn event_kind(event: &FilesystemChange) -> &'static str {
+fn event_kind(event: &FilesystemEvent) -> &'static str {
     match event {
-        FilesystemChange::DirectoryCreated { .. } => "directory_created",
-        FilesystemChange::FileCreated { .. } => "file_created",
-        FilesystemChange::ContentChanged { .. } => "content_changed",
-        FilesystemChange::Moved { .. } => "moved",
-        FilesystemChange::Deleted { .. } => "deleted",
-        FilesystemChange::Undeleted { .. } => "undeleted",
-        FilesystemChange::AttributesChanged { .. } => "attributes_changed",
-        FilesystemChange::AccessChanged { .. } => "access_changed",
-        FilesystemChange::Unknown => "unknown",
+        FilesystemEvent::DirectoryCreated { .. } => "directory_created",
+        FilesystemEvent::FileCreated { .. } => "file_created",
+        FilesystemEvent::ContentChanged { .. } => "content_changed",
+        FilesystemEvent::Moved { .. } => "moved",
+        FilesystemEvent::Deleted { .. } => "deleted",
+        FilesystemEvent::Restored { .. } => "restored",
+        FilesystemEvent::AttributesChanged { .. } => "attributes_changed",
+        FilesystemEvent::AccessChanged { .. } => "access_changed",
+        FilesystemEvent::Unknown => "unknown",
     }
 }
 
-fn commit_events<'a>(changes: &'a ListChangesResponse, id: &str) -> &'a [FilesystemChange] {
+fn commit_events<'a>(changes: &'a ListChangesResponse, id: &str) -> &'a [FilesystemEvent] {
     &changes
         .changes
         .iter()
@@ -46,7 +46,7 @@ fn append_offsets(changes: &ListChangesResponse, id: &str) -> Vec<Option<u64>> {
     commit_events(changes, id)
         .iter()
         .map(|event| match event {
-            FilesystemChange::ContentChanged { append_offset, .. } => *append_offset,
+            FilesystemEvent::ContentChanged { append_offset, .. } => *append_offset,
             other => panic!("expected `content_changed` in commit `{id}`, got {other:?}"),
         })
         .collect()
@@ -149,16 +149,16 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
     submit_operation(
         &store,
         &namespace_id,
-        commit_id("undelete-copy"),
-        FilesystemOperation::Undelete {
+        commit_id("restore-copy"),
+        FilesystemOperation::RestoreDeleted {
             inode_id: copied_inode_id,
             deletion_seq: deletion.committed_seq,
-            destination: loonfs_types::options::UndeleteDestination::Recorded,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
         },
         &context,
     )
     .await
-    .expect("undelete copied file");
+    .expect("restore copied file");
     submit_operation(
         &store,
         &namespace_id,
@@ -172,7 +172,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
     .await
     .expect("restore first revision");
 
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("read change feed");
     assert_eq!(event_kinds(&changes, "create-file"), vec!["file_created"]);
@@ -191,7 +191,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
     );
     assert_eq!(event_kinds(&changes, "copy-file"), vec!["file_created"]);
     assert_eq!(event_kinds(&changes, "delete-copy"), vec!["deleted"]);
-    assert_eq!(event_kinds(&changes, "undelete-copy"), vec!["undeleted"]);
+    assert_eq!(event_kinds(&changes, "restore-copy"), vec!["restored"]);
     assert_eq!(
         event_kinds(&changes, "restore-file"),
         vec!["content_changed"]
@@ -269,7 +269,7 @@ async fn append_events_report_where_the_appended_bytes_begin_before_and_after_a_
                 .await
                 .expect("fold the WAL tail into commit rows");
         }
-        let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+        let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
             .await
             .expect("read change feed");
         for (id, offsets) in &expected {
@@ -280,7 +280,7 @@ async fn append_events_report_where_the_appended_bytes_begin_before_and_after_a_
             );
         }
         let content_id = |id| match commit_events(&changes, id) {
-            [FilesystemChange::ContentChanged { content_ref, .. }] => &content_ref.content_id,
+            [FilesystemEvent::ContentChanged { content_ref, .. }] => &content_ref.content_id,
             other => panic!("expected one `content_changed` event, got {other:?}"),
         };
         assert_ne!(content_id("append-to-restored"), content_id("restore"));
@@ -334,7 +334,7 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
         let changes = list_changes_after(&store, &fork, forked.head_seq)
             .await
             .expect("read the fork's change feed");
-        let [FilesystemChange::ContentChanged {
+        let [FilesystemEvent::ContentChanged {
             content_ref,
             append_offset,
             ..

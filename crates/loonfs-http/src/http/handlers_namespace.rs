@@ -11,9 +11,9 @@ use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    CapabilityDocument, ChangeSeq, Commit, CreateNamespaceRequest, ForkNamespaceRequest,
-    MergeForkRequest, NamespaceId, NextMergeRangeResponse, RebaseForkRequest, RebaseForkResponse,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
+    CapabilityDocument, Commit, CommitSeq, CreateNamespaceRequest, ForkNamespaceForRebaseRequest,
+    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NextMergeRangeResponse, ReplayForkRequest,
+    ReplayForkResponse, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
@@ -29,7 +29,10 @@ use std::sync::Arc;
 const MERGE_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/through_seq"];
 
 /// The JSON Pointers of the rebase request fields that a rejection can name.
-const REBASE_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/new_namespace_id", "/through_seq"];
+const REBASE_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/new_namespace_id"];
+
+/// The JSON Pointers of the replay request fields that a rejection can name.
+const REPLAY_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/through_seq"];
 
 /// Advertises a feature, or removes the key: an absent key and an
 /// advertised-false key both mean unsupported, and the document stays small.
@@ -48,7 +51,7 @@ fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: 
 #[serde(deny_unknown_fields)]
 pub(super) struct DeleteNamespaceQuery {
     /// The head sequence that the namespace must still have for the delete to succeed.
-    expected_head_seq: Option<ChangeSeq>,
+    expected_head_seq: Option<CommitSeq>,
 }
 
 /// The query of the next-range query.
@@ -192,7 +195,7 @@ pub(super) async fn get_capabilities(
         path = "/v0/namespaces",
         tag = "namespaces",
         summary = "Create namespace",
-        description = "Creates a new empty namespace.",
+        description = "Creates a new empty namespace. Without `namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         request_body = CreateNamespaceRequest,
         responses(
             (status = 200, description = "Namespace created", body = loonfs_types::NamespaceMetadata),
@@ -214,7 +217,7 @@ pub(super) async fn create_namespace(
     let namespace = state
         .runtime
         .create_namespace_with_options(
-            &request.namespace_id,
+            &request.namespace_id.unwrap_or_else(NamespaceId::generate),
             &actor_id,
             &CreateNamespaceOptions {
                 access: request.access,
@@ -332,9 +335,10 @@ pub(super) async fn delete_namespace(
         expected_head_seq: query.expected_head_seq,
     };
     let namespace = state.open_writer(&namespace_id, subject).await?;
-    let response = namespace.delete_with_options(&options).await.map_err(
-        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
-    )?;
+    let response = namespace
+        .delete_with_options(&options)
+        .await
+        .map_err(ApiResponseError::runtime)?;
     state.namespaces.forget(&namespace_id);
     Ok(Json(response))
 }
@@ -351,7 +355,7 @@ pub(super) async fn delete_namespace(
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
         summary = "Fork namespace",
-        description = "Creates a new namespace from the source namespace's current head or from an unexpired snapshot.",
+        description = "Creates a new namespace from the source namespace's current head or from an unexpired snapshot. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         params(("namespace_id" = String, Path, description = "The source namespace ID.")),
         request_body = ForkNamespaceRequest,
         responses(
@@ -378,7 +382,9 @@ pub(super) async fn fork_namespace(
     let namespace = runtime
         .fork_namespace_with_options(
             &source_namespace_id,
-            &request.new_namespace_id,
+            &request
+                .new_namespace_id
+                .unwrap_or_else(NamespaceId::generate),
             &actor_id,
             &loonfs::ForkNamespaceOptions {
                 snapshot_id: request.snapshot_id,
@@ -404,7 +410,7 @@ pub(super) async fn fork_namespace(
         path = "/v0/namespaces/{namespace_id}/merges",
         tag = "namespaces",
         summary = "Merge a fork",
-        description = "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. After the commit, the server folds the namespace's WAL tail through it, unless the merge has already run for half of the request deadline, in which case the tail waits for the fold trigger like any other tail.",
+        description = "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. The merge's WAL object counts toward the namespace's fold triggers like any commit.",
         params(("namespace_id" = String, Path, description = "The namespace that the merge commits into.")),
         request_body = MergeForkRequest,
         responses(
@@ -412,9 +418,9 @@ pub(super) async fn fork_namespace(
             (status = 400, description = "Invalid request, or the namespace isn't a fork of this namespace", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
-            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 409, description = "Merge conflict, range conflict, or history below a retention floor", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 410, description = "The namespace or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 413, description = "The merge is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -448,13 +454,9 @@ pub(super) async fn merge_fork(
         .merge_fork_with_options(&source_namespace_id, &actor_id, &options)
         .await
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                &namespace_id,
-                error,
-            )
-            .with_body_field_params(MERGE_BODY_FIELDS)
-            .with_commit_id(&commit_id)
+            ApiResponseError::runtime(error)
+                .with_body_field_params(MERGE_BODY_FIELDS)
+                .with_commit_id(&commit_id)
         })?;
     Ok(Json(response))
 }
@@ -472,7 +474,7 @@ pub(super) async fn merge_fork(
         path = "/v0/namespaces/{namespace_id}/merges",
         tag = "namespaces",
         summary = "Get a fork's next merge range",
-        description = "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `rebootstrap_required`, the response's `outcome` says which floor instead of failing.",
+        description = "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `below_retention_floor`, the response's `outcome` says which floor instead of failing.",
         params(
             ("namespace_id" = String, Path, description = "The namespace that the fork merges into."),
             NextMergeRangeQuery
@@ -482,8 +484,8 @@ pub(super) async fn merge_fork(
             (status = 400, description = "Invalid request, or the source isn't a fork of this namespace", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
-            (status = 404, description = "Namespace not found", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
+            (status = 410, description = "The namespace or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -516,71 +518,116 @@ pub(super) async fn get_next_merge_range(
     Ok(Json(response))
 }
 
-/// Rebases a fork: replays its unmerged commits into a new fork of the
-/// namespace, which the first rebase creates. The server stores the
-/// `Loonfs-Actor` header, and the shared token doesn't verify the header. A
-/// runtime whose merge allowance is zero returns `not_supported` for
-/// `filesystem.merges` before it reads or creates a namespace.
+/// Creates a rebase's new fork: a new fork of the namespace's head for a
+/// fork of the namespace, which the fork's replay commits then go into. The
+/// server stores the `Loonfs-Actor` header, and the shared token doesn't
+/// verify the header. A runtime whose merge allowance is zero returns
+/// `not_supported` for `filesystem.merges` before it reads or creates a
+/// namespace.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         post,
-        operation_id = "rebase_fork",
+        operation_id = "fork_namespace_for_rebase",
+        extensions(
+            ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-retry" = json!("not_idempotent")),
+        ),
+        path = "/v0/namespaces/{namespace_id}/rebases",
+        tag = "namespaces",
+        summary = "Fork a namespace for a rebase",
+        description = "Creates a rebase's new fork from the namespace's head, for a fork of the namespace whose unmerged commits the replay route then replays into the new fork. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new fork's ID, and its `fork_basis.rebased_from` identifies the fork. A request whose new fork already exists returns `namespace_exists`.",
+        params(("namespace_id" = String, Path, description = "The namespace that the fork was forked from.")),
+        request_body = ForkNamespaceForRebaseRequest,
+        responses(
+            (status = 200, description = "New fork created", body = loonfs_types::NamespaceMetadata),
+            (status = 400, description = "Invalid request, or the source isn't a fork of this namespace", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
+            (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
+            (status = 409, description = "The new fork already exists, or history is below a retention floor", body = ErrorResponse),
+            (status = 410, description = "The namespace or the fork was deleted, or the new fork's ID was deleted and can't be used again, and `details.namespace_id` identifies which", body = ErrorResponse),
+            (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
+            (status = 501, description = "Merges are disabled", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn fork_namespace_for_rebase(
+    State(state): State<Arc<HttpState>>,
+    ActorHeader(actor_id): ActorHeader,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
+    AppJson(request): AppJson<ForkNamespaceForRebaseRequest>,
+) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
+    let namespace = state
+        .runtime_for(subject)
+        .fork_namespace_for_rebase(
+            &namespace_id,
+            &request.source_namespace_id,
+            &request
+                .new_namespace_id
+                .unwrap_or_else(NamespaceId::generate),
+            &actor_id,
+        )
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime(error).with_body_field_params(REBASE_BODY_FIELDS)
+        })?;
+    Ok(Json(namespace))
+}
+
+/// Replays a fork's unmerged commits into the namespace, a rebase's new fork
+/// for the fork, as one replay commit. The server stores the `Loonfs-Actor`
+/// header, and the shared token doesn't verify the header. A runtime whose
+/// merge allowance is zero returns `not_supported` for `filesystem.merges`
+/// before it reads a namespace.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        operation_id = "replay_fork",
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
         ),
-        path = "/v0/namespaces/{namespace_id}/rebases",
+        path = "/v0/namespaces/{namespace_id}/replays",
         tag = "namespaces",
-        summary = "Rebase a fork",
-        description = "Replays a fork's unmerged commits into a new fork of the namespace as one replay commit, which applies the changes that don't conflict with the namespace and reports the ones that do. The first rebase of a fork creates the new fork from the namespace's head, and a later rebase continues into it. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
-        params(("namespace_id" = String, Path, description = "The namespace that the fork was forked from.")),
-        request_body = RebaseForkRequest,
+        summary = "Replay a fork into a rebase's new fork",
+        description = "Replays a fork's unmerged commits into the namespace, a rebase's new fork for the fork, as one replay commit, which applies the changes that don't conflict with the new fork and reports the ones that do. Each request continues after the new fork's previous replay commit. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
+        params(("namespace_id" = String, Path, description = "The rebase's new fork, which the replay commit commits into.")),
+        request_body = ReplayForkRequest,
         responses(
-            (status = 200, description = "Fork rebased", body = RebaseForkResponse),
-            (status = 400, description = "Invalid request, the source isn't a fork of this namespace, or the new namespace isn't a rebase of the fork", body = ErrorResponse),
+            (status = 200, description = "Fork replayed", body = ReplayForkResponse),
+            (status = 400, description = "Invalid request, or the namespace isn't a rebase's new fork for the fork", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
-            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 404, description = "The new fork or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 409, description = "Range conflict, or history below a retention floor", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 410, description = "The new fork or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 413, description = "The replay commit is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
 )]
-pub(super) async fn rebase_fork(
+pub(super) async fn replay_fork(
     State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    AppJson(request): AppJson<RebaseForkRequest>,
-) -> Result<Json<RebaseForkResponse>, ApiResponseError> {
-    let RebaseForkRequest {
+    AppJson(request): AppJson<ReplayForkRequest>,
+) -> Result<Json<ReplayForkResponse>, ApiResponseError> {
+    let ReplayForkRequest {
         source_namespace_id,
-        new_namespace_id,
         through_seq,
         commit_id,
         message,
     } = request;
-    state
-        .runtime_for(subject.clone())
-        .fork_namespace_for_rebase(
-            &namespace_id,
-            &source_namespace_id,
-            &new_namespace_id,
-            &actor_id,
-        )
-        .await
-        .map_err(|error| {
-            ApiResponseError::runtime(error)
-                .with_body_field_params(REBASE_BODY_FIELDS)
-                .with_commit_id(&commit_id)
-        })?;
     let new_fork = state
-        .open_writer(&new_namespace_id, subject)
+        .open_writer(&namespace_id, subject)
         .await
         .map_err(|error| error.with_commit_id(&commit_id))?;
     let options = MergeForkOptions {
@@ -592,13 +639,9 @@ pub(super) async fn rebase_fork(
         .replay_fork_with_options(&source_namespace_id, &actor_id, &options)
         .await
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                &new_namespace_id,
-                error,
-            )
-            .with_body_field_params(REBASE_BODY_FIELDS)
-            .with_commit_id(&commit_id)
+            ApiResponseError::runtime(error)
+                .with_body_field_params(REPLAY_BODY_FIELDS)
+                .with_commit_id(&commit_id)
         })?;
     Ok(Json(response))
 }

@@ -279,11 +279,11 @@ class FilesClient(_GeneratedFilesClient):
                 )
                 completion = CompleteUploadBody_ServiceProxied()
             elif begin.mode == "direct_put":
-                if begin.access is None:
-                    raise RuntimeError("direct_put session lacks access")
+                if begin.transfer is None:
+                    raise RuntimeError("direct_put session lacks a presigned URL")
                 source.digest = _IncrementalChecksum(begin.checksum_algorithm)
                 _send_stream_presigned(
-                    client, begin.access, source.chunks(), timeout, size_bytes
+                    client, begin.transfer, source.chunks(), timeout, size_bytes
                 )
                 completion = CompleteUploadBody_DirectPut(
                     content=UploadContentClaim(
@@ -635,11 +635,11 @@ class AsyncFilesClient(_GeneratedAsyncFilesClient):
                 )
                 completion = CompleteUploadBody_ServiceProxied()
             elif begin.mode == "direct_put":
-                if begin.access is None:
-                    raise RuntimeError("direct_put session lacks access")
+                if begin.transfer is None:
+                    raise RuntimeError("direct_put session lacks a presigned URL")
                 source.digest = _IncrementalChecksum(begin.checksum_algorithm)
                 await _async_send_stream_presigned(
-                    client, begin.access, source.chunks(), timeout, size_bytes
+                    client, begin.transfer, source.chunks(), timeout, size_bytes
                 )
                 completion = CompleteUploadBody_DirectPut(
                     content=UploadContentClaim(
@@ -934,7 +934,7 @@ def _stream_multipart(
         if len(signed.parts) != 1 or signed.parts[0].part_number != number:
             raise RuntimeError(f"server did not sign requested part {number}")
         etag = _send_stream_presigned(
-            http, signed.parts[0].access, bytes(part), timeout
+            http, signed.parts[0].transfer, bytes(part), timeout
         )
         if not etag:
             raise RuntimeError(f"part {number} returned no ETag")
@@ -1022,7 +1022,7 @@ async def _async_stream_multipart(
         if len(signed.parts) != 1 or signed.parts[0].part_number != number:
             raise RuntimeError(f"server did not sign requested part {number}")
         etag = await _async_send_stream_presigned(
-            http, signed.parts[0].access, bytes(part), timeout
+            http, signed.parts[0].transfer, bytes(part), timeout
         )
         if not etag:
             raise RuntimeError(f"part {number} returned no ETag")

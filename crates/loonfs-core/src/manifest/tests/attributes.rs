@@ -31,7 +31,7 @@ fn attributes_record(
     AttributesRevisionRecord {
         inode_id,
         attributes_revision_no: AttributesRevisionNo(revision),
-        committed_seq: ChangeSeq(seq),
+        committed_seq: CommitSeq(seq),
         commit_id: CommitId::parse(format!("c_attributes_{seq}")).expect("commit id"),
         delta_index: 0,
         committed_by: loonfs_types::ActorId::loonfs(),
@@ -100,7 +100,7 @@ fn the_compaction_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
     compact_rows_with_retention(
         MetadataFamilyGroup::Attributes,
         &mut rows_by_family,
-        ChangeSeq(6),
+        CommitSeq(6),
     )
     .expect("compact attributes");
 
@@ -119,7 +119,7 @@ fn the_compaction_keeps_a_latest_empty_revision() {
         AttributesRevisionRecord {
             inode_id: InodeId(7),
             attributes_revision_no: AttributesRevisionNo(2),
-            committed_seq: ChangeSeq(4),
+            committed_seq: CommitSeq(4),
             commit_id: CommitId::parse("c_attributes_4").expect("commit id"),
             delta_index: 0,
             committed_by: loonfs_types::ActorId::loonfs(),
@@ -132,7 +132,7 @@ fn the_compaction_keeps_a_latest_empty_revision() {
     compact_rows_with_retention(
         MetadataFamilyGroup::Attributes,
         &mut rows_by_family,
-        ChangeSeq(9),
+        CommitSeq(9),
     )
     .expect("compact attributes");
 
@@ -190,7 +190,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         &store,
         &namespace_id,
         ManifestNo(1),
-        ChangeSeq(9),
+        CommitSeq(9),
         flatten_manifest_segments(segments),
     )
     .await;
@@ -204,7 +204,7 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
         (6, 2, "grace"),
         (5, 1, "ada"),
     ] {
-        let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(visible_seq));
+        let view = MetadataView::over_manifest_segments(&verified, CommitSeq(visible_seq));
         let projection = view.attributes(InodeId(7)).await.expect("read attributes");
         assert_eq!(
             projection.attributes_revision_no,
@@ -219,13 +219,13 @@ async fn a_published_segment_answers_at_the_sequence_the_read_asks_for() {
 
     // Below every row, and for an inode that has none: the concrete empty
     // state, not a missing answer.
-    let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(2));
+    let view = MetadataView::over_manifest_segments(&verified, CommitSeq(2));
     let projection = view.attributes(InodeId(7)).await.expect("read attributes");
     assert_eq!(
         (projection.attributes_revision_no, projection.attributes),
         (AttributesRevisionNo(0), Attributes::default())
     );
-    let view = MetadataView::over_manifest_segments(&verified, ChangeSeq(9));
+    let view = MetadataView::over_manifest_segments(&verified, CommitSeq(9));
     let projection = view.attributes(InodeId(8)).await.expect("read attributes");
     assert_eq!(
         (projection.attributes_revision_no, projection.attributes),
@@ -276,7 +276,7 @@ async fn wide_attribute_rows_roll_segments_by_bytes_and_preserve_every_row() {
             assert!(descriptor.row_count > 0 && descriptor.row_count <= 3);
             let rows = super::inspection_state::load_manifest_segment_rows(
                 &store,
-                ChangeSeq(1),
+                CommitSeq(1),
                 descriptor,
             )
             .await

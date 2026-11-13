@@ -9,7 +9,7 @@ use crate::profiles::{resolve_profile, NamedProfile};
 use crate::resolve::{resolve_actor, resolve_namespace, resolve_subject, ResolvedTarget};
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use loonfs_types::{
-    AbsolutePath, ActorId, ChangeSeq, Commit, EntryInodeKind, ErrorCode, InodeId, NamespaceId,
+    AbsolutePath, ActorId, Commit, CommitSeq, EntryInodeKind, ErrorCode, InodeId, NamespaceId,
 };
 use std::path::{Path, PathBuf};
 
@@ -203,7 +203,7 @@ pub(crate) enum RemoteDirectoryOutcome {
     Created(Commit),
     AlreadyExists {
         inode_id: InodeId,
-        head_seq: ChangeSeq,
+        head_seq: CommitSeq,
     },
 }
 
@@ -356,7 +356,7 @@ pub(crate) fn render_target(namespace_id: &NamespaceId, absolute_path: &Absolute
     format!("{namespace_id}:{absolute_path}")
 }
 
-/// The flags a printed `loonfs undelete` has to spell so that pasting it into
+/// The flags a printed `loonfs restore` has to spell so that pasting it into
 /// a later shell still reaches the filesystem this command ran against.
 ///
 /// Every one of them names something the CLI would otherwise take from
@@ -366,7 +366,7 @@ pub(crate) fn render_target(namespace_id: &NamespaceId, absolute_path: &Absolute
 /// flag or an environment variable that a later shell need not repeat. The
 /// hint is only worth printing if it survives all three, so the flags are
 /// built once per invocation and shared by every entry it prints.
-pub(crate) struct UndeleteHint {
+pub(crate) struct RestoreDeletedHint {
     /// Rendered and already shell-quoted, for example
     /// `--namespace demo --profile prod`. Never empty: `--namespace` is
     /// unconditional.
@@ -393,7 +393,7 @@ impl ProfileSource {
     }
 }
 
-impl UndeleteHint {
+impl RestoreDeletedHint {
     pub(crate) fn new(
         context: &NamespaceContext,
         location: &ConfigLocation,
@@ -425,11 +425,11 @@ impl UndeleteHint {
         Self { context_flags }
     }
 
-    /// The complete `loonfs undelete` invocation that recovers one deletion.
-    pub(crate) fn command(&self, inode_id: InodeId, deletion_seq: ChangeSeq) -> String {
+    /// The complete `loonfs restore` invocation that restores one deletion.
+    pub(crate) fn command(&self, inode_id: InodeId, deletion_seq: CommitSeq) -> String {
         let inode_id = inode_id.to_string();
         format!(
-            "loonfs undelete --inode {inode_id} --deletion-seq {}{}",
+            "loonfs restore --inode {inode_id} --deletion-seq {}{}",
             deletion_seq.0, self.context_flags
         )
     }

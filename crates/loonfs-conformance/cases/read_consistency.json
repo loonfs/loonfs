@@ -1,6 +1,6 @@
 {
   "name": "read_consistency",
-  "intent": "Checks that the trash and revision listings and the download grants accept a strong and an eventual read consistency, and that a download grant refuses a consistency together with a snapshot.",
+  "intent": "Checks that the trash and revision listings and the download requests accept a strong and an eventual read consistency, and that a download request refuses a consistency together with a snapshot.",
   "request": {
     "namespace_id": "conf-read-consistency",
     "path": "/kept.txt",

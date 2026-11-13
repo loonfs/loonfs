@@ -7,7 +7,7 @@ use crate::scheduler::SchedulerState;
 use crate::scheduler::StepRetry;
 use crate::scheduler::MAX_STEP_BACKOFF_MS;
 
-use loonfs::{ErrorCode, NamespaceId};
+use loonfs::{ErrorCode, NamespaceId, PoolId};
 use loonfs_http::HeldNamespace;
 
 use std::sync::Mutex;
@@ -59,8 +59,8 @@ struct Retry {
     wait_ms: u64,
 }
 
-/// The calls that a namespace's steps make. Failures are counted by these
-/// names.
+/// The calls that a namespace's steps and a sweep make. Failures are counted
+/// by these names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MaintenanceCall {
     Metadata,
@@ -71,10 +71,18 @@ pub(super) enum MaintenanceCall {
     /// The retention advance, which a sweep makes, or leaves to the steps
     /// that have the namespace when the sweep reaches it.
     Retention,
+    /// The garbage collection of a pool, which only a sweep makes.
+    PoolGc,
 }
 
 impl MaintenanceCall {
-    pub(super) const ALL: [Self; 4] = [Self::Metadata, Self::GrepIndex, Self::Gc, Self::Retention];
+    pub(super) const ALL: [Self; 5] = [
+        Self::Metadata,
+        Self::GrepIndex,
+        Self::Gc,
+        Self::Retention,
+        Self::PoolGc,
+    ];
 
     pub(super) fn as_str(self) -> &'static str {
         match self {
@@ -82,6 +90,7 @@ impl MaintenanceCall {
             Self::GrepIndex => "grep_index",
             Self::Gc => "gc",
             Self::Retention => "retention",
+            Self::PoolGc => "pool_gc",
         }
     }
 
@@ -94,7 +103,7 @@ impl MaintenanceCall {
             Self::Metadata => Some(state.metadata_retry),
             Self::GrepIndex => Some(state.index_retry),
             Self::Gc => Some(state.gc_retry),
-            Self::Retention => None,
+            Self::Retention | Self::PoolGc => None,
         }
     }
 
@@ -103,7 +112,7 @@ impl MaintenanceCall {
             Self::Metadata => Some(&mut state.metadata_retry),
             Self::GrepIndex => Some(&mut state.index_retry),
             Self::Gc => Some(&mut state.gc_retry),
-            Self::Retention => None,
+            Self::Retention | Self::PoolGc => None,
         }
     }
 }
@@ -251,6 +260,36 @@ impl Scheduler {
                 retry_after_ms,
                 error = error.as_str(),
                 "maintenance call failed again; the scheduler retries it"
+            ),
+        }
+    }
+}
+
+impl Scheduler {
+    /// Counts a failed collection of a pool and logs it at error level. A
+    /// pool has no retry state, because the next sweep is its retry.
+    pub(super) fn record_pool_failure(&self, pool_id: &PoolId, failure: &CallFailure) {
+        let metrics = &self.inner.metrics;
+        let call = MaintenanceCall::PoolGc;
+        metrics.call_failures[call as usize].increment(1);
+        let code = failure.code();
+        match failure {
+            CallFailure::Panic { panic } => {
+                metrics.panics.increment(1);
+                tracing::error!(
+                    pool_id = %pool_id,
+                    call = call.as_str(),
+                    code = %code,
+                    panic = panic.as_str(),
+                    "maintenance call panicked; the next sweep retries it"
+                );
+            }
+            CallFailure::Error { error, .. } => tracing::error!(
+                pool_id = %pool_id,
+                call = call.as_str(),
+                code = %code,
+                error = error.as_str(),
+                "maintenance call failed; the next sweep retries it"
             ),
         }
     }

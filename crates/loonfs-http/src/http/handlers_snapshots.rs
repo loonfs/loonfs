@@ -1,20 +1,19 @@
-//! Snapshot and checkpoint handlers.
+//! Snapshot and snapshot inventory handlers.
 
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::PageQuery;
 
-use super::query_params::{checked_cursor, effective_page_limit};
+use super::query_params::effective_page_limit;
 use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{CheckpointPageCursor, SnapshotPageCursor};
 
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    Checkpoint, CreateSnapshotRequest, DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest,
-    ListCheckpointsResponse, ListSnapshotsResponse, PinId, Snapshot,
+    CreateSnapshotRequest, DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, Snapshot, SnapshotId, SnapshotRecord,
 };
 use std::sync::Arc;
 
@@ -57,14 +56,7 @@ pub(super) async fn create_snapshot(
             },
         )
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                &namespace_id,
-                error,
-            )
-            .with_body_field_params(&["/name"])
-        })?;
+        .map_err(|error| ApiResponseError::runtime(error).with_body_field_params(&["/name"]))?;
     Ok(Json(snapshot))
 }
 
@@ -77,7 +69,7 @@ pub(super) async fn create_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
-        description = "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork pins, which the maintenance checkpoint inventory lists.",
+        description = "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance snapshot inventory lists.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             PageQuery
@@ -99,11 +91,10 @@ pub(super) async fn list_snapshots(
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
     let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
-    let cursor = checked_cursor::<SnapshotPageCursor>(query.cursor)?;
     let response = namespace
         .list_snapshots()
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(cursor)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -122,7 +113,7 @@ pub(super) async fn list_snapshots(
         description = "Moves an unexpired snapshot's expiry to `ttl_ms` from the server's current time. The expiry never moves earlier, so a snapshot without an expiry is returned unchanged. A missing or expired snapshot returns `snapshot_not_found`. Repeating the request has the same result.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("snapshot_id" = loonfs_types::PinId, Path, description = "The snapshot ID.")
+            ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
         ),
         request_body = ExtendSnapshotRequest,
         responses(
@@ -147,10 +138,7 @@ pub(super) async fn extend_snapshot(
     let response = namespace
         .extend_snapshot(&snapshot_id, request.ttl_ms)
         .await
-        .map_err(ApiResponseError::for_namespace_writer(
-            state.namespaces.as_ref(),
-            &namespace_id,
-        ))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -163,10 +151,10 @@ pub(super) async fn extend_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Retrieve snapshot",
-        description = "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork pin, returns `snapshot_not_found`.",
+        description = "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork snapshot, returns `snapshot_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("snapshot_id" = loonfs_types::PinId, Path, description = "The snapshot ID.")
+            ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
         ),
         responses(
             (status = 200, description = "Snapshot", body = Snapshot),
@@ -202,16 +190,16 @@ pub(super) async fn get_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Delete snapshot",
-        description = "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork pin returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
+        description = "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("snapshot_id" = loonfs_types::PinId, Path, description = "The snapshot ID.")
+            ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
         ),
         responses(
             (status = 200, description = "Snapshot deleted, or already absent", body = DeleteSnapshotResponse),
             (status = 400, description = "Invalid namespace or snapshot ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace not found, or the ID belongs to a fork pin", body = ErrorResponse),
+            (status = 404, description = "Namespace not found, or the ID belongs to a fork snapshot", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -226,7 +214,7 @@ pub(super) async fn delete_snapshot(
     let namespace = match state.namespaces.open(&namespace_id).await {
         // The session registry opens sessions for active namespaces only, but
         // a snapshot without an expiry has to stay deletable after its
-        // namespace is deleted. Deleting a pin publishes nothing, so a
+        // namespace is deleted. Deleting a snapshot publishes nothing, so a
         // session outside the registry is enough.
         Err(error) if error.code() == ErrorCode::NamespaceDeleted => state
             .runtime
@@ -236,33 +224,34 @@ pub(super) async fn delete_snapshot(
     };
     let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
-    let response = namespace.delete_snapshot(&snapshot_id).await.map_err(
-        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
-    )?;
+    let response = namespace
+        .delete_snapshot(&snapshot_id)
+        .await
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct SnapshotPathParams {
-    snapshot_id: PinId,
+    snapshot_id: SnapshotId,
 }
 
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "list_checkpoints",
+        operation_id = "list_snapshot_records",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+        path = "/v0/maintenance/namespaces/{namespace_id}/snapshots",
         tag = "maintenance",
-        summary = "List checkpoints",
-        description = "Lists every pin, snapshots and fork pins, in checkpoint ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of pins.",
+        summary = "List snapshot records",
+        description = "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             PageQuery
         ),
         responses(
-            (status = 200, description = "Existing checkpoint objects", body = ListCheckpointsResponse),
+            (status = 200, description = "Existing snapshot objects", body = ListSnapshotRecordsResponse),
             (status = 400, description = "Invalid namespace ID, limit, or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
@@ -270,17 +259,16 @@ pub(super) struct SnapshotPathParams {
         )
     )
 )]
-pub(super) async fn list_checkpoints(
+pub(super) async fn list_snapshot_records(
     State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
-) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
-    let cursor = checked_cursor::<CheckpointPageCursor>(query.cursor)?;
+) -> Result<Json<ListSnapshotRecordsResponse>, ApiResponseError> {
     let response = state
         .maintenance
-        .list_checkpoints(&namespace_id)
+        .list_snapshot_records(&namespace_id)
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(cursor)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -291,40 +279,40 @@ pub(super) async fn list_checkpoints(
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "get_checkpoint",
+        operation_id = "get_snapshot_record",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+        path = "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "maintenance",
-        summary = "Retrieve checkpoint",
-        description = "Returns one existing pin, as the checkpoint listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
+        summary = "Retrieve snapshot record",
+        description = "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("checkpoint_id" = String, Path, description = "The checkpoint ID.")
+            ("snapshot_id" = String, Path, description = "The snapshot ID.")
         ),
         responses(
-            (status = 200, description = "Existing checkpoint", body = Checkpoint),
-            (status = 400, description = "Invalid namespace or checkpoint ID", body = ErrorResponse),
+            (status = 200, description = "Existing snapshot", body = SnapshotRecord),
+            (status = 400, description = "Invalid namespace or snapshot ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace or checkpoint not found", body = ErrorResponse),
+            (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
 )]
-pub(super) async fn get_checkpoint(
+pub(super) async fn get_snapshot_record(
     State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
+    AppPath(SnapshotRecordPathParams { snapshot_id }): AppPath<SnapshotRecordPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<Checkpoint>, ApiResponseError> {
-    let checkpoint = state
+) -> Result<Json<SnapshotRecord>, ApiResponseError> {
+    let snapshot = state
         .maintenance
-        .get_checkpoint(&namespace_id, &checkpoint_id)
+        .get_snapshot_record(&namespace_id, &snapshot_id)
         .await
         .map_err(ApiResponseError::runtime)?;
-    Ok(Json(checkpoint))
+    Ok(Json(snapshot))
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct CheckpointPathParams {
-    checkpoint_id: PinId,
+pub(super) struct SnapshotRecordPathParams {
+    snapshot_id: SnapshotId,
 }

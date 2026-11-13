@@ -108,7 +108,7 @@ func TestStreamingUploads(t *testing.T) {
 						session["part_size_bytes"] = 4
 					}
 					if fixture.Mode == "direct_put" {
-						session["access"] = access
+						session["transfer"] = access
 					}
 					value = session
 				case strings.HasSuffix(path, "/parts"):
@@ -126,7 +126,7 @@ func TestStreamingUploads(t *testing.T) {
 					if source.position.Load() > payload.Load()*4+4 {
 						t.Error("read the next part before sending this one")
 					}
-					value = map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "parts": []any{map[string]any{"part_number": body.Parts[0].PartNumber, "access": access}}}
+					value = map[string]any{"namespace_id": "demo", "upload_id": "upl_test", "parts": []any{map[string]any{"part_number": body.Parts[0].PartNumber, "transfer": access}}}
 				case path == "/object" || strings.HasSuffix(path, "/content"):
 					payload.Add(1)
 					body, err := io.ReadAll(r.Body)

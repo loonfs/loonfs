@@ -4,11 +4,11 @@
 use crate::common::*;
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::test_support::writer;
-use loonfs::{ChangeSeq, CommitId, DeleteDirectoryBehavior, ErrorCode, InodeId, LoonFs};
+use loonfs::{CommitId, CommitSeq, DeleteDirectoryBehavior, ErrorCode, InodeId, LoonFs};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_types::AbsolutePath;
-use loonfs_types::{Commit, FilesystemChange};
+use loonfs_types::{Commit, FilesystemEvent};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -52,7 +52,7 @@ fn deleted_roots(commit: &Commit) -> Vec<InodeId> {
         .events
         .iter()
         .filter_map(|event| match event {
-            FilesystemChange::Deleted { inode_id, .. } => Some(*inode_id),
+            FilesystemEvent::Deleted { inode_id, .. } => Some(*inode_id),
             _ => None,
         })
         .collect()
@@ -61,8 +61,8 @@ fn deleted_roots(commit: &Commit) -> Vec<InodeId> {
 /// The sequences of the commits after `after_seq`.
 async fn commits_after(
     namespace: &loonfs::Namespace<loonfs::ReadOnly>,
-    after_seq: ChangeSeq,
-) -> Vec<ChangeSeq> {
+    after_seq: CommitSeq,
+) -> Vec<CommitSeq> {
     namespace
         .list_changes(after_seq)
         .collect_up_to(64)
@@ -74,9 +74,9 @@ async fn commits_after(
 }
 
 /// Checks that a retention advance expires every deletion at or below the
-/// new floor without a commit: the trash leaves them out, an undelete of
+/// new floor without a commit: the trash leaves them out, a restore of
 /// one returns `not_deleted`, and the deletion above the floor stays
-/// recoverable.
+/// in the trash.
 #[tokio::test]
 async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_without_a_commit() {
     let temp_dir = tempdir().expect("tempdir");
@@ -119,8 +119,8 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_withou
         ))
         .await
         .expect("delete above the floor");
-    // Every folded commit is now one grace window old.
-    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+    // Every folded commit is now an hour old.
+    clock.advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let advanced = maintenance
         .advance_retention_floor(&namespace_id)
         .await
@@ -151,22 +151,22 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_withou
         "only the deletion above the floor stays in the trash"
     );
     let error = namespace
-        .undelete(deleted_roots(&deleted)[0], deleted.committed_seq, &actor)
+        .restore_deleted(deleted_roots(&deleted)[0], deleted.committed_seq, &actor)
         .await
-        .expect_err("an undelete at the floor");
+        .expect_err("a restore at the floor");
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
     namespace
-        .undelete(
+        .restore_deleted(
             deleted_roots(&above_floor)[0],
             above_floor.committed_seq,
             &actor,
         )
         .await
-        .expect("an undelete above the floor");
+        .expect("a restore above the floor");
 }
 
 /// Checks that every deletion a fork inherits has expired in the fork from
-/// its creation: the fork's trash is empty, its first request, an undelete
+/// its creation: the fork's trash is empty, its first request, a restore
 /// of an inherited deletion, returns `not_deleted`, and its first write
 /// commits right after the fork point with nothing before it. The source
 /// keeps its own trash.
@@ -205,7 +205,7 @@ async fn a_forks_inherited_deletions_have_expired_and_its_first_write_commits_no
     assert!(fork_trash.is_empty(), "{fork_trash:?}");
     let fork_writer = writer.open_namespace(&fork_id).expect("open the fork");
     let error = fork_writer
-        .undelete(deleted_roots(&deleted)[0], deleted.committed_seq, &actor)
+        .restore_deleted(deleted_roots(&deleted)[0], deleted.committed_seq, &actor)
         .await
         .expect_err("the fork's first request");
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");

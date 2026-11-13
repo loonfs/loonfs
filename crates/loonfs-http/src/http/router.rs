@@ -14,18 +14,19 @@ use super::handlers_inodes::{
     get_file_content_by_inode, get_file_revision_content_by_inode, get_inode,
     list_file_revisions_by_inode, list_inode_children,
 };
-use super::handlers_maintenance::run_maintenance;
+use super::handlers_maintenance::{run_maintenance_job, run_pool_maintenance_job};
 use super::handlers_namespace::{
-    create_namespace, delete_namespace, fork_namespace, get_capabilities, get_namespace,
-    get_namespace_diagnostics, get_next_merge_range, merge_fork, rebase_fork,
+    create_namespace, delete_namespace, fork_namespace, fork_namespace_for_rebase,
+    get_capabilities, get_namespace, get_namespace_diagnostics, get_next_merge_range, merge_fork,
+    replay_fork,
 };
 use super::handlers_query::{
     disable_grep_index, enable_grep_index, get_grep_index, grep, grep_index_not_maintained,
     grep_queries_not_served,
 };
 use super::handlers_snapshots::{
-    create_snapshot, delete_snapshot, extend_snapshot, get_checkpoint, get_snapshot,
-    list_checkpoints, list_snapshots,
+    create_snapshot, delete_snapshot, extend_snapshot, get_snapshot, get_snapshot_record,
+    list_snapshot_records, list_snapshots,
 };
 use super::handlers_store::probe_store;
 use super::handlers_uploads::{
@@ -98,7 +99,8 @@ routes! {
     "/v0/namespaces/{namespace_id}" => { GET get_namespace, DELETE delete_namespace },
     "/v0/namespaces/{namespace_id}/forks" => { POST fork_namespace },
     "/v0/namespaces/{namespace_id}/merges" => { POST merge_fork, GET get_next_merge_range },
-    "/v0/namespaces/{namespace_id}/rebases" => { POST rebase_fork },
+    "/v0/namespaces/{namespace_id}/rebases" => { POST fork_namespace_for_rebase },
+    "/v0/namespaces/{namespace_id}/replays" => { POST replay_fork },
     "/v0/namespaces/{namespace_id}/snapshots" => { POST create_snapshot, GET list_snapshots },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend" => { POST extend_snapshot },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}" => {
@@ -186,11 +188,12 @@ routes! {
             post(grep_index_not_maintained),
         ),
     },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints" => { GET list_checkpoints },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}" => {
-        GET get_checkpoint,
+    "/v0/maintenance/namespaces/{namespace_id}/snapshots" => { GET list_snapshot_records },
+    "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}" => {
+        GET get_snapshot_record,
     },
-    "/v0/maintenance/namespaces/{namespace_id}/runs" => { POST run_maintenance [deadline_exempt] },
+    "/v0/maintenance/namespaces/{namespace_id}/jobs" => { POST run_maintenance_job [deadline_exempt] },
+    "/v0/maintenance/pools/{pool_id}/jobs" => { POST run_pool_maintenance_job [deadline_exempt] },
     // The one maintenance route whose subject is the store rather than a
     // namespace, so it sits beside them rather than under one.
     "/v0/maintenance/store/probe" => { POST probe_store [deadline_exempt] },

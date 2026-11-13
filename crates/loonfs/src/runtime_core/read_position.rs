@@ -133,6 +133,7 @@ impl ReadPositionSlot {
                 namespace_id: position.read_basis.head.namespace_id.clone(),
                 manifest_no: position.read_basis.basis.manifest_no(),
                 head_seq: position.read_basis.head.seq,
+                wal_no: position.read_basis.head.wal_no,
             },
             Arc::clone(&position.tail),
         );
@@ -245,12 +246,14 @@ impl RuntimeCore {
     /// Checks the position's manifest for a successor with one HEAD.
     ///
     /// A HEAD that finds nothing records the check. A HEAD that finds a
-    /// successor starts the walk of [`same_epoch_manifests_above`]. Each
-    /// manifest with the position's writer epoch (a fold, a compaction, a
-    /// checkpoint, a snapshot, or a retention advance, by this runtime or by
-    /// another process) describes the head this session wrote, so the
-    /// position moves onto them in order, as it moves onto the manifests this
-    /// runtime publishes (see [`HeadPositions::move_position`]). The walk
+    /// successor starts the walk of [`same_epoch_manifests_above`]. The
+    /// position moves onto each manifest with the position's writer epoch (a
+    /// fold, a compaction, or a snapshot, by this runtime or by
+    /// another process) in order, as it moves onto the manifests this
+    /// runtime publishes (see [`HeadPositions::move_position`]). A fold that
+    /// folds past the position's tip covered a WAL object that the session
+    /// hasn't read, such as another process's floor object, so it drops the
+    /// position instead. The walk
     /// that ends on the newest manifest is that manifest's successor check,
     /// so a position that moved onto it records the check. Anything else
     /// the walk finds, or a response that arrives `READ_REVALIDATION_BOUND_MS`

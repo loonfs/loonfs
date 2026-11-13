@@ -5,7 +5,7 @@
 //! [`docs/specs/format.md` Appendix D](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#appendix-d-grep-extension-format).
 
 use loonfs_types::format::segment_blocks::{read_varint, write_varint, SegmentBlockCodecError};
-use loonfs_types::{ChangeSeq, ContentId, ContentRef, InodeId, RevisionNo};
+use loonfs_types::{CommitSeq, ContentId, ContentRef, InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -94,8 +94,8 @@ pub(crate) fn extract_grams(content: &[u8]) -> BTreeSet<Gram> {
 /// reference's content ID and size.
 ///
 /// Two references with the same content ID and size refer to the same bytes in
-/// every namespace of a fork family, so an index of content values is valid
-/// in every member. Values order by content ID, then size, which is the order
+/// every member of a pool, so an index of content values is valid in every
+/// member. Values order by content ID, then size, which is the order
 /// of their row keys and of a run's value table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ContentValue {
@@ -329,7 +329,7 @@ pub struct ContentRevisionRow {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     /// The sequence of the commit that published the revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
 }
 
 impl ContentRevisionRow {
@@ -368,7 +368,7 @@ impl IndexRow {
         value: &ContentValue,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
     ) -> Self {
         Self::ContentRevision(ContentRevisionRow {
             content_id: value.content_id(),
@@ -670,7 +670,7 @@ mod tests {
         );
         assert_eq!(text.filter_key(), "text-0000000000000000000000001a");
 
-        let revision = IndexRow::content_revision(&value, InodeId(9), RevisionNo(3), ChangeSeq(12));
+        let revision = IndexRow::content_revision(&value, InodeId(9), RevisionNo(3), CommitSeq(12));
         assert_eq!(
             revision.row_key(),
             "content-revision-0000000000000000000000001a-00000000000000000007-00000000000000000000000009-18446744073709551612"
@@ -700,7 +700,7 @@ mod tests {
                     &content_value(1, size_bytes),
                     InodeId(inode_id),
                     RevisionNo(revision_no),
-                    ChangeSeq(1),
+                    CommitSeq(1),
                 );
                 (row.row_key(), size_bytes, inode_id, revision_no)
             },
@@ -715,7 +715,7 @@ mod tests {
                 &content_value(9, 1),
                 InodeId(1),
                 RevisionNo(1),
-                ChangeSeq(1),
+                CommitSeq(1),
             ),
             IndexRow::filter(u64::MAX, &[0]),
             IndexRow::gram_postings(Gram(*b"abc"), &[0]).expect("row"),

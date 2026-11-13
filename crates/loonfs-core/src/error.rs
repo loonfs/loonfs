@@ -18,8 +18,8 @@ use loonfs_types::format::control::WriterBlock;
 pub use loonfs_types::MergeBound;
 use loonfs_types::{ActiveWriter, CommittedReceipt, MergeConflict};
 use loonfs_types::{
-    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, ManifestNo, NamespaceId,
-    PathError, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
+    BindingVersion, CommitId, CommitSeq, ErrorDetails, InodeId, InodeKind, ManifestNo, NamespaceId,
+    PathError, PoolId, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
 };
 use thiserror::Error;
 
@@ -98,7 +98,7 @@ pub enum CoreError {
         max_bytes: usize,
         /// The split hint: a fork sequence such that a merge of the fork's
         /// commits through it fits, or `None` when no shorter range fits.
-        split_at_seq: Option<ChangeSeq>,
+        split_at_seq: Option<CommitSeq>,
     },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]
     AppendTooLarge { size_bytes: u64, max_bytes: u64 },
@@ -172,8 +172,8 @@ pub enum CoreError {
     )]
     MergeRangeConflict {
         source_namespace_id: NamespaceId,
-        expected_after_seq: ChangeSeq,
-        actual_after_seq: ChangeSeq,
+        expected_after_seq: CommitSeq,
+        actual_after_seq: CommitSeq,
     },
     /// A fork's change conflicts with the namespace being merged into, under
     /// the conflict rule. `conflict` is the conflicting inode with the
@@ -199,31 +199,38 @@ pub enum CoreError {
     ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
+    /// A merge can't reserve its share of the merge allowance, because other
+    /// merges' reservations use the allowance.
+    #[error("server busy: the merge allowance is in use by other merges")]
+    ServerBusy,
     #[error("writer session for namespace `{namespace_id}` is closed; new work is not admitted")]
     WriterSessionClosed { namespace_id: NamespaceId },
     /// The service is shutting down. New requests are rejected, while requests
     /// accepted earlier may finish.
     #[error("shutting down; new work is not admitted")]
     ShuttingDown,
-    #[error("checkpoint unavailable: {0}")]
-    CheckpointUnavailable(String),
+    #[error("snapshot unavailable: {0}")]
+    SnapshotUnavailable(String),
     #[error("content `{content_id}` requires content writes that this deployment cannot perform; read through the proxied route")]
     ContentNotMaterialized { content_id: loonfs_types::ContentId },
     #[error("invalid snapshot request: {0}")]
     InvalidSnapshotRequest(String),
     #[error("snapshot `{snapshot_id}` was not found")]
-    SnapshotNotFound { snapshot_id: loonfs_types::PinId },
+    SnapshotNotFound {
+        snapshot_id: loonfs_types::SnapshotId,
+    },
     #[error(
         "metadata publication ran out of its {budget_ms}ms budget after {elapsed_ms}ms \
          and stopped before its next write"
     )]
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error(
-        "the garbage collection live set of namespace `{namespace_id}` needs {bytes} bytes of \
+        "the garbage collection live set of `{collected_id}` needs {bytes} bytes of \
          read working memory, above its {limit}-byte limit"
     )]
     LiveSetExceedsReadMemory {
-        namespace_id: NamespaceId,
+        /// The namespace or the pool whose collection needs the memory.
+        collected_id: String,
         bytes: usize,
         limit: usize,
     },
@@ -261,9 +268,9 @@ pub enum CoreError {
         "{below} is older than retention floor `{retention_floor_seq}`{}",
         below.consequence()
     )]
-    RebootstrapRequired {
+    BelowRetentionFloor {
         below: HistoryPosition,
-        retention_floor_seq: ChangeSeq,
+        retention_floor_seq: CommitSeq,
     },
     /// A diff's `from_seq`, `to_seq`, or `after_seq` is out of order with the
     /// others or with the head. `param` identifies the parameter.
@@ -286,18 +293,17 @@ pub enum CoreError {
     },
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
-    /// A bounded loop on a control object used every attempt it was allowed.
+    /// An operation on a control object used every attempt it was allowed.
     /// Concurrent writers changed the object, a read found a newer manifest
     /// or ran past its revalidation bound, or, on snapshot renewal, a
     /// transport failure left an attempt's outcome unconfirmed. Retrying can
     /// succeed.
-    #[error(
-        "the operation on `{object_key}` used every one of its {} attempts",
-        crate::limits::MAX_CONTENTION_ATTEMPTS
-    )]
+    #[error("the operation on `{object_key}` used every attempt it was allowed")]
     StoreContention { object_key: String },
     #[error("namespace `{namespace_id}` does not exist")]
     NamespaceNotFound { namespace_id: NamespaceId },
+    #[error("pool `{pool_id}` has no pool record")]
+    PoolNotFound { pool_id: PoolId },
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
@@ -326,12 +332,12 @@ pub enum CoreError {
     /// choose whether to retry. Both errors use the `stale_head` code.
     #[error("expected head sequence {expected}, found {actual}")]
     StaleHeadPrecondition {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
+        expected: CommitSeq,
+        actual: CommitSeq,
     },
     /// A read or a publication on a manifest that a newer manifest replaced
     /// found a metadata segment missing. Garbage collection keeps the
-    /// segments of the current manifest and of pinned manifests, so a
+    /// segments of the current manifest and of snapshots' manifests, so a
     /// successor can drop the replaced manifest's. The code is `stale_head`:
     /// a read runs again at the current manifest, and the publisher plans the
     /// commit again on it.
@@ -495,11 +501,13 @@ impl CoreError {
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::InodeNotFound(_) => ErrorCode::InodeNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
-            CoreError::ContentTooLarge { .. }
-            | CoreError::CommitTooLarge { .. }
-            | CoreError::AppendTooLarge { .. } => ErrorCode::ContentTooLarge,
+            CoreError::ContentTooLarge { .. } | CoreError::AppendTooLarge { .. } => {
+                ErrorCode::ContentTooLarge
+            }
+            CoreError::CommitTooLarge { .. } => ErrorCode::CommitTooLarge,
             CoreError::MergeTooLarge { .. } => ErrorCode::MergeTooLarge,
             CoreError::NamespaceNotFound { .. } => ErrorCode::NamespaceNotFound,
+            CoreError::PoolNotFound { .. } => ErrorCode::PoolNotFound,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespaceUnrestricted { .. } => ErrorCode::NamespaceUnrestricted,
@@ -515,15 +523,14 @@ impl CoreError {
             CoreError::MergeConflict { .. } => ErrorCode::MergeConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
+            CoreError::ServerBusy => ErrorCode::ServerBusy,
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::ContentNotMaterialized { .. } => ErrorCode::ContentNotMaterialized,
-            // An over-budget publication stops before its next write and is retryable
-            // after maintenance, exactly the checkpoint_unavailable contract.
-            CoreError::CheckpointUnavailable(_)
-            | CoreError::MetadataPublicationBudgetExceeded { .. } => {
-                ErrorCode::CheckpointUnavailable
-            }
+            CoreError::SnapshotUnavailable(_) => ErrorCode::SnapshotUnavailable,
+            // An over-budget publication stops before its next write, and
+            // the next maintenance run publishes the metadata.
+            CoreError::MetadataPublicationBudgetExceeded { .. } => ErrorCode::MaintenanceRequired,
             // The deployment's read memory cannot fit this namespace's
             // collection live set; an operator raises the limit.
             CoreError::LiveSetExceedsReadMemory { .. } => ErrorCode::ServerError,
@@ -533,10 +540,11 @@ impl CoreError {
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
-            CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
-            CoreError::ExpectedFile { .. }
-            | CoreError::ExpectedDirectory { .. }
-            | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
+            CoreError::BelowRetentionFloor { .. } => ErrorCode::BelowRetentionFloor,
+            CoreError::ExpectedFile { .. } | CoreError::ExpectedDirectory { .. } => {
+                ErrorCode::WrongKind
+            }
+            CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
             // Naming which operation or precondition stopped a commit says
@@ -623,10 +631,11 @@ impl CoreError {
             | CoreError::InvalidMerge { .. }
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
+            | CoreError::ServerBusy
             | CoreError::WriterSessionClosed { .. }
             | CoreError::ShuttingDown
             | CoreError::ContentNotMaterialized { .. }
-            | CoreError::CheckpointUnavailable(_)
+            | CoreError::SnapshotUnavailable(_)
             | CoreError::InvalidSnapshotRequest(_)
             | CoreError::SnapshotNotFound { .. }
             | CoreError::MetadataPublicationBudgetExceeded { .. }
@@ -638,12 +647,13 @@ impl CoreError {
             | CoreError::InvalidCursor(_)
             | CoreError::InvalidEventIndex(_)
             | CoreError::InvalidDiffRange { .. }
-            | CoreError::RebootstrapRequired { .. }
+            | CoreError::BelowRetentionFloor { .. }
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
             | CoreError::StoreContention { .. }
             | CoreError::NamespaceNotFound { .. }
+            | CoreError::PoolNotFound { .. }
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
             | CoreError::Forbidden { .. }
@@ -662,7 +672,8 @@ impl CoreError {
     /// can match the typed variants directly instead.
     pub fn details(&self) -> Option<ErrorDetails> {
         match self {
-            CoreError::NamespaceDeleted { namespace_id } => Some(ErrorDetails {
+            CoreError::NamespaceNotFound { namespace_id }
+            | CoreError::NamespaceDeleted { namespace_id } => Some(ErrorDetails {
                 namespace_id: Some(namespace_id.clone()),
                 ..ErrorDetails::default()
             }),
@@ -698,7 +709,7 @@ impl CoreError {
                 size_bytes: Some(*size_bytes),
                 ..ErrorDetails::default()
             }),
-            CoreError::RebootstrapRequired {
+            CoreError::BelowRetentionFloor {
                 below,
                 retention_floor_seq,
             } => Some(ErrorDetails {
@@ -761,20 +772,20 @@ impl CoreError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistoryPosition {
     /// The `after_seq` cursor of a change feed read.
-    FeedCursor { after_seq: ChangeSeq },
+    FeedCursor { after_seq: CommitSeq },
     /// The `from_seq` of a diff.
-    DiffStart { from_seq: ChangeSeq },
+    DiffStart { from_seq: CommitSeq },
     /// The sequence of a read view.
-    ReadSeq { read_seq: ChangeSeq },
+    ReadSeq { read_seq: CommitSeq },
     /// A merge's fork point, below the floor of the namespace being merged
     /// into, so a base compaction might have removed the fork's previous
     /// merge from the merge index.
-    ForkPoint { fork_point_seq: ChangeSeq },
+    ForkPoint { fork_point_seq: CommitSeq },
     /// The start of a merge's range, below the fork's own floor, so the
     /// fork's change over the range can't be computed.
     RangeStart {
         source_namespace_id: NamespaceId,
-        source_after_seq: ChangeSeq,
+        source_after_seq: CommitSeq,
     },
 }
 
@@ -917,7 +928,7 @@ mod tests {
     use crate::control_object::ControlObjectLoadError;
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_objectstore::ObjectStoreError;
-    use loonfs_types::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
+    use loonfs_types::{CommitId, CommitSeq, InodeId, NamespaceId, RevisionNo, WriterEpoch};
     use std::assert_matches;
 
     #[test]
@@ -934,10 +945,6 @@ mod tests {
         assert_eq!(
             ErrorCode::MaintenanceRequired.kind(),
             ErrorKind::Unavailable
-        );
-        assert_eq!(
-            ErrorCode::CommitOutcomeUnknown.kind(),
-            ErrorKind::OutcomeUnknown
         );
         assert_eq!(ErrorCode::OutcomeUnknown.kind(), ErrorKind::OutcomeUnknown);
         assert_eq!(
@@ -1025,7 +1032,7 @@ mod tests {
         // commit id was committed and what was committed there, which is what a retry
         // reads back and proves itself against.
         let receipt = CommittedReceipt {
-            committed_seq: ChangeSeq(9),
+            committed_seq: CommitSeq(9),
             committed_fingerprint: loonfs_test_support::ids::commit_fingerprint("abc"),
         };
         let reuse = CoreError::CommitIdReuseConflict {
@@ -1084,8 +1091,8 @@ mod tests {
         // A refused `expected_head_seq` carries both sequences, so a caller
         // that still means to delete knows what to retry against.
         let precondition = CoreError::StaleHeadPrecondition {
-            expected: ChangeSeq(41),
-            actual: ChangeSeq(45),
+            expected: CommitSeq(41),
+            actual: CommitSeq(45),
         };
         assert_eq!(precondition.code(), ErrorCode::StaleHead);
         assert_eq!(
@@ -1093,8 +1100,8 @@ mod tests {
             "expected head sequence 41, found 45"
         );
         let details = precondition.details().expect("head-sequence details");
-        assert_eq!(details.expected_head_seq, Some(ChangeSeq(41)));
-        assert_eq!(details.actual_head_seq, Some(ChangeSeq(45)));
+        assert_eq!(details.expected_head_seq, Some(CommitSeq(41)));
+        assert_eq!(details.actual_head_seq, Some(CommitSeq(45)));
 
         // Errors without machine-usable identity stay detail-free.
         assert!(CoreError::NamespaceCorrupt("boom".to_owned())
@@ -1122,19 +1129,19 @@ mod tests {
         let error = CoreError::store("namespaces/demo/metadata/segment", &invalid_range);
         assert_eq!(error.code(), ErrorCode::ServerError);
 
-        let key = "namespaces/demo/content/blob".to_owned();
+        let key = "pools/pool_00000000000000000000000001/content/blob".to_owned();
         for (occupied, message) in [
             (
                 ObjectStoreError::DifferentObject {
                     object_key: key.clone(),
                 },
-                "immutable object `namespaces/demo/content/blob` already exists with different bytes",
+                "immutable object `pools/pool_00000000000000000000000001/content/blob` already exists with different bytes",
             ),
             (
                 ObjectStoreError::StoredChecksumMissing {
                     object_key: key.clone(),
                 },
-                "immutable object `namespaces/demo/content/blob` already exists without a stored checksum",
+                "immutable object `pools/pool_00000000000000000000000001/content/blob` already exists without a stored checksum",
             ),
         ] {
             let error = CoreError::store(&key, &occupied);
@@ -1155,7 +1162,7 @@ mod tests {
         ));
         assert_eq!(segment_read.code(), ErrorCode::StoragePermissionDenied);
 
-        let contended = CoreError::contention_exhausted("namespaces/demo/pins/p");
+        let contended = CoreError::contention_exhausted("namespaces/demo/snapshots/p");
         assert_eq!(contended.code(), ErrorCode::StoreContention);
         assert_eq!(contended.kind(), ErrorKind::Unavailable);
         assert!(!contended.code().retryable_without_operator_action());

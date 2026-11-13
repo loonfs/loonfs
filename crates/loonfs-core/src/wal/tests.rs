@@ -13,12 +13,12 @@ use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate,
-    MetadataMapStore, OperationSelector, RecordingStore,
+    MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch,
+    AbsolutePath, CommitId, CommitSeq, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch,
     WriterId,
 };
 use std::assert_matches;
@@ -55,7 +55,7 @@ async fn readers_reject_invalid_numbers_epochs_and_sequences() {
             0 => payload.wal_no = WalNo(1),
             1 => payload.writer_epoch = WriterEpoch(0),
             2 => payload.writer_epoch = WriterEpoch(3),
-            _ => payload.head_seq = ChangeSeq(1),
+            _ => payload.head_seq = CommitSeq(1),
         }
         let bytes = encode_wal_object_envelope_zstd(payload)
             .expect("encode")
@@ -118,7 +118,7 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
         &anchor,
     )
     .expect("replay discovery");
-    assert_eq!(anchor.read_state.seq, ChangeSeq(9));
+    assert_eq!(anchor.read_state.seq, CommitSeq(9));
     assert_eq!(anchor.read_state.wal_no, WalNo(12));
     assert!(tail
         .find_commit_receipt(&CommitId::parse("data-8").expect("commit"))
@@ -182,14 +182,14 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert_eq!(current.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.payload().head_seq, CommitSeq(0));
     assert_eq!(current.payload().folded_wal_no, WalNo(1));
     let options = crate::gc::GcOptions {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
     };
     let aged = context(options.grace_window_ms + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
         .expect("collect");
     assert_eq!(report.deleted.wal_objects, 1);
@@ -247,7 +247,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert_eq!(current.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.payload().head_seq, CommitSeq(0));
     assert_eq!(current.payload().folded_wal_no, WalNo(2));
 }
 
@@ -441,7 +441,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
         blocked.release();
         result
     });
-    assert_eq!(winner.expect("winner").committed_seq, ChangeSeq(2));
+    assert_eq!(winner.expect("winner").committed_seq, CommitSeq(2));
     assert_eq!(loser.expect_err("collision").code(), ErrorCode::StaleHead);
     assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(
@@ -449,7 +449,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
             .await
             .expect("retry")
             .committed_seq,
-        ChangeSeq(3)
+        CommitSeq(3)
     );
     assert_eq!(store.counts().create_if_absent_puts, 3);
     assert_eq!(store.counts().compare_and_swaps, 0);
@@ -517,7 +517,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
             .await
             .expect("new writer")
             .committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
 }
 
@@ -581,7 +581,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
             .await
             .expect("publish");
     }
-    let mut walk = WalWalk::after(&namespace_id, WalNo(0), ChangeSeq(0), WriterEpoch(1));
+    let mut walk = WalWalk::after(&namespace_id, WalNo(0), CommitSeq(0), WriterEpoch(1));
     let mut sequential = Vec::new();
     for number in 1..=20 {
         let loaded = load_wal_object(&store, &namespace_id, WalNo(number)).await;
@@ -600,8 +600,8 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
         &watched,
         super::WalTailLoadRequest {
             namespace_id: &namespace_id,
-            base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(19),
+            base_seq: CommitSeq(0),
+            head_seq: CommitSeq(19),
             base_wal_no: WalNo(0),
             tip_wal_no: WalNo(20),
             writer_epoch: WriterEpoch(1),
@@ -646,8 +646,8 @@ async fn a_bounded_tail_load_names_the_missing_wal_object() {
         &store,
         super::WalTailLoadRequest {
             namespace_id: &namespace_id,
-            base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(3),
+            base_seq: CommitSeq(0),
+            head_seq: CommitSeq(3),
             base_wal_no: WalNo(0),
             tip_wal_no: WalNo(4),
             writer_epoch: WriterEpoch(1),
@@ -707,25 +707,18 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             .fold_wal()
             .await
             .expect("fold old WAL");
-        // The writer's floor, published under its epoch.
-        let folded = crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .load_current_manifest()
+        // A manifest after the fold, so the fold's manifest isn't current.
+        crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &context(1_000))
+            .engine()
+            .set_retention_window(std::num::NonZeroU64::new(60_000))
             .await
-            .expect("load the fold's manifest");
-        crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .publish_retention_floor(
-                None,
-                folded.payload().writer_epoch,
-                folded.payload().head_seq,
-            )
-            .await
-            .expect("advance floor");
+            .expect("set the retention window");
         let aged = WriterAt {
             now_ms: grace + 1,
             ..context(1_000)
         };
         crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .gc(None, &options, &aged.clock())
+            .gc(&options, &aged.clock())
             .await
             .expect("collect old WAL");
         assert!(store
@@ -740,7 +733,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         published
             .expect("replanned from folded state")
             .committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     assert!(store
         .head(&wal_object(&namespace_id, &WalNo(1)))
@@ -763,6 +756,152 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         .await
         .expect("file");
     }
+}
+
+/// Checks the lost commit that the second writer rule prevents: a session
+/// with tip `t` stays idle while another process's floor object at `t + 1`
+/// ages past the grace window. While the session's tip confirmation waits
+/// for its WAL HEAD, another process folds the floor object, and a
+/// collection deletes it, so the WAL HEAD finds nothing at `t + 1`. The
+/// manifest HEAD that follows finds the fold's manifest, so the session runs
+/// discovery and writes its commit at `t + 2`, not at the emptied number.
+#[tokio::test]
+async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_number() {
+    use loonfs_test_support::stores::MetadataMapStore;
+    let temp_dir = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("floor-gc").expect("namespace");
+    let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
+    let options = crate::gc::GcOptions {
+        grace_window_ms: grace,
+    };
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let store = MetadataMapStore::new(
+        store,
+        KeyPredicate::new(|key| {
+            loonfs_objectstore::layout::manifest_no_of(key)
+                .is_some_and(|number| number >= ManifestNo(3))
+        }),
+        move |mut metadata| {
+            metadata.last_modified_at_ms = Some(grace + 1);
+            metadata
+        },
+    );
+    // The recording store logs each request when its response arrives. The
+    // gate above it logs each manifest HEAD when the request is sent, and
+    // parks the next WAL HEAD when it's armed.
+    let store = RecordingStore::new(store, KeyPredicate::manifest(&namespace_id));
+    let sent_manifest_heads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let store = BlockingStore::matching(store, {
+        let sent_manifest_heads = Arc::clone(&sent_manifest_heads);
+        let wal = wal_prefix(&namespace_id);
+        let manifests = KeyPredicate::manifest(&namespace_id);
+        move |context| {
+            if !OperationSelector::Head.matches(context.kind()) {
+                return false;
+            }
+            if manifests.matches(context.key()) {
+                sent_manifest_heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            context.key().starts_with(&wal)
+        }
+    });
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+        .create()
+        .await
+        .expect("create");
+    let timer = Arc::new(ManualClock::new(0));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        context(1_000).writer_id,
+    );
+    let clock = OperationClock::start(1_000, timer.clone());
+    engine
+        .publish_batch(vec![directory("seed")], &clock)
+        .await
+        .results
+        .remove(0)
+        .expect("seed");
+    let tip = engine
+        .writer_position()
+        .expect("a position")
+        .read_basis
+        .head
+        .wal_no;
+    let floor_object = tip.successor().expect("next WAL number");
+    let namespace = crate::test_support::namespace_store(store.inner(), &namespace_id);
+    let planned = namespace.load_current_manifest().await.expect("planned");
+    namespace
+        .publish_floor_object(&planned, CommitSeq(1))
+        .await
+        .expect("another process creates a floor object");
+
+    timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
+    store.inner().reset();
+    sent_manifest_heads.store(0, std::sync::atomic::Ordering::SeqCst);
+    store.block_next();
+    let (mut published, ()) = futures::join!(
+        engine.publish_batch(vec![directory("after")], &clock),
+        async {
+            store.wait_until_blocked().await;
+            // A manifest HEAD sent before the WAL response is answered here,
+            // before the fold, so it finds no successor.
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+            while sent_manifest_heads.load(std::sync::atomic::Ordering::SeqCst)
+                > store
+                    .inner()
+                    .snapshot()
+                    .iter()
+                    .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
+                    .count()
+            {
+                tokio::task::yield_now().await;
+            }
+            namespace.fold_wal().await.expect("fold the floor object");
+            let aged = WriterAt {
+                now_ms: grace + 1,
+                ..context(1_000)
+            };
+            namespace
+                .gc(&options, &aged.clock())
+                .await
+                .expect("collect the floor object");
+            assert!(store
+                .inner()
+                .head(&wal_object(&namespace_id, &floor_object))
+                .await
+                .expect("the floor object's number")
+                .is_none());
+            store.release();
+        }
+    );
+    published
+        .results
+        .remove(0)
+        .expect("the commit plans again after discovery");
+    assert!(store
+        .head(&wal_object(&namespace_id, &floor_object))
+        .await
+        .expect("the emptied number")
+        .is_none());
+    assert_eq!(
+        engine
+            .writer_position()
+            .expect("a position")
+            .read_basis
+            .head
+            .wal_no,
+        floor_object
+            .successor()
+            .expect("the number after the floor object")
+    );
 }
 
 #[tokio::test]
@@ -796,7 +935,7 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         .wal_no
         .successor()
         .expect("next WAL number");
-    broken.head_seq = ChangeSeq(5);
+    broken.head_seq = CommitSeq(5);
     store
         .put_if_absent(
             &wal_object(&namespace_id, &broken.wal_no),
@@ -1115,7 +1254,6 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             store_clock.advance_ms(options.grace_window_ms + 1);
             let report = crate::test_support::namespace_store(blocked.inner(), &namespace_id)
                 .gc(
-                    None,
                     &options,
                     &WriterAt {
                         now_ms: store_clock.now_ms(),
@@ -1143,7 +1281,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             .remove(0)
             .expect_err("reclaimed number must not acknowledge a commit")
             .code(),
-        ErrorCode::CommitOutcomeUnknown,
+        ErrorCode::OutcomeUnknown,
     );
     assert!(blocked
         .inner()
@@ -1157,7 +1295,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         .await
         .expect("current view");
     let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
-    assert_eq!(view.head().seq, ChangeSeq(2));
+    assert_eq!(view.head().seq, CommitSeq(2));
     view.resolve_path("/takeover", AttributeInclusion::Omit, &access)
         .await
         .expect("live commit");

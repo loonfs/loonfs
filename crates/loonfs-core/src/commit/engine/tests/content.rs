@@ -171,7 +171,8 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
-    let content_key = content_blob(&namespace_id, &completed.prepared.content_ref().content_id);
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let content_key = content_blob(&pool_id, &completed.prepared.content_ref().content_id);
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let reclaimed = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1);
     let timer = Arc::new(PublicationTimer::default());
@@ -204,11 +205,11 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         let options = GcOptions {
             grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
         };
-        crate::test_support::namespace_store(&aged, &namespace_id)
+        crate::test_support::pool_store(&aged, &pool_id)
             .gc(None, &options, &reclaimed.clock())
             .await
             .expect("gc removes the session record");
-        let report = crate::test_support::namespace_store(&aged, &namespace_id)
+        let report = crate::test_support::pool_store(&aged, &pool_id)
             .gc(None, &options, &reclaimed.clock())
             .await
             .expect("gc reclaims the content");
@@ -333,7 +334,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
             .as_ref()
             .expect("valid peer")
             .committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     assert_eq!(
         result.results[2]
@@ -347,7 +348,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         .load_read_state()
         .await
         .expect("head");
-    assert_eq!(head_after.seq, ChangeSeq(2));
+    assert_eq!(head_after.seq, CommitSeq(2));
     assert_eq!(
         head_after.wal_no,
         head_before.wal_no.successor().expect("next")
@@ -443,7 +444,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let (result, ()) = futures::join!(publish, advance);
     assert_eq!(
         result.results[0].as_ref().expect("primary").committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     assert_eq!(
         result.results[0].as_ref().expect("primary"),
@@ -451,7 +452,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     );
     assert_eq!(
         result.results[2].as_ref().expect("later").committed_seq,
-        ChangeSeq(3)
+        CommitSeq(3)
     );
     assert_eq!(
         result.results[3].as_ref().expect("independent replay"),
@@ -461,7 +462,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .load_read_state()
         .await
         .expect("head");
-    assert_eq!(head_after.seq, ChangeSeq(3));
+    assert_eq!(head_after.seq, CommitSeq(3));
     assert_eq!(
         head_after.wal_no,
         head_before.wal_no.successor().expect("next")

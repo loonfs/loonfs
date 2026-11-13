@@ -9,10 +9,10 @@ use crate::pagers::{
 use crate::pinned_read::PinnedRead;
 use crate::runtime_core::{classify_read_result, RuntimeCore};
 use crate::{
-    ChangeSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
+    CommitSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
     FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
-    NamespaceId, PathEntry, PinId, ReadAt, ReadFileStreamOptions, Result, RevisionNo,
-    SharedObjectStore, StatOptions,
+    NamespaceId, PathEntry, ReadAt, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore,
+    SnapshotId, StatOptions,
 };
 use loonfs_core::RuntimeReadContext;
 use loonfs_types::format::manifest::ExtensionEntry;
@@ -40,12 +40,12 @@ pub struct ReadView {
 #[derive(Clone)]
 pub(crate) enum ReadSource {
     Head,
-    Snapshot(PinId),
+    Snapshot(SnapshotId),
 }
 
 impl ReadSource {
     /// Returns the snapshot this source reads, or `None` for the live head.
-    pub(crate) fn snapshot_id(&self) -> Option<&PinId> {
+    pub(crate) fn snapshot_id(&self) -> Option<&SnapshotId> {
         match self {
             Self::Snapshot(snapshot_id) => Some(snapshot_id),
             Self::Head => None,
@@ -57,8 +57,8 @@ impl ReadSource {
 /// its head, so the head test does work only for a view of the live head.
 pub(crate) fn validate_view_directory_cursor(
     cursor: Option<&ListPageCursor>,
-    captured_seq: ChangeSeq,
-    pin_id: Option<&PinId>,
+    captured_seq: CommitSeq,
+    snapshot_id: Option<&SnapshotId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
         return Ok(());
@@ -70,18 +70,18 @@ pub(crate) fn validate_view_directory_cursor(
         ))
         .into());
     }
-    match (cursor.pin_id(), pin_id) {
+    match (cursor.snapshot_id(), snapshot_id) {
         (Some(actual), Some(expected)) if actual == expected => Ok(()),
         (Some(actual), Some(expected)) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor pin `{actual}` does not match requested pin `{expected}`"
+            "directory cursor snapshot `{actual}` does not match requested snapshot `{expected}`"
         ))
         .into()),
         (Some(actual), None) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor is bound to pin `{actual}`"
+            "directory cursor is bound to snapshot `{actual}`"
         ))
         .into()),
         (None, Some(expected)) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor is not bound to pin `{expected}`"
+            "directory cursor is not bound to snapshot `{expected}`"
         ))
         .into()),
         (None, None) => Ok(()),
@@ -102,7 +102,7 @@ impl ReadView {
         classify_read_result(&self.core, &self.pinned.context, &self.source, read.await).await
     }
 
-    fn snapshot_id(&self) -> Option<&PinId> {
+    fn snapshot_id(&self) -> Option<&SnapshotId> {
         self.source.snapshot_id()
     }
 
@@ -113,7 +113,7 @@ impl ReadView {
 
     /// Returns the head sequence this view captured, or the sequence that a
     /// view from [`Self::at_seq`] reads at.
-    pub fn head_seq(&self) -> ChangeSeq {
+    pub fn head_seq(&self) -> CommitSeq {
         self.pinned.head_seq()
     }
 
@@ -124,8 +124,8 @@ impl ReadView {
     /// and they check the subject's rights at this view's head, as reads of
     /// a snapshot do. A sequence above the head, or a view of a snapshot,
     /// returns `invalid_request`, and a sequence below the retention floor
-    /// returns `rebootstrap_required`.
-    pub async fn at_seq(&self, seq: ChangeSeq) -> Result<ReadView> {
+    /// returns `below_retention_floor`.
+    pub async fn at_seq(&self, seq: CommitSeq) -> Result<ReadView> {
         if let Some(snapshot_id) = self.snapshot_id() {
             return Err(Error::InvalidRequest {
                 message: format!(
@@ -218,7 +218,7 @@ impl ReadView {
 
     /// Lists the change feed after `after_seq` through this view's captured
     /// head.
-    pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
+    pub fn list_changes(&self, after_seq: CommitSeq) -> ChangesPager {
         loonfs_types::Pager::with_state(
             (self.clone(), after_seq),
             |(view, after_seq), request: PageRequest<ChangeFeedPosition>| async move {

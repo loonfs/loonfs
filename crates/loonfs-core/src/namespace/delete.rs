@@ -79,7 +79,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     deleted_at_ms: clock.request_at_ms(),
                 };
                 // A tombstone lists no extension segments, so they're
-                // collected once no pin keeps a manifest that lists them
+                // collected once no snapshot keeps a manifest that lists them
                 // (format spec, "Extensions").
                 for entry in payload.extensions.values_mut() {
                     entry.runs.clear();

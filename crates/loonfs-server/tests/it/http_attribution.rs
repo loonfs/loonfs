@@ -5,7 +5,7 @@ use crate::common::start_server;
 use loonfs_client::AttributeChanges;
 use loonfs_client::{NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
-use loonfs_types::{ActorId, ChangeSeq, DestinationBehavior, RevisionNo};
+use loonfs_types::{ActorId, CommitSeq, DestinationBehavior, RevisionNo};
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -19,10 +19,10 @@ fn path(absolute_path: &str) -> NamespacePath {
 
 /// Returns the change at `seq` so tests can compare its timestamp with the
 /// corresponding metadata rows.
-async fn change_at(harness: &crate::common::TestServer, seq: ChangeSeq) -> loonfs_types::Commit {
+async fn change_at(harness: &crate::common::TestServer, seq: CommitSeq) -> loonfs_types::Commit {
     harness
         .client
-        .list_changes(&namespace_id("demo"), ChangeSeq(0))
+        .list_changes(&namespace_id("demo"), CommitSeq(0))
         .page()
         .await
         .expect("list changes")
@@ -218,22 +218,22 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     assert_eq!(deleted.deleted_at_ms, delete_change.committed_at_ms);
     assert_eq!(deleted.deleted_by, deleter);
 
-    let undelete_actor = actor("undelete-restorer");
-    let undelete = harness
+    let restore_actor = actor("deletion-restorer");
+    let restore_deleted = harness
         .client
-        .undelete(
+        .restore_deleted(
             &namespace,
             deleted.inode_id,
             deleted.deletion_seq,
-            &undelete_actor,
+            &restore_actor,
         )
         .await
-        .expect("undelete file");
+        .expect("restore file");
     assert_eq!(
-        change_at(&harness, undelete.committed_seq)
+        change_at(&harness, restore_deleted.committed_seq)
             .await
             .committed_by,
-        undelete_actor
+        restore_actor
     );
     assert!(harness
         .client
@@ -241,7 +241,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .page_limit(page_limit(10))
         .page()
         .await
-        .expect("list trash after undelete")
+        .expect("list trash after restore")
         .entries
         .is_empty());
 

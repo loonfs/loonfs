@@ -22,7 +22,7 @@ use loonfs_types::{ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
 enum Rival {
     CompactorClaim,
     Compaction,
-    RetentionAdvance,
+    RetentionWindow,
     ExtensionPublication,
     Fold(Box<WriterPosition>),
 }
@@ -46,23 +46,18 @@ impl Rival {
                     crate::test_support::compact_every_group(store, namespace_id).await;
                 assert!(compactions > 0, "the compaction rival should publish");
             }
-            Self::RetentionAdvance => {
-                // The floor's publication by the holder of the writer epoch,
-                // which changes nothing but the floor.
-                let namespace = crate::test_support::namespace_store(store, namespace_id);
-                let current = namespace
-                    .load_current_manifest()
-                    .await
-                    .expect("load the current manifest");
-                let published = namespace
-                    .publish_retention_floor(
-                        None,
-                        current.payload().writer_epoch,
-                        current.payload().head_seq,
-                    )
-                    .await
-                    .expect("publish the floor");
-                assert!(published.published.is_some(), "the floor moves");
+            Self::RetentionWindow => {
+                // A window change, which changes nothing but the window.
+                let published = crate::test_support::NamespaceFixture::new(
+                    store,
+                    namespace_id,
+                    &crate::test_support::writer_at("test-writer", 0),
+                )
+                .engine()
+                .set_retention_window(std::num::NonZeroU64::new(60_000))
+                .await
+                .expect("set the retention window");
+                assert!(published.published.is_some(), "the window changes");
             }
             Self::ExtensionPublication => {
                 let fixture = crate::test_support::NamespaceFixture::new(
@@ -248,7 +243,7 @@ fn layout(
     manifest: &LoadedManifest,
 ) -> (
     NamespaceManifestPayload,
-    Vec<(RunNo, ChangeSeq, RunTier, usize)>,
+    Vec<(RunNo, CommitSeq, RunTier, usize)>,
 ) {
     let payload = manifest.envelope.payload();
     (
@@ -279,7 +274,7 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
     for rival in [
         Rival::Compaction,
         Rival::CompactorClaim,
-        Rival::RetentionAdvance,
+        Rival::RetentionWindow,
         Rival::ExtensionPublication,
     ] {
         let mut writer = Writer::open().await;
@@ -651,7 +646,7 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
 }
 
 #[tokio::test]
-async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() {
+async fn a_snapshot_that_loses_its_fold_to_a_compaction_reads_no_wal_object() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let basis = writer
@@ -668,8 +663,8 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
         OperationSelector::PutCreateIfAbsent,
     );
     gate.block_next();
-    let (checkpoint, ()) = futures::join!(
-        create_checkpoint(&gate, &writer.namespace_id, &writer.context),
+    let (created, ()) = futures::join!(
+        create_snapshot(&gate, &writer.namespace_id, &writer.context),
         async {
             gate.wait_until_blocked().await;
             Rival::CompactorClaim
@@ -679,15 +674,18 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
             gate.release();
         }
     );
-    let checkpoint = checkpoint.expect("checkpoint");
+    let created = created.expect("snapshot");
     let after_park = writer.store.take();
     assert!(writer.wal_reads(&after_park).is_empty(), "{after_park:?}");
-    let pin = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
-        .load_pin(&checkpoint.checkpoint_id)
+    let snapshot = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+        .load_snapshot_record(&created.snapshot_id)
         .await
-        .expect("pin record")
-        .expect("pin");
-    assert_eq!(pin.state.manifest().manifest_no, ManifestNo(basis.0 + 2));
+        .expect("snapshot record")
+        .expect("snapshot");
+    assert_eq!(
+        snapshot.state.manifest().manifest_no,
+        ManifestNo(basis.0 + 2)
+    );
 }
 
 /// Checks that a session's fold that loses its manifest number to another

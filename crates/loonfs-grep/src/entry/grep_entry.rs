@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The version of grep's format that this build reads and writes, which
 /// governs grep's entry and the rows of its segments.
-pub const GREP_ENTRY_VERSION: u32 = 2;
+pub const GREP_ENTRY_VERSION: u32 = 1;
 
 /// Returns the name of grep's entry in a namespace manifest, which is also
 /// part of the key of each grep segment.
@@ -43,9 +43,9 @@ pub struct GrepEntry {
 
 impl GrepEntry {
     /// Builds an entry after checking that a disabled index lists no runs
-    /// and no reorganization, and that a reorganization's inputs and outputs
-    /// are distinct segments that `runs` lists, with each output in the
-    /// reorganization's run.
+    /// and no reorganization, that no two runs have the same number, and
+    /// that a reorganization's inputs and outputs are distinct segments that
+    /// `runs` lists, with each output in the reorganization's run.
     pub fn new(
         status: GrepIndexStatus,
         reorganize: Option<GrepReorganizeState>,
@@ -145,65 +145,34 @@ impl GrepEntry {
         }
     }
 
-    /// Returns this entry with the runs whose numbers are `provisional` or
-    /// above moved to numbers from `base` on, in the same order, and an
-    /// in-progress reorganization's run number moved with them.
-    ///
-    /// A pending change records each run that it writes under a provisional
-    /// number, from the next run number of the manifest that the change
-    /// builds on, so a provisional number differs from every number that
-    /// manifest lists. The change's publication assigns the runs their numbers from
-    /// the next run number of the manifest that it's published over, as a
-    /// compaction assigns its run's number at publication.
-    pub(crate) fn with_runs_numbered_from(&self, provisional: RunNo, base: RunNo) -> Self {
-        let number = |run_no: RunNo| match run_no.0.checked_sub(provisional.0) {
-            Some(offset) => RunNo(base.0 + offset),
-            None => run_no,
+    /// Returns the number of the next run that a step writes: one more than
+    /// the largest number among the runs and the in-progress reorganization,
+    /// whose output run can have no segment yet, or 0 when there are none.
+    pub(crate) fn next_run_no(&self) -> crate::Result<RunNo> {
+        let largest = self
+            .runs
+            .iter()
+            .map(|run| run.run_no)
+            .chain(self.reorganize.as_ref().map(|reorganize| reorganize.run_no))
+            .max();
+        let Some(largest) = largest else {
+            return Ok(RunNo(0));
         };
-        Self {
-            status: self.status.clone(),
-            reorganize: self
-                .reorganize
-                .clone()
-                .map(|reorganize| GrepReorganizeState {
-                    run_no: number(reorganize.run_no),
-                    ..reorganize
-                }),
-            runs: self
-                .runs
-                .iter()
-                .map(|run| ExtensionRunRef {
-                    run_no: number(run.run_no),
-                    ..run.clone()
-                })
-                .collect(),
-        }
-    }
-
-    /// Checks that the in-progress reorganization's run number, the number
-    /// of the run that the reorganization's outputs form once a step writes
-    /// them, is below the manifest's next run number.
-    pub(crate) fn ensure_reorganize_allocated(
-        &self,
-        next_run_no: RunNo,
-    ) -> Result<(), GrepEntryError> {
-        match &self.reorganize {
-            Some(reorganize) if reorganize.run_no >= next_run_no => {
-                Err(GrepEntryError::UnallocatedReorganizeRunNo {
-                    run_no: reorganize.run_no,
-                    next_run_no,
-                })
-            }
-            _ => Ok(()),
-        }
+        largest
+            .successor()
+            .map_err(|_| crate::GrepError::IndexCorrupt {
+                message: format!(
+                    "grep run {largest} has the largest run number, so no run can follow it"
+                ),
+            })
     }
 
     /// Returns whether `later`, the entry that a step makes from this one,
     /// keeps this entry's build and doesn't move its indexing position back,
-    /// or starts a later build from a new pin.
+    /// or starts a later build from a new snapshot.
     ///
     /// A backfill moves its cursor back only when it restarts from a new
-    /// pin, and an active index keeps the `captured_seq` of the backfill
+    /// snapshot, and an active index keeps the `captured_seq` of the backfill
     /// that built it. Disabling and enabling the index starts over.
     pub(crate) fn is_followed_by(&self, later: &Self) -> bool {
         match (&self.status, &later.status) {
@@ -227,17 +196,17 @@ impl GrepEntry {
             (
                 GrepIndexStatus::Backfilling {
                     captured_seq,
-                    pin_id,
+                    snapshot_id,
                     cursor_inode_id,
                 },
                 GrepIndexStatus::Backfilling {
                     captured_seq: next_target,
-                    pin_id: next_pin_id,
+                    snapshot_id: next_snapshot_id,
                     cursor_inode_id: next_cursor,
                 },
             ) => {
                 next_target >= captured_seq
-                    && (next_pin_id != pin_id
+                    && (next_snapshot_id != snapshot_id
                         || (next_target == captured_seq && next_cursor >= cursor_inode_id))
             }
             (
@@ -266,6 +235,10 @@ impl GrepEntry {
             if self.reorganize.is_some() {
                 return Err(GrepEntryError::DisabledHasReorganize);
             }
+        }
+        let mut run_nos = BTreeSet::new();
+        if let Some(run) = self.runs.iter().find(|run| !run_nos.insert(run.run_no)) {
+            return Err(GrepEntryError::DuplicateRunNo { run_no: run.run_no });
         }
         if let Some(reorganize) = &self.reorganize {
             let runs_by_segment: BTreeMap<&IndexSegmentId, &ExtensionRunRef> = self

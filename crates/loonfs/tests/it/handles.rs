@@ -801,7 +801,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
         assert_eq!(
             status.current_manifest_no,
             Some(ManifestNo(2)),
-            "a shut-down writer must not schedule checkpoints: {status:?}"
+            "a shut-down writer must not schedule folds: {status:?}"
         );
         assert_eq!(
             status.wal_tail_objects, tail_at_shutdown,
@@ -924,7 +924,7 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
 }
 
 #[test]
-fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
+fn maintenance_snapshot_and_retention_are_explicit_one_shot_calls() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -945,10 +945,10 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("put file");
 
-        // A retention advance passes a commit once it's one grace window old,
+        // A retention advance passes a commit once it's an hour old,
         // so this runtime's clock is that far ahead of the writer's.
         let clock = Arc::new(ManualClock::at_system_time());
-        clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+        clock.advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
         let maintenance_runtime = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
@@ -960,18 +960,18 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
         let maintenance = maintenance_runtime.maintenance(loonfs_test_support::ids::writer_id(
             "handle-test-maintenance",
         ));
-        let checkpoint = maintenance_runtime
+        let snapshot = maintenance_runtime
             .open_namespace(&namespace_id)
             .expect("open namespace")
-            .create_snapshot("handle-pin")
+            .create_snapshot("handle-snapshot")
             .await
             .expect("create snapshot");
-        assert!(checkpoint.snapshot_id.manifest_no() > ManifestNo(0));
+        assert!(snapshot.snapshot_id.manifest_no() > ManifestNo(0));
         let retention = maintenance
             .advance_retention_floor(&namespace_id)
             .await
             .expect("advance retention");
-        assert_eq!(retention.retention_floor_seq, checkpoint.captured_seq);
+        assert_eq!(retention.retention_floor_seq, snapshot.captured_seq);
     });
 }
 

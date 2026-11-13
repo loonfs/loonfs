@@ -26,14 +26,28 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+/// Runs one collection of the pool of `namespace_id`.
+async fn collect_pool<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    options: &loonfs_core::GcOptions,
+    clock: &loonfs_core::time::OperationClock,
+) -> loonfs_core::Result<loonfs_types::PoolGcResponse> {
+    let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
+    loonfs_core::test_support::pool_store(store, &pool_id)
+        .gc(None, options, clock)
+        .await
+}
+
 /// Reads an upload session's record and its outcome record, if it has one.
 async fn read_upload_records<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
 ) -> (UploadSessionPayload, Option<UploadOutcome>) {
+    let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
     let session = store
-        .get(&upload_session(namespace_id, upload_id), None)
+        .get(&upload_session(&pool_id, upload_id), None)
         .await
         .expect("read session")
         .expect("session exists");
@@ -42,7 +56,7 @@ async fn read_upload_records<S: ObjectStore + ?Sized>(
             .expect("decode session")
             .into_payload();
     let outcome = store
-        .get(&upload_outcome(namespace_id, upload_id), None)
+        .get(&upload_outcome(&pool_id, upload_id), None)
         .await
         .expect("read outcome")
         .map(|outcome| {
@@ -156,8 +170,9 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
                 .await
                 .expect("complete");
             let reference = completed.content_ref().expect("reference");
+            let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
             let stored = store
-                .head(&content_blob(&namespace_id, &reference.content_id))
+                .head(&content_blob(&pool_id, &reference.content_id))
                 .await
                 .expect("head")
                 .expect("object");
@@ -322,9 +337,9 @@ async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
         )
         .await
         .expect("create file");
-    create_checkpoint(&setup_store, &namespace_id, &context)
+    create_snapshot(&setup_store, &namespace_id, &context)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     NamespaceFixture::new(&setup_store, &namespace_id, &context)
         .put_file(
             "/docs/hello.txt",
@@ -408,7 +423,8 @@ mod streamed_content {
         let begin = begin_upload(&store, &namespace_id, &context)
             .await
             .expect("begin");
-        let session_key = upload_session(&namespace_id, &begin.upload_id);
+        let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+        let session_key = upload_session(&pool_id, &begin.upload_id);
         let encoded = store
             .get(&session_key, None)
             .await
@@ -420,7 +436,7 @@ mod streamed_content {
         )
         .expect("decode")
         .into_payload();
-        let content_key = content_blob(&namespace_id, &session.content_id);
+        let content_key = content_blob(&pool_id, &session.content_id);
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
         let stream = futures::stream::once(async move {
@@ -447,8 +463,7 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                namespace_store(&store, &namespace_id)
-                    .gc(None, &options, &aged.clock())
+                collect_pool(&store, &namespace_id, &options, &aged.clock())
                     .await
                     .expect("collect aborted session");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -462,10 +477,14 @@ mod streamed_content {
             result.expect_err("aborted session cannot stage").code(),
             ErrorCode::UploadNotFound
         );
-        namespace_store(&store, &namespace_id)
-            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
-            .await
-            .expect("repeat GC after late content write");
+        collect_pool(
+            &store,
+            &namespace_id,
+            &loonfs_core::GcOptions::default(),
+            &aged.clock(),
+        )
+        .await
+        .expect("repeat GC after late content write");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
@@ -510,8 +529,9 @@ mod streamed_content {
         let staging = engine.stage_owned_stream(&catalog, None, body);
         let collecting = async {
             started_rx.await.expect("owned staging waiting for input");
+            let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
             let sessions = store
-                .list_prefix(&upload_session_prefix(&namespace_id))
+                .list_prefix(&upload_session_prefix(&pool_id))
                 .await
                 .expect("list implicit owner");
             assert_eq!(sessions.len(), 1, "one in-process staging session");
@@ -528,7 +548,7 @@ mod streamed_content {
             .expect("decode")
             .into_payload();
             let expires_at_ms = session.expires_at_ms;
-            let content_key = content_blob(&namespace_id, &session.content_id);
+            let content_key = content_blob(&pool_id, &session.content_id);
             let options = loonfs_core::GcOptions::default();
             // Model a source stalled past its lease and both collection graces.
             // GC, not a caller's explicit abort, moves the implicit session terminal.
@@ -536,8 +556,7 @@ mod streamed_content {
                 now_ms: expires_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
-            namespace_store(&store, &namespace_id)
-                .gc(None, &options, &expired.clock())
+            collect_pool(&store, &namespace_id, &options, &expired.clock())
                 .await
                 .expect("GC aborts expired implicit session");
             let (_, aborted) = read_upload_records(&store, &namespace_id, &session.upload_id).await;
@@ -553,8 +572,7 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                namespace_store(&store, &namespace_id)
-                    .gc(None, &options, &aged.clock())
+                collect_pool(&store, &namespace_id, &options, &aged.clock())
                     .await
                     .expect("forget expired implicit owner");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -568,10 +586,14 @@ mod streamed_content {
             result.expect_err("expired owner cannot complete").code(),
             ErrorCode::UploadNotFound
         );
-        namespace_store(&store, &namespace_id)
-            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
-            .await
-            .expect("GC after failed late completion");
+        collect_pool(
+            &store,
+            &namespace_id,
+            &loonfs_core::GcOptions::default(),
+            &aged.clock(),
+        )
+        .await
+        .expect("GC after failed late completion");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
@@ -680,8 +702,9 @@ mod streamed_content {
         .expect_err("different bytes into one session conflict");
         assert_eq!(error.code(), ErrorCode::UploadContentConflict);
 
+        let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
         let object_key = content_blob(
-            &namespace_id,
+            &pool_id,
             &first.content_ref().expect("staged content").content_id,
         );
         assert_eq!(
@@ -774,8 +797,9 @@ mod streamed_content {
             }
         };
 
+        let pool_id = loonfs_core::test_support::load_pool_id(&blocking, &namespace_id).await;
         let object_key = content_blob(
-            &namespace_id,
+            &pool_id,
             &staged.content_ref().expect("staged content").content_id,
         );
         let stored = blocking
@@ -862,7 +886,8 @@ mod direct_multipart {
         );
         assert_eq!(checksum_algorithm, begin.checksum_algorithm);
 
-        let object_key = content_blob(&state.namespace_id, &state.content_id);
+        let pool_id = loonfs_core::test_support::load_pool_id(&store, &state.namespace_id).await;
+        let object_key = content_blob(&pool_id, &state.content_id);
 
         Session {
             namespace_id,
@@ -1404,8 +1429,7 @@ mod direct_multipart {
             writer_id: context.writer_id.clone(),
             now_ms: expires_at_ms + options.grace_window_ms + 1,
         };
-        namespace_store(&store, &session.namespace_id)
-            .gc(None, &options, &expired.clock())
+        collect_pool(&store, &session.namespace_id, &options, &expired.clock())
             .await
             .expect("garbage collection");
 

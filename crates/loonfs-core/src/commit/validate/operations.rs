@@ -12,7 +12,7 @@ use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, RevisionSumm
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
     next_public_ordinal, AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo,
-    ChangeSeq, ContentRef, DisplayName, InodeId, InodeKind, RevisionNo,
+    CommitSeq, ContentRef, DisplayName, InodeId, InodeKind, RevisionNo,
 };
 
 impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
@@ -96,14 +96,19 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 self.validate_delete_subtree(*root_inode_id, source_binding, *require_empty)
                     .await
             }
-            CommitOperation::Undelete {
+            CommitOperation::RestoreDeleted {
                 inode_id,
                 deletion_seq,
                 parent_inode_id,
                 display_name,
             } => {
-                self.validate_undelete(*inode_id, *deletion_seq, *parent_inode_id, display_name)
-                    .await
+                self.validate_restore_deleted(
+                    *inode_id,
+                    *deletion_seq,
+                    *parent_inode_id,
+                    display_name,
+                )
+                .await
             }
             CommitOperation::UpdateAttributes {
                 inode_id,
@@ -337,32 +342,32 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         delete_deltas(&mut self.numbering, &inode, source_binding)
     }
 
-    async fn validate_undelete(
+    async fn validate_restore_deleted(
         &mut self,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         parent_inode_id: InodeId,
         display_name: &DisplayName,
     ) -> Result<Vec<WalDelta>> {
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
             CommitValidationError::InodeMissing {
-                operand: CommitOperand::UndeleteTarget,
+                operand: CommitOperand::RestoreDeletedTarget,
                 inode_id,
             },
         )?;
         let deletion = self
-            .resolve_recoverable_deletion(inode_id, deletion_seq)
+            .resolve_tombstone_in_trash(inode_id, deletion_seq)
             .await?;
         let name_key = self
             .resolve_name_absent(
                 parent_inode_id,
                 display_name,
                 None,
-                CommitOperand::UndeleteTarget,
+                CommitOperand::RestoreDeletedTarget,
             )
             .await?;
         self.ensure_child_unbound(inode_id, None).await?;
-        self.ensure_not_covered_by_tombstone(parent_inode_id, CommitOperand::UndeleteTarget)
+        self.ensure_not_covered_by_tombstone(parent_inode_id, CommitOperand::RestoreDeletedTarget)
             .await?;
         let revision = self.resolve_revision_summary(&inode).await?;
         Ok(vec![

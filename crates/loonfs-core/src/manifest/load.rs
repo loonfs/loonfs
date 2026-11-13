@@ -245,7 +245,7 @@ pub(crate) async fn load_manifest_segments<'a, S: ObjectStore + ?Sized>(
 }
 
 /// Inspects an object by ID, validating its envelope and segment descriptors.
-/// This does not verify a root or pin reference. Authoritative reads
+/// This does not verify a root or snapshot reference. Authoritative reads
 /// and publication paths must use `load_manifest_segments` instead.
 pub(crate) async fn load_manifest_segments_for_inspection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,

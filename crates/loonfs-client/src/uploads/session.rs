@@ -8,7 +8,7 @@ use bytes::Bytes;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{Checksum, NamespaceId, UploadId};
 use loonfs_types::{
-    CompleteUploadBody, CompletedUploadPart, CreateUploadBody, ObjectTransferAccess,
+    CompleteUploadBody, CompletedUploadPart, CreateUploadBody, ObjectTransfer,
     SignUploadPartsRequest, SignUploadPartsResponse, UploadPartChecksumClaim, UploadSession,
 };
 
@@ -99,7 +99,7 @@ impl Client {
     pub async fn upload_part_via_presigned_url(
         &self,
         part_number: u32,
-        access: &ObjectTransferAccess,
+        access: &ObjectTransfer,
         checksum: Checksum,
         bytes: Bytes,
     ) -> Result<CompletedUploadPart> {
@@ -125,7 +125,7 @@ impl Client {
     /// Uploads in-memory bytes directly to object storage using a presigned URL.
     pub async fn upload_via_presigned_url(
         &self,
-        access: &ObjectTransferAccess,
+        access: &ObjectTransfer,
         bytes: &[u8],
     ) -> Result<()> {
         // A successful create-only PUT may replay as a provider precondition error, not success.
@@ -142,7 +142,7 @@ impl Client {
     /// attempt, and a source is consumed by the attempt that reads it.
     pub async fn upload_stream_via_presigned_url(
         &self,
-        access: &ObjectTransferAccess,
+        access: &ObjectTransfer,
         source: PayloadSource,
     ) -> Result<()> {
         let request = presigned_put_request(access, SendPolicy::Once)?;

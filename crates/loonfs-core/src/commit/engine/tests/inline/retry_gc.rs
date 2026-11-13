@@ -38,14 +38,14 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .pop()
         .expect("result")
         .expect_err("the successful write has an unknown outcome");
-    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
     assert_eq!(failed.attempts(), 1);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace
         .load_current_metadata_view()
         .await
         .expect("committed view");
-    assert_eq!(view.head().seq, ChangeSeq(1));
+    assert_eq!(view.head().seq, CommitSeq(1));
     drop(view);
 
     // Remove the physical evidence from WAL before the client retries. The
@@ -65,7 +65,6 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     );
     let report = crate::test_support::namespace_store(&aged, &namespace_id)
         .gc(
-            None,
             &options,
             &WriterAt {
                 now_ms: options.grace_window_ms + 1,
@@ -90,7 +89,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     let committed = publish(&mut engine, &context, retry.clone())
         .await
         .expect("recover the original receipt");
-    assert_eq!(committed.committed_seq, ChangeSeq(1));
+    assert_eq!(committed.committed_seq, CommitSeq(1));
     assert_eq!(committed.committed_at_ms, context.now_ms);
     assert_no_writes(&store);
 
@@ -126,7 +125,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .load_current_metadata_view()
         .await
         .expect("fresh view");
-    assert_eq!(view.head().seq, ChangeSeq(1));
+    assert_eq!(view.head().seq, CommitSeq(1));
     let file = view
         .read_file_bytes(
             "/lost-ack-0",

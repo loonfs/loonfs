@@ -164,11 +164,11 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_and_reads_no_hin
 }
 
 /// Checks that a retention advance in a runtime with the namespace's live
-/// session publishes the floor on the session's position. The fold before the
-/// floor finds the tail folded, so the floor's put is the advance's one
-/// manifest request, and the advance reads no hint before it.
+/// session creates its floor object at the session's tip and then folds the
+/// floor object on the session's position. The fold's put is the advance's
+/// one manifest request, and the advance reads no hint before it.
 #[tokio::test]
-async fn a_retention_advance_from_a_live_session_puts_on_its_basis_and_reads_no_hint() {
+async fn a_retention_advance_from_a_live_session_folds_on_its_basis_and_reads_no_hint() {
     let clock = Arc::new(ManualClock::at_system_time());
     let fixture = Fixture::new({
         let clock = Arc::clone(&clock);
@@ -183,8 +183,8 @@ async fn a_retention_advance_from_a_live_session_puts_on_its_basis_and_reads_no_
         .await
         .expect("fold the first commit");
     fixture.writer.drain().await.expect("drain");
-    // Every commit is a grace window old, so the advance can pass them.
-    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    // Every commit is an hour old, so the advance can pass them.
+    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let next = fixture
         .current_manifest_no()
         .await
@@ -198,7 +198,7 @@ async fn a_retention_advance_from_a_live_session_puts_on_its_basis_and_reads_no_
     .await
     .expect("the advance returns")
     .expect("advance the floor");
-    assert!(advanced.retention_floor_seq > ChangeSeq(0));
+    assert!(advanced.retention_floor_seq > CommitSeq(0));
     assert_eq!(
         fixture.manifest_requests(),
         vec![("put", fixture.manifest(next))]

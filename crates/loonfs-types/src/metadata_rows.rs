@@ -3,7 +3,7 @@
 
 use crate::wal::WalCommitPayload;
 use crate::{
-    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, CommitId, CommitSeq,
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -29,10 +29,10 @@ pub enum MetadataRowFamily {
     /// Stores set and revoke events used to determine active subtree
     /// tombstones, newest first within each root.
     Tombstones,
-    /// Lists the deletions that no undelete has cancelled, derived from the
+    /// Lists the deletions that no restore has cancelled, derived from the
     /// tombstone family and ordered by deletion sequence. The trash listing
     /// reads the rows above the retention floor.
-    ActiveDeletions,
+    Trash,
     /// Preserves commit idempotency evidence independently of retained WAL history.
     CommitReceipts,
     /// Stores each retained commit's record in sequence order.
@@ -63,7 +63,7 @@ impl MetadataRowFamily {
         Self::DirentryChildBinds,
         Self::Revisions,
         Self::Tombstones,
-        Self::ActiveDeletions,
+        Self::Trash,
         Self::CommitReceipts,
         Self::Commits,
         Self::ContentLayouts,
@@ -80,7 +80,7 @@ impl MetadataRowFamily {
             Self::DirentryChildBinds => "direntry_child_binds",
             Self::Revisions => "revisions",
             Self::Tombstones => "tombstones",
-            Self::ActiveDeletions => "active_deletions",
+            Self::Trash => "trash",
             Self::CommitReceipts => "commit_receipts",
             Self::Commits => "commits",
             Self::ContentLayouts => "content_layouts",
@@ -103,8 +103,8 @@ pub enum MetadataFamilyGroup {
     Inodes,
     /// Tombstones.
     Tombstones,
-    /// Active deletions.
-    ActiveDeletions,
+    /// The trash.
+    Trash,
     /// Commit records and their idempotency receipts, one row each per
     /// commit, and the merge index, one row per merge.
     Commits,
@@ -123,7 +123,7 @@ impl MetadataFamilyGroup {
         Self::Revisions,
         Self::Inodes,
         Self::Tombstones,
-        Self::ActiveDeletions,
+        Self::Trash,
         Self::Commits,
         Self::ContentLayouts,
         Self::Attributes,
@@ -137,7 +137,7 @@ impl MetadataFamilyGroup {
             Self::Revisions => "revisions",
             Self::Inodes => "inodes",
             Self::Tombstones => "tombstones",
-            Self::ActiveDeletions => "active_deletions",
+            Self::Trash => "trash",
             Self::Commits => "commits",
             Self::ContentLayouts => "content_layouts",
             Self::Attributes => "attributes",
@@ -155,7 +155,7 @@ impl MetadataFamilyGroup {
             Self::Revisions => &[MetadataRowFamily::Revisions],
             Self::Inodes => &[MetadataRowFamily::Inodes],
             Self::Tombstones => &[MetadataRowFamily::Tombstones],
-            Self::ActiveDeletions => &[MetadataRowFamily::ActiveDeletions],
+            Self::Trash => &[MetadataRowFamily::Trash],
             Self::Commits => &[
                 MetadataRowFamily::Commits,
                 MetadataRowFamily::CommitReceipts,
@@ -182,12 +182,12 @@ pub enum MetadataRow {
     FileRevision(RevisionRecord),
     /// Changes whether one root inode has an active subtree tombstone.
     Tombstone(SubtreeTombstoneRecord),
-    /// Derived row used to list recoverable deletions.
+    /// Derived row used to list the trash.
     ///
     /// Applying a commit writes `listed` for each tombstone set and `removed` for
     /// each revoke. This lets trash listing use an ordered range scan
     /// instead of replaying all historical deletion events.
-    ActiveDeletion(ActiveDeletionRecord),
+    Trash(TrashRecord),
     /// Preserves the evidence needed to respond to a retried logical commit.
     CommitReceipt(CommitReceiptRecord),
     /// One committed logical commit as its WAL record describes it, without inline bytes.
@@ -225,7 +225,7 @@ pub struct InodeRecord {
     /// Classification fixed when the inode was created.
     pub inode_kind: InodeKind,
     /// Commit sequence that created the inode.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Actor of the creating commit, as supplied by the application.
@@ -254,7 +254,7 @@ pub struct DirentryBindingRecord {
     /// Unix milliseconds of the child's creating commit.
     pub child_created_at_ms: u64,
     /// Commit that wrote this row.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Order within the commit.
     pub delta_index: u32,
     /// Commit ID of the commit that wrote this row.
@@ -354,7 +354,7 @@ pub struct RevisionRecord {
     /// Monotonic revision number within that file's history.
     pub revision_no: RevisionNo,
     /// Namespace sequence that published the revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Actor that committed this revision, as supplied by the application.
@@ -374,7 +374,7 @@ pub struct SubtreeTombstoneRecord {
     /// Inode whose rooted subtree the event governs.
     pub root_inode_id: InodeId,
     /// Namespace sequence that published the event.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Position within the owning commit.
     pub delta_index: u32,
     /// Commit ID associated with this row.
@@ -397,16 +397,16 @@ impl SubtreeTombstoneRecord {
     }
 }
 
-/// One current-state row for a recoverable deletion.
+/// One current-state row for a deletion in the trash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ActiveDeletionRecord {
+pub struct TrashRecord {
     /// Subtree root the deletion covers.
     pub root_inode_id: InodeId,
     /// Commit sequence of the deletion.
-    pub deletion_seq: ChangeSeq,
+    pub deletion_seq: CommitSeq,
     /// Current listing state for the deletion.
-    pub action: ActiveDeletionRowAction,
+    pub action: TrashRowAction,
 }
 
 /// The objects that store a chain as of one fold or commit.
@@ -416,7 +416,7 @@ pub struct ContentLayoutRecord {
     /// Chain whose bytes the layout lists.
     pub content_id: ContentId,
     /// Newest commit whose bytes the layout covers.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Total length covered by the extents.
     pub size_bytes: u64,
     /// Objects in chain order, and the chain's creator.
@@ -430,7 +430,7 @@ pub struct CommitReceiptRecord {
     /// Caller idempotency key whose later reuse is checked against this row.
     pub commit_id: CommitId,
     /// Namespace sequence assigned to the accepted commit.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
 }
 
 /// Indexes one merge by the fork whose commits it applied.
@@ -442,11 +442,11 @@ pub struct MergeIndexRecord {
     /// The fork whose commits the merge applied.
     pub source_namespace_id: NamespaceId,
     /// Namespace sequence assigned to the merge.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// The fork's commits above this sequence were applied.
-    pub source_after_seq: ChangeSeq,
+    pub source_after_seq: CommitSeq,
     /// The fork's commits at or below this sequence were applied.
-    pub source_through_seq: ChangeSeq,
+    pub source_through_seq: CommitSeq,
 }
 
 impl MergeIndexRecord {
@@ -471,7 +471,7 @@ pub struct AttributesRevisionRecord {
     /// Monotonic per-inode attribute revision.
     pub attributes_revision_no: AttributesRevisionNo,
     /// Namespace sequence that published the revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Delta position that disambiguates the revision within `committed_seq`.
@@ -493,7 +493,7 @@ pub struct AccessRevisionRecord {
     /// Monotonic per-inode access revision.
     pub access_revision_no: AccessRevisionNo,
     /// Namespace sequence that published the revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Delta position that disambiguates the revision within `committed_seq`.
@@ -515,14 +515,14 @@ pub struct AccessRevisionRecord {
 #[serde(deny_unknown_fields)]
 pub struct DeltaPosition {
     /// Commit sequence that published the event.
-    pub seq: ChangeSeq,
+    pub seq: CommitSeq,
     /// Position that disambiguates the event within `seq`.
     pub delta_index: u32,
 }
 
 /// Directory binding removed by a path deletion.
 ///
-/// Tombstones retain this binding after old slot versions are collected. Undelete uses it to restore the original parent and name.
+/// Tombstones retain this binding after old slot versions are collected. A restore of the deletion uses it to bind the original parent and name again.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeletedBinding {
@@ -534,7 +534,7 @@ pub struct DeletedBinding {
     pub display_name: DisplayName,
 }
 
-/// Events retained for recoverable subtree deletion.
+/// Events retained for a subtree deletion in the trash.
 ///
 /// The latest event for a root at a sequence determines the root's state there
 /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
@@ -568,13 +568,13 @@ impl TombstoneRowAction {
 
 /// Current-state rows for deletions.
 ///
-/// `Listed` exposes a deletion in trash; `Removed` hides it after an undelete.
+/// `Listed` exposes a deletion in trash; `Removed` hides it after a restore.
 /// Both rows share a key prefix, with `Removed` sorting first, so scans can
 /// suppress cancelled entries. Compaction later removes the cancelled pair,
 /// and the `Listed` row of a deletion at or below the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ActiveDeletionRowAction {
+pub enum TrashRowAction {
     /// The deletion is in the trash while it's above the retention floor;
     /// these are the fields the trash entry renders, denormalized so a page
     /// needs no per-entry join.
@@ -590,9 +590,9 @@ pub enum ActiveDeletionRowAction {
         /// this row derives from.
         deleted_binding: DeletedBinding,
     },
-    /// The deletion was cancelled by an undelete at `removed_seq`.
+    /// The deletion was cancelled by a restore at `removed_seq`.
     Removed {
-        /// Commit sequence of the undelete that cancelled the deletion.
-        removed_seq: ChangeSeq,
+        /// Commit sequence of the restore that cancelled the deletion.
+        removed_seq: CommitSeq,
     },
 }

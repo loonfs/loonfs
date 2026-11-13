@@ -9,7 +9,7 @@ use loonfs::{DestinationBehavior, PutFileOptions, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_types::{ChangeSeq, DiffEntryKind, DiffResponse, ErrorCode, ErrorResponse, RevisionNo};
+use loonfs_types::{CommitSeq, DiffEntryKind, DiffResponse, ErrorCode, ErrorResponse, RevisionNo};
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -22,7 +22,7 @@ struct Fixture {
     directory: TempDir,
     store: SharedObjectStore,
     /// The sequence of the first write, which the diffs start after.
-    from_seq: ChangeSeq,
+    from_seq: CommitSeq,
 }
 
 async fn fixture() -> Fixture {
@@ -161,10 +161,10 @@ async fn the_route_serves_pages_that_a_client_follows_to_the_end() {
 #[tokio::test]
 async fn a_diff_below_the_floor_returns_its_from_seq_and_the_floor() {
     let fixture = fixture().await;
-    // The floor passes a commit once it's one grace window old, so this
+    // The floor passes a commit once it's an hour old, so this
     // engine's clock is that far ahead of the writer's.
     let clock = Arc::new(ManualClock::at_system_time());
-    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+    clock.advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let maintenance = loonfs_core::NamespaceWriterEngine::writer(
         loonfs_core::test_support::namespace_store_with_wall_clock(
             fixture.store.clone(),
@@ -190,7 +190,7 @@ async fn a_diff_below_the_floor_returns_its_from_seq_and_the_floor() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let error: ErrorResponse = serde_json::from_slice(&body).expect("error body");
-    assert_eq!(error.code, ErrorCode::RebootstrapRequired.as_str());
+    assert_eq!(error.code, ErrorCode::BelowRetentionFloor.as_str());
     let details = error.details.expect("error details");
     assert_eq!(
         (

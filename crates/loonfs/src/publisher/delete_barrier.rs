@@ -83,9 +83,9 @@ impl NamespacePublisher {
     /// the session epoch and fencing that govern this namespace's
     /// publications govern its tombstone swap too.
     ///
-    /// The deletion folds the tail before its tombstone, under the
-    /// namespace's fold lock, so it waits for any other fold of the
-    /// namespace instead of folding the same tail.
+    /// The deletion folds the tail before its tombstone, with the
+    /// namespace's fold lock in exclusive mode, so it waits for any other
+    /// fold of the namespace instead of folding the same tail.
     async fn delete_through_engine(
         &self,
         options: DeleteNamespaceOptions,
@@ -94,7 +94,7 @@ impl NamespacePublisher {
         let Some(writer) = self.context.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());
         };
-        let _turn = self.turns.fold.lock().await;
+        let _turn = self.turns.fold.write().await;
         let _permit = self.context.runtime_core.fold_permit().await;
         let mut slot = self.lock_engine().await;
         let engine = self.engine_for(&mut slot, &writer.writer_id);

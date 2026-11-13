@@ -17,7 +17,7 @@ use loonfs_types::format::wal::{
 use loonfs_types::options::{CommitSplitting, DiffOptions};
 use loonfs_types::{
     u64_from_usize, AbsolutePath, AccessRevisionNo, AttributesRevisionNo, ChangeFeedPosition,
-    ChangeSeq, DiffEntry, DiffEntryKind, DiffResponse, InodeId, InodeKind, NameKey, NamespaceId,
+    CommitSeq, DiffEntry, DiffEntryKind, DiffResponse, InodeId, InodeKind, NameKey, NamespaceId,
     RevisionNo,
 };
 use std::collections::{BTreeSet, HashMap};
@@ -44,10 +44,10 @@ pub struct DiffPage {
 /// `to_seq` defaults to the head of `view`, and `after_seq` to `from_seq`.
 /// The page checks `from_seq` against the retention floor of `view` before
 /// it reads anything, so a page whose basis has a floor above `from_seq`
-/// returns `rebootstrap_required`.
+/// returns `below_retention_floor`.
 pub(crate) async fn diff_page<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
-    from_seq: ChangeSeq,
+    from_seq: CommitSeq,
     options: &DiffOptions,
 ) -> Result<DiffPage> {
     diff_page_within(view, from_seq, options, DIFF_PAGE_TOUCHES).await
@@ -59,7 +59,7 @@ pub(crate) async fn diff_page<S: ObjectStore + ?Sized>(
 /// `max_touches` inodes is read across pages instead.
 async fn diff_page_within<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
-    from_seq: ChangeSeq,
+    from_seq: CommitSeq,
     options: &DiffOptions,
     max_touches: usize,
 ) -> Result<DiffPage> {
@@ -78,7 +78,7 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
     crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
     let retention_floor_seq = view.retention_floor_seq();
     if from_seq < retention_floor_seq {
-        return Err(CoreError::RebootstrapRequired {
+        return Err(CoreError::BelowRetentionFloor {
             below: HistoryPosition::DiffStart { from_seq },
             retention_floor_seq,
         });
@@ -325,7 +325,7 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
     ///
     /// An entry is under the requested path when the inode's path at either
     /// end is the requested path or below it. An entry is also under the
-    /// requested path when the inode is a `deleted`, `moved`, or `undeleted`
+    /// requested path when the inode is a `deleted`, `moved`, or `restored`
     /// directory whose path at either end is above the requested path,
     /// because the kind applies to everything below the directory, and the
     /// diff doesn't list those descendants. A directory above the requested
@@ -353,7 +353,7 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
         }
         let (kind, from_revisions) = match (&from, &to) {
             (State::Absent, State::Visible(_)) if at_or_below => (DiffEntryKind::Created, None),
-            (State::Hidden, State::Visible(_)) => (DiffEntryKind::Undeleted, None),
+            (State::Hidden, State::Visible(_)) => (DiffEntryKind::Restored, None),
             (State::Visible(_), State::Absent | State::Hidden) => (DiffEntryKind::Deleted, None),
             (State::Visible(from_path), State::Visible(to_path))
                 if at_or_below || edge(from_path) != edge(to_path) =>
@@ -372,7 +372,7 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
             // A directory above the requested path that was created, or that
             // kept its parent and name, isn't an entry. Each inode that a
             // created directory contains at `to_seq` and that's under the
-            // requested path was created, moved in, or undeleted in the range,
+            // requested path was created, moved in, or restored in the range,
             // so it's an entry of its own. A change to the directory's own
             // revisions doesn't change the state of an inode below the
             // directory.
@@ -381,7 +381,7 @@ impl<S: ObjectStore + ?Sized> Diff<'_, '_, '_, S> {
         };
         let (from, to) = (from.into_visible(), to.into_visible());
 
-        // A created or undeleted file reports its revision. A moved or
+        // A created or restored file reports its revision. A moved or
         // changed inode reports each revision that differs between the ends.
         let (revision_no, attributes_revision_no, access_revision_no) =
             match (from_revisions, touched.revisions) {
@@ -475,7 +475,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> End<'a, 'store, S> {
         &self,
         inode_id: InodeId,
         inode_kind: InodeKind,
-    ) -> Result<(Revisions, Option<ChangeSeq>)> {
+    ) -> Result<(Revisions, Option<CommitSeq>)> {
         let revision = match inode_kind {
             InodeKind::File => self.view.latest_revision_record(inode_id).await?,
             InodeKind::Directory => None,
@@ -506,7 +506,7 @@ struct TouchedInode {
     /// The sequence of the inode's newest own row (a binding event, a
     /// tombstone event, or a revision, attribute, or access row), which is
     /// the last commit in the range that touched the inode.
-    last_touch_seq: Option<ChangeSeq>,
+    last_touch_seq: Option<CommitSeq>,
     /// The inode's revision numbers, or `None` when it doesn't exist at
     /// `to_seq`.
     revisions: Option<Revisions>,
@@ -551,7 +551,7 @@ impl State {
 
 /// Returns the inodes that `deltas` touch, each once: the child of a bind or
 /// unbind, the inode of a revision, attribute, access, or creation delta,
-/// and the root of a deletion or undelete. A bind's parent isn't touched,
+/// and the root of a deletion or restore. A bind's parent isn't touched,
 /// because a child's binding doesn't change the parent's own state.
 pub(crate) fn touched_inodes(deltas: &[WalCommitDelta]) -> BTreeSet<InodeId> {
     deltas

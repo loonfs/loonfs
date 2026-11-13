@@ -5,10 +5,10 @@ use super::filesystem::{
     AccessCommand, ChangesArgs, FilesystemAnnotateArgs, FilesystemAppendArgs, FilesystemCatArgs,
     FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs, FilesystemMkdirArgs,
     FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs,
-    FilesystemStatArgs, FilesystemTransferArgs, FilesystemUndeleteArgs, TrashArgs,
+    FilesystemStatArgs, FilesystemTransferArgs, TrashArgs,
 };
 use super::flags::PageLimitArgs;
-use super::maintenance::{MaintenanceCheckpointCommand, MaintenanceCommand};
+use super::maintenance::{MaintenanceCommand, MaintenanceSnapshotCommand};
 use super::namespace::{MergeArgs, NamespaceCommand, NamespaceUseArgs, SnapshotCommand};
 use super::profile::ProfileCommand;
 use crate::progress::ProgressMode;
@@ -28,8 +28,7 @@ Filesystem:
   grep          Search file content through the grep index
   get           Download a file or directory tree
   put           Upload a file or directory tree
-  restore       Restore a prior file revision
-  undelete      Recover a deleted file or directory
+  restore       Restore a prior file revision or a deleted item
   mkdir         Create a directory
   rm            Delete a file or directory
   mv            Move or rename a path
@@ -50,7 +49,7 @@ Context and configuration:
 Inspection:
   stat          Describe one visible path or inode
   revisions     List a file's revision history
-  trash         List recoverable deletions
+  trash         List the trash
   changes       List committed changes
   maintenance   Run maintenance operations
   capabilities  Show the selected deployment's protocol capabilities
@@ -222,7 +221,7 @@ pub(crate) enum Command {
     /// with the conflicts and the new fork to inspect. It saves the session
     /// in a record file after every step, so a rerun resumes where the last
     /// run stopped. Without a record, it recovers the session's new forks
-    /// from the namespace's fork pins.
+    /// from the namespace's fork snapshots.
     Merge(MergeArgs),
     /// Set the default namespace for a profile.
     /// This sets the interactive default. Automation that runs concurrently
@@ -253,10 +252,9 @@ pub(crate) enum Command {
     Append(FilesystemAppendArgs),
     /// List a file's revision history, newest first.
     Revisions(FilesystemRevisionsArgs),
-    /// Write a prior revision's content as the file's next revision.
+    /// Write a prior revision's content as the file's next revision, or
+    /// restore a deleted file or directory.
     Restore(FilesystemRestoreArgs),
-    /// Recover a deleted file or directory at a destination path.
-    Undelete(FilesystemUndeleteArgs),
     /// Create a directory.
     Mkdir(FilesystemMkdirArgs),
     /// Delete a file or directory.
@@ -265,14 +263,14 @@ pub(crate) enum Command {
     Mv(FilesystemTransferArgs),
     /// Copy a file (or directory tree with -r) to another path.
     Cp(FilesystemTransferArgs),
-    /// List recoverable deletions: what was deleted, when, and the exact
-    /// handle `undelete` needs.
+    /// List the trash: what was deleted, when, and the exact
+    /// handle `restore` needs.
     Trash(TrashArgs),
     /// List committed changes after a sequence number.
     Changes(ChangesArgs),
     /// Show the selected deployment's protocol capabilities.
     Capabilities,
-    /// Maintenance operations: metadata, the checkpoint inventory, retention, GC, indexes, and the store.
+    /// Maintenance operations: metadata, the snapshot inventory, retention, GC, indexes, and the store.
     Maintenance {
         #[command(subcommand)]
         command: MaintenanceCommand,
@@ -310,7 +308,6 @@ impl Command {
                 | Self::Append(_)
                 | Self::Revisions(_)
                 | Self::Restore(_)
-                | Self::Undelete(_)
                 | Self::Mkdir(_)
                 | Self::Rm(_)
                 | Self::Mv(_)
@@ -318,12 +315,13 @@ impl Command {
                 | Self::Trash(_)
                 | Self::Changes(_)
                 | Self::Maintenance {
-                    command: MaintenanceCommand::Checkpoint { .. }
+                    command: MaintenanceCommand::Snapshot { .. }
                         | MaintenanceCommand::Index { .. }
                         | MaintenanceCommand::Metadata(_)
                         | MaintenanceCommand::Fold
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Gc(_)
+                        | MaintenanceCommand::Pool { .. }
                         | MaintenanceCommand::RecoverAdministrator(_),
                 }
         )
@@ -341,8 +339,8 @@ impl Command {
             } => Some(&args.pagination.page_limits),
             Self::Maintenance {
                 command:
-                    MaintenanceCommand::Checkpoint {
-                        command: MaintenanceCheckpointCommand::List(args),
+                    MaintenanceCommand::Snapshot {
+                        command: MaintenanceSnapshotCommand::List(args),
                     },
             } => Some(&args.pagination.page_limits),
             _ => None,

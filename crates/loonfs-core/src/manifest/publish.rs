@@ -268,7 +268,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .then(|| newest.unwrap_or_else(|| basis.manifest.clone())))
     }
 
-    /// Publishes manifest 1 of a new namespace, after the hint that points to it.
+    /// Publishes the hint of a new namespace, which points to manifest 1.
     ///
     /// The put of the hint decides whether the ID is new (format spec,
     /// "Creating a namespace"). Manifest 1 can't, because garbage collection
@@ -276,19 +276,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// call reads the current manifest through it, and returns
     /// `namespace_exists`, or `namespace_deleted` when that manifest is a
     /// tombstone. A hint without a manifest belongs to a creation that failed
-    /// before it wrote manifest 1, and the call then writes manifest 1 with
-    /// put-if-absent, which decides between two such creations.
-    pub(crate) async fn create_manifest(
-        &self,
-        payload: NamespaceManifestPayload,
-        clock: &OperationClock,
-    ) -> Result<()> {
-        let namespace_id = payload.namespace_id.clone();
+    /// before it wrote manifest 1, and the call then returns `Ok`, so the
+    /// caller writes manifest 1 with [`Self::publish_first_manifest`].
+    pub(crate) async fn publish_first_hint(&self) -> Result<()> {
         let first = HintPayload {
-            namespace_id: namespace_id.clone(),
+            namespace_id: self.namespace_id.clone(),
             manifest_no: ManifestNo(1),
         };
-        let object_key = loonfs_objectstore::keys::hint(&namespace_id);
+        let object_key = loonfs_objectstore::keys::hint(&self.namespace_id);
         let bytes = encode_control_state(ControlObjectKind::Hint, &first)
             .expect("a namespace hint should encode");
         match self
@@ -296,18 +291,29 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .put_if_absent(&object_key, Bytes::from(bytes))
             .await
         {
-            Ok(_) => {}
+            Ok(_) => Ok(()),
             Err(ObjectStoreError::PreconditionFailed { .. }) => {
-                if let Some(current) = self
+                match self
                     .load_current_manifest_if_present()
                     .await
                     .map_err(CoreError::ControlObjectLoad)?
                 {
-                    return Err(existing_namespace(namespace_id, &current));
+                    Some(current) => Err(existing_namespace(self.namespace_id.clone(), &current)),
+                    None => Ok(()),
                 }
             }
-            Err(error) => return Err(CoreError::store(&object_key, &error)),
+            Err(error) => Err(CoreError::store(&object_key, &error)),
         }
+    }
+
+    /// Publishes manifest 1 of a new namespace with put-if-absent, after
+    /// [`Self::publish_first_hint`], and returns `namespace_exists` or
+    /// `namespace_deleted` when another creation's manifest 1 won the put.
+    pub(crate) async fn publish_first_manifest(
+        &self,
+        payload: NamespaceManifestPayload,
+        clock: &OperationClock,
+    ) -> Result<()> {
         match self
             .publish_manifest_from(encode_manifest(payload), clock, None)
             .await?
@@ -315,7 +321,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             ManifestPublicationOutcome::Published(_) => Ok(()),
             ManifestPublicationOutcome::CoveredByCurrent(current)
             | ManifestPublicationOutcome::PredecessorChanged(current) => {
-                Err(existing_namespace(namespace_id, &current))
+                Err(existing_namespace(self.namespace_id.clone(), &current))
             }
         }
     }
@@ -536,44 +542,37 @@ fn existing_namespace(namespace_id: NamespaceId, current: &LoadedManifest) -> Co
     }
 }
 
-/// Returns whether `payload` references an object that this attempt created:
-/// a fork's source pin, or a metadata or extension segment that its
-/// predecessor doesn't list.
+/// Returns whether `payload` references an ID that this attempt generated.
 ///
-/// Identical bytes prove authorship only for such a manifest. A rival can
-/// rebuild any other manifest byte for byte.
+/// Every manifest 1, which is the only manifest without a `current`, refers to
+/// one (a plain create's pool ID, or the fork snapshot of a fork). A successor refers
+/// to one when it lists a metadata or extension segment that `current`
+/// doesn't list. Identical bytes prove authorship only for such a manifest. A
+/// rival can rebuild any other manifest byte for byte.
 fn references_own_object(
     payload: &NamespaceManifestPayload,
     current: Option<&PublicationBasis>,
 ) -> bool {
-    let predecessor = current.map(|current| current.manifest.payload());
-    let listed = predecessor
+    let Some(current) = current else {
+        return true;
+    };
+    let listed = segment_ids(current.manifest.payload()).collect::<HashSet<_>>();
+    segment_ids(payload).any(|segment_id| !listed.contains(segment_id))
+}
+
+fn segment_ids(manifest: &NamespaceManifestPayload) -> impl Iterator<Item = &str> {
+    manifest
+        .runs
         .iter()
-        .flat_map(|predecessor| &predecessor.runs)
         .flat_map(|run| &run.segments)
         .map(|segment| segment.segment_id.as_str())
         .chain(
-            predecessor
-                .iter()
-                .flat_map(|predecessor| predecessor.extensions.values())
+            manifest
+                .extensions
+                .values()
                 .flat_map(ExtensionEntry::segments)
                 .map(|segment| segment.segment_id.as_str()),
         )
-        .collect::<HashSet<_>>();
-    (payload.manifest_no == ManifestNo(1) && payload.fork_basis.is_some())
-        || payload
-            .runs
-            .iter()
-            .flat_map(|run| &run.segments)
-            .map(|segment| segment.segment_id.as_str())
-            .chain(
-                payload
-                    .extensions
-                    .values()
-                    .flat_map(ExtensionEntry::segments)
-                    .map(|segment| segment.segment_id.as_str()),
-            )
-            .any(|segment_id| !listed.contains(segment_id))
 }
 
 /// Asserts that `payload` is a legal successor of the current manifest, or a

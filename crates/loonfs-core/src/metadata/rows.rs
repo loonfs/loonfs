@@ -4,13 +4,13 @@
 use super::indexes::MetadataIndexes;
 use crate::heap_bytes::HeapBytes;
 use loonfs_types::format::manifest::{
-    lookup_keys, AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction,
-    AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, DeletedBinding,
-    DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    lookup_keys, AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord,
+    ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction, TrashRecord, TrashRowAction,
 };
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
-use loonfs_types::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
+use loonfs_types::{ActorId, CommitId, CommitSeq, InodeId, InodeKind};
 use std::mem::size_of;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +49,11 @@ impl Default for MetadataState {
 /// among records at or below `visible_seq`, the newest position speaks for
 /// the root. A `Set` newest means the root's subtree is hidden, and a
 /// `Revoke` newest means it isn't. Whether a hidden subtree's deletion is
-/// recoverable depends on the view's retention floor, which this rule
+/// in the trash depends on the view's retention floor, which this rule
 /// doesn't read.
 /// The newest event is authoritative WITHOUT consulting the target of a
 /// revoke: commit validation guarantees a revoke is only ever written against the
-/// position that was recoverable, so for valid histories the two rules
+/// position that was in the trash, so for valid histories the two rules
 /// agree, and the recorded target serves as audit metadata and the
 /// projection contract (change-feed consumers reduce with it and can flag a
 /// mismatch as corruption). Keep every reader on this helper — a site
@@ -61,7 +61,7 @@ impl Default for MetadataState {
 /// truth.
 pub(crate) fn hiding_tombstone_from_records(
     records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<SubtreeTombstoneRecord> {
     newest_tombstone_from_records(records, visible_seq)
         .filter(|tombstone| tombstone.action.hides_subtree())
@@ -71,7 +71,7 @@ pub(crate) fn hiding_tombstone_from_records(
 /// `revoke`, which is the event that [`hiding_tombstone_from_records`] reads.
 pub(crate) fn newest_tombstone_from_records(
     records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<SubtreeTombstoneRecord> {
     records
         .into_iter()
@@ -79,53 +79,49 @@ pub(crate) fn newest_tombstone_from_records(
         .max_by_key(|tombstone| tombstone.position())
 }
 
-/// Converts a tombstone event into its derived `ActiveDeletions` row. A `set`
+/// Converts a tombstone event into its derived trash row. A `set`
 /// adds a deletion to the listing, with the root's kind that the event
 /// stores, and a `revoke` removes that position.
 ///
 /// It reduces target-aware where the newest-event-wins rule in
 /// [`hiding_tombstone_from_records`] reduces target-blind. Commit validation
-/// only ever writes a revoke against the position that was recoverable, so
+/// only ever writes a revoke against the position that was in the trash, so
 /// the two agree on every history a writer can produce; the target is what
 /// lets a removal be derived one event at a time instead of by re-reading a
 /// root's whole history.
-pub(crate) fn active_deletion_from_tombstone(
-    tombstone: &SubtreeTombstoneRecord,
-) -> ActiveDeletionRecord {
+pub(crate) fn trash_record_from_tombstone(tombstone: &SubtreeTombstoneRecord) -> TrashRecord {
     match &tombstone.action {
         TombstoneRowAction::Set {
             root_kind,
             deleted_binding,
-        } => ActiveDeletionRecord {
+        } => TrashRecord {
             root_inode_id: tombstone.root_inode_id,
             deletion_seq: tombstone.committed_seq,
-            action: ActiveDeletionRowAction::Listed {
+            action: TrashRowAction::Listed {
                 inode_kind: *root_kind,
                 deleted_at_ms: tombstone.committed_at_ms,
                 deleted_by: tombstone.committed_by.clone(),
                 deleted_binding: deleted_binding.clone(),
             },
         },
-        TombstoneRowAction::Revoke { target } => ActiveDeletionRecord {
+        TombstoneRowAction::Revoke { target } => TrashRecord {
             root_inode_id: tombstone.root_inode_id,
             deletion_seq: target.seq,
-            action: ActiveDeletionRowAction::Removed {
+            action: TrashRowAction::Removed {
                 removed_seq: tombstone.committed_seq,
             },
         },
     }
 }
 
-pub(crate) fn recoverable_deletion_from_active_record(
-    record: ActiveDeletionRecord,
-) -> Option<RecoverableDeletion> {
+pub(crate) fn listed_trash_entry_from_record(record: TrashRecord) -> Option<ListedTrashEntry> {
     match record.action {
-        ActiveDeletionRowAction::Listed {
+        TrashRowAction::Listed {
             inode_kind,
             deleted_at_ms,
             deleted_by,
             deleted_binding,
-        } => Some(RecoverableDeletion {
+        } => Some(ListedTrashEntry {
             root_inode_id: record.root_inode_id,
             inode_kind,
             deletion_seq: record.deletion_seq,
@@ -133,52 +129,52 @@ pub(crate) fn recoverable_deletion_from_active_record(
             deleted_by,
             deleted_binding,
         }),
-        ActiveDeletionRowAction::Removed { .. } => None,
+        TrashRowAction::Removed { .. } => None,
     }
 }
 
-/// One recoverable deletion as the trash listing renders it.
+/// One trash entry as the trash listing renders it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecoverableDeletion {
+pub(crate) struct ListedTrashEntry {
     pub(crate) root_inode_id: InodeId,
     pub(crate) inode_kind: InodeKind,
-    pub(crate) deletion_seq: ChangeSeq,
+    pub(crate) deletion_seq: CommitSeq,
     pub(crate) deleted_at_ms: u64,
     pub(crate) deleted_by: ActorId,
-    /// The binding the delete removed and an in-place undelete restores.
+    /// The binding the delete removed and an in-place restore binds again.
     pub(crate) deleted_binding: DeletedBinding,
 }
 
-/// The rows of the active-deletion family that one scan reads, as row-key
+/// The rows of the trash family that one scan reads, as row-key
 /// bounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ActiveDeletionRange {
+pub(crate) struct TrashRange {
     pub(super) lower_bound: String,
     /// `None` scans to the end of the family.
     pub(super) upper_bound: Option<String>,
 }
 
-impl ActiveDeletionRange {
+impl TrashRange {
     /// The deletions after the one at `start_after`, or every deletion when
     /// it's `None`, as a trash listing page reads them.
-    pub(crate) fn after(start_after: Option<(ChangeSeq, InodeId)>) -> Self {
+    pub(crate) fn after(start_after: Option<(CommitSeq, InodeId)>) -> Self {
         Self {
             lower_bound: match start_after {
                 Some((deletion_seq, root_inode_id)) => {
-                    lookup_keys::active_deletion_key_after(deletion_seq, root_inode_id)
+                    lookup_keys::trash_key_after(deletion_seq, root_inode_id)
                 }
-                None => lookup_keys::ACTIVE_DELETION_ROW_PREFIX.to_owned(),
+                None => lookup_keys::TRASH_ROW_PREFIX.to_owned(),
             },
-            upper_bound: string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX),
+            upper_bound: string_prefix_upper_bound(lookup_keys::TRASH_ROW_PREFIX),
         }
     }
 
     /// Starts the range above `after_seq` without moving it backward.
-    pub(crate) fn above_seq(self, after_seq: ChangeSeq) -> Self {
+    pub(crate) fn above_seq(self, after_seq: CommitSeq) -> Self {
         Self {
             lower_bound: self
                 .lower_bound
-                .max(lookup_keys::active_deletion_key_after_seq(after_seq)),
+                .max(lookup_keys::trash_key_after_seq(after_seq)),
             ..self
         }
     }
@@ -233,7 +229,7 @@ impl MetadataState {
     /// to an at-head query. The seq-gated read methods below rely on this to
     /// route to the indexes; only queries strictly below `indexed_seq()` need
     /// the historical scans.
-    pub fn indexed_seq(&self) -> ChangeSeq {
+    pub fn indexed_seq(&self) -> CommitSeq {
         self.indexes.indexed_seq()
     }
 

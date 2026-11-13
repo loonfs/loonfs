@@ -88,7 +88,7 @@ See the [documentation](docs/specs/README.md) for the architecture, storage form
 
 - **A commit applies one or more changes atomically.** The operations in a commit are serialized in order, and preconditions add optimistic concurrency control. 
 
-- **Forks and snapshots are copy-on-write.** Every stored object is immutable, so a fork shares the source namespace's metadata segments and content objects instead of copying them. Within a namespace, a snapshot is a pin that keeps one manifest readable until the snapshot expires.
+- **Forks and snapshots are copy-on-write.** Every stored object is immutable, so a fork shares the source namespace's metadata segments and content objects instead of copying them. Within a namespace, a snapshot keeps one manifest readable until the snapshot expires.
 
 
 ## Design philosophy

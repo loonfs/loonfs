@@ -27,7 +27,7 @@ use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
     SegmentBlocksBuilder, SegmentFilter, SegmentFilterBuilder,
 };
-use loonfs_types::{ChangeSeq, ContentId, IndexSegmentId, InodeId, PinId, RevisionNo, RunNo};
+use loonfs_types::{CommitSeq, ContentId, IndexSegmentId, InodeId, RevisionNo, RunNo, SnapshotId};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -35,23 +35,23 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 
 /// The entry of an active index reorganizing a set of segments.
-pub(crate) const ACTIVE_ENTRY_FIXTURE: &str = "grep_entry.v2.json";
+pub(crate) const ACTIVE_ENTRY_FIXTURE: &str = "grep_entry.v1.json";
 /// The entry of a backfill in progress, with segments and no
 /// reorganization.
-pub(crate) const BACKFILLING_ENTRY_FIXTURE: &str = "grep_entry.backfilling.v2.json";
+pub(crate) const BACKFILLING_ENTRY_FIXTURE: &str = "grep_entry.backfilling.v1.json";
 /// The entry of a disabled index, which lists neither segments nor a
 /// reorganization.
-pub(crate) const DISABLED_ENTRY_FIXTURE: &str = "grep_entry.disabled.v2.json";
+pub(crate) const DISABLED_ENTRY_FIXTURE: &str = "grep_entry.disabled.v1.json";
 /// One data block of `gram_postings` rows.
-const GRAM_POSTINGS_BLOCK_FIXTURE: &str = "grep_segment_gram_postings.v2.bin";
+const GRAM_POSTINGS_BLOCK_FIXTURE: &str = "grep_segment_gram_postings.v1.bin";
 /// One data block of `text` rows.
-const TEXTS_BLOCK_FIXTURE: &str = "grep_segment_texts.v2.bin";
+const TEXTS_BLOCK_FIXTURE: &str = "grep_segment_texts.v1.bin";
 /// One data block of `content_revision` rows.
-const CONTENT_REVISIONS_BLOCK_FIXTURE: &str = "grep_segment_content_revisions.v2.bin";
+const CONTENT_REVISIONS_BLOCK_FIXTURE: &str = "grep_segment_content_revisions.v1.bin";
 /// One data block of `value` rows.
-const VALUES_BLOCK_FIXTURE: &str = "grep_segment_values.v2.bin";
+const VALUES_BLOCK_FIXTURE: &str = "grep_segment_values.v1.bin";
 /// One data block of `filter` rows.
-const FILTERS_BLOCK_FIXTURE: &str = "grep_segment_filters.v2.bin";
+const FILTERS_BLOCK_FIXTURE: &str = "grep_segment_filters.v1.bin";
 
 // ---------------------------------------------------------------------------
 // Golden helpers
@@ -97,7 +97,7 @@ fn unzstd(bytes: &[u8]) -> Vec<u8> {
 /// level-2 run, so every id the reorganize state lists is a segment this
 /// entry lists, and it records the revisions its pruning keeps.
 pub(crate) fn sample_active_entry(
-    built_through_seq: ChangeSeq,
+    built_through_seq: CommitSeq,
     next_event_index: u32,
 ) -> GrepEntry {
     let reorganize = GrepReorganizeState {
@@ -107,13 +107,13 @@ pub(crate) fn sample_active_entry(
         output_level: 2,
         run_no: RunNo(3),
         pruning: Some(GrepPruning {
-            filter_seq: ChangeSeq(9),
-            retention_floor_seq: ChangeSeq(4),
+            filter_seq: CommitSeq(9),
+            retention_floor_seq: CommitSeq(4),
         }),
     };
     GrepEntry::new(
         GrepIndexStatus::Active {
-            captured_seq: ChangeSeq(3),
+            captured_seq: CommitSeq(3),
             built_through_seq,
             next_event_index,
         },
@@ -127,16 +127,16 @@ pub(crate) fn sample_active_entry(
     .expect("valid active entry")
 }
 
-/// A backfill walking a pinned checkpoint. It lists the run the walk has
+/// A backfill walking a snapshot. It lists the run the walk has
 /// written so far and no reorganization, which is the index shape the active
 /// fixture above does not pin.
 pub(crate) fn sample_backfilling_entry() -> GrepEntry {
     GrepEntry::new(
         GrepIndexStatus::Backfilling {
-            captured_seq: ChangeSeq(7),
+            captured_seq: CommitSeq(7),
             cursor_inode_id: Some(InodeId(7)),
-            pin_id: PinId::parse("pin_00000000000000000001-0000000000000009")
-                .expect("valid pin id"),
+            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000009")
+                .expect("valid snapshot id"),
         },
         None,
         vec![run_ref(1, 0, &[1])],
@@ -253,7 +253,7 @@ fn sample_content_revision_rows() -> Vec<IndexRow> {
                 &ContentValue::new(&content_id, size_bytes),
                 InodeId(inode_id),
                 RevisionNo(revision_no),
-                ChangeSeq(committed_seq),
+                CommitSeq(committed_seq),
             )
         })
         .collect()
@@ -321,12 +321,12 @@ fn assert_entry_golden_decodes(fixture: &str, entry: &GrepEntry) {
 
 #[test]
 fn grep_entry_matches_golden_bytes() {
-    assert_entry_matches_golden(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(ChangeSeq(11), 5));
+    assert_entry_matches_golden(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(CommitSeq(11), 5));
 }
 
 #[test]
 fn grep_entry_golden_decodes_to_sample() {
-    assert_entry_golden_decodes(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(ChangeSeq(11), 5));
+    assert_entry_golden_decodes(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(CommitSeq(11), 5));
 }
 
 #[test]

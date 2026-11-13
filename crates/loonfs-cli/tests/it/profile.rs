@@ -139,12 +139,19 @@ root = "./store"
     assert_success(&run(&["profile", "list"]));
     assert_success(&run(&["profile", "show", "dev"]));
     harness.add_embedded_profile("other");
-    assert_success(&run(&["namespace", "create", "demo", "--profile", "other"]));
+    let created = run(&["namespace", "create", "--profile", "other"]);
+    assert_success(&created);
+    let stdout = stdout_string(&created);
+    let generated = stdout.split(' ').next().expect("namespace ID");
+    assert_eq!(
+        stderr_string(&created),
+        format!("creating namespace `{generated}`\n")
+    );
     assert_success(&run(&[
         "ls",
         "/",
         "--namespace",
-        "demo",
+        generated,
         "--profile",
         "other",
     ]));
@@ -1289,7 +1296,7 @@ fn external_remote_profile_executes_through_http() {
             "namespace_id": "demo",
             "created_at_ms": json_data(&create)["created_at_ms"],
             "created_by": "loonfs-cli",
-            "family_root_id": "demo",
+            "pool_id": json_data(&create)["pool_id"],
             "head_seq": 0,
             "retention_floor_seq": 0
         })
@@ -1306,10 +1313,10 @@ fn external_remote_profile_executes_through_http() {
             "created_by": "loonfs-cli",
             "fork_basis": {
                 "source_namespace_id": "demo",
-                "source_head_seq": 0,
-                "source_pin_id": json_data(&fork)["fork_basis"]["source_pin_id"]
+                "fork_point_seq": 0,
+                "source_snapshot_id": json_data(&fork)["fork_basis"]["source_snapshot_id"]
             },
-            "family_root_id": "demo",
+            "pool_id": json_data(&create)["pool_id"],
             "head_seq": 0,
             "retention_floor_seq": 0
         })

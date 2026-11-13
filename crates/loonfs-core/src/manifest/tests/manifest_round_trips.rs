@@ -1,4 +1,4 @@
-//! Checkpoint manifest construction, round trips, and strict consumption.
+//! Snapshot manifest construction, round trips, and strict consumption.
 
 use super::*;
 use loonfs_test_support::stores::replace_object;
@@ -160,17 +160,14 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
     let before = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization before");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization after");
 
-    assert_eq!(
-        after.manifest.manifest().manifest_no,
-        checkpoint.manifest_no
-    );
+    assert_eq!(after.manifest.manifest().manifest_no, snapshot.manifest_no);
     assert_eq!(before.head.seq, after.head.seq);
     assert!(metadata_states_equivalent(
         &before.metadata_state,
@@ -208,9 +205,9 @@ async fn manifest_round_trip_preserves_unbound_values() {
             .count(),
         1
     );
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization after");
@@ -270,12 +267,12 @@ async fn manifest_round_trip_supports_empty_namespace() {
             .is_empty());
     }
 
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
-    // The published manifest already covers the head: pinning writes a
+        .expect("create snapshot");
+    // The published manifest already covers the head: taking a snapshot writes a
     // record against it instead of materializing a new manifest.
-    assert_eq!(checkpoint.manifest_no, ManifestNo(1));
+    assert_eq!(snapshot.manifest_no, ManifestNo(1));
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
@@ -284,14 +281,14 @@ async fn manifest_round_trip_supports_empty_namespace() {
         ManifestNo(1)
     );
     let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&checkpoint.checkpoint_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
-        .expect("read pin")
+        .expect("read snapshot")
         .expect("record exists")
         .state;
-    assert!(PinId::parse(record.pin_id.as_str()).is_ok());
-    assert_eq!(record.head_seq, ChangeSeq(0));
-    assert_eq!(record.pin_id.manifest_no(), ManifestNo(1));
+    assert!(SnapshotId::parse(record.snapshot_id.as_str()).is_ok());
+    assert_eq!(record.head_seq, CommitSeq(0));
+    assert_eq!(record.snapshot_id.manifest_no(), ManifestNo(1));
     assert!(metadata_states_equivalent(
         &materialization.metadata_state,
         &genesis.base_state
@@ -311,9 +308,9 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     let manifest_key = current_manifest_key(&store, &namespace_id).await;
     replace_object(
@@ -333,7 +330,7 @@ async fn strict_manifest_consumption_fails_when_manifest_is_corrupted() {
 }
 
 #[tokio::test]
-async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
+async fn create_snapshot_surfaces_conflicting_invalid_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
@@ -359,14 +356,14 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
         KeyPredicate::exact(manifest_key),
         br#"{"bad":"json"}"#.to_vec(),
     );
-    let error = create_checkpoint(&store, &namespace_id, &context)
+    let error = create_snapshot(&store, &namespace_id, &context)
         .await
         .expect_err("invalid winning manifest");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
 #[tokio::test]
-async fn pins_are_standalone_files_one_per_pin() {
+async fn snapshots_are_standalone_files_one_per_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -379,26 +376,26 @@ async fn pins_are_standalone_files_one_per_pin() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let first = create_checkpoint(&store, &namespace_id, &context)
+    let first = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
-    // Pinning the same basis again is a second pin, not a second name for
+        .expect("create snapshot");
+    // Taking a snapshot of the same basis again is a second snapshot, not a second name for
     // the first one: its own record file under its own id, with the same
     // basis facts inside.
-    let repeated = create_checkpoint(&store, &namespace_id, &context)
+    let repeated = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("repeat checkpoint");
-    assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
+        .expect("repeat snapshot");
+    assert_ne!(repeated.snapshot_id, first.snapshot_id);
     assert_eq!(repeated.manifest_no, first.manifest_no);
     assert_eq!(repeated.captured_seq, first.captured_seq);
 
     let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&first.checkpoint_id)
+        .load_snapshot_record(&first.snapshot_id)
         .await
-        .expect("read pin")
+        .expect("read snapshot")
         .expect("record exists")
         .state;
-    assert_eq!(record.pin_id.manifest_no(), first.manifest_no);
+    assert_eq!(record.snapshot_id.manifest_no(), first.manifest_no);
     assert_eq!(record.head_seq, first.captured_seq);
 
     // A new basis mints a new record; both files exist side by side.
@@ -406,12 +403,12 @@ async fn pins_are_standalone_files_one_per_pin() {
         .write_file_bytes("/docs/file-2.txt", b"body\n", None)
         .await
         .expect("write 2");
-    let second = create_checkpoint(&store, &namespace_id, &context)
+    let second = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("second checkpoint");
-    assert_ne!(second.checkpoint_id, first.checkpoint_id);
+        .expect("second snapshot");
+    assert_ne!(second.snapshot_id, first.snapshot_id);
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&first.checkpoint_id)
+        .load_snapshot_record(&first.snapshot_id)
         .await
         .expect("read first record")
         .is_some());
@@ -430,9 +427,9 @@ async fn manifest_materialization_uses_written_segments() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
@@ -452,7 +449,7 @@ async fn manifest_materialization_uses_written_segments() {
         .await
         .expect("materialization");
     let manifest_head = head_from_manifest(&current.head, &materialized.manifest);
-    assert_eq!(manifest_head.seq, ChangeSeq(1));
+    assert_eq!(manifest_head.seq, CommitSeq(1));
     assert!(metadata_states_equivalent(
         &materialized.metadata_state,
         &current.metadata_state
@@ -473,7 +470,7 @@ async fn manifest_materialization_uses_written_segments() {
 }
 
 #[tokio::test]
-async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
+async fn manifest_delta_run_materialization_matches_snapshot_projection() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -485,9 +482,9 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    let first = create_checkpoint(&store, &namespace_id, &context)
+    let first = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("first checkpoint");
+        .expect("first snapshot");
     let first_materialized =
         load_manifest_state_for_inspection(&store, &namespace_id, first.manifest_no)
             .await
@@ -497,9 +494,9 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         .write_file_bytes("/docs/second.txt", b"second\n", None)
         .await
         .expect("write second");
-    let second = create_checkpoint(&store, &namespace_id, &context)
+    let second = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("second checkpoint");
+        .expect("second snapshot");
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
@@ -508,8 +505,8 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             .await
             .expect("load second manifest");
 
-    // Checkpoints only append: the base run stays the bootstrap seed's and
-    // each checkpoint contributes one delta run.
+    // Snapshots only append: the base run stays the bootstrap seed's and
+    // each snapshot contributes one delta run.
     assert_eq!(
         second_materialized.manifest.payload().base_seq(),
         first_materialized.manifest.payload().base_seq()
@@ -525,12 +522,12 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
     assert!(delta_runs.iter().all(|run| run.tier == RunTier::Delta));
     for response in [&first, &second] {
         let record = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_pin(&response.checkpoint_id)
+            .load_snapshot_record(&response.snapshot_id)
             .await
-            .expect("read pin")
+            .expect("read snapshot")
             .expect("record exists")
             .state;
-        assert_eq!(record.pin_id.manifest_no(), response.manifest_no);
+        assert_eq!(record.snapshot_id.manifest_no(), response.manifest_no);
     }
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
@@ -548,9 +545,9 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             )
             .await
             .expect("write file");
-        latest = create_checkpoint(&store, &namespace_id, &context)
+        latest = create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
         captured_seqs.push(latest.captured_seq);
     }
     let latest_materialized =
@@ -559,8 +556,8 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             .expect("load chained manifest");
     assert_eq!(
         latest_materialized.manifest.payload().base_seq(),
-        ChangeSeq(0),
-        "always-append checkpoints keep the first published base"
+        CommitSeq(0),
+        "always-append snapshots keep the first published base"
     );
     let chained_delta_runs = super::delta_runs(&latest_materialized.manifest);
     assert_eq!(chained_delta_runs.len(), captured_seqs.len());
@@ -583,16 +580,16 @@ async fn manifest_delta_run_missing_segment_fails_load() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("first checkpoint");
+        .expect("first snapshot");
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/second.txt", b"second\n", None)
         .await
         .expect("write second");
-    let second = create_checkpoint(&store, &namespace_id, &context)
+    let second = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("second checkpoint");
+        .expect("second snapshot");
     let materialized =
         load_manifest_state_for_inspection(&store, &namespace_id, second.manifest_no)
             .await
@@ -627,7 +624,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1).await;
+    let first = write_file_and_create_snapshot(&store, &namespace_id, &context, 1).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/file-2.txt", b"file 2\n", None)
         .await
@@ -670,7 +667,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,
-        family_root_id: namespace_id.clone(),
+        pool_id: loonfs_test_support::ids::numbered_pool_id(1),
         status: loonfs_types::format::control::NamespaceStatus::Active {},
         writer: None,
         folded_wal_no: loonfs_types::WalNo(0),
@@ -739,9 +736,9 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
     };
     let materialization_before = load_current_projection(&store, &namespace_id)
         .await
-        .expect("materialization before checkpoint");
+        .expect("materialization before snapshot");
 
-    let manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    let manifest_no = snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     let materialized = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
         .await
         .expect("load manifest");
@@ -779,7 +776,7 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
 }
 
 #[tokio::test]
-async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest() {
+async fn create_snapshot_keeps_a_current_basis_without_building_a_new_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -796,7 +793,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         .await
         .expect("materialization");
     let covering_manifest_no = ManifestNo(materialization.manifest.manifest().manifest_no.0 + 1);
-    let manifest_without_checkpoint = build_namespace_manifest_from_metadata_state(
+    let manifest_without_snapshot = build_namespace_manifest_from_metadata_state(
         &store,
         &namespace_id,
         ManifestMetadataSource {
@@ -810,28 +807,28 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
     )
     .await
     .expect("build manifest");
-    let manifest_checksum = manifest_without_checkpoint.payload_checksum().to_owned();
+    let manifest_checksum = manifest_without_snapshot.payload_checksum().to_owned();
     publish_once(
         &store,
-        encode_manifest(manifest_without_checkpoint.into_payload()),
+        encode_manifest(manifest_without_snapshot.into_payload()),
     )
     .await
     .expect("publish manifest");
 
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
-    // With standalone records, pinning a basis that already covers the head
-    // writes a checkpoint file against it instead of building a new
+    // With standalone records, taking a snapshot of a basis that already covers the head
+    // writes a snapshot file against it instead of building a new
     // manifest.
-    assert_eq!(checkpoint.manifest_no, covering_manifest_no);
+    assert_eq!(snapshot.manifest_no, covering_manifest_no);
     let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&checkpoint.checkpoint_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
-        .expect("read pin")
+        .expect("read snapshot")
         .expect("record exists")
         .state;
-    assert_eq!(record.pin_id.manifest_no(), covering_manifest_no);
+    assert_eq!(record.snapshot_id.manifest_no(), covering_manifest_no);
     assert_eq!(record.payload_checksum, manifest_checksum);
 }

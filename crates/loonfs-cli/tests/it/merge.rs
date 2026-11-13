@@ -13,10 +13,17 @@ fn merge_merges_a_fork_and_abandons_a_conflicting_session_against_a_server() {
         assert_success(&harness.run_with_stdin(&args, bytes));
     };
     put("demo", "/a.txt", b"base");
-    assert_success(&harness.run(&["namespace", "fork", "demo", "sandbox"]));
-    put("sandbox", "/b.txt", b"new");
+    let forked = harness.run(&["namespace", "fork", "demo"]);
+    assert_success(&forked);
+    let stdout = stdout_string(&forked);
+    let sandbox = stdout.split(' ').next().expect("fork ID");
+    assert_eq!(
+        stderr_string(&forked),
+        format!("forking `demo` into `{sandbox}`\n")
+    );
+    put(sandbox, "/b.txt", b"new");
 
-    let merged = harness.run(&["--json", "merge", "demo", "--from", "sandbox"]);
+    let merged = harness.run(&["--json", "merge", "demo", "--source", sandbox]);
 
     assert_success(&merged);
     let data = json_data(&merged);
@@ -34,9 +41,9 @@ fn merge_merges_a_fork_and_abandons_a_conflicting_session_against_a_server() {
 
     // Both namespaces change `/a.txt`, so the fork's next merge conflicts,
     // and the default resolver leaves the session failed.
-    put("sandbox", "/a.txt", b"ours");
+    put(sandbox, "/a.txt", b"ours");
     put("demo", "/a.txt", b"theirs");
-    let failed = harness.run(&["--json", "merge", "demo", "--from", "sandbox"]);
+    let failed = harness.run(&["--json", "merge", "demo", "--source", sandbox]);
 
     assert_failure(&failed);
     let data = json_data(&failed);
@@ -56,7 +63,7 @@ fn merge_merges_a_fork_and_abandons_a_conflicting_session_against_a_server() {
         Path::new(&record).exists(),
         "a failed session keeps its record"
     );
-    let again = harness.run(&["--json", "merge", "demo", "--from", "sandbox"]);
+    let again = harness.run(&["--json", "merge", "demo", "--source", sandbox]);
     assert_failure(&again);
     assert_eq!(json_data(&again)["steps"], serde_json::json!([]));
 
@@ -64,7 +71,7 @@ fn merge_merges_a_fork_and_abandons_a_conflicting_session_against_a_server() {
     // new fork never merged, so its report is lost, and the session rebases
     // the fork again into a second new fork.
     std::fs::remove_file(&record).expect("remove the record");
-    let recovered = harness.run(&["--json", "merge", "demo", "--from", "sandbox"]);
+    let recovered = harness.run(&["--json", "merge", "demo", "--source", sandbox]);
 
     assert_failure(&recovered);
     let data = json_data(&recovered);
@@ -80,7 +87,7 @@ fn merge_merges_a_fork_and_abandons_a_conflicting_session_against_a_server() {
     assert_eq!(new_fork_ids[0], new_fork_id.as_str());
     assert_eq!(data["session"]["status"]["fork_id"], new_fork_ids[1]);
 
-    let abandoned = harness.run(&["--json", "merge", "demo", "--from", "sandbox", "--abandon"]);
+    let abandoned = harness.run(&["--json", "merge", "demo", "--source", sandbox, "--abandon"]);
 
     assert_success(&abandoned);
     let data = json_data(&abandoned);

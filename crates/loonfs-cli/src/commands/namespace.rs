@@ -10,9 +10,10 @@ use crate::config_file::{load_config, mutate_config};
 use crate::error::{CliError, Result};
 use crate::profiles::{resolve_profile, set_default_namespace, NamedProfile};
 use crate::prompt::prompt_line;
+use crate::render::{write_stderr_progress, OutputFormat};
 use crate::resolve::resolve_namespace;
 use loonfs_client::{CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions};
-use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, PrincipalScope};
+use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, NamespaceId, PrincipalScope};
 use std::collections::BTreeMap;
 
 pub(crate) async fn run_namespace_command(
@@ -54,11 +55,18 @@ async fn run_namespace_create(
     let context = ProfileContext::resolve(invocation).await?;
     let actor_id = context.actor(args.actor.actor_id.as_ref())?;
     let access = namespace_access(invocation, &args).map_err(|error| context.fail(error))?;
+    let namespace_id = args.namespace_id.unwrap_or_else(|| {
+        let generated = NamespaceId::generate();
+        if invocation.behavior.output == OutputFormat::Human {
+            write_stderr_progress(format_args!("creating namespace `{generated}`"));
+        }
+        generated
+    });
     let namespace = context
         .target
         .client
         .create_namespace_with_options(
-            &args.namespace_id,
+            &namespace_id,
             &actor_id,
             &CreateNamespaceOptions {
                 access,
@@ -159,12 +167,22 @@ async fn run_namespace_fork(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = ProfileContext::resolve_as_subject(invocation).await?;
     let actor_id = context.actor(args.actor.actor_id.as_ref())?;
+    let new_namespace_id = args.new_namespace_id.unwrap_or_else(|| {
+        let generated = NamespaceId::generate();
+        if invocation.behavior.output == OutputFormat::Human {
+            write_stderr_progress(format_args!(
+                "forking `{}` into `{generated}`",
+                args.source_namespace_id
+            ));
+        }
+        generated
+    });
     let namespace = context
         .target
         .client
         .fork_namespace_with_options(
             &args.source_namespace_id,
-            &args.new_namespace_id,
+            &new_namespace_id,
             &actor_id,
             &ForkNamespaceOptions {
                 snapshot_id: args.snapshot_id,

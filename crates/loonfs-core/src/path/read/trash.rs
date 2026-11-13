@@ -3,23 +3,22 @@
 use super::listing::validate_cursor_head;
 use crate::authorize::ReadAccess;
 use crate::error::Result;
-use crate::metadata::ActiveDeletionRange;
+use crate::metadata::TrashRange;
 use crate::path::read::loaded_view::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::DirectoryBinding;
-use loonfs_types::{ChangeSeq, InodeId, Page, PageRequest, TrashEntry, TrashPageCursor};
+use loonfs_types::{CommitSeq, InodeId, Page, PageRequest, TrashEntry, TrashPageCursor};
 
 /// Rows one filtered trash page examines before it returns a short page with a
 /// cursor.
 const MAX_TRASH_ROWS_SCANNED_PER_PAGE: usize = 256;
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
-    /// One page of the namespace's recoverable deletions, oldest deletion
-    /// first, as one bounded range scan over the derived active-deletion
-    /// family.
+    /// One page of the namespace's trash, oldest deletion first, as one
+    /// bounded range scan over the derived trash family.
     ///
     /// Each commit keeps that family in step with the tombstone family
-    /// (a delete adds the row, and an undelete removes it). The scan starts
+    /// (a delete adds the row, and a restore removes it). The scan starts
     /// above the view's retention floor, so an expired deletion is never
     /// listed, and the page reads only the deletions it returns, never the
     /// namespace's whole deletion history. A fork's floor starts at its fork
@@ -40,15 +39,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .map(|cursor| (cursor.last_deletion_seq, cursor.last_root_inode_id));
         let retention_floor_seq = self.retention_floor_seq();
         let mut session = self.metadata_view().session();
-        let cursor = |seq: ChangeSeq, inode_id: InodeId| TrashPageCursor {
+        let cursor = |seq: CommitSeq, inode_id: InodeId| TrashPageCursor {
             head_seq: self.visible_seq,
             last_deletion_seq: seq,
             last_root_inode_id: inode_id,
         };
         let (deletions, next_cursor) = if access.is_unrestricted() {
             let mut deletions = session
-                .active_deletions_page(
-                    &ActiveDeletionRange::after(start_after).above_seq(retention_floor_seq),
+                .trash_entries_page(
+                    &TrashRange::after(start_after).above_seq(retention_floor_seq),
                     request.limit.limit_plus_one(),
                 )
                 .await?;
@@ -66,8 +65,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             while !exhausted && kept.len() < limit && scanned < MAX_TRASH_ROWS_SCANNED_PER_PAGE {
                 let wanted = (limit - kept.len()).min(MAX_TRASH_ROWS_SCANNED_PER_PAGE - scanned);
                 let batch = session
-                    .active_deletions_page(
-                        &ActiveDeletionRange::after(start_after).above_seq(retention_floor_seq),
+                    .trash_entries_page(
+                        &TrashRange::after(start_after).above_seq(retention_floor_seq),
                         wanted,
                     )
                     .await?;

@@ -1,8 +1,8 @@
-//! HTTP checkpoint inventory, retention, garbage collection, and maintenance
+//! HTTP snapshot inventory, retention, garbage collection, and maintenance
 //! operations.
 
 use crate::common::http_split_support::*;
-use crate::common::{collect_checkpoints, start_server};
+use crate::common::{assert_api_code, collect_snapshot_records, start_server};
 use bytes::Bytes;
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -12,16 +12,16 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::{
-    ChangeSeq, Checkpoint, CheckpointOwner, DeleteSnapshotResponse, ErrorResponse, ManifestNo,
-    PinId, Snapshot,
+    CommitSeq, DeleteSnapshotResponse, ErrorCode, ErrorResponse, ManifestNo, PoolId, Snapshot,
+    SnapshotId, SnapshotRecord, SnapshotRecordOwner,
 };
 use tempfile::tempdir;
 
 type ApiResult<T> = Result<T, Box<ErrorResponse>>;
 
 /// Creates a snapshot without an expiry, and returns its row in the
-/// checkpoint inventory.
-fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
+/// snapshot inventory.
+fn post_snapshot(server_url: &str, namespace: &str) -> ApiResult<SnapshotRecord> {
     let snapshot: Snapshot = post_maintenance_json_body(
         &format!("{server_url}/v0/namespaces/{namespace}/snapshots"),
         "test-token",
@@ -31,7 +31,7 @@ fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
         decode_maintenance_response(
             raw_agent()
                 .get(&format!(
-                    "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{}",
+                    "{server_url}/v0/maintenance/namespaces/{namespace}/snapshots/{}",
                     snapshot.snapshot_id
                 ))
                 .set("authorization", "Bearer test-token")
@@ -62,9 +62,9 @@ fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_types::GcRespo
 }
 
 fn upkeep(
-    response: &loonfs_types::RunMaintenanceResponse,
+    response: &loonfs_types::RunMaintenanceJobResponse,
 ) -> &loonfs_types::MetadataMaintenanceResponse {
-    let loonfs_types::RunMaintenanceResponse::Metadata(metadata) = response else {
+    let loonfs_types::RunMaintenanceJobResponse::Metadata(metadata) = response else {
         panic!("metadata request returned a different response")
     };
     metadata
@@ -81,8 +81,8 @@ async fn wal_tail_objects(
         .wal_tail_objects
 }
 
-fn retention_floor(response: loonfs_types::RunMaintenanceResponse) -> ChangeSeq {
-    let loonfs_types::RunMaintenanceResponse::Retention(retention) = response else {
+fn retention_floor(response: loonfs_types::RunMaintenanceJobResponse) -> CommitSeq {
+    let loonfs_types::RunMaintenanceJobResponse::Retention(retention) = response else {
         panic!("retention request returned a different response")
     };
     retention.retention_floor_seq
@@ -98,13 +98,13 @@ fn post_gc_with(
         .as_object_mut()
         .expect("GC options are an object")
         .insert("kind".to_owned(), serde_json::json!("gc"));
-    let response: ApiResult<loonfs_types::RunMaintenanceResponse> = post_maintenance_json_body(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
+    let response: ApiResult<loonfs_types::RunMaintenanceJobResponse> = post_maintenance_json_body(
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/jobs"),
         "test-token",
         request,
     );
     response.map(|response| {
-        let loonfs_types::RunMaintenanceResponse::Gc(gc) = response else {
+        let loonfs_types::RunMaintenanceJobResponse::Gc(gc) = response else {
             panic!("GC request returned a different response")
         };
         gc
@@ -114,9 +114,9 @@ fn post_gc_with(
 fn post_metadata_run(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceJobResponse> {
     post_maintenance_json_body(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/jobs"),
         "test-token",
         serde_json::json!({ "kind": "metadata" }),
     )
@@ -125,9 +125,9 @@ fn post_metadata_run(
 fn post_missing_maintenance_body(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceJobResponse> {
     post_maintenance_json(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/jobs"),
         "test-token",
     )
 }
@@ -135,7 +135,7 @@ fn post_missing_maintenance_body(
 fn post_retention_advance(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceJobResponse> {
     post_retention_advance_with(server_url, namespace, serde_json::json!({}))
 }
 
@@ -143,14 +143,14 @@ fn post_retention_advance_with(
     server_url: &str,
     namespace: &str,
     target: serde_json::Value,
-) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceJobResponse> {
     let mut request = target;
     request
         .as_object_mut()
         .expect("retention targets are an object")
         .insert("kind".to_owned(), serde_json::json!("retention"));
     post_maintenance_json_body(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/jobs"),
         "test-token",
         request,
     )
@@ -256,7 +256,7 @@ async fn seed_with_a_departed_writer(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
+async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
     let key_prefix = "http-maintenance";
@@ -282,24 +282,24 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let server_url = harness.server_url.clone();
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
 
-    let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
-    assert!(PinId::parse(first.checkpoint_id.as_str()).is_ok());
+    let first = post_snapshot(&server_url, namespace.as_str()).expect("first snapshot");
+    assert!(SnapshotId::parse(first.snapshot_id.as_str()).is_ok());
     assert_eq!(
         first.owner,
-        CheckpointOwner::User {
+        SnapshotRecordOwner::User {
             name: "nightly".to_owned()
         }
     );
-    assert_eq!(first.captured_seq, ChangeSeq(1));
+    assert_eq!(first.captured_seq, CommitSeq(1));
     assert_eq!(first.manifest_no, ManifestNo(3));
-    let listed = collect_checkpoints(&client, &namespace)
+    let listed = collect_snapshot_records(&client, &namespace)
         .await
-        .expect("list first checkpoint");
-    assert_eq!(listed.checkpoints, vec![first.clone()]);
+        .expect("list first snapshot");
+    assert_eq!(listed.snapshots, vec![first.clone()]);
 
-    // A second checkpoint at the same head creates a new record.
-    let repeated = post_checkpoint(&server_url, namespace.as_str()).expect("repeat checkpoint");
-    assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
+    // A second snapshot at the same head creates a new record.
+    let repeated = post_snapshot(&server_url, namespace.as_str()).expect("repeat snapshot");
+    assert_ne!(repeated.snapshot_id, first.snapshot_id);
     assert_eq!(repeated.namespace_id, first.namespace_id);
     assert_eq!(repeated.owner, first.owner);
     assert_eq!(repeated.captured_seq, first.captured_seq);
@@ -317,21 +317,17 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let diagnostics = client
         .get_namespace_diagnostics(&namespace)
         .await
-        .expect("read checkpoint diagnostics");
+        .expect("read snapshot diagnostics");
     assert_eq!(diagnostics.live_snapshots, 2);
 
     for attempt in 0..2 {
-        let deleted = delete_snapshot(
-            &server_url,
-            namespace.as_str(),
-            first.checkpoint_id.as_str(),
-        )
-        .unwrap_or_else(|error| panic!("delete attempt {attempt}: {error:?}"));
+        let deleted = delete_snapshot(&server_url, namespace.as_str(), first.snapshot_id.as_str())
+            .unwrap_or_else(|error| panic!("delete attempt {attempt}: {error:?}"));
         assert_eq!(
             deleted,
             DeleteSnapshotResponse {
                 namespace_id: namespace.clone(),
-                snapshot_id: first.checkpoint_id.clone(),
+                snapshot_id: first.snapshot_id.clone(),
             }
         );
     }
@@ -340,8 +336,8 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         .await
         .expect("read diagnostics after delete");
     assert_eq!(diagnostics.live_snapshots, 1);
-    let bogus_delete = delete_snapshot(&server_url, namespace.as_str(), "not-a-checkpoint-id")
-        .expect_err("malformed checkpoint id");
+    let bogus_delete = delete_snapshot(&server_url, namespace.as_str(), "not-a-snapshot-id")
+        .expect_err("malformed snapshot id");
     assert_eq!(bogus_delete.code, "invalid_request");
 
     // Reject grace periods below the safety minimum.
@@ -369,12 +365,12 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         serde_json::json!({ "cutoff_at_ms": 0 }),
     )
     .expect("advance retention to a cutoff");
-    assert_eq!(retention_floor(unmoved), ChangeSeq(0));
+    assert_eq!(retention_floor(unmoved), CommitSeq(0));
 
     let advanced = retention_floor(
         post_retention_advance(&server_url, namespace.as_str()).expect("advance retention"),
     );
-    assert_eq!(advanced, ChangeSeq(1));
+    assert_eq!(advanced, CommitSeq(1));
 
     // Both calls reach the same floor, and a target below it moves nothing.
     let repeated =
@@ -391,13 +387,15 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello maintenance\n");
 
-    match client.list_changes(&namespace, ChangeSeq(0)).page().await {
-        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "rebootstrap_required"),
-        other => panic!("expected rebootstrap_required, got {other:?}"),
+    match client.list_changes(&namespace, CommitSeq(0)).page().await {
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "below_retention_floor")
+        }
+        other => panic!("expected below_retention_floor, got {other:?}"),
     }
 
     let empty = client
-        .list_changes(&namespace, ChangeSeq(1))
+        .list_changes(&namespace, CommitSeq(1))
         .page()
         .await
         .expect("changes after floor");
@@ -433,7 +431,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
         )
         .await
         .expect("write file");
-    post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
+    post_snapshot(&server_url, namespace.as_str()).expect("snapshot");
 
     let refused = post_gc_with(
         &server_url,
@@ -449,12 +447,52 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(
-        report.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        report.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
 
     let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello gc\n");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_gc_pool_collects_a_namespace_pool_and_rejects_a_pool_without_a_record() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-pool-gc",
+        "http-maintenance-pool-gc",
+    ))
+    .await;
+    let client = harness.client.clone();
+    let namespace = namespace_id("demo");
+    let pool_id = client
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace")
+        .pool_id;
+
+    let report = client.gc_pool(&pool_id).await.expect("collect the pool");
+    assert_eq!(report.pool_id, pool_id);
+    assert_eq!(
+        report.deleted,
+        loonfs_types::PoolDeletedObjectCounts::default()
+    );
+
+    assert_api_code(
+        client
+            .gc_pool_with_options(
+                &PoolId::generate(),
+                &loonfs_client::GcOptions {
+                    grace_window_ms: 86_400_000,
+                },
+            )
+            .await,
+        404,
+        ErrorCode::PoolNotFound,
+    );
 
     harness.server.abort();
 }
@@ -499,9 +537,9 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     );
 
     let forced = client
-        .run_maintenance(
+        .run_maintenance_job(
             &namespace,
-            &loonfs_types::RunMaintenanceRequest::Metadata(
+            &loonfs_types::RunMaintenanceJobRequest::Metadata(
                 loonfs_types::MetadataMaintenanceRequest {
                     max_wal_tail_objects: Some(std::num::NonZeroU64::MIN),
                 },
@@ -516,17 +554,17 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     assert_eq!(upkeep(&forced).compaction_units, 0);
     assert_eq!(wal_tail_objects(&client, &namespace).await, 0);
     let retention = client
-        .run_maintenance(
+        .run_maintenance_job(
             &namespace,
-            &loonfs_types::RunMaintenanceRequest::Retention(
+            &loonfs_types::RunMaintenanceJobRequest::Retention(
                 loonfs_types::AdvanceRetentionRequest::default(),
             ),
         )
         .await
         .expect("advance retention");
     // The commit is seconds old, so the floor stays below it.
-    assert_eq!(retention_floor(retention), ChangeSeq(0));
-    let gc = post_gc(&server_url, namespace.as_str()).expect("GC run");
+    assert_eq!(retention_floor(retention), CommitSeq(0));
+    let gc = post_gc(&server_url, namespace.as_str()).expect("GC job");
     assert_eq!(gc.deleted.wal_objects, 0);
 
     let bytes = client.read_file(&target).await.expect("read file");
@@ -561,14 +599,14 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
         .await;
         let response = harness
             .client
-            .run_maintenance(
+            .run_maintenance_job(
                 &namespace,
-                &loonfs_types::RunMaintenanceRequest::Metadata(
+                &loonfs_types::RunMaintenanceJobRequest::Metadata(
                     loonfs_types::MetadataMaintenanceRequest::default(),
                 ),
             )
             .await
-            .expect("metadata run");
+            .expect("metadata job");
         assert_eq!(
             upkeep(&response).outcome,
             loonfs_types::MetadataMaintenanceOutcome::CaughtUp,
@@ -588,8 +626,8 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loonfs-server-maintenance-missing-checkpoint",
-        "http-maintenance-missing-checkpoint",
+        "loonfs-server-maintenance-missing-snapshot",
+        "http-maintenance-missing-snapshot",
     ))
     .await;
     let client = harness.client.clone();
@@ -604,13 +642,13 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
     let advanced = retention_floor(
         post_retention_advance(&server_url, namespace.as_str()).expect("advance retention"),
     );
-    assert_eq!(advanced, ChangeSeq(0));
+    assert_eq!(advanced, CommitSeq(0));
 
     harness.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupted() {
+async fn http_snapshot_manifest_consumption_is_strict_when_manifest_is_corrupted() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
     let mut warm_config = test_config(
@@ -652,11 +690,11 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         )
         .await
         .expect("write file");
-    post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
+    post_snapshot(&server_url, namespace.as_str()).expect("snapshot");
     client
         .stat(&target)
         .await
-        .expect("warm the first server after checkpoint maintenance");
+        .expect("warm the first server after snapshot maintenance");
 
     let store = ConfiguredObjectStore::local_fs(LocalFsStoreConfig {
         root: store_root.display().to_string(),
@@ -706,7 +744,7 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
     )
     .expect("probe the configured store");
 
-    assert!(probe.run_id.as_str().starts_with("probe_"));
+    assert!(probe.probe_id.as_str().starts_with("probe_"));
     assert!(!probe.checks.is_empty(), "the probe must report its work");
     let names: std::collections::BTreeSet<&str> = probe
         .checks

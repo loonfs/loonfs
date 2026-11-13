@@ -7,7 +7,8 @@ use crate::envelope::EnvelopeCodecError;
 use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
 use crate::CompactorEpoch;
-use crate::{AccessGrants, ActorId, ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
+use crate::PoolId;
+use crate::{AccessGrants, ActorId, CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
 use crate::{ExtensionName, IndexSegmentId, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -75,7 +76,7 @@ pub struct MetadataRunRef {
     /// Run identity allocated by the manifest.
     pub run_no: RunNo,
     /// Namespace sequence at which this run was produced.
-    pub run_seq: ChangeSeq,
+    pub run_seq: CommitSeq,
     /// Compaction tier used to order overlapping runs.
     pub tier: RunTier,
     /// Segments written as part of this run.
@@ -183,8 +184,7 @@ impl ExtensionEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionRunRef {
-    /// The run's number, allocated from the manifest's `next_run_no` like a
-    /// metadata run's number.
+    /// The run's number, which only the extension interprets.
     pub run_no: RunNo,
     /// The run's level, which only the extension interprets.
     pub level: u32,
@@ -323,19 +323,20 @@ pub struct NamespaceManifestPayload {
     /// The namespace's access mode, which can't be changed.
     pub access: NamespaceAccess,
     /// The namespace's retention window in milliseconds, which a scheduled
-    /// retention advance uses instead of its host's setting. Unlike the
+    /// retention advance uses. A namespace without a window isn't advanced
+    /// on a schedule. Unlike the
     /// access mode, a successor can change it (see [Advancing the retention
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_window_ms: Option<NonZeroU64>,
-    /// Fork provenance and source checkpoint identity for this namespace.
+    /// Fork provenance and source snapshot identity for this namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
-    /// The namespace whose prefix stores the content of this namespace's
-    /// [fork family](https://github.com/loonfs/loonfs/blob/main/docs/specs/glossary.md#fork-family).
-    /// A plain create records the namespace itself, a fork copies its
-    /// source's value, and a successor can't change it.
-    pub family_root_id: NamespaceId,
+    /// The pool whose prefix stores the namespace's content objects and
+    /// upload records. A namespace created without a source records a pool ID
+    /// that its create call generates, a fork copies its source's pool, and
+    /// the value can't change.
+    pub pool_id: PoolId,
     /// Lifecycle state of this namespace.
     pub status: NamespaceStatus,
     /// Writer that acquired the current epoch.
@@ -347,18 +348,19 @@ pub struct NamespaceManifestPayload {
     pub manifest_no: ManifestNo,
     /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
-    /// Grep publishes each bounded step, so a lost race costs only one step.
+    /// Grep publishes the steps of one maintenance interval together, so a lost race costs
+    /// that interval's steps.
     pub compactor_epoch: CompactorEpoch,
     /// Folded head, or the final namespace sequence on deletion.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// Activity committed in this namespace through `head_seq`.
     pub activity: ManifestActivity,
     /// Current writer fencing epoch.
     pub writer_epoch: WriterEpoch,
-    /// Run number the next producer allocates. Every run's `run_no` is below it.
+    /// Run number the next producer allocates. Every metadata run's `run_no` is below it.
     pub next_run_no: RunNo,
     /// Earliest sequence for which retained history remains readable.
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
     /// Complete set of metadata runs required to reconstruct the snapshot.
     pub runs: Vec<MetadataRunRef>,
     /// Each extension's entry, under the extension's name. Every publication
@@ -389,7 +391,7 @@ impl std::error::Error for ManifestChainError {}
 
 impl NamespaceManifestPayload {
     /// Returns the oldest non-empty run sequence, or the head when there are none.
-    pub fn base_seq(&self) -> ChangeSeq {
+    pub fn base_seq(&self) -> CommitSeq {
         self.runs
             .iter()
             .filter(|run| !run.segments.is_empty())
@@ -398,23 +400,18 @@ impl NamespaceManifestPayload {
             .unwrap_or(self.head_seq)
     }
 
-    /// Returns whether this namespace is the root of its fork family, which
-    /// is true exactly when it wasn't forked from another namespace.
-    pub fn is_family_root(&self) -> bool {
-        self.family_root_id == self.namespace_id
-    }
-
-    /// Constructs manifest 1 with no retention window, as the root of its own
-    /// fork family.
+    /// Constructs manifest 1 with no retention window and no fork basis, which
+    /// records `pool_id`.
     pub fn initial(
         namespace_id: NamespaceId,
+        pool_id: PoolId,
         created_at_ms: u64,
         created_by: ActorId,
         access: NamespaceAccess,
     ) -> Self {
         Self {
-            family_root_id: namespace_id.clone(),
             namespace_id,
+            pool_id,
             created_at_ms,
             created_by,
             access,
@@ -424,12 +421,12 @@ impl NamespaceManifestPayload {
             writer: None,
             manifest_no: ManifestNo(1),
             compactor_epoch: CompactorEpoch(0),
-            head_seq: ChangeSeq(0),
+            head_seq: CommitSeq(0),
             activity: ManifestActivity::default(),
             writer_epoch: WriterEpoch(0),
             next_run_no: RunNo(0),
             folded_wal_no: WalNo(0),
-            retention_floor_seq: ChangeSeq(0),
+            retention_floor_seq: CommitSeq(0),
             runs: Vec::new(),
             extensions: BTreeMap::new(),
         }
@@ -437,7 +434,7 @@ impl NamespaceManifestPayload {
 
     /// Constructs manifest 1 of a fork of `source` at `fork_basis`, which lists
     /// the runs and copies the extension entries of `source`, records the
-    /// family root of `source`, and starts its retention floor at the fork's head.
+    /// pool of `source`, and starts its retention floor at the fork's head.
     pub fn initial_fork(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -449,7 +446,6 @@ impl NamespaceManifestPayload {
         Self {
             retention_window_ms: source.retention_window_ms,
             fork_basis: Some(fork_basis),
-            family_root_id: source.family_root_id.clone(),
             head_seq: source.head_seq,
             next_run_no: source.next_run_no,
             retention_floor_seq: fork_seq,
@@ -457,6 +453,7 @@ impl NamespaceManifestPayload {
             extensions: source.extensions.clone(),
             ..Self::initial(
                 namespace_id,
+                source.pool_id.clone(),
                 created_at_ms,
                 created_by,
                 source.access.clone(),
@@ -478,7 +475,7 @@ impl NamespaceManifestPayload {
             access: self.access.clone(),
             retention_window_ms: self.retention_window_ms,
             fork_basis: self.fork_basis.clone(),
-            family_root_id: self.family_root_id.clone(),
+            pool_id: self.pool_id.clone(),
             status: self.status,
             writer: self.writer.clone(),
             folded_wal_no: self.folded_wal_no,
@@ -528,7 +525,7 @@ impl NamespaceManifestPayload {
                 if !self.extensions.is_empty() {
                     return invalid("extensions");
                 }
-                if self.head_seq != ChangeSeq(0) || self.retention_floor_seq != ChangeSeq(0) {
+                if self.head_seq != CommitSeq(0) || self.retention_floor_seq != CommitSeq(0) {
                     return invalid("head_seq");
                 }
                 if self.next_run_no != RunNo(0) {
@@ -603,8 +600,8 @@ impl NamespaceManifestPayload {
         if successor.fork_basis != self.fork_basis {
             return invalid("fork_basis");
         }
-        if successor.family_root_id != self.family_root_id {
-            return invalid("family_root_id");
+        if successor.pool_id != self.pool_id {
+            return invalid("pool_id");
         }
         if self.status.is_deleted() {
             return invalid("status");
@@ -678,8 +675,12 @@ mod tests {
         MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
     use crate::CompactorEpoch;
-    use crate::{ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
+    use crate::{CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
     use std::assert_matches;
+
+    fn pool_id() -> crate::PoolId {
+        crate::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x").expect("valid pool ID")
+    }
 
     #[test]
     fn activity_arithmetic_and_successors_reject_invalid_totals() {
@@ -691,6 +692,7 @@ mod tests {
         };
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("activity").expect("namespace"),
+            pool_id(),
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
@@ -709,7 +711,7 @@ mod tests {
                 .field,
             "activity"
         );
-        successor.head_seq = ChangeSeq(1);
+        successor.head_seq = CommitSeq(1);
         initial
             .ensure_successor(&successor)
             .expect("folded activity");
@@ -733,7 +735,7 @@ mod tests {
             let mut regression: NamespaceManifestPayload =
                 serde_json::from_value(payload.clone()).expect("regression");
             regression.manifest_no = ManifestNo(3);
-            regression.head_seq = ChangeSeq(2);
+            regression.head_seq = CommitSeq(2);
             successor
                 .ensure_successor(&regression)
                 .expect_err("a successor whose activity totals go backward should be rejected");
@@ -760,6 +762,7 @@ mod tests {
     fn successor_preserves_identity() {
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("original").expect("namespace"),
+            pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
@@ -771,7 +774,7 @@ mod tests {
             ("created_at_ms", 1),
             ("fork_basis", 2),
             ("access", 3),
-            ("family_root_id", 4),
+            ("pool_id", 4),
         ] {
             let mut successor = next.clone();
             match change {
@@ -782,17 +785,17 @@ mod tests {
                         manifest: crate::control::ManifestRef {
                             owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
                             manifest_no: ManifestNo(1),
-                            head_seq: ChangeSeq(0),
+                            head_seq: CommitSeq(0),
                             payload_checksum: crate::sha256_digest(b"source"),
                         },
-                        source_pin_id: crate::PinId::parse(
-                            "pin_00000000000000000001-0000000000000001",
+                        source_snapshot_id: crate::SnapshotId::parse(
+                            "snp_00000000000000000001-00000000000000000000000001",
                         )
-                        .expect("checkpoint"),
+                        .expect("snapshot"),
                         rebased_from: None,
                     })
                 }
-                4 => successor.family_root_id = NamespaceId::parse("another").expect("namespace"),
+                4 => successor.pool_id = crate::PoolId::generate(),
                 _ => {
                     successor.access = super::NamespaceAccess::Acl {
                         principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
@@ -840,13 +843,14 @@ mod tests {
     fn a_later_manifest_keeps_the_chain_rules_without_the_next_number() {
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("later").expect("namespace"),
+            pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
         );
         let mut later = initial.clone();
         later.manifest_no = ManifestNo(4);
-        later.head_seq = ChangeSeq(3);
+        later.head_seq = CommitSeq(3);
         initial
             .ensure_later(&later)
             .expect("a later manifest may skip numbers");
@@ -865,7 +869,7 @@ mod tests {
             "manifest_no"
         );
         let mut regressed = later.clone();
-        regressed.head_seq = ChangeSeq(0);
+        regressed.head_seq = CommitSeq(0);
         assert_eq!(
             later
                 .ensure_later(&NamespaceManifestPayload {
@@ -903,7 +907,7 @@ mod tests {
             access: super::NamespaceAccess::Unrestricted {},
             retention_window_ms: None,
             fork_basis: None,
-            family_root_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            pool_id: pool_id(),
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
@@ -911,15 +915,15 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
 
-            head_seq: ChangeSeq(10),
+            head_seq: CommitSeq(10),
             writer_epoch: WriterEpoch(2),
             next_run_no: RunNo(1),
-            retention_floor_seq: ChangeSeq(0),
+            retention_floor_seq: CommitSeq(0),
             runs: vec![metadata_run_ref(
                 "demo",
                 "seg_00000000000000000000000001",
                 RunNo(0),
-                ChangeSeq(10),
+                CommitSeq(10),
                 RunTier::Base,
             )],
             extensions: Default::default(),
@@ -935,9 +939,9 @@ mod tests {
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.base_seq(), ChangeSeq(10));
+        assert_eq!(decoded.payload.base_seq(), CommitSeq(10));
         assert_eq!(decoded.payload.runs.len(), 1);
-        assert_eq!(decoded.payload.runs[0].run_seq, ChangeSeq(10));
+        assert_eq!(decoded.payload.runs[0].run_seq, CommitSeq(10));
     }
 
     #[test]
@@ -949,7 +953,7 @@ mod tests {
             access: super::NamespaceAccess::Unrestricted {},
             retention_window_ms: None,
             fork_basis: None,
-            family_root_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            pool_id: pool_id(),
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
@@ -957,23 +961,23 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
 
-            head_seq: ChangeSeq(12),
+            head_seq: CommitSeq(12),
             writer_epoch: WriterEpoch(2),
             next_run_no: RunNo(2),
-            retention_floor_seq: ChangeSeq(0),
+            retention_floor_seq: CommitSeq(0),
             runs: vec![
                 metadata_run_ref(
                     "source",
                     "seg_00000000000000000000000001",
                     RunNo(0),
-                    ChangeSeq(10),
+                    CommitSeq(10),
                     RunTier::Base,
                 ),
                 metadata_run_ref(
                     "demo",
                     "seg_00000000000000000000000002",
                     RunNo(1),
-                    ChangeSeq(12),
+                    CommitSeq(12),
                     RunTier::Delta,
                 ),
             ],
@@ -986,7 +990,7 @@ mod tests {
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.runs[0].tier, RunTier::Base);
         assert_eq!(decoded.payload.runs[1].tier, RunTier::Delta);
-        assert_eq!(decoded.payload.runs[1].run_seq, ChangeSeq(12));
+        assert_eq!(decoded.payload.runs[1].run_seq, CommitSeq(12));
         assert_eq!(
             decoded.payload.runs[0].segments[0].owner_namespace_id,
             NamespaceId::parse("source").expect("valid namespace id")
@@ -997,6 +1001,7 @@ mod tests {
     fn decoder_accepts_the_manifest_limit_and_rejects_the_next_byte_before_decoding() {
         let encoded = encode_namespace_manifest_json(NamespaceManifestPayload::initial(
             NamespaceId::parse("bounded").expect("namespace"),
+            pool_id(),
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
@@ -1024,7 +1029,7 @@ mod tests {
         owner_namespace_id: &str,
         segment_id: &str,
         run_no: RunNo,
-        run_seq: ChangeSeq,
+        run_seq: CommitSeq,
         tier: RunTier,
     ) -> MetadataRunRef {
         MetadataRunRef {

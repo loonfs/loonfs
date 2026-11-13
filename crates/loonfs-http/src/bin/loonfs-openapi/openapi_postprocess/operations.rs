@@ -127,19 +127,19 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "fork_namespace_for_rebase",
+        SdkName {
+            group: &["namespaces"],
+            method: "forkForRebase",
+            request: None,
+        },
+    ),
+    (
         "get_capabilities",
         SdkName {
             group: &["capabilities"],
             method: "retrieve",
             request: None,
-        },
-    ),
-    (
-        "get_checkpoint",
-        SdkName {
-            group: &["maintenance", "checkpoints"],
-            method: "retrieve",
-            request: Some("GetCheckpointRequest"),
         },
     ),
     (
@@ -223,6 +223,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "get_snapshot_record",
+        SdkName {
+            group: &["maintenance", "snapshots"],
+            method: "retrieve",
+            request: Some("GetSnapshotRecordRequest"),
+        },
+    ),
+    (
         "get_upload",
         SdkName {
             group: &["uploads"],
@@ -244,14 +252,6 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
             group: &["changes"],
             method: "list",
             request: Some("ListChangesRequest"),
-        },
-    ),
-    (
-        "list_checkpoints",
-        SdkName {
-            group: &["maintenance", "checkpoints"],
-            method: "list",
-            request: Some("ListCheckpointsRequest"),
         },
     ),
     (
@@ -295,6 +295,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "list_snapshot_records",
+        SdkName {
+            group: &["maintenance", "snapshots"],
+            method: "list",
+            request: Some("ListSnapshotRecordsRequest"),
+        },
+    ),
+    (
         "list_snapshots",
         SdkName {
             group: &["snapshots"],
@@ -335,17 +343,25 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
-        "rebase_fork",
+        "replay_fork",
         SdkName {
             group: &["namespaces"],
-            method: "rebase",
+            method: "replay",
             request: None,
         },
     ),
     (
-        "run_maintenance",
+        "run_maintenance_job",
         SdkName {
-            group: &["maintenance", "runs"],
+            group: &["maintenance", "jobs"],
+            method: "create",
+            request: None,
+        },
+    ),
+    (
+        "run_pool_maintenance_job",
+        SdkName {
+            group: &["maintenance", "pools", "jobs"],
             method: "create",
             request: None,
         },

@@ -3,7 +3,7 @@
 use crate::common::{in_walk_order, page_request, GrepHost};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, MetadataCache, NamespaceId,
+    CommitId, CommitSeq, DestinationBehavior, ErrorCode, LoonFs, MetadataCache, NamespaceId,
     SharedObjectStore,
 };
 use loonfs_grep::codec::MAX_INDEX_GRAMS_FILE_BYTES;
@@ -41,7 +41,7 @@ fn request(pattern: &str) -> GrepRequest {
 async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
     let content_blob = KeyPredicate::content_blob();
     store
-        .list_prefix("namespaces/")
+        .list_prefix("pools/")
         .await
         .expect("list content blobs")
         .into_iter()
@@ -94,7 +94,7 @@ async fn drive_worker_step(
 async fn grams_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> ChangeSeq {
+) -> CommitSeq {
     crate::common::control::grep_entry(store, namespace_id)
         .await
         .expect("grep entry exists")
@@ -613,7 +613,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
 }
 
 fn index_segment_keys() -> KeyPredicate {
-    KeyPredicate::new(|key| key.contains("/extensions/grep/segments/") && key.ends_with(".sst.zst"))
+    KeyPredicate::new(|key| key.contains("/extensions/grep/segments/") && key.ends_with(".sst"))
 }
 
 #[tokio::test]

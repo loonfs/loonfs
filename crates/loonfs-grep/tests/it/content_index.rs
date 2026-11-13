@@ -19,7 +19,7 @@ use loonfs_test_support::ids::{first_page, nonzero_usize};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::format::segment_blocks::{decode_data_block_rows, decode_index_block};
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, FileContent, GrepRequest, GrepScope, InodeId, RevisionNo, RunNo,
+    AbsolutePath, CommitSeq, FileContent, GrepRequest, GrepScope, InodeId, RevisionNo, RunNo,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -321,12 +321,12 @@ impl ContentFixture {
     /// writer session, so they join that session's queue and fence nothing.
     /// The advance plans its target from the folded manifest before it folds
     /// the tail itself, so the call folds the tail first and the floor can
-    /// reach the head. The floor never passes a commit younger than one grace
-    /// window, so the call also moves the runtime's clock one grace window
-    /// ahead, and the floor can then pass every commit made so far. Each call
-    /// moves the clock another grace window, which does no harm because this
-    /// clock stamps every commit the fixture makes.
-    pub(crate) async fn advance_retention_floor(&self) -> ChangeSeq {
+    /// reach the head. The floor never passes a commit younger than an hour,
+    /// so the call also moves the runtime's clock an hour ahead, and the
+    /// floor can then pass every commit made so far. Each call moves the
+    /// clock another hour, which does no harm because this clock stamps every
+    /// commit the fixture makes.
+    pub(crate) async fn advance_retention_floor(&self) -> CommitSeq {
         self.maintenance
             .maintain_metadata_with_options(
                 &self.namespace_id,
@@ -336,7 +336,8 @@ impl ContentFixture {
             )
             .await
             .expect("fold wal");
-        self.clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+        self.clock
+            .advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
         self.maintenance
             .advance_retention_floor(&self.namespace_id)
             .await

@@ -687,7 +687,7 @@ mod tests {
         let requests = UploadRequests::default();
         let signer = test_signer(&path, HttpClient::new(requests.clone()));
         let expected = Checksum::crc32c(b"hello");
-        let key = "namespaces/demo/content/con_014d2pf2dbsqqg28t5cy4tqkff";
+        let key = "pools/pool_00000000000000000000000001/content/con_014d2pf2dbsqqg28t5cy4tqkff";
         for sources in [
             vec![],
             vec![AssemblySource {

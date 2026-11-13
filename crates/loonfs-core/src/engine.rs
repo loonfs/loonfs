@@ -24,7 +24,7 @@ use loonfs_types::options::{AccessState, CommitSplitting, DiffOptions, ListOptio
 use loonfs_types::ListChangesResponse;
 use loonfs_types::{ChangeFeedPosition, EffectiveLimit};
 use loonfs_types::{
-    ChangeSeq, CommitId, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId,
+    CommitId, CommitSeq, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId,
     ListPageCursor, NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo,
     Subject, TrashEntry, TrashPageCursor, WriterId, ROOT_INODE_ID,
 };
@@ -46,12 +46,12 @@ pub struct RuntimeReadContext {
     pub tail: Option<Arc<ProjectedWalTail>>,
     /// The sequence that reads see: a retained sequence below the head, or
     /// `None` to read at the head.
-    pub visible_seq: Option<ChangeSeq>,
+    pub visible_seq: Option<CommitSeq>,
 }
 
 impl RuntimeReadContext {
     /// Returns the sequence that reads of this context see.
-    pub fn visible_seq(&self) -> ChangeSeq {
+    pub fn visible_seq(&self) -> CommitSeq {
         self.visible_seq.unwrap_or(self.read_basis.head.seq)
     }
 }
@@ -213,7 +213,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Checks that the sequence `context` reads at is at or above the
-    /// retention floor of its metadata, and returns `rebootstrap_required`
+    /// retention floor of its metadata, and returns `below_retention_floor`
     /// otherwise.
     pub async fn ensure_retained(&self, context: &RuntimeReadContext) -> Result<()> {
         self.load_read_view(context).await.map(drop)
@@ -562,7 +562,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             view.resolve_published_content_location(content_ref).await
         } else {
             Ok(ContentLocation::whole(
-                &context.read_basis.head.family_root_id,
+                &context.read_basis.head.pool_id,
                 content_ref,
             ))
         }
@@ -701,7 +701,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// `from_seq`. The page reads at most `options.limit` commits.
     pub async fn diff_page(
         &self,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
         options: &DiffOptions,
         context: &RuntimeReadContext,
     ) -> Result<DiffPage> {
@@ -829,7 +829,7 @@ mod tests {
         };
         let changes = reader
             .list_changes_after(
-                ChangeFeedPosition::after(ChangeSeq(0)),
+                ChangeFeedPosition::after(CommitSeq(0)),
                 loonfs_types::EffectiveLimit::DEFAULT,
                 CommitSplitting::Whole,
                 &context,

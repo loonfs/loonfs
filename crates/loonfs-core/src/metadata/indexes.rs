@@ -6,12 +6,12 @@ use super::{
     DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
-use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey};
+use loonfs_types::{CommitId, CommitSeq, InodeId, NameKey};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataIndexes {
-    indexed_seq: ChangeSeq,
+    indexed_seq: CommitSeq,
     inode_by_id: HashMap<InodeId, InodeRecord>,
     latest_bind_by_parent_name: HashMap<(InodeId, NameKey), DirentryBindingRecord>,
     latest_binding_by_child: HashMap<InodeId, DirentryBindingRecord>,
@@ -26,7 +26,7 @@ pub(super) struct MetadataIndexes {
 impl Default for MetadataIndexes {
     fn default() -> Self {
         Self {
-            indexed_seq: ChangeSeq(0),
+            indexed_seq: CommitSeq(0),
             inode_by_id: HashMap::new(),
             latest_bind_by_parent_name: HashMap::new(),
             latest_binding_by_child: HashMap::new(),
@@ -76,7 +76,7 @@ impl MetadataIndexes {
         indexes
     }
 
-    pub(super) fn indexed_seq(&self) -> ChangeSeq {
+    pub(super) fn indexed_seq(&self) -> CommitSeq {
         self.indexed_seq
     }
 
@@ -281,7 +281,7 @@ fn replace_if_newer<K, V, O>(
     }
 }
 
-fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {
+fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (CommitSeq, u32) {
     (record.committed_seq, record.delta_index)
 }
 
@@ -301,7 +301,7 @@ mod tests {
         let older = bind(1, "original", 7, 10);
 
         let mut unbound = older.clone();
-        unbound.committed_seq = ChangeSeq(20);
+        unbound.committed_seq = CommitSeq(20);
         unbound.state = loonfs_types::format::manifest::DirentryBindingState::Unbound;
         indexes.record_binding(&unbound);
         indexes.record_binding(&newer);
@@ -310,7 +310,7 @@ mod tests {
         let parent = indexes
             .active_parent_for_child(InodeId(7))
             .expect("the child keeps its newer binding");
-        assert_eq!(parent.committed_seq, ChangeSeq(30));
+        assert_eq!(parent.committed_seq, CommitSeq(30));
         assert!(indexes
             .active_child(
                 InodeId(2),
@@ -335,11 +335,11 @@ mod tests {
         let seven = indexes
             .active_parent_for_child(InodeId(7))
             .expect("child 7 keeps its newer binding");
-        assert_eq!(seven.committed_seq, ChangeSeq(30));
+        assert_eq!(seven.committed_seq, CommitSeq(30));
         let eight = indexes
             .active_parent_for_child(InodeId(8))
             .expect("child 8 keeps its binding");
-        assert_eq!(eight.committed_seq, ChangeSeq(20));
+        assert_eq!(eight.committed_seq, CommitSeq(20));
         let original = indexes
             .active_child(
                 InodeId(1),

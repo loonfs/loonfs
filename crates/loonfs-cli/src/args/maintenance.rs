@@ -3,7 +3,7 @@
 use super::flags::{ActorSelectorArgs, PaginationArgs};
 use super::parse::parse_change_seq;
 use clap::{Args, Subcommand, ValueHint};
-use loonfs_types::{ChangeSeq, PrincipalId};
+use loonfs_types::{CommitSeq, PoolId, PrincipalId};
 use std::num::NonZeroU64;
 
 #[derive(Debug, Subcommand)]
@@ -14,15 +14,15 @@ pub(crate) enum MaintenanceCommand {
     ///
     /// A compaction unit can take minutes, so the command can too. It
     /// stops after 16 compaction units. A `due` outcome means that work
-    /// remains, and a later run continues it.
+    /// remains, and a later job continues it.
     Metadata(MaintenanceMetadataArgs),
     /// Fold the WAL tail whatever its length, and compact metadata until
     /// nothing is due.
     Fold,
-    /// List the checkpoint inventory: every pin, snapshots and fork pins.
-    Checkpoint {
+    /// List the snapshot inventory: every snapshot, user snapshots and fork snapshots.
+    Snapshot {
         #[command(subcommand)]
-        command: MaintenanceCheckpointCommand,
+        command: MaintenanceSnapshotCommand,
     },
     /// Inspect and manage the gram content index.
     Index {
@@ -37,6 +37,11 @@ pub(crate) enum MaintenanceCommand {
     /// Collect aged, unreferenced objects, including gram index objects when the deployment
     /// maintains the index.
     Gc(MaintenanceGcArgs),
+    /// Collect a pool's content objects, upload records, and temporary objects.
+    Pool {
+        #[command(subcommand)]
+        command: MaintenancePoolCommand,
+    },
     /// Inspect and manage the profile's object store.
     Store {
         #[command(subcommand)]
@@ -53,11 +58,11 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum MaintenanceCheckpointCommand {
-    /// List every pin in checkpoint ID order, snapshots and fork pins.
+pub(crate) enum MaintenanceSnapshotCommand {
+    /// List every snapshot in snapshot ID order, user snapshots and fork snapshots.
     ///
     /// Expired snapshots remain listed until garbage collection deletes them.
-    List(MaintenanceCheckpointListArgs),
+    List(MaintenanceSnapshotListArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -84,9 +89,19 @@ pub(crate) enum MaintenanceRetentionCommand {
     /// Set or clear the namespace's retention window.
     ///
     /// The server's maintenance sweep keeps this much of the namespace's
-    /// history instead of applying the server's own window. Once the
-    /// namespace's window is cleared, the server's window applies again.
+    /// history. Once the namespace's window is cleared, the sweep doesn't
+    /// advance the namespace's floor.
     Window(MaintenanceRetentionWindowArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MaintenancePoolCommand {
+    /// Collect a pool's aged, unreferenced content objects, upload records,
+    /// and temporary objects.
+    ///
+    /// Without a pool ID, the command collects the pool of the selected
+    /// namespace, which `loonfs namespace show` prints.
+    Gc(MaintenancePoolGcArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -117,7 +132,7 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
     /// Advance the floor to this sequence, or to the folded manifest head
     /// when that's lower.
     #[arg(long, conflicts_with = "before", value_parser = parse_change_seq)]
-    pub to_seq: Option<ChangeSeq>,
+    pub to_seq: Option<CommitSeq>,
     /// Advance the floor to the last commit made at or before this Unix
     /// time, in milliseconds.
     #[arg(long, value_name = "UNIX_MS")]
@@ -129,13 +144,14 @@ pub(crate) struct MaintenanceRetentionWindowArgs {
     /// The namespace's new retention window, in milliseconds.
     #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
     pub retention_window_ms: Option<NonZeroU64>,
-    /// Clear the namespace's window, so that the server's setting applies.
+    /// Clear the namespace's window, so that the sweep doesn't advance the
+    /// namespace's floor.
     #[arg(long)]
     pub clear: bool,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct MaintenanceCheckpointListArgs {
+pub(crate) struct MaintenanceSnapshotListArgs {
     #[command(flatten)]
     pub pagination: PaginationArgs,
 }
@@ -154,4 +170,13 @@ pub(crate) struct MaintenanceGcArgs {
     /// omitted).
     #[arg(long)]
     pub grace_window_ms: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MaintenancePoolGcArgs {
+    /// Pool to collect. When omitted, the selected namespace's pool.
+    #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
+    pub pool_id: Option<PoolId>,
+    #[command(flatten)]
+    pub gc: MaintenanceGcArgs,
 }

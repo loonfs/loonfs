@@ -13,7 +13,7 @@ use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
-use loonfs_types::ChangeSeq;
+use loonfs_types::CommitSeq;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
@@ -268,7 +268,7 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
 #[derive(Clone)]
 pub(crate) struct MetadataSegmentInput {
     descriptor: MetadataSegmentRef,
-    max_seq: ChangeSeq,
+    max_seq: CommitSeq,
 }
 
 pub(crate) type MetadataSegmentRowIterator =
@@ -277,7 +277,7 @@ pub(crate) type MetadataSegmentRowIterator =
 impl MetadataSegmentRowIterator {
     pub(crate) fn metadata(
         family: MetadataRowFamily,
-        max_seq: ChangeSeq,
+        max_seq: CommitSeq,
         segments: Vec<MetadataSegmentRef>,
     ) -> Self {
         Self::new(
@@ -418,7 +418,7 @@ mod tests {
     use crate::read_working_memory::ReadWorkingMemory;
     use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily};
     use loonfs_types::format::segment_blocks::{BlockHandle, DecodedDataBlock, SegmentIndexEntry};
-    use loonfs_types::{ChangeSeq, DisplayName, InodeId, NameKey};
+    use loonfs_types::{CommitSeq, DisplayName, InodeId, NameKey};
     use std::sync::{Arc, Mutex};
 
     fn bind(parent: u64, name: &str, bind_seq: u64) -> MetadataRow {
@@ -433,13 +433,13 @@ mod tests {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(bind_seq),
+            committed_seq: CommitSeq(bind_seq),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(bind_seq),
+                seq: CommitSeq(bind_seq),
                 delta_index: 0,
             },
         })
@@ -453,13 +453,13 @@ mod tests {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(bind_seq + 1),
+            committed_seq: CommitSeq(bind_seq + 1),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(bind_seq + 1),
+                seq: CommitSeq(bind_seq + 1),
                 delta_index: 0,
             },
             state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
@@ -547,7 +547,7 @@ mod tests {
     struct ShortBatches {
         blocks: Vec<Arc<DecodedDataBlock<String>>>,
         index: Arc<Vec<SegmentIndexEntry>>,
-        pool: Arc<ReadWorkingMemory>,
+        read_working_memory: Arc<ReadWorkingMemory>,
         requests: Mutex<Vec<usize>>,
     }
 
@@ -577,7 +577,7 @@ mod tests {
             Self {
                 blocks,
                 index: Arc::new(index),
-                pool: Arc::new(ReadWorkingMemory::new(usize::MAX, None)),
+                read_working_memory: Arc::new(ReadWorkingMemory::new(usize::MAX, None)),
                 requests: Mutex::new(Vec::new()),
             }
         }
@@ -600,7 +600,7 @@ mod tests {
             let count = entries.len().min(2);
             Ok(LoadedBlocks {
                 blocks: self.blocks[first..first + count].to_vec(),
-                reservation: Some(self.pool.reserve(100 * count, 100)),
+                reservation: Some(self.read_working_memory.reserve(100 * count, 100)),
             })
         }
     }
@@ -618,7 +618,7 @@ mod tests {
                 break;
             }
             // Only the batch that the iterator keeps is reserved.
-            assert!(loader.pool.in_use() <= 200);
+            assert!(loader.read_working_memory.in_use() <= 200);
             while iterator.head().is_some() {
                 rows.push(iterator.take_head());
             }
@@ -627,6 +627,6 @@ mod tests {
         assert_eq!(rows, expected);
         assert_eq!(*loader.requests.lock().expect("requests"), [5, 3, 1]);
         drop(iterator);
-        assert_eq!(loader.pool.in_use(), 0);
+        assert_eq!(loader.read_working_memory.in_use(), 0);
     }
 }

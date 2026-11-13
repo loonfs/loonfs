@@ -14,7 +14,7 @@ await client.files.upload({
     namespace_id: "demo",
     path: "/notes.txt",
     content: new TextEncoder().encode("first line\n"),
-    commit_id: "c_7kn71d9dq885x91hejz3gvf9p0",
+    commit_id: "cmt_7kn71d9dq885x91hejz3gvf9p0",
 });
 ```
 
@@ -83,20 +83,20 @@ already consumed are unverified until EOF succeeds. The request's abort signal
 and timeout cover metadata and body reads. The default deadline is 60 seconds;
 `uploadStream` keeps that deadline through publication.
 
-Direct grants contain ordered `ranges`. Each range has a revision `start_offset`,
-`length`, and signed `access`. Helpers validate the range list before any object
-request and read the ranges in order. They keep up to four range responses
+A download response contains ordered `ranges`. Each range has a revision
+`start_offset`, a `length`, and a presigned URL (`transfer`). Helpers validate
+the range list before any object request and read the ranges in order. They keep up to four range responses
 open: the one being read and up to three requested after it. They check each
 range's length and verify the complete file at the end.
 They send the signed headers unchanged. The object Range header can differ from
 the revision offset. An empty file needs no object request. Successful EOF checks
 the total length, then the checksum of the complete file.
 
-The download helpers read complete files. To resume through the generated grant
-API, pin `revision_no`, retain the bytes already read, and request a new grant
+The download helpers read complete files. To resume through the generated download
+API, pin `revision_no`, retain the bytes already read, and request a new download
 with `start_offset` equal to that prefix's length. Verify prefix plus suffix
 against the content reference. Checking only the suffix cannot verify the file.
-A complete local file needs no new grant.
+A complete local file needs no new download.
 
 Direct requests carry only signed headers and never follow redirects. Proxied
 reads use API authorization and are pinned to the selected revision.

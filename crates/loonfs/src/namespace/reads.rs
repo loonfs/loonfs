@@ -11,10 +11,10 @@ use crate::read_view::{validate_view_directory_cursor, ReadSource, ReadView};
 use crate::runtime_core::classify_read_result;
 use crate::trace::{self, operation_span};
 use crate::{
-    ChangeSeq, Consistency, ContentRef, CoreError, DiffOptions, DiffResponse, DownloadOptions,
+    CommitSeq, Consistency, ContentRef, CoreError, DiffOptions, DiffResponse, DownloadOptions,
     Error, FileBytes, FileContentStream, ListChangesOptions, ListChangesResponse, ListOptions,
-    ListPathEntriesResponse, ListTrashOptions, Namespace, PathEntry, PinId, ReadAt,
-    ReadFileOptions, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, StatOptions,
+    ListPathEntriesResponse, ListTrashOptions, Namespace, PathEntry, ReadAt, ReadFileOptions,
+    ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, SnapshotId, StatOptions,
 };
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{
@@ -44,9 +44,9 @@ pub(crate) fn ensure_revision_read_at(at: &ReadAt, revision_no: Option<RevisionN
 }
 
 /// Rejects a directory cursor that a listing of a snapshot can't resume: one
-/// minted at another head, or bound to another pin or to none. A cursor for a
+/// minted at another head, or bound to another snapshot or to none. A cursor for a
 /// listing of the live head passes, because the listing checks the cursor
-/// with [`reject_pinned_directory_cursor`] before the read.
+/// with [`reject_snapshot_directory_cursor`] before the read.
 pub(crate) fn validate_snapshot_directory_cursor(
     request: &PageRequest<ListPageCursor>,
     pinned: &PinnedRead,
@@ -54,18 +54,20 @@ pub(crate) fn validate_snapshot_directory_cursor(
 ) -> Result<()> {
     match source {
         ReadSource::Head => Ok(()),
-        ReadSource::Snapshot(pin_id) => {
-            validate_view_directory_cursor(request.cursor.as_ref(), pinned.head_seq(), Some(pin_id))
-        }
+        ReadSource::Snapshot(snapshot_id) => validate_view_directory_cursor(
+            request.cursor.as_ref(),
+            pinned.head_seq(),
+            Some(snapshot_id),
+        ),
     }
 }
 
-pub(crate) fn reject_pinned_directory_cursor(cursor: Option<&ListPageCursor>) -> Result<()> {
-    let Some(pin_id) = cursor.and_then(ListPageCursor::pin_id) else {
+pub(crate) fn reject_snapshot_directory_cursor(cursor: Option<&ListPageCursor>) -> Result<()> {
+    let Some(snapshot_id) = cursor.and_then(ListPageCursor::snapshot_id) else {
         return Ok(());
     };
     Err(CoreError::InvalidCursor(format!(
-        "directory cursor is bound to pin `{pin_id}`, so resume it from the same snapshot"
+        "directory cursor is bound to snapshot `{snapshot_id}`, so resume it from the same snapshot"
     ))
     .into())
 }
@@ -124,9 +126,9 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Captures the namespace state an unexpired snapshot, or one of the
-    /// namespace's fork pins, preserves. A missing pin or an expired snapshot
+    /// namespace's fork snapshots, preserves. A missing snapshot or an expired snapshot
     /// returns `snapshot_not_found`.
-    pub async fn read_view_at_snapshot(&self, snapshot_id: &PinId) -> Result<ReadView> {
+    pub async fn read_view_at_snapshot(&self, snapshot_id: &SnapshotId) -> Result<ReadView> {
         let span = operation_span!(
             self.core,
             "read_view_at_snapshot",
@@ -230,7 +232,7 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 if matches!(options.at, ReadAt::Live(_)) {
-                    reject_pinned_directory_cursor(request.cursor.as_ref())?;
+                    reject_snapshot_directory_cursor(request.cursor.as_ref())?;
                 }
                 let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
                 self.read_at(&options.at, |pinned, source| {
@@ -399,15 +401,15 @@ impl<M: crate::Mode> Namespace<M> {
         .await
     }
 
-    /// Lists the namespace's recoverable deletions, oldest deletion first.
-    /// A deletion stays listed until it's undeleted, or until the retention
+    /// Lists the namespace's trash, oldest deletion first.
+    /// A deletion stays in the trash until it's restored, or until the retention
     /// floor reaches it and it expires.
     pub fn list_trash(&self) -> TrashPager {
         self.list_trash_with_options(&ListTrashOptions::default())
     }
 
-    /// Lists the namespace's recoverable deletions, oldest deletion first,
-    /// as `options` asks.
+    /// Lists the namespace's trash, oldest deletion first, as `options`
+    /// asks.
     pub fn list_trash_with_options(&self, options: &ListTrashOptions) -> TrashPager {
         loonfs_types::Pager::with_state(
             (self.read_only(), options.consistency),
@@ -452,7 +454,7 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Lists the ordered change feed after `after_seq`.
-    pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
+    pub fn list_changes(&self, after_seq: CommitSeq) -> ChangesPager {
         self.list_changes_with_options(after_seq, &ListChangesOptions::default())
     }
 
@@ -465,7 +467,7 @@ impl<M: crate::Mode> Namespace<M> {
     /// [`Consistency::Strong`].
     pub fn list_changes_with_options(
         &self,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
         let start = ChangeFeedPosition {
@@ -514,7 +516,7 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Returns the first page of the diff of the whole namespace from
     /// `from_seq` to the head that the page reads.
-    pub async fn diff(&self, from_seq: ChangeSeq) -> Result<DiffResponse> {
+    pub async fn diff(&self, from_seq: CommitSeq) -> Result<DiffResponse> {
         self.diff_with_options(from_seq, &DiffOptions::default())
             .await
     }
@@ -527,12 +529,12 @@ impl<M: crate::Mode> Namespace<M> {
     /// next page, pass the returned `to_seq` and `next_after_seq` as
     /// `options.to_seq` and `options.after_seq`. A `from_seq` below the
     /// retention floor of the head that a page reads returns
-    /// `rebootstrap_required`. A `to_seq` above that head returns
+    /// `below_retention_floor`. A `to_seq` above that head returns
     /// `invalid_request`, so a caller that gets this error from an eventual
     /// page reads the page again with [`Consistency::Strong`].
     pub async fn diff_with_options(
         &self,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
         options: &DiffOptions,
     ) -> Result<DiffResponse> {
         trace::in_operation(

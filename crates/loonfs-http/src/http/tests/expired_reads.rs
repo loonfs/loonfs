@@ -64,10 +64,10 @@ async fn expire_old(store: &SharedObjectStore) -> (String, String) {
         .await
         .expect("delete file");
     writer.shutdown().await.expect("writer shutdown");
-    // The floor passes a commit once it's one grace window old, so this
+    // The floor passes a commit once it's an hour old, so this
     // engine's clock is that far ahead of the writer's.
     let clock = Arc::new(ManualClock::at_system_time());
-    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+    clock.advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let maintenance = loonfs_core::NamespaceWriterEngine::writer(
         loonfs_core::test_support::namespace_store_with_wall_clock(
             store.clone(),
@@ -110,7 +110,7 @@ async fn an_expired_subtree_is_an_unknown_inode_on_every_inode_route() {
     .await
     .expect("app");
 
-    for (inode, recoverable) in [(kept, true), (notes, false)] {
+    for (inode, in_trash) in [(kept, true), (notes, false)] {
         for (method, route, history) in INODE_ROUTES {
             let uri = format!("/v0/namespaces/demo/inodes/{inode}{route}");
             let mut request = Request::builder()
@@ -131,8 +131,8 @@ async fn an_expired_subtree_is_an_unknown_inode_on_every_inode_route() {
                 .await
                 .expect("body");
             // A deleted inode has no current entry or content, so only the
-            // history routes serve a recoverable deletion.
-            if recoverable && history {
+            // history routes serve a deletion in the trash.
+            if in_trash && history {
                 assert_eq!(status, StatusCode::OK, "{method} {uri}");
                 continue;
             }

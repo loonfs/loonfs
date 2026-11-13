@@ -42,17 +42,17 @@ fn copy_by_inode(
     }
 }
 
-/// An undelete of the deletion at `deletion_seq` that binds `inode_id` as
+/// A restore of the deletion at `deletion_seq` that binds `inode_id` as
 /// `name` under the root.
-fn undelete_under_root(
+fn restore_deleted_under_root(
     inode_id: InodeId,
-    deletion_seq: loonfs_types::ChangeSeq,
+    deletion_seq: loonfs_types::CommitSeq,
     name: &str,
 ) -> FilesystemOperation {
-    FilesystemOperation::Undelete {
+    FilesystemOperation::RestoreDeleted {
         inode_id,
         deletion_seq,
-        destination: loonfs_types::options::UndeleteDestination::Name {
+        destination: loonfs_types::options::RestoreDeletedDestination::Name {
             parent_inode_id: ROOT_INODE_ID,
             display_name: display_name(name),
         },
@@ -901,7 +901,7 @@ async fn restore_revision_by_inode_restores_a_moved_file() {
     )
     .await
     .expect_err("a directory has no revisions");
-    assert_eq!(directory.code(), ErrorCode::PathConflict);
+    assert_eq!(directory.code(), ErrorCode::WrongKind);
 }
 
 #[tokio::test]
@@ -955,7 +955,7 @@ async fn inode_writes_refuse_the_root_except_for_access() {
 }
 
 #[tokio::test]
-async fn undelete_binds_under_a_parent_inode() {
+async fn a_restore_of_a_deleted_file_binds_under_a_parent_inode() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
     for (path, commit) in [
         ("/docs/report.txt", "put-report"),
@@ -986,7 +986,7 @@ async fn undelete_binds_under_a_parent_inode() {
         &store,
         &namespace_id,
         CommitId::generate(),
-        undelete_under_root(report_inode_id, deletion_seq, "TAKEN.txt"),
+        restore_deleted_under_root(report_inode_id, deletion_seq, "TAKEN.txt"),
         &context,
     )
     .await
@@ -996,12 +996,12 @@ async fn undelete_binds_under_a_parent_inode() {
     submit_operation(
         &store,
         &namespace_id,
-        commit_id("undelete-under-root"),
-        undelete_under_root(report_inode_id, deletion_seq, "restored.txt"),
+        commit_id("restore-under-root"),
+        restore_deleted_under_root(report_inode_id, deletion_seq, "restored.txt"),
         &context,
     )
     .await
-    .expect("undelete under a parent inode");
+    .expect("restore under a parent inode");
     let (restored_inode_id, _) = read_entry(&store, &namespace_id, "/restored.txt").await;
     assert_eq!(restored_inode_id, report_inode_id);
     assert_eq!(

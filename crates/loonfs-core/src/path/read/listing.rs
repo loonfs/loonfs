@@ -15,7 +15,7 @@ use crate::phase::Phase;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::options::{AttributeInclusion, ListOptions};
 use loonfs_types::{
-    AccessRight, ChangeSeq, DirectoryPageCursor, DirectoryTreePageCursor, DisplayName, InodeId,
+    AccessRight, CommitSeq, DirectoryPageCursor, DirectoryTreePageCursor, DisplayName, InodeId,
     InodeKind, ListPageCursor, NameKey, Page, PageRequest, PathEntry, PathEntryKind,
 };
 use std::collections::HashMap;
@@ -27,8 +27,8 @@ use tracing::Instrument;
 /// cursor from a head ahead of this view's is refused, as an invalid cursor:
 /// this view did not issue it.
 pub(super) fn validate_cursor_head(
-    current_head_seq: ChangeSeq,
-    cursor_head_seq: Option<ChangeSeq>,
+    current_head_seq: CommitSeq,
+    cursor_head_seq: Option<CommitSeq>,
 ) -> Result<()> {
     let Some(cursor_head_seq) = cursor_head_seq else {
         return Ok(());
@@ -327,7 +327,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .limit
             .finish_page(&mut children, |last| DirectoryPageCursor {
                 head_seq: self.visible_seq,
-                pin_id: None,
+                snapshot_id: None,
                 directory_inode_id: resolved.inode_id,
                 last_name_key: last.binding.name_key.clone(),
             });

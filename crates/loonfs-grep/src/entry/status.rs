@@ -1,7 +1,7 @@
 //! The lifecycle of grep's index and its in-progress reorganization, as
 //! grep's entry records them.
 
-use loonfs_types::{ChangeSeq, IndexSegmentId, InodeId, PinId, RunNo};
+use loonfs_types::{CommitSeq, IndexSegmentId, InodeId, RunNo, SnapshotId};
 use serde::{Deserialize, Serialize};
 
 /// Durable status of grep indexing for one namespace.
@@ -18,18 +18,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrepIndexStatus {
-    /// The initial build is walking the files that a snapshot pins.
+    /// The initial build is walking the files that a snapshot keeps.
     Backfilling {
-        /// Namespace sequence the pinned checkpoint captured. The walk ends
+        /// Namespace sequence the snapshot captured. The walk ends
         /// at exactly this state however far the namespace has moved since.
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
         /// Inode the next backfill step resumes strictly after; absent means
-        /// the start. Checkpoint file enumeration is ordered by ascending
+        /// the start. Snapshot file enumeration is ordered by ascending
         /// inode id, so one id is the whole resume position.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor_inode_id: Option<InodeId>,
-        /// The user pin whose manifest this backfill walks.
-        pin_id: PinId,
+        /// The user snapshot whose manifest this backfill walks.
+        snapshot_id: SnapshotId,
     },
     /// Backfill is complete and changes are consumed incrementally.
     Active {
@@ -37,10 +37,10 @@ pub enum GrepIndexStatus {
         /// captured. It identifies the build: a rebootstrap rebuilds the
         /// index from a later backfill, and a query cursor that refers
         /// to another build is invalid.
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
         /// Sequence of the commit at the index cursor. Everything at or
         /// below it is indexed, subject to `next_event_index`.
-        built_through_seq: ChangeSeq,
+        built_through_seq: CommitSeq,
         /// Offset of the next change event within `built_through_seq`, or
         /// zero when the cursor is at the commit boundary and the whole
         /// commit is represented.
@@ -75,17 +75,17 @@ impl GrepIndexStatus {
 
     /// Returns the sequence that the active index's backfill captured,
     /// which identifies the build of the index.
-    pub fn active_captured_seq(&self) -> Option<ChangeSeq> {
+    pub fn active_captured_seq(&self) -> Option<CommitSeq> {
         match self {
             Self::Active { captured_seq, .. } => Some(*captured_seq),
             Self::Backfilling { .. } | Self::Disabled {} => None,
         }
     }
 
-    /// Returns the pin a backfilling status walks.
-    pub fn backfill_pin_id(&self) -> Option<&PinId> {
+    /// Returns the snapshot a backfilling status walks.
+    pub fn backfill_snapshot_id(&self) -> Option<&SnapshotId> {
         match self {
-            Self::Backfilling { pin_id, .. } => Some(pin_id),
+            Self::Backfilling { snapshot_id, .. } => Some(snapshot_id),
             Self::Active { .. } | Self::Disabled {} => None,
         }
     }
@@ -98,11 +98,11 @@ impl From<&GrepIndexStatus> for loonfs_types::GrepIndexStatus {
             GrepIndexStatus::Backfilling {
                 captured_seq,
                 cursor_inode_id,
-                pin_id,
+                snapshot_id,
             } => Self::Backfilling {
                 captured_seq: *captured_seq,
                 cursor_inode_id: *cursor_inode_id,
-                checkpoint_id: pin_id.clone(),
+                snapshot_id: snapshot_id.clone(),
             },
             GrepIndexStatus::Active {
                 built_through_seq,
@@ -129,7 +129,9 @@ pub struct GrepReorganizeState {
     pub row_key_cursor: String,
     /// Level stamped on every output segment of this reorganize.
     pub output_level: u32,
-    /// Run number stamped on every output segment of this reorganize.
+    /// Number of the run that the outputs of this reorganize form, which
+    /// grep takes like a new run's number when the reorganize starts. The
+    /// run has no segment before the first step writes one.
     pub run_no: RunNo,
     /// The revisions whose content values and `content_revisions` rows a
     /// reorganization into the base level keeps. Its first step records
@@ -152,10 +154,10 @@ pub struct GrepReorganizeState {
 pub struct GrepPruning {
     /// The sequence that the filters describe, the head when the first step
     /// built them.
-    pub filter_seq: ChangeSeq,
+    pub filter_seq: CommitSeq,
     /// The retention floor when the first step built the filters, at or
     /// below `filter_seq`.
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
 }
 
 /// Change-feed resume point derived from the grep watermark pair.
@@ -166,31 +168,31 @@ pub struct GrepPruning {
 /// selection complementary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeFeedResume {
-    built_through_seq: ChangeSeq,
+    built_through_seq: CommitSeq,
     next_event_index: u32,
 }
 
 impl ChangeFeedResume {
-    pub fn new(built_through_seq: ChangeSeq, next_event_index: u32) -> Self {
+    pub fn new(built_through_seq: CommitSeq, next_event_index: u32) -> Self {
         Self {
             built_through_seq,
             next_event_index,
         }
     }
 
-    pub fn after_seq(self) -> ChangeSeq {
+    pub fn after_seq(self) -> CommitSeq {
         if self.next_event_index == 0 {
             self.built_through_seq
         } else {
-            ChangeSeq(self.built_through_seq.0.saturating_sub(1))
+            CommitSeq(self.built_through_seq.0.saturating_sub(1))
         }
     }
 
-    pub fn built_through_seq(self) -> ChangeSeq {
+    pub fn built_through_seq(self) -> CommitSeq {
         self.built_through_seq
     }
 
-    pub(crate) fn start_event_index(self, change_seq: ChangeSeq) -> usize {
+    pub(crate) fn start_event_index(self, change_seq: CommitSeq) -> usize {
         if change_seq == self.built_through_seq {
             self.next_event_index as usize
         } else {

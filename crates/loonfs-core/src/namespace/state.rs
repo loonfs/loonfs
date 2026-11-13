@@ -2,7 +2,7 @@
 
 use loonfs_types::format::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{ActorId, ChangeSeq, NamespaceAccess, NamespaceId, WalNo, WriterEpoch};
+use loonfs_types::{ActorId, CommitSeq, NamespaceAccess, NamespaceId, PoolId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,16 +12,23 @@ pub struct NamespaceReadState {
     pub created_by: ActorId,
     pub access: NamespaceAccess,
     pub fork_basis: Option<ForkBasis>,
-    pub family_root_id: NamespaceId,
+    pub pool_id: PoolId,
     pub status: NamespaceStatus,
     pub writer_epoch: WriterEpoch,
     pub writer: Option<WriterBlock>,
-    pub seq: ChangeSeq,
+    pub seq: CommitSeq,
     pub wal_no: WalNo,
     pub folded_wal_no: WalNo,
+    /// The retention floor of the view at this head: the manifest's
+    /// `retention_floor_seq`, raised by each floor object in the WAL tail
+    /// that replay read to reach the head (format spec, "Replaying the
+    /// visible WAL").
+    pub retention_floor_seq: CommitSeq,
 }
 
 impl NamespaceReadState {
+    /// Returns the head after the WAL object `payload`, whose floor is the
+    /// higher of this head's floor and the floor that a floor object records.
     pub(crate) fn after_wal_object(
         &self,
         payload: &loonfs_types::format::wal::WalObjectPayload,
@@ -29,6 +36,11 @@ impl NamespaceReadState {
         Self {
             seq: payload.head_seq,
             wal_no: payload.wal_no,
+            retention_floor_seq: payload
+                .retention_floor_seq
+                .map_or(self.retention_floor_seq, |floor| {
+                    floor.max(self.retention_floor_seq)
+                }),
             ..self.clone()
         }
     }
@@ -47,13 +59,14 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             created_by: manifest.created_by.clone(),
             access: manifest.access.clone(),
             fork_basis: manifest.fork_basis.clone(),
-            family_root_id: manifest.family_root_id.clone(),
+            pool_id: manifest.pool_id.clone(),
             status: manifest.status,
             writer_epoch: manifest.writer_epoch,
             writer: manifest.writer.clone(),
             seq: manifest.head_seq,
             wal_no: manifest.folded_wal_no,
             folded_wal_no: manifest.folded_wal_no,
+            retention_floor_seq: manifest.retention_floor_seq,
         }
     }
 }
@@ -63,6 +76,8 @@ impl NamespaceReadState {
     pub fn initial(namespace_id: NamespaceId, created_at_ms: u64, created_by: ActorId) -> Self {
         Self::from(&NamespaceManifestPayload::initial(
             namespace_id,
+            PoolId::parse("pool_00000000000000000000000001")
+                .expect("a static pool ID should parse"),
             created_at_ms,
             created_by,
             loonfs_types::NamespaceAccess::Unrestricted {},

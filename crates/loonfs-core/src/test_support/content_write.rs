@@ -13,13 +13,14 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         &self,
         absolute_path: &str,
         bytes: &[u8],
+        content_id: loonfs_types::ContentId,
     ) -> Result<PreparedContent> {
         parse_mutation_path(absolute_path)?;
         let catalog = self.namespace.load_catalog_entry().await?;
         let stored = stage_bytes_under_content_id(
             &self.namespace.store,
-            catalog.family_root_id(),
-            loonfs_types::ContentId::generate(),
+            catalog.pool_id(),
+            content_id,
             bytes,
             ContentKeyOwner::FreshIdentity,
         )

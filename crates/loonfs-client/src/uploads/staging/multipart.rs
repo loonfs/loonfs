@@ -9,8 +9,8 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt as _;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, NamespaceId, UploadId};
 use loonfs_types::{
-    CompleteUploadBody, CompletedUploadPart, ObjectTransferAccess, SignedUploadPart,
-    UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
+    CompleteUploadBody, CompletedUploadPart, ObjectTransfer, SignedUploadPart, UploadContentClaim,
+    UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
 };
 
 use crate::uploads::staging::negotiated_a_different_upload_mode;
@@ -97,11 +97,11 @@ struct UploadedObject {
 }
 
 /// Returns the authorization for one part.
-fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<ObjectTransferAccess> {
+fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<ObjectTransfer> {
     signed
         .iter()
         .find(|part| part.part_number == part_number)
-        .map(|part| part.access.clone())
+        .map(|part| part.transfer.clone())
         .ok_or_else(|| {
             ClientError::Protocol(format!(
                 "server authorized no upload for part {part_number}"
@@ -288,7 +288,7 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         unsigned: Vec<PendingPart>,
-    ) -> Result<Vec<(PendingPart, ObjectTransferAccess)>> {
+    ) -> Result<Vec<(PendingPart, ObjectTransfer)>> {
         let claims = unsigned.iter().map(|part| part.claim.clone()).collect();
         let signed = self
             .sign_upload_parts(namespace_id, upload_id, claims)
@@ -315,7 +315,7 @@ impl Client {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         part: PendingPart,
-        mut access: ObjectTransferAccess,
+        mut access: ObjectTransfer,
     ) -> Result<CompletedUploadPart> {
         let part_number = part.claim.part_number;
         for attempt in 1..DIRECT_MULTIPART_PART_ATTEMPTS {

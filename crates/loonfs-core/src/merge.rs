@@ -4,6 +4,7 @@
 //! ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#62-validation)).
 
 mod classify;
+mod memory;
 mod net_change;
 mod next_range;
 mod operations;
@@ -27,13 +28,16 @@ use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, RebasedFrom};
 use loonfs_types::format::manifest::MergeIndexRecord;
-use loonfs_types::format::wal::MergeRecord;
+use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::{
-    ActorId, ChangeSeq, Commit, CommitId, CommitPrecondition, FilesystemOperation, MergeConflict,
+    ActorId, Commit, CommitId, CommitPrecondition, CommitSeq, FilesystemOperation, MergeConflict,
     NamespaceId,
 };
+use std::fmt;
+use std::sync::Arc;
+
+pub use net_change::MERGE_COMMITS_PAGE_BYTES;
 pub use replay::ReplayPlan;
-pub use size::check_planned_bytes;
 
 /// A request to merge a fork's commits into a namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,13 +46,13 @@ pub struct MergeRequest {
     pub source_namespace_id: NamespaceId,
     /// The fork sequence to merge through, or `None` for the fork's folded
     /// head.
-    pub through_seq: Option<ChangeSeq>,
+    pub through_seq: Option<CommitSeq>,
     /// The fork sequence that the range has to start after, or `None` to
     /// take the start from the merge index. A caller that plans a merge again
     /// sets the first plan's range, so that the merge never applies a longer
     /// range than it first planned, and another merge of the fork in between
     /// returns `merge_range_conflict`.
-    pub after_seq: Option<ChangeSeq>,
+    pub after_seq: Option<CommitSeq>,
     /// The merge's idempotency key.
     pub commit_id: CommitId,
     /// The actor responsible for the merge.
@@ -58,26 +62,89 @@ pub struct MergeRequest {
 }
 
 /// The publisher's merge allowance, which limits the estimated peak memory of
-/// publishing a merge.
+/// the merges that plan and publish at once, with one merge's reservation of
+/// the allowance.
 ///
-/// The estimate is `peak_per_planned_byte` times the merge's planned WAL
-/// bytes. The planner checks the allowance as it plans, so it stops planning
-/// a merge that admission would refuse, and admission checks the merge's
-/// commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A merge's estimate is `peak_per_planned_byte` times the merge's planned
+/// WAL bytes, or the memory that planning the merge uses, whichever is
+/// larger. The planner checks the allowance as it plans, so it stops
+/// planning a merge that admission would refuse, and the check grows the
+/// merge's reservation to the estimate. Admission checks the merge's commit.
+#[derive(Clone)]
 pub struct MergeAllowance {
     /// The allowance, in bytes.
     pub max_bytes: usize,
     /// The multiple of a merge's planned WAL bytes that estimates the peak.
     pub peak_per_planned_byte: usize,
+    /// The merge's reservation of the allowance.
+    pub reservation: Arc<dyn MergeReservation>,
+}
+
+/// One merge's reservation of the merge allowance, which grows while the
+/// merge plans and doesn't shrink while the merge is admitted.
+pub trait MergeReservation: Send + Sync {
+    /// Grows the reservation to at least `estimated_bytes`, and returns
+    /// whether the allowance had room. A refused growth leaves the
+    /// reservation as it was.
+    fn grow(&self, estimated_bytes: usize) -> bool;
+}
+
+/// The reservation of a merge that shares the allowance with no other merge,
+/// so every growth within the allowance fits.
+struct UnsharedReservation;
+
+impl MergeReservation for UnsharedReservation {
+    fn grow(&self, _estimated_bytes: usize) -> bool {
+        true
+    }
+}
+
+impl fmt::Debug for MergeAllowance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MergeAllowance")
+            .field("max_bytes", &self.max_bytes)
+            .field("peak_per_planned_byte", &self.peak_per_planned_byte)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MergeAllowance {
-    /// Returns `merge_too_large` when the estimated peak of a merge whose
-    /// planned WAL bytes are `planned_bytes` exceeds the allowance. An
-    /// allowance of zero turns merges off, so it refuses every merge.
-    pub fn check(&self, planned_bytes: usize) -> Result<()> {
-        let estimated_bytes = planned_bytes.saturating_mul(self.peak_per_planned_byte);
+    /// Returns an allowance of `max_bytes` that one merge shares with no
+    /// other merge, for a caller without a publisher.
+    pub fn unshared(max_bytes: usize, peak_per_planned_byte: usize) -> Self {
+        Self {
+            max_bytes,
+            peak_per_planned_byte,
+            reservation: Arc::new(UnsharedReservation),
+        }
+    }
+
+    /// Checks a merge whose planned WAL bytes are `planned_bytes` and whose
+    /// planner uses an estimated `working_bytes` of memory, and grows the
+    /// merge's reservation to the merge's estimate.
+    ///
+    /// The check applies three rules in order. A merge whose planned bytes
+    /// don't fit one WAL object returns `merge_too_large`. The merge's
+    /// estimate is the larger of `peak_per_planned_byte` times the planned
+    /// bytes and the working bytes, and an estimate above the allowance
+    /// returns `merge_too_large`. Otherwise the check grows the reservation to
+    /// the estimate, and returns `server_busy` when other merges'
+    /// reservations leave no room for the growth. An allowance of zero turns
+    /// merges off, so it refuses every merge.
+    pub fn check(&self, planned_bytes: usize, working_bytes: usize) -> Result<()> {
+        let document_bytes = planned_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
+        if document_bytes > MAX_WAL_OBJECT_BYTES {
+            return Err(CoreError::MergeTooLarge {
+                bound: MergeBound::WalObject,
+                estimated_bytes: document_bytes,
+                max_bytes: MAX_WAL_OBJECT_BYTES,
+                split_at_seq: None,
+            });
+        }
+        let estimated_bytes = planned_bytes
+            .saturating_mul(self.peak_per_planned_byte)
+            .max(working_bytes);
         if self.max_bytes == 0 || estimated_bytes > self.max_bytes {
             return Err(CoreError::MergeTooLarge {
                 bound: MergeBound::MergeAllowance,
@@ -86,7 +153,16 @@ impl MergeAllowance {
                 split_at_seq: None,
             });
         }
+        if !self.reservation.grow(estimated_bytes) {
+            return Err(CoreError::ServerBusy);
+        }
         Ok(())
+    }
+
+    /// Returns this allowance with an unshared reservation, for a measure
+    /// of a range that the merge doesn't publish.
+    fn unshared_copy(&self) -> Self {
+        Self::unshared(self.max_bytes, self.peak_per_planned_byte)
     }
 }
 
@@ -151,11 +227,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             source_after_seq: request
                 .after_seq
                 .or(committed.as_ref().map(|merge| merge.source_after_seq))
-                .unwrap_or(ChangeSeq(0)),
+                .unwrap_or(CommitSeq(0)),
             source_through_seq: request
                 .through_seq
                 .or(committed.as_ref().map(|merge| merge.source_through_seq))
-                .unwrap_or(ChangeSeq(0)),
+                .unwrap_or(CommitSeq(0)),
         };
         let namespace_id = &self.namespace.namespace_id;
         let identity = merge_fingerprint(
@@ -177,7 +253,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// checks it against the fork's own floor, computes the fork's net change
     /// over the range, and classifies it against this namespace's head. It
     /// fails with `merge_too_large` when the commit wouldn't fit one WAL
-    /// object or `allowance`, before it reports a conflict, and records the
+    /// object or `allowance`, or with `server_busy` when other merges'
+    /// reservations of `allowance` leave no room for the commit, before it
+    /// reports a conflict, and records the
     /// conflicts for [`MergePlan::into_candidate`]. The subject of `fork` has to be able to
     /// read each inode whose change the merge applies. The proofs of the
     /// merge's content expire one direct transfer lifetime after
@@ -226,7 +304,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 range,
                 request,
                 prepared_at_ms,
-                allowance,
+                &allowance,
             )
             .await?;
         if planned.first_conflict.is_none() {
@@ -316,12 +394,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 /// history that is below the floor, and the floor.
 pub(crate) struct FloorRefusal {
     below: HistoryPosition,
-    retention_floor_seq: ChangeSeq,
+    retention_floor_seq: CommitSeq,
 }
 
 impl From<FloorRefusal> for CoreError {
     fn from(refusal: FloorRefusal) -> Self {
-        CoreError::RebootstrapRequired {
+        CoreError::BelowRetentionFloor {
             below: refusal.below,
             retention_floor_seq: refusal.retention_floor_seq,
         }
@@ -332,7 +410,7 @@ impl From<FloorRefusal> for CoreError {
 /// rule.
 pub(crate) struct MergeStart {
     /// The fork sequence that the next merge starts after.
-    pub(crate) after_seq: ChangeSeq,
+    pub(crate) after_seq: CommitSeq,
     /// The fork's newest merge that the range rule reads, or `None` before
     /// the fork's first merge, or before a rebase's first replay commit.
     pub(crate) previous: Option<MergeIndexRecord>,
@@ -356,7 +434,7 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
     view: &MetadataView<'_, '_, S>,
     head: &NamespaceReadState,
     source_namespace_id: &NamespaceId,
-    fork_point_seq: ChangeSeq,
+    fork_point_seq: CommitSeq,
 ) -> Result<std::result::Result<MergeStart, FloorRefusal>> {
     let rebase = rebase_basis(head, source_namespace_id);
     let checked_fork_point_seq =
@@ -414,7 +492,7 @@ async fn range_start<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
     request: &MergeRequest,
     source: &NamespaceId,
-) -> Result<(ChangeSeq, ChangeSeq)> {
+) -> Result<(CommitSeq, CommitSeq)> {
     let fork_head = fork_view.head();
     let fork_point_seq = fork_point(fork_head, source)?;
     let source_namespace_id = &fork_head.namespace_id;
@@ -445,7 +523,7 @@ async fn range_start<S: ObjectStore + ?Sized>(
 /// no longer keeps.
 fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
-    source_after_seq: ChangeSeq,
+    source_after_seq: CommitSeq,
 ) -> std::result::Result<(), FloorRefusal> {
     let fork_floor_seq = fork_view.retention_floor_seq();
     if source_after_seq < fork_floor_seq {
@@ -464,7 +542,7 @@ fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
 /// folded head of the fork's basis manifest, a sequence of `namespace_id`. A
 /// namespace whose basis manifest belongs to another namespace isn't a fork
 /// of `namespace_id`.
-fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Result<ChangeSeq> {
+fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Result<CommitSeq> {
     match &fork_head.fork_basis {
         Some(basis) if basis.manifest.owner_namespace_id == *namespace_id => {
             Ok(basis.manifest.head_seq)
@@ -484,10 +562,10 @@ fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Res
 /// the fork's folded head, `folded_seq`.
 fn through_seq(
     fork: &NamespaceId,
-    folded_seq: ChangeSeq,
-    after_seq: ChangeSeq,
-    requested: Option<ChangeSeq>,
-) -> Result<ChangeSeq> {
+    folded_seq: CommitSeq,
+    after_seq: CommitSeq,
+    requested: Option<CommitSeq>,
+) -> Result<CommitSeq> {
     let through_seq = requested.unwrap_or(folded_seq);
     let refused = |message: String| CoreError::InvalidMerge {
         param: "through_seq",

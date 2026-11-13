@@ -31,8 +31,6 @@ mod registry;
 mod retention_advance;
 mod session_tasks;
 mod worker;
-
-pub(crate) use worker::sleep_ms;
 mod write_stop;
 
 use crate::runtime_core::{ReadPositionSlot, RuntimeCore};
@@ -44,10 +42,10 @@ pub(crate) use folds::{FoldWhen, NamespaceFold};
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
 use loonfs_core::time::Observation;
 use loonfs_core::MetadataCompactionCancellation;
-use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId};
+use loonfs_types::{CommitId, CommitSeq, ManifestNo, NamespaceId};
 use queue::{InFlightRequest, WorkItem};
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
-pub(crate) use registry::{MergeSlot, NamespaceChange, NamespaceSession, PublisherRegistry};
+pub(crate) use registry::{MergeReservation, NamespaceChange, NamespaceSession, PublisherRegistry};
 use registry::{PositionChange, RegistryShared};
 use session_tasks::{SessionTask, WorkerHandle};
 use std::collections::{HashMap, VecDeque};
@@ -219,7 +217,7 @@ struct NamespacePublisherState {
 /// The newest commit this session published, and when it published it.
 #[derive(Debug, Clone, Copy)]
 struct LastPublish {
-    seq: ChangeSeq,
+    seq: CommitSeq,
     at_ms: u64,
 }
 
@@ -321,11 +319,14 @@ impl NamespacePublisher {
 
     pub(super) fn session_status(&self) -> NamespaceSessionStatus {
         if !matches!(self.lock_state().admission, PublisherAdmissionStatus::Open) {
-            NamespaceSessionStatus::Closed
-        } else if self.session_is_fenced() {
-            NamespaceSessionStatus::Fenced
-        } else {
-            NamespaceSessionStatus::Open
+            return NamespaceSessionStatus::Closed;
+        }
+        match *lock_state(&self.session) {
+            WriterSessionStatus::Fenced(_) => NamespaceSessionStatus::Fenced,
+            WriterSessionStatus::NamespaceGone => NamespaceSessionStatus::Closed,
+            WriterSessionStatus::Unacquired | WriterSessionStatus::Acquired(_) => {
+                NamespaceSessionStatus::Open
+            }
         }
     }
 

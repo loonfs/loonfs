@@ -2,6 +2,7 @@
 //! one of them
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#the-split-hint)).
 
+use super::memory::PlanningMemory;
 use super::net_change::{fork_layout, inode_change, touched_inodes, InodeChange};
 use super::operations::{
     access_update, attributes_update, binding_change, create_plan, revision_update, InodePlan,
@@ -13,29 +14,12 @@ use crate::error::{CoreError, MergeBound, Result};
 use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
-use loonfs_types::{ChangeSeq, InodeId, NamespaceId};
+use loonfs_types::{CommitSeq, InodeId, NamespaceId};
 
 /// How many times the split hint bisects the fork's commit sequences. With
 /// the probe of the first unmerged commit alone, the hint measures at most
 /// four ranges, each with one computation of the fork's net change.
 const SPLIT_BISECTIONS: usize = 3;
-
-/// Returns `merge_too_large` when a merge whose planned WAL bytes are
-/// `planned_bytes` doesn't fit one WAL object, or when its estimated peak
-/// doesn't fit `allowance`.
-pub fn check_planned_bytes(planned_bytes: usize, allowance: MergeAllowance) -> Result<()> {
-    let document_bytes = planned_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
-    if document_bytes > MAX_WAL_OBJECT_BYTES {
-        return Err(CoreError::MergeTooLarge {
-            bound: MergeBound::WalObject,
-            estimated_bytes: document_bytes,
-            max_bytes: MAX_WAL_OBJECT_BYTES,
-            split_at_seq: None,
-        });
-    }
-    allowance.check(planned_bytes)
-}
 
 /// Returns `result` with the split hint added to its refusal for one WAL
 /// object or `allowance`, when the refusal has none.
@@ -45,9 +29,9 @@ pub fn check_planned_bytes(planned_bytes: usize, allowance: MergeAllowance) -> R
 pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
     result: Result<T>,
     fork_view: &LoadedMetadataView<'_, S>,
-    (after_seq, through_seq): (ChangeSeq, ChangeSeq),
+    (after_seq, through_seq): (CommitSeq, CommitSeq),
     fields_bytes: usize,
-    allowance: MergeAllowance,
+    allowance: &MergeAllowance,
 ) -> Result<T> {
     match result {
         Err(CoreError::MergeTooLarge {
@@ -59,8 +43,14 @@ pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
             bound,
             estimated_bytes,
             max_bytes,
-            split_at_seq: split_hint(fork_view, after_seq, through_seq, fields_bytes, allowance)
-                .await?,
+            split_at_seq: split_hint(
+                fork_view,
+                after_seq,
+                through_seq,
+                fields_bytes,
+                &allowance.unshared_copy(),
+            )
+            .await?,
         }),
         result => result,
     }
@@ -73,11 +63,11 @@ pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
 /// the merge commit's fields other than its operations.
 async fn split_hint<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
-    after_seq: ChangeSeq,
-    through_seq: ChangeSeq,
+    after_seq: CommitSeq,
+    through_seq: CommitSeq,
     fields_bytes: usize,
-    allowance: MergeAllowance,
-) -> Result<Option<ChangeSeq>> {
+    allowance: &MergeAllowance,
+) -> Result<Option<CommitSeq>> {
     let mut search = SplitSearch::new(after_seq, through_seq);
     // The search ends after at most four probes.
     while let Some(probe_seq) = search.next_probe() {
@@ -105,7 +95,7 @@ struct SplitSearch {
 }
 
 impl SplitSearch {
-    fn new(after_seq: ChangeSeq, through_seq: ChangeSeq) -> Self {
+    fn new(after_seq: CommitSeq, through_seq: CommitSeq) -> Self {
         assert!(
             after_seq < through_seq,
             "a merge's range should end after the sequence that it starts after"
@@ -120,7 +110,7 @@ impl SplitSearch {
 
     /// Returns the sequence that the next probe's range ends at, or `None`
     /// when the search is over.
-    fn next_probe(&self) -> Option<ChangeSeq> {
+    fn next_probe(&self) -> Option<CommitSeq> {
         let probe = if self.probes < SPLIT_BISECTIONS {
             self.fitting + (self.too_large - self.fitting) / 2
         } else if self.probes == SPLIT_BISECTIONS && self.fitting == self.after_seq {
@@ -128,11 +118,11 @@ impl SplitSearch {
         } else {
             return None;
         };
-        (probe > self.fitting && probe < self.too_large).then_some(ChangeSeq(probe))
+        (probe > self.fitting && probe < self.too_large).then_some(CommitSeq(probe))
     }
 
     /// Records whether the range that ends at `probe_seq` fits.
-    fn record(&mut self, probe_seq: ChangeSeq, fits: bool) {
+    fn record(&mut self, probe_seq: CommitSeq, fits: bool) {
         if fits {
             self.fitting = probe_seq.0;
         } else {
@@ -142,16 +132,16 @@ impl SplitSearch {
     }
 
     /// Returns the largest sequence that a probe showed to fit.
-    fn hint(&self) -> Option<ChangeSeq> {
-        (self.fitting > self.after_seq).then_some(ChangeSeq(self.fitting))
+    fn hint(&self) -> Option<CommitSeq> {
+        (self.fitting > self.after_seq).then_some(CommitSeq(self.fitting))
     }
 }
 
 /// Returns whether the fork's net change over its commits after `after_seq`
 /// through `through_seq` fits one WAL object and `allowance`, measured from
-/// the fork alone as [`check_planned_bytes`] measures a merge's planned
-/// bytes. `fields_bytes` bounds the commit's fields other than its
-/// operations, as it does for the merge.
+/// the fork alone as a merge's plan measures its planned bytes and its
+/// working bytes (see [`MergeAllowance::check`]). `fields_bytes` bounds the
+/// commit's fields other than its operations, as it does for the merge.
 ///
 /// The measure is the plan of a merge of the net change into a namespace
 /// whose rows are the fork's own at the range's start. A merge into another
@@ -161,24 +151,45 @@ impl SplitSearch {
 /// plan at a time.
 async fn net_change_fits<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
-    after_seq: ChangeSeq,
-    through_seq: ChangeSeq,
+    after_seq: CommitSeq,
+    through_seq: CommitSeq,
     fields_bytes: usize,
-    allowance: MergeAllowance,
+    allowance: &MergeAllowance,
 ) -> Result<bool> {
+    match measure_net_change(fork_view, after_seq, through_seq, fields_bytes, allowance).await {
+        Ok(()) => Ok(true),
+        Err(CoreError::MergeTooLarge {
+            bound: MergeBound::WalObject | MergeBound::MergeAllowance,
+            ..
+        }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Measures the fork's net change for [`net_change_fits`], and returns
+/// `merge_too_large` at the first inode that takes the measure over a bound.
+async fn measure_net_change<S: ObjectStore + ?Sized>(
+    fork_view: &LoadedMetadataView<'_, S>,
+    after_seq: CommitSeq,
+    through_seq: CommitSeq,
+    fields_bytes: usize,
+    allowance: &MergeAllowance,
+) -> Result<()> {
     let fork = &fork_view.head().namespace_id;
     let end = fork_view.metadata_view_at(through_seq);
     let start = fork_view.metadata_view_at(after_seq);
-    let (mut ours, mut before) = (StateReader::new(end), StateReader::new(start));
+    let memory = PlanningMemory::new(allowance.clone());
+    let (mut ours, mut before) = (
+        StateReader::new(end, &memory),
+        StateReader::new(start, &memory),
+    );
     let mut planned_bytes = fields_bytes;
-    for inode_id in touched_inodes(end, after_seq).await? {
-        let Some(change) = inode_change(&mut ours, &mut before, fork, inode_id).await? else {
-            continue;
+    for inode_id in touched_inodes(end, after_seq, &memory).await? {
+        let plan = match inode_change(&mut ours, &mut before, fork, inode_id).await? {
+            Some(change) => net_change_plan(start, fork, inode_id, &change).await?,
+            None => None,
         };
-        let Some(plan) = net_change_plan(start, fork, inode_id, &change).await? else {
-            continue;
-        };
-        for operation in plan.operations() {
+        for operation in plan.iter().flat_map(InodePlan::operations) {
             let layout_extents = match operation.content_ref() {
                 Some(content_ref) => Some(fork_layout(end, fork, content_ref).await?.extents.len()),
                 None => None,
@@ -186,17 +197,15 @@ async fn net_change_fits<S: ObjectStore + ?Sized>(
             planned_bytes =
                 planned_bytes.saturating_add(merge_operation_bytes(&operation, layout_extents));
         }
-        if check_planned_bytes(planned_bytes, allowance).is_err() {
-            return Ok(false);
-        }
+        memory.check_planned(planned_bytes)?;
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Returns the plan of a merge of the fork's change to one inode into a
 /// namespace whose rows are the fork's own at the range's start, which
 /// `start` reads: the create of an inode that the fork created in the range,
-/// or the inode's move, delete, or undelete, which the planner's
+/// or the inode's move, delete, or restore, which the planner's
 /// [`binding_change`] chooses, then its revision, attribute, and access
 /// updates. The plan's preconditions are the rows of `fork` at the range's
 /// start.
@@ -214,9 +223,9 @@ async fn net_change_plan<S: ObjectStore + ?Sized>(
     let Some(before) = before else {
         return create_plan(inode_id, ours);
     };
-    // An undelete reverses a deletion of the inode itself that hid it at the
+    // A restore reverses a deletion of the inode itself that hid it at the
     // start. An inode that only an ancestor's deletion hid comes back with
-    // the ancestor's undelete, with no change of its own.
+    // the ancestor's restore, with no change of its own.
     let deletion_seq = match (&before.visible, ours.edge()) {
         (None, Some(_)) => start
             .hiding_subtree_tombstone(inode_id)
@@ -271,14 +280,14 @@ mod tests {
             (100, 104, 100, None, &[102, 101]),
         ];
         for (after_seq, through_seq, fits_through, hint, probes) in cases {
-            let mut search = SplitSearch::new(ChangeSeq(after_seq), ChangeSeq(through_seq));
+            let mut search = SplitSearch::new(CommitSeq(after_seq), CommitSeq(through_seq));
             let mut measured = Vec::new();
             while let Some(probe_seq) = search.next_probe() {
                 measured.push(probe_seq.0);
                 search.record(probe_seq, probe_seq.0 <= fits_through);
             }
             let case = (after_seq, through_seq, fits_through);
-            assert_eq!(search.hint(), hint.map(ChangeSeq), "{case:?}");
+            assert_eq!(search.hint(), hint.map(CommitSeq), "{case:?}");
             assert_eq!(measured, probes, "{case:?}");
             assert!(measured.len() <= 4, "{case:?}");
         }

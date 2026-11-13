@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
-    ByteStream, ChangeSeq, CommitId, CreateDirectoryOptions, DestinationBehavior,
+    ByteStream, CommitId, CommitSeq, CreateDirectoryOptions, DestinationBehavior,
     MetadataCompactionOutcome, NamespaceId, PutFileOptions, RevisionNo,
 };
 use loonfs_types::ActorId;
@@ -48,11 +48,11 @@ fn options_with_message(commit_id: &CommitId, message: Option<&str>) -> PutFileO
 async fn feed_message(
     runtime: &TestRuntime,
     namespace_id: &NamespaceId,
-    seq: ChangeSeq,
+    seq: CommitSeq,
 ) -> Option<String> {
     let namespace = runtime.reader.namespace(namespace_id);
     let page = namespace
-        .list_changes(ChangeSeq(0))
+        .list_changes(CommitSeq(0))
         .page()
         .await
         .expect("list changes");
@@ -67,8 +67,8 @@ async fn feed_message(
 async fn compact_receipt_past_horizon(
     runtime: &TestRuntime,
     namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
-) -> ChangeSeq {
+    committed_seq: CommitSeq,
+) -> CommitSeq {
     // Nine rounds: the first fold builds the base run, and the next eight
     // accumulate the delta runs that reach the compaction trigger
     // (`DEFAULT_MAX_DELTA_RUNS`).
@@ -88,7 +88,7 @@ async fn compact_receipt_past_horizon(
         runtime
             .create_snapshot(namespace_id)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
     }
     let advanced = runtime
         .advance_retention_floor(namespace_id)
@@ -142,7 +142,7 @@ async fn restart_replays_the_commit_actor_from_the_wal() {
     let reopened = open_runtime_async(store(temp_dir.path()), "writer-b").await;
     let namespace = reopened.reader.namespace(&namespace_id);
     let page = namespace
-        .list_changes(ChangeSeq(0))
+        .list_changes(CommitSeq(0))
         .page()
         .await
         .expect("replay change feed after restart");
@@ -730,14 +730,14 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .await
         .expect("first put");
 
-    // Pin the head, then give up incremental replay below it. The commit's
+    // Take a snapshot of the head, then give up incremental replay below it. The commit's
     // receipt still binds the id, so a rerun still conflicts and the
     // conflict still names the commit's sequence — but the change feed no
     // longer answers for that sequence.
     runtime
         .create_snapshot(&namespace_id)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let advanced = runtime
         .advance_retention_floor(&namespace_id)
         .await
@@ -869,7 +869,7 @@ async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
     assert_eq!(left, right, "both retries resolve to the same commit");
     assert_eq!(
         left.committed_seq,
-        ChangeSeq(last_seq.0 + 1),
+        CommitSeq(last_seq.0 + 1),
         "only one retry advances the namespace head"
     );
     assert_eq!(

@@ -4,9 +4,10 @@ use crate::commit::engine::NamespaceCommitEngine;
 use crate::manifest::tests::control_requests;
 use crate::test_support::WriterAt;
 use crate::wal::tests::publish;
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
-    keys::{hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix},
+    keys::{hint, metadata_manifest_object, metadata_manifest_prefix, pool_record, wal_prefix},
     local_fs_store::LocalFsStore,
     ObjectStore,
 };
@@ -14,8 +15,10 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
 };
+use loonfs_types::format::control::PoolPayload;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{ErrorCode, ManifestNo, NamespaceId};
+use std::assert_matches;
 use tempfile::tempdir;
 
 impl<S: ObjectStore> crate::namespace::store::NamespaceStore<S> {
@@ -33,12 +36,25 @@ fn context() -> WriterAt {
     crate::test_support::writer_at("writer", 1_000)
 }
 
+/// Returns the key of every pool record in `store`.
+async fn pool_record_keys<S: ObjectStore>(store: &S) -> Vec<String> {
+    store
+        .list_prefix("pools/")
+        .await
+        .expect("list the pools")
+        .into_iter()
+        .filter(|key| {
+            parse_object_key(key).is_some_and(|parsed| parsed.family() == DurableObjectFamily::Pool)
+        })
+        .collect()
+}
+
 #[test]
 fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
     use super::bootstrap::bootstrap_metadata_state;
     use crate::metadata::AccessRevisionRecord;
     use loonfs_types::{
-        AccessGrants, AccessRevisionNo, AccessRights, ActorId, ChangeSeq, NamespaceAccess,
+        AccessGrants, AccessRevisionNo, AccessRights, ActorId, CommitSeq, NamespaceAccess,
         PrincipalId, PrincipalScope, ROOT_INODE_ID,
     };
 
@@ -59,7 +75,7 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
         &[AccessRevisionRecord {
             inode_id: ROOT_INODE_ID,
             access_revision_no: AccessRevisionNo(0),
-            committed_seq: ChangeSeq(0),
+            committed_seq: CommitSeq(0),
             commit_id: loonfs_types::format::control::genesis_commit_id(),
             delta_index: 0,
             committed_by: ActorId::loonfs(),
@@ -93,13 +109,19 @@ async fn two_creations_race_at_manifest_one() {
         store.release();
         result
     });
-    winner.expect("winner");
+    let winner = winner.expect("winner");
     assert_eq!(loser.expect_err("loser").code(), ErrorCode::NamespaceExists);
+    assert_eq!(
+        pool_record_keys(&store).await,
+        vec![pool_record(&winner.pool_id)],
+        "the loser deletes its own pool record"
+    );
 }
 
 /// Checks that a create and a fork each return the state that their manifest
 /// 1 records, and that neither reads the new namespace: the put of manifest 1
-/// decides whether it exists.
+/// decides whether it exists. A create writes its pool record after the hint
+/// and before manifest 1, and a fork writes no pool record.
 #[tokio::test]
 async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     let directory = tempdir().expect("directory");
@@ -113,12 +135,36 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
         .create()
         .await
         .expect("create");
+    let operations = store.take();
     assert_eq!(
-        control_requests(&source, &store.take()),
+        operations
+            .iter()
+            .filter(|operation| matches!(operation, RecordedOperation::Put { .. }))
+            .map(RecordedOperation::key)
+            .collect::<Vec<_>>(),
+        [
+            hint(&source),
+            pool_record(&created.pool_id),
+            metadata_manifest_object(&source, &ManifestNo(1)),
+        ]
+    );
+    assert_eq!(
+        control_requests(&source, &operations),
         vec![
             ("put", hint(&source)),
             ("put", metadata_manifest_object(&source, &ManifestNo(1))),
         ]
+    );
+    assert_eq!(
+        crate::test_support::pool_store(&store, &created.pool_id)
+            .load_pool_record()
+            .await
+            .expect("load the pool record"),
+        Some(PoolPayload {
+            pool_id: created.pool_id.clone(),
+            first_member_namespace_id: source.clone(),
+            created_at_ms: created.created_at_ms,
+        })
     );
     assert_eq!(
         created,
@@ -149,13 +195,17 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
         )
         .await
         .expect("fork");
+    let operations = store.take();
     assert_eq!(
-        control_requests(&target, &store.take()),
+        control_requests(&target, &operations),
         vec![
             ("put", hint(&target)),
             ("put", metadata_manifest_object(&target, &ManifestNo(1))),
         ]
     );
+    assert!(operations
+        .iter()
+        .all(|operation| !operation.key().starts_with("pools/")));
     assert!(forked.fork_basis.is_some());
     assert_eq!(
         forked,
@@ -166,8 +216,11 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     );
 }
 
+/// Checks that identical bytes at manifest 1 confirm a create and a fork
+/// after a lost response, and that a create of the existing namespace with
+/// `allow_existing` deletes its own pool record.
 #[tokio::test]
-async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
+async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
     let directory = tempdir().expect("directory");
     let source = NamespaceId::parse("source").expect("source");
     let target = NamespaceId::parse("target").expect("target");
@@ -182,16 +235,11 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     .apply_then_fail();
     store.fail_next(1);
     let actor_id = loonfs_test_support::test_actor();
-    let error = crate::test_support::NamespaceFixture::new(&store, &source, &context())
+    let created = crate::test_support::NamespaceFixture::new(&store, &source, &context())
         .create()
         .await
-        .expect_err("plain create cannot prove authorship from matching bytes");
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+        .expect("the pool ID proves authorship from matching bytes");
     assert_eq!(store.attempts(), 1);
-    let existing = crate::test_support::namespace_store(&store, &source)
-        .load_metadata()
-        .await
-        .expect("created namespace");
     let adopted = crate::test_support::NamespaceFixture::new(&store, &source, &context())
         .engine()
         .bootstrap_namespace(
@@ -203,10 +251,14 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         )
         .await
         .expect("allow existing returns the created namespace");
-    assert_eq!(adopted, existing);
+    assert_eq!(adopted, created);
+    assert_eq!(
+        pool_record_keys(&store).await,
+        vec![pool_record(&created.pool_id)]
+    );
     store.fail_next(1);
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
-    let created = fixture
+    let forked = fixture
         .engine()
         .fork_namespace(
             &target,
@@ -216,10 +268,53 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
                 .expect("fold the WAL tail"),
         )
         .await
-        .expect("fork source pin proves authorship from matching bytes");
-    assert!(created.fork_basis.is_some());
+        .expect("fork snapshot proves authorship from matching bytes");
+    assert!(forked.fork_basis.is_some());
     assert_eq!(store.attempts(), 1);
     assert_eq!(store.remaining(), 0);
+}
+
+/// Checks that a create whose pool record put has an unknown outcome sends the
+/// put again after its read-back finds no record, and that a create whose
+/// manifest put has an unknown outcome keeps its pool record and leaves the
+/// hint, so a later create of the ID succeeds.
+#[tokio::test]
+async fn a_lost_pool_record_put_is_sent_again_and_a_lost_manifest_put_keeps_the_pool_record() {
+    let namespace_id = NamespaceId::parse("created").expect("namespace");
+    let manifest_key = metadata_manifest_object(&namespace_id, &ManifestNo(1));
+    for (keys, creates) in [
+        (KeyPredicate::family(DurableObjectFamily::Pool), true),
+        (KeyPredicate::exact(&manifest_key), false),
+    ] {
+        let directory = tempdir().expect("directory");
+        let store = FailStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            keys,
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("request lost".to_owned()),
+        );
+        store.fail_next(1);
+        let created = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+            .create()
+            .await;
+        assert_eq!(pool_record_keys(store.inner()).await.len(), 1);
+        for (key, exists) in [(hint(&namespace_id), true), (manifest_key.clone(), creates)] {
+            let stored = store.inner().head(&key).await.expect("head");
+            assert_eq!(stored.is_some(), exists, "`{key}`");
+        }
+        if creates {
+            created.expect("the create sends the pool record put again");
+        } else {
+            assert_matches!(
+                created.expect_err("the create fails"),
+                crate::CoreError::OutcomeUnknown { object_key, .. } if object_key == manifest_key
+            );
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+                .create()
+                .await
+                .expect("a later create of the ID succeeds");
+        }
+    }
 }
 
 #[tokio::test]
@@ -381,20 +476,13 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 .fold_wal()
                 .await
                 .expect("replace manifest");
-            // The writer session's floor, published under its epoch.
-            let folded = crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .load_current_manifest()
+            // A manifest after the fold, so the fold's manifest isn't current.
+            crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &context())
+                .engine()
+                .set_retention_window(std::num::NonZeroU64::new(60_000))
                 .await
-                .expect("load the fold's manifest");
-            crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .publish_retention_floor(
-                    None,
-                    folded.payload().writer_epoch,
-                    folded.payload().head_seq,
-                )
-                .await
-                .expect("advance floor");
-            // The runtime that published the fold and the floor raises the
+                .expect("set the retention window");
+            // The runtime that published the fold and the window raises the
             // hint after them, while the raise to manifest 2 is still pending.
             crate::test_support::namespace_store(store.inner(), &namespace_id)
                 .raise_hint(ManifestNo(4), None)
@@ -405,7 +493,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 ..context()
             };
             crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .gc(None, &options, &aged.clock())
+                .gc(&options, &aged.clock())
                 .await
                 .expect("collect during pending hint");
             store.release();
@@ -438,7 +526,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         ..context()
     };
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
         .expect("collect after grace");
     assert!(store
@@ -449,7 +537,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
 }
 
 #[tokio::test]
-async fn fork_into_a_deleted_id_leaves_no_source_pin() {
+async fn fork_into_a_deleted_id_leaves_no_source_snapshot() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -485,28 +573,28 @@ async fn fork_into_a_deleted_id_leaves_no_source_pin() {
         .await
         .expect_err("deleted target");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
-    // The fork writes its source pin, has the put of the target's hint
-    // refused, reads the tombstone, and deletes the pin.
+    // The fork writes its fork snapshot, has the put of the target's hint
+    // refused, reads the tombstone, and deletes the snapshot.
     assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(store.counts().deletes, 1);
     assert!(store
-        .list_prefix(&loonfs_objectstore::keys::pin_prefix(&source))
+        .list_prefix(&loonfs_objectstore::keys::snapshot_prefix(&source))
         .await
-        .expect("source pins")
+        .expect("fork snapshots")
         .is_empty());
 }
 
 #[tokio::test]
-async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
+async fn a_fork_that_loses_target_publication_deletes_its_source_snapshot() {
     for deleted in [false, true] {
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("source").expect("source");
         let target = NamespaceId::parse("target").expect("target");
-        let pin_prefix = loonfs_objectstore::keys::pin_prefix(&source);
+        let snapshot_prefix = loonfs_objectstore::keys::snapshot_prefix(&source);
         let store = BlockingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::prefix(&pin_prefix),
+            KeyPredicate::prefix(&snapshot_prefix),
             OperationSelector::PutCreateIfAbsent,
         );
         let setup = context();
@@ -549,9 +637,9 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
             }
         );
         assert!(store
-            .list_prefix(&pin_prefix)
+            .list_prefix(&snapshot_prefix)
             .await
-            .expect("source pins")
+            .expect("fork snapshots")
             .is_empty());
     }
 }

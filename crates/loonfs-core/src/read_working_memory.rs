@@ -96,7 +96,7 @@ impl ReadWorkingMemory {
         }
         self.report();
         ReadReservation {
-            pool: Arc::clone(self),
+            read_working_memory: Arc::clone(self),
             bytes: granted,
         }
     }
@@ -128,7 +128,7 @@ impl ReadWorkingMemory {
 /// is dropped.
 #[derive(Debug)]
 pub struct ReadReservation {
-    pool: Arc<ReadWorkingMemory>,
+    read_working_memory: Arc<ReadWorkingMemory>,
     bytes: usize,
 }
 
@@ -144,14 +144,14 @@ impl ReadReservation {
             bytes <= self.bytes,
             "a reservation should shrink to at most its reserved bytes"
         );
-        self.pool.release(self.bytes - bytes);
+        self.read_working_memory.release(self.bytes - bytes);
         self.bytes = bytes;
     }
 }
 
 impl Drop for ReadReservation {
     fn drop(&mut self) {
-        self.pool.release(self.bytes);
+        self.read_working_memory.release(self.bytes);
     }
 }
 
@@ -189,12 +189,12 @@ mod tests {
             first_report_entered: Barrier::new(2),
             first_report_released: Barrier::new(2),
         });
-        let pool = ReadWorkingMemory::new(4096, Some(Arc::clone(&observer) as _));
+        let read_working_memory = ReadWorkingMemory::new(4096, Some(Arc::clone(&observer) as _));
         std::thread::scope(|scope| {
-            scope.spawn(|| assert!(pool.try_reserve(100)));
+            scope.spawn(|| assert!(read_working_memory.try_reserve(100)));
             // The first reservation read 100 bytes and is inside its report.
             observer.first_report_entered.wait();
-            assert!(pool.try_reserve(200));
+            assert!(read_working_memory.try_reserve(200));
             // The newer report set 300; now the held report sets 100.
             observer.first_report_released.wait();
         });
@@ -204,53 +204,53 @@ mod tests {
 
     #[test]
     fn a_reservation_takes_its_minimum_and_what_is_free_and_releases_both() {
-        let pool = Arc::new(ReadWorkingMemory::new(4096, None));
-        assert!(pool.try_reserve(1024));
-        let mut reservation = pool.reserve(1000, 0);
+        let read_working_memory = Arc::new(ReadWorkingMemory::new(4096, None));
+        assert!(read_working_memory.try_reserve(1024));
+        let mut reservation = read_working_memory.reserve(1000, 0);
         assert_eq!(reservation.bytes(), 1000);
-        assert_eq!(pool.in_use(), 2024);
-        let rest = pool.reserve(4096, 100);
+        assert_eq!(read_working_memory.in_use(), 2024);
+        let rest = read_working_memory.reserve(4096, 100);
         assert_eq!(rest.bytes(), 2072);
-        assert_eq!(pool.in_use(), 4096);
-        // A full pool still grants the minimum, above the limit.
-        let over = pool.reserve(500, 200);
+        assert_eq!(read_working_memory.in_use(), 4096);
+        // A reservation still gets the minimum when the read working memory is full.
+        let over = read_working_memory.reserve(500, 200);
         assert_eq!(over.bytes(), 200);
-        assert_eq!(pool.in_use(), 4296);
-        assert_eq!(pool.available_bytes(), 0);
+        assert_eq!(read_working_memory.in_use(), 4296);
+        assert_eq!(read_working_memory.available_bytes(), 0);
         reservation.shrink_to(400);
         assert_eq!(reservation.bytes(), 400);
-        assert_eq!(pool.in_use(), 3696);
+        assert_eq!(read_working_memory.in_use(), 3696);
         drop(over);
         drop(rest);
         drop(reservation);
-        assert_eq!(pool.in_use(), 1024);
-        pool.release(1024);
-        assert_eq!(pool.in_use(), 0);
+        assert_eq!(read_working_memory.in_use(), 1024);
+        read_working_memory.release(1024);
+        assert_eq!(read_working_memory.in_use(), 0);
     }
 
     #[test]
     fn concurrent_reservations_share_one_limit_and_release_every_byte() {
-        let pool = ReadWorkingMemory::new(4096, None);
+        let read_working_memory = ReadWorkingMemory::new(4096, None);
         let barrier = Barrier::new(9);
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
-                    let reserved = pool.try_reserve(1024);
+                    let reserved = read_working_memory.try_reserve(1024);
                     barrier.wait();
                     barrier.wait();
                     if reserved {
-                        pool.release(1024);
+                        read_working_memory.release(1024);
                     }
                 });
             }
             barrier.wait();
-            assert_eq!(pool.in_use(), 4096);
-            assert!(!pool.try_reserve(usize::MAX));
+            assert_eq!(read_working_memory.in_use(), 4096);
+            assert!(!read_working_memory.try_reserve(usize::MAX));
             barrier.wait();
         });
-        assert_eq!(pool.in_use(), 0);
-        assert!(pool.try_reserve(4096));
-        pool.release(4096);
-        assert_eq!(pool.in_use(), 0);
+        assert_eq!(read_working_memory.in_use(), 0);
+        assert!(read_working_memory.try_reserve(4096));
+        read_working_memory.release(4096);
+        assert_eq!(read_working_memory.in_use(), 0);
     }
 }

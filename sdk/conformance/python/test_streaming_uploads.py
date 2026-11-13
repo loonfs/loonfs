@@ -90,7 +90,7 @@ def test_streaming_uploads(fixture, source_type):
                 "expires_at_ms": 2000000000000,
                 "checksum_algorithm": fixture["algorithm"],
                 **({"part_size_bytes": 4} if mode == "direct_multipart" else {}),
-                **({"access": access} if mode == "direct_put" else {}),
+                **({"transfer": access} if mode == "direct_put" else {}),
             }
         elif path.endswith("/parts"):
             parts = json.loads(request.content)["parts"]
@@ -101,7 +101,7 @@ def test_streaming_uploads(fixture, source_type):
             value = {
                 "namespace_id": "demo",
                 "upload_id": "upl_test",
-                "parts": [{"part_number": parts[0]["part_number"], "access": access}],
+                "parts": [{"part_number": parts[0]["part_number"], "transfer": access}],
             }
         elif path == "/object" or path.endswith("/content"):
             counts["payload"] += 1

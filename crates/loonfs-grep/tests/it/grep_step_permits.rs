@@ -1,12 +1,12 @@
 //! How many grep steps hold file content or index segments at once.
 
 use crate::common::GrepHost;
-use loonfs::engine::PoolCounts;
+use loonfs::engine::PermitCounts;
 use loonfs::{InlineContentPolicy, LoonFs, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepStepBudget, GrepWorker,
 };
-use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::bounded;
 use loonfs_test_support::stores::{
@@ -31,16 +31,15 @@ fn content_watch(inner: LocalFsStore) -> NamespaceOverlapStore<LocalFsStore> {
     })
 }
 
-/// The namespace of a content object or a grep segment.
+/// The pool of a content object or the namespace of a grep segment. Each
+/// namespace in these tests is created without a source, so each has a pool
+/// of its own.
 fn content_namespace(key: &str) -> Option<String> {
-    parse_object_key(key)
-        .filter(|parsed| {
-            matches!(
-                parsed.family(),
-                DurableObjectFamily::ContentBlob | DurableObjectFamily::ExtensionSegment
-            )
-        })
-        .map(|parsed| parsed.prefix_namespace_id().to_owned())
+    parse_object_key(key).and_then(|parsed| match (parsed.family(), parsed.prefix()) {
+        (DurableObjectFamily::ContentBlob, KeyPrefix::Pool(id))
+        | (DurableObjectFamily::ExtensionSegment, KeyPrefix::Namespace(id)) => Some(id.to_owned()),
+        _ => None,
+    })
 }
 
 /// A writer that stores every file as a content object, so a step's content
@@ -137,7 +136,7 @@ async fn parked_build_step<'a>(
 async fn drive_until_reported(
     step: &mut (impl Future<Output = loonfs_grep::Result<GrepBuildOutcome>> + Unpin),
     budget: &GrepStepBudget,
-    expected: PoolCounts,
+    expected: PermitCounts,
 ) {
     let reported = async {
         while budget.stats() != expected {
@@ -229,7 +228,7 @@ async fn workers_over_two_stores_share_one_step_permit() {
     let holding_step = parked_build_step(&blocking, &first_worker, &first).await;
     assert_eq!(
         budget.stats(),
-        PoolCounts {
+        PermitCounts {
             running: 1,
             waiting: 0
         }
@@ -243,7 +242,7 @@ async fn workers_over_two_stores_share_one_step_permit() {
     drive_until_reported(
         &mut waiting_step,
         &budget,
-        PoolCounts {
+        PermitCounts {
             running: 1,
             waiting: 1,
         },
@@ -258,7 +257,7 @@ async fn workers_over_two_stores_share_one_step_permit() {
         .expect("the waiting step takes the permit the first step returned")
         .expect("waiting step");
     assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
-    assert_eq!(budget.stats(), PoolCounts::default());
+    assert_eq!(budget.stats(), PermitCounts::default());
 }
 
 #[tokio::test]
@@ -299,7 +298,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
     }
     assert_eq!(
         budget.stats(),
-        PoolCounts {
+        PermitCounts {
             running: 1,
             waiting: 0
         }
@@ -370,7 +369,7 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     drive_until_reported(
         &mut waiting_step,
         &budget,
-        PoolCounts {
+        PermitCounts {
             running: 1,
             waiting: 1,
         },
@@ -379,7 +378,7 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     drop(waiting_step);
     assert_eq!(
         budget.stats(),
-        PoolCounts {
+        PermitCounts {
             running: 1,
             waiting: 0
         }
@@ -388,5 +387,5 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     blocking.release();
     let outcome = holding_step.await.expect("holding step");
     assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
-    assert_eq!(budget.stats(), PoolCounts::default());
+    assert_eq!(budget.stats(), PermitCounts::default());
 }

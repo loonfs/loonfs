@@ -25,7 +25,7 @@
 //! };
 //! use loonfs_core::time::SystemWallClock;
 //! use loonfs_core::{
-//!     CreateNamespaceOptions, MetadataRunPolicy, NamespaceEngine, NamespaceStore, PermitPool,
+//!     CreateNamespaceOptions, MetadataRunPolicy, NamespaceEngine, NamespaceStore, Permits,
 //! };
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //! use loonfs_types::StdMonotonicTimer;
@@ -49,7 +49,7 @@
 //!     )),
 //!     Arc::new(SystemWallClock),
 //!     Arc::new(StdMonotonicTimer::default()),
-//!     Arc::new(PermitPool::new(
+//!     Arc::new(Permits::new(
 //!         NonZeroUsize::new(32).expect("a nonzero limit"),
 //!         None,
 //!     )),
@@ -96,8 +96,9 @@ mod merge;
 mod namespace;
 mod object_cache;
 mod options;
-mod permit_pool;
+mod permits;
 mod phase;
+mod pool_store;
 mod read_working_memory;
 mod recency;
 mod segment;
@@ -214,23 +215,26 @@ pub use error::{
 };
 pub use gc::GcOptions;
 pub use manifest::{
-    next_run_no_after, ExtensionBasis, ExtensionPublication, FoldWalOutcome, FoldWalResponse,
+    ExtensionBasis, ExtensionPublication, FloorObjectReport, FoldWalOutcome, FoldWalResponse,
     FoldedWalTail, ManifestLoadError, PublicationReport, PublishedManifest, RetentionPlan,
     RetentionTarget,
 };
-pub use merge::{check_planned_bytes, MergeAllowance, MergePlan, MergeRequest, ReplayPlan};
+pub use merge::{
+    MergeAllowance, MergePlan, MergeRequest, MergeReservation, ReplayPlan, MERGE_COMMITS_PAGE_BYTES,
+};
 pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
     FileRevisionsPage, ObjectRange, RetainedRevisionsPage, RetainedRevisionsPageCursor,
 };
-pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
+pub use permits::{BudgetPermit, PermitCounts, PermitObserver, Permits};
 pub use phase::Phase;
+pub use pool_store::PoolStore;
 pub use segment::{MetadataFamilyGroup, MetadataRunPolicy};
 pub use snapshot::{
-    CheckpointPageCursor, ListSnapshotFilesOptions, SnapshotFile, SnapshotFilesPage,
-    SnapshotFilesPageCursor, SnapshotPageCursor,
+    ListSnapshotFilesOptions, SnapshotFile, SnapshotFilesPage, SnapshotFilesPageCursor,
+    SnapshotPageCursor, SnapshotRecordPageCursor,
 };
 pub use upload::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,

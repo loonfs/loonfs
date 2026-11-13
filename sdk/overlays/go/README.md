@@ -63,20 +63,20 @@ and body reads; without one, the operation has a 60-second deadline. Direct and
 proxied transfers use the configured HTTP client and the same context. Direct
 requests carry only the presigned headers, and do not follow redirects.
 
-Direct grants contain ordered `ranges`. Each range has a revision `start_offset`,
-`length`, and signed `access`. Helpers validate the range list before any object
-request and read the ranges in order. They keep up to four range responses
+A download response contains ordered `ranges`. Each range has a revision
+`start_offset`, a `length`, and a presigned URL (`transfer`). Helpers validate
+the range list before any object request and read the ranges in order. They keep up to four range responses
 open: the one being read and up to three requested after it. They check each
 range's length and verify the complete file at the end.
 They send the signed headers unchanged. The object Range header can differ from
 the revision offset. An empty file needs no object request. Successful EOF checks
 the total length, then the checksum of the complete file.
 
-The download helpers read complete files. To resume through the generated grant
-API, pin `revision_no`, retain the bytes already read, and request a new grant
+The download helpers read complete files. To resume through the generated download
+API, pin `revision_no`, retain the bytes already read, and request a new download
 with `start_offset` equal to that prefix's length. Verify prefix plus suffix
 against the content reference. Checking only the suffix cannot verify the file.
-A complete local file needs no new grant.
+A complete local file needs no new download.
 
 `client.Files.Download` collects that stream into memory. `client.Files.Upload`
 accepts an in-memory byte slice through the same transfer path.

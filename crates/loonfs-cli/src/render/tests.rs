@@ -15,7 +15,7 @@ use loonfs_test_support::provider_detail::{
 };
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    AbsolutePath, AttributeValue, AttributesProjection, ChangeSeq, DisplayName, InodeId,
+    AbsolutePath, AttributeValue, AttributesProjection, CommitSeq, DisplayName, InodeId,
     NamespaceId, PathEntry, PathEntryKind, StoreProbeCheck, StoreProbeCheckOutcome,
     StoreProbeResponse,
 };
@@ -141,7 +141,7 @@ fn provider_failure_is_safe_on_embedded_remote_and_doctor_surfaces() {
                     .to_owned(),
                 request_id: None,
                 store_probe: Some(StoreProbeResponse {
-                    run_id: loonfs_types::ProbeRunId::parse("probe_00000000000000000000000001")
+                    probe_id: loonfs_types::ProbeId::parse("probe_00000000000000000000000001")
                         .expect("probe run id"),
                     checks: checks.clone(),
                 }),
@@ -198,7 +198,7 @@ fn path_entry(path: &str, display_name: Option<&str>) -> PathEntry {
         created_by: loonfs_types::ActorId::loonfs(),
         created_at_ms: 1_752_624_000_000,
         kind: PathEntryKind::Directory {},
-        head_seq: ChangeSeq(3),
+        head_seq: CommitSeq(3),
         parent_inode_id: display_name.map(|_| ROOT_INODE_ID),
         display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
         binding_version: None,
@@ -221,7 +221,7 @@ fn human_stat_omits_the_absent_root_name() {
     for line in [
         "path: /",
         "inode: ino_00000000000000000000000000",
-        "kind: dir",
+        "kind: directory",
         "seq: 3",
         "created_by: loonfs",
         "created: 2025-07-16 00:00:00Z",
@@ -635,28 +635,29 @@ fn doctor_failures_show_request_ids_in_json_and_remote_human_output() {
     }
 }
 #[test]
-fn gc_summaries_report_counts_retention_and_namespace_retirement() {
+fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_work() {
     use super::summaries::gc_summary;
     use loonfs_types::{GcResponse, RetainedReason};
 
     let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
     pass.deleted.wal_objects = 2;
-    pass.deleted.upload_sessions = 3;
-    pass.deleted.content_objects = 1;
-    pass.deleted.retired_content_objects = 7;
-    pass.deleted_checkpoints_by_owner.fork = 2;
+    pass.deleted.manifests = 1;
+    pass.deleted_snapshots_by_owner.fork = 2;
     for _ in 0..4 {
         pass.retain(RetainedReason::WithinGraceWindow);
     }
-    pass.retain(RetainedReason::UploadSessionWindow);
+    pass.retain(RetainedReason::SnapshotNotDeletable);
     pass.next_reclamation_at_ms = Some(1_700_000_000_000);
 
     let summary = gc_summary(&pass);
+    assert!(summary.contains("2 wal objects"), "{summary}");
+    assert!(summary.contains("1 manifests"), "{summary}");
+    assert!(summary.contains("2 fork snapshots"), "{summary}");
     assert!(
-        summary.contains("1 content objects, 7 retired content objects"),
+        summary.contains("mostly within_grace_window: 4"),
         "{summary}"
     );
-    assert!(summary.contains("2 fork checkpoints"), "{summary}");
+    assert!(!summary.contains("content objects"), "{summary}");
     assert!(!summary.contains("namespace can be reclaimed"), "{summary}");
     pass.deleted.extension_segments = 3;
     let summary = gc_summary(&pass);
@@ -665,7 +666,7 @@ fn gc_summaries_report_counts_retention_and_namespace_retirement() {
         "{summary}"
     );
 
-    pass.reclaimable_at_ms = Some(1_700_000_000_000);
+    pass.retires_at_ms = Some(1_700_000_000_000);
     for next in [
         Some(1_699_999_999_000),
         Some(1_700_000_000_000),
@@ -675,18 +676,43 @@ fn gc_summaries_report_counts_retention_and_namespace_retirement() {
         pass.next_reclamation_at_ms = next;
         assert_eq!(
             gc_summary(&pass).lines().last(),
-            Some("namespace can be retired at or after 2023-11-14 22:13:20Z after pin cleanup; only fork pins can hold it beyond this deadline")
+            Some("namespace can be retired at or after 2023-11-14 22:13:20Z after snapshot cleanup; only fork snapshots can hold it beyond this deadline")
         );
     }
     let empty = gc_summary(&GcResponse::empty(
         NamespaceId::parse("demo").expect("namespace id"),
     ));
-    assert!(
-        empty.contains("0 content objects, 0 retired content objects"),
-        "{empty}"
-    );
     assert!(!empty.contains("namespace is retired"), "{empty}");
-    assert!(empty.contains("0 fork checkpoints, 0 snapshots"), "{empty}");
+    assert!(empty.contains("0 fork snapshots, 0 snapshots"), "{empty}");
+    assert!(!empty.contains("skipped"), "{empty}");
+
+    let mut pool = loonfs_types::PoolGcResponse::empty(
+        loonfs_types::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x").expect("pool id"),
+    );
+    pool.deleted.content_objects = 2;
+    pool.retain(loonfs_types::PoolRetainedReason::UploadSessionWindow);
+    pool.listed_bytes = 4_096;
+    assert_eq!(
+        super::summaries::pool_gc_summary(&pool),
+        "gc deleted 2 content objects, 0 upload sessions, 0 temporary objects (1 retained); \
+         mostly upload_session_window: 1\nlisted 4096 bytes under the pool"
+    );
+    pool.next_reclamation_at_ms = Some(1_700_000_000_000);
+    pool.skipped = vec![
+        loonfs_types::GcSkippedWork::ContentDeletionPoolBudget,
+        loonfs_types::GcSkippedWork::ContentDeletionUnreadableMember,
+    ];
+    assert_eq!(
+        super::summaries::pool_gc_summary(&pool)
+            .lines()
+            .skip(2)
+            .collect::<Vec<_>>(),
+        [
+            "next reclamation at 2023-11-14 22:13:20Z",
+            "skipped the content sweep: the collection couldn't read every pool member's roots within its budget",
+            "skipped the content sweep: the collection couldn't read one pool member's roots",
+        ]
+    );
 }
 
 #[test]

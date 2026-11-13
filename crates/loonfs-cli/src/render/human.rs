@@ -9,7 +9,7 @@ use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::StoreConfig;
-use loonfs_types::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
+use loonfs_types::{CommitId, CommitSeq, FileRevision, GrepMatch, PathEntry};
 
 use super::human_maintenance::*;
 
@@ -64,13 +64,14 @@ fn human_success_text(output: &CommandOutput) -> String {
         CommandData::SnapshotsListed(response) => human_snapshots_listed(response),
         CommandData::SnapshotExtended(snapshot) => human_snapshot_extended(snapshot),
         CommandData::SnapshotDeleted(response) => human_snapshot_deleted(response),
-        CommandData::CheckpointsListed(response) => human_checkpoints_listed(response),
+        CommandData::SnapshotRecordsListed(response) => human_snapshot_records_listed(response),
         CommandData::MergeSession {
             record_path,
             session,
             steps,
         } => human_merge_session(record_path, session, steps),
         CommandData::MaintenanceRan(response) => human_maintenance_ran(response),
+        CommandData::PoolMaintenanceRan(response) => human_pool_maintenance_ran(response),
         CommandData::Changes(response) => human_changes(response),
         CommandData::Trash(listing) => human_trash(listing),
         CommandData::PathEntries {
@@ -266,7 +267,7 @@ fn human_trash(listing: &TrashListing) -> String {
             "trash for {} (head seq {})",
             response.namespace_id, response.head_seq.0
         ),
-        "DELETED\tDELETED_BY\tKIND\tNAME\tINODE\tSEQ\tRECOVER".to_owned(),
+        "DELETED\tDELETED_BY\tKIND\tNAME\tINODE\tSEQ\tRESTORE".to_owned(),
     ];
     for (entry, recovery_command) in response.entries.iter().zip(&listing.recovery_commands) {
         lines.push(format!(
@@ -438,7 +439,7 @@ fn human_tree_transfer(
 fn human_file_mutation(
     kind: CommandKind,
     target: &str,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     commit_id: &CommitId,
     recovery_command: Option<&str>,
 ) -> String {
@@ -451,12 +452,12 @@ fn human_file_mutation(
         }
         CommandKind::FilesystemRm => match recovery_command {
             Some(recovery_command) => format!(
-                "removed {target} @ seq {committed_seq} (commit {commit_id}); recover with `{recovery_command}`"
+                "removed {target} @ seq {committed_seq} (commit {commit_id}); restore with `{recovery_command}`"
             ),
             None => format!("removed {target} @ seq {committed_seq} (commit {commit_id})"),
         },
-        CommandKind::FilesystemUndelete => {
-            format!("recovered {target} @ seq {committed_seq} (commit {commit_id})")
+        CommandKind::FilesystemRestore => {
+            format!("restored {target} @ seq {committed_seq} (commit {commit_id})")
         }
         CommandKind::FilesystemAnnotate => {
             format!("annotated {target} @ seq {committed_seq} (commit {commit_id})")
@@ -469,7 +470,7 @@ fn human_path_move(
     kind: CommandKind,
     from: &str,
     to: &str,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     commit_id: &CommitId,
 ) -> String {
     match kind {

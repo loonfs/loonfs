@@ -19,7 +19,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload,
 };
-use loonfs_types::{ChangeSeq, CompactorEpoch, NamespaceId};
+use loonfs_types::{CommitSeq, CompactorEpoch, NamespaceId};
 use std::collections::BTreeSet;
 
 pub(crate) struct CompactionPublication {
@@ -134,6 +134,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 input_bytes: result.input_bytes,
                 output_bytes: result.output_bytes,
                 output_segments: result.output_segments.len(),
+                skipped: result.skipped,
             }),
             // Every attempt lost its manifest number to another publication.
             Err(CoreError::StoreContention { .. }) => {
@@ -184,7 +185,7 @@ pub(super) fn build_replacement_manifest(
     previous: &NamespaceManifestPayload,
     surviving: Vec<MetadataRunRef>,
     output: ReplacementOutput,
-    floor_seq: ChangeSeq,
+    floor_seq: CommitSeq,
 ) -> Result<NamespaceManifestPayload> {
     let next_run_no = if output.segments.is_empty() {
         previous.next_run_no
