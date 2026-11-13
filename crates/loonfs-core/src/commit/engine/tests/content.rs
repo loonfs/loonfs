@@ -1,11 +1,7 @@
 //! Publication deadlines for completed content.
 
 use super::*;
-use crate::gc::GcOptions;
-use crate::limits::{
-    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_WINDOW_MS,
-    GC_MIN_GRACE_WINDOW_MS,
-};
+use crate::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_WINDOW_MS};
 use crate::test_support::WriterAt;
 use crate::upload::complete::CompletedUpload;
 use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
@@ -183,15 +179,12 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
             .0
             .store(reclaimed.now_ms - publication.now_ms, Ordering::SeqCst);
         let aged = MetadataMapStore::aged(&store, KeyPredicate::content_blob());
-        let options = GcOptions {
-            grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-        };
         crate::test_support::pool_store(&aged, &pool_id)
-            .gc(None, &options, &reclaimed.clock())
+            .gc(None, &reclaimed.clock())
             .await
             .expect("gc removes the session record");
         let report = crate::test_support::pool_store(&aged, &pool_id)
-            .gc(None, &options, &reclaimed.clock())
+            .gc(None, &reclaimed.clock())
             .await
             .expect("gc reclaims the content");
         assert_eq!(report.deleted.content_objects, 1);

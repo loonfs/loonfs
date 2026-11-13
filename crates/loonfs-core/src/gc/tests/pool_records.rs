@@ -22,7 +22,7 @@ async fn a_pool_without_a_record_is_not_found_and_nothing_is_deleted() {
         .expect("orphan");
     store.reset();
     let error = crate::test_support::pool_store(&store, &pool_id)
-        .gc(None, &options(), &context(GRACE_MS + 1).clock())
+        .gc(None, &context(GC_GRACE_WINDOW_MS + 1).clock())
         .await
         .expect_err("a pool without a record");
     assert_matches!(&error, CoreError::PoolNotFound { pool_id: missing } if *missing == pool_id);
@@ -58,15 +58,25 @@ async fn the_record_of_a_pool_without_members_is_deleted_after_its_creation_grac
         let key = pool_record(&pool_id);
 
         store.reset();
-        let inside = collect_pool(&store, &pool_id, &context(created_at_ms + GRACE_MS - 1)).await;
+        let inside = collect_pool(
+            &store,
+            &pool_id,
+            &context(created_at_ms + GC_GRACE_WINDOW_MS - 1),
+        )
+        .await;
         assert_eq!(
             inside.next_reclamation_at_ms,
-            Some(created_at_ms + GRACE_MS),
+            Some(created_at_ms + GC_GRACE_WINDOW_MS),
             "won elsewhere: {won_elsewhere}"
         );
         assert!(store.head(&key).await.expect("pool record").is_some());
 
-        let after = collect_pool(&store, &pool_id, &context(created_at_ms + GRACE_MS)).await;
+        let after = collect_pool(
+            &store,
+            &pool_id,
+            &context(created_at_ms + GC_GRACE_WINDOW_MS),
+        )
+        .await;
         assert_eq!(after, PoolGcResponse::empty(pool_id.clone()));
         assert!(store.head(&key).await.expect("pool record").is_none());
         assert_eq!(store.counts().lists, 0, "won elsewhere: {won_elsewhere}");

@@ -5,6 +5,7 @@ use super::deletes::{Counter, Decision};
 use super::live_set::LiveSet;
 use crate::control_object::present;
 use crate::error::{CoreError, Result};
+use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::namespace::store::NamespaceStore;
 use crate::snapshot::record::load_snapshot_record_at_key;
 use crate::time::OperationClock;
@@ -17,15 +18,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(super) async fn sweep_snapshot(
         &self,
         key: &str,
-        grace_window_ms: u64,
         live: &LiveSet,
         clock: &OperationClock,
     ) -> Result<Decision<GcResponse>> {
         match self.load_listed_snapshot_record(key).await? {
-            Some(record) => {
-                self.sweep_snapshot_record(key, &record, grace_window_ms, live, clock)
-                    .await
-            }
+            Some(record) => self.sweep_snapshot_record(key, &record, live, clock).await,
             None => Ok(Decision::Gone),
         }
     }
@@ -35,7 +32,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         key: &str,
         record: &SnapshotPayload,
-        grace_window_ms: u64,
         live: &LiveSet,
         clock: &OperationClock,
     ) -> Result<Decision<GcResponse>> {
@@ -51,12 +47,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             } => {
                 return Ok(
                     match self
-                        .fork_snapshot_is_retained(
-                            record,
-                            target_namespace_id,
-                            grace_window_ms,
-                            clock,
-                        )
+                        .fork_snapshot_is_retained(record, target_namespace_id, clock)
                         .await?
                     {
                         false => delete(|report| &mut report.deleted_snapshots_by_owner.fork),
@@ -71,15 +62,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let expires_at_ms = record
             .owner
             .expires_at_ms()
-            .map(|expiry| expiry.saturating_add(grace_window_ms));
+            .map(|expiry| expiry.saturating_add(GC_GRACE_WINDOW_MS));
         let deleted_at_ms = record
             .owner
             .deleted_at_ms()
-            .map(|deletion| deletion.saturating_add(grace_window_ms));
+            .map(|deletion| deletion.saturating_add(GC_GRACE_WINDOW_MS));
         let ages_out_at_ms = live
             .current_tombstone
             .is_some()
-            .then(|| record.created_at_ms.saturating_add(grace_window_ms));
+            .then(|| record.created_at_ms.saturating_add(GC_GRACE_WINDOW_MS));
         let reclaimable_at_ms = expires_at_ms
             .into_iter()
             .chain(deleted_at_ms)
@@ -111,10 +102,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         record: &SnapshotPayload,
         target_namespace_id: &NamespaceId,
-        grace_window_ms: u64,
         clock: &OperationClock,
     ) -> Result<bool> {
-        if clock.request_at_ms().saturating_sub(record.created_at_ms) < grace_window_ms {
+        if clock.request_at_ms().saturating_sub(record.created_at_ms) < GC_GRACE_WINDOW_MS {
             return Ok(true);
         }
         // A target whose current manifest can't be loaded, whether the store

@@ -63,9 +63,9 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
     )
     .await;
     store.reset();
-    let now = context(2_000 + GRACE_MS);
+    let now = context(2_000 + GC_GRACE_WINDOW_MS);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &now.clock())
+        .gc(&now.clock())
         .await
         .expect("complete collection");
     assert_eq!(report.deleted_snapshots_by_owner.user, 1025);

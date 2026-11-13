@@ -5,15 +5,15 @@ use super::context::{Invocation, NamespaceContext, ProfileContext};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceRan};
 use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
-    ChangesArgs, MaintenanceCommand, MaintenanceGcArgs, MaintenanceIndexCommand,
-    MaintenanceIndexEnableArgs, MaintenanceMetadataArgs, MaintenancePoolCommand,
-    MaintenancePoolGcArgs, MaintenanceRecoverAdministratorArgs, MaintenanceRetentionAdvanceArgs,
+    ChangesArgs, MaintenanceCommand, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
+    MaintenanceMetadataArgs, MaintenancePoolCommand, MaintenancePoolGcArgs,
+    MaintenanceRecoverAdministratorArgs, MaintenanceRetentionAdvanceArgs,
     MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs, MaintenanceSnapshotCommand,
     MaintenanceSnapshotListArgs, MaintenanceStoreCommand,
 };
 use crate::backend::StepBudget;
 use crate::error::Result;
-use loonfs_client::{GcOptions, ListChangesOptions, ReadAt};
+use loonfs_client::{ListChangesOptions, ReadAt};
 use loonfs_types::{
     AdvanceRetentionRequest, CommitSeq, GrepIndexStatus, MetadataMaintenanceRequest,
     RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse,
@@ -49,7 +49,7 @@ pub(crate) async fn run_maintenance_command(
                 run_maintenance_retention_window(invocation, args).await
             }
         },
-        MaintenanceCommand::Gc(args) => run_maintenance_gc(invocation, args).await,
+        MaintenanceCommand::Gc => run_maintenance_gc(invocation).await,
         MaintenanceCommand::Pool { command } => match command {
             MaintenancePoolCommand::Gc(args) => run_maintenance_pool_gc(invocation, args).await,
         },
@@ -130,21 +130,13 @@ async fn maintain_metadata(
     ))
 }
 
-async fn run_maintenance_gc(
-    invocation: &Invocation,
-    args: MaintenanceGcArgs,
-) -> Result<CommandOutput, CommandFailure> {
+async fn run_maintenance_gc(invocation: &Invocation) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, None).await?;
     let client = &context.profile.target.client;
-    let response = match args.grace_window_ms {
-        Some(grace_window_ms) => {
-            client
-                .gc_with_options(context.namespace(), &GcOptions { grace_window_ms })
-                .await
-        }
-        None => client.gc(context.namespace()).await,
-    }
-    .map_err(|error| context.fail(error))?;
+    let response = client
+        .gc(context.namespace())
+        .await
+        .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
         RunMaintenanceJobResponse::Gc(response),
@@ -168,15 +160,10 @@ async fn run_maintenance_pool_gc(
                 .pool_id
         }
     };
-    let response = match args.gc.grace_window_ms {
-        Some(grace_window_ms) => {
-            client
-                .gc_pool_with_options(&pool_id, &GcOptions { grace_window_ms })
-                .await
-        }
-        None => client.gc_pool(&pool_id).await,
-    }
-    .map_err(|error| context.fail(error))?;
+    let response = client
+        .gc_pool(&pool_id)
+        .await
+        .map_err(|error| context.fail(error))?;
     Ok(context.output(CommandData::PoolMaintenanceRan(
         RunPoolMaintenanceJobResponse::Gc(response),
     )))

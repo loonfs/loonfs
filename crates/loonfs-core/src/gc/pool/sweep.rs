@@ -9,6 +9,7 @@ use super::uploads::{
 use crate::error::Result;
 use crate::gc::deletes::Decision;
 use crate::gc::session_cache::CompletedUploadSessionCache;
+use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::pool_store::PoolStore;
 use crate::time::OperationClock;
 use crate::upload::records::upload_session_record_keys;
@@ -26,7 +27,6 @@ pub(super) enum ContentReference {
 
 pub(super) struct PoolSweep<'a, S: ObjectStore> {
     pub(super) pool: &'a PoolStore<S>,
-    pub(super) grace_window_ms: u64,
     pub(super) clock: &'a OperationClock,
     pub(super) roots: &'a PoolRoots,
     pub(super) session_cache: Option<&'a CompletedUploadSessionCache>,
@@ -134,7 +134,7 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
                     return Ok(self.retain(PoolRetainedReason::UploadSessionUndecided, None));
                 };
                 self.pool
-                    .sweep_upload_session(self.grace_window_ms, self.roots, self.clock, &state)
+                    .sweep_upload_session(self.roots, self.clock, &state)
                     .await?
             }
         };
@@ -163,7 +163,7 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
     ) -> Decision<PoolGcResponse> {
         Decision::aged(
             entry,
-            self.grace_window_ms,
+            GC_GRACE_WINDOW_MS,
             self.clock.request_at_ms(),
             counter,
         )

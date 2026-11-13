@@ -682,7 +682,6 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
 
 #[tokio::test]
 async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain() {
-    use crate::gc::GcOptions;
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let value = InlineContent::new(
@@ -780,14 +779,12 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
             .expect("unrooted object");
     }
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
-    let options = GcOptions::default();
     store.reset();
     let report = crate::test_support::pool_store(&aged, &pool_id)
         .gc(
             None,
-            &options,
             &WriterAt {
-                now_ms: options.grace_window_ms + 1,
+                now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
                 ..context.clone()
             }
             .clock(),
@@ -846,9 +843,8 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
     let report = crate::test_support::pool_store(&aged, &pool_id)
         .gc(
             None,
-            &options,
             &WriterAt {
-                now_ms: options.grace_window_ms + 1,
+                now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
                 ..context
             }
             .clock(),
@@ -896,15 +892,12 @@ async fn collect_aged(
     store: &Arc<RecordingStore<LocalFsStore>>,
     context: &WriterAt,
 ) -> loonfs_types::PoolGcResponse {
-    use crate::gc::GcOptions;
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
-    let options = GcOptions::default();
     crate::test_support::pool_store(&aged, &pool_id(store).await)
         .gc(
             None,
-            &options,
             &WriterAt {
-                now_ms: options.grace_window_ms + 1,
+                now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
                 ..context.clone()
             }
             .clock(),

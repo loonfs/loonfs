@@ -41,7 +41,7 @@ async fn collect(
 ) -> (PoolGcResponse, BTreeMap<String, usize>) {
     store.reset();
     let report = crate::test_support::pool_store(store, pool_id)
-        .gc(Some(cache), &options(), &context(now_ms).clock())
+        .gc(Some(cache), &context(now_ms).clock())
         .await
         .expect("collection");
     let mut reads = BTreeMap::new();
@@ -98,7 +98,7 @@ async fn a_collection_reads_only_the_sessions_that_the_cache_dropped() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = session_recording_store(temp_dir.path());
     let early = context(1_000);
-    let late = context(early.now_ms + GRACE_MS);
+    let late = context(early.now_ms + GC_GRACE_WINDOW_MS);
     let pool_id = crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &early)
         .create()
         .await
@@ -224,7 +224,7 @@ async fn a_session_the_sweep_deletes_leaves_the_cache() {
     collect(&store, &cache, &pool_id, completed.now_ms + 1).await;
     assert_eq!(cache.len(), 3);
 
-    let aged = now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await;
+    let aged = now_after_newest_object(store.inner(), &namespace_id, GC_GRACE_WINDOW_MS + 1).await;
     let (deleted, reads) = collect(&store, &cache, &pool_id, aged).await;
     assert_eq!(
         reads,

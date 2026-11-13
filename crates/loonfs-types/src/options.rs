@@ -1,7 +1,6 @@
 //! Per-operation options and payloads shared by the embedded runtime and HTTP
 //! client.
 
-use crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
     AttributesRevisionNo, CommitId, CommitPrecondition, CommitSeq, DeleteDirectoryBehavior,
@@ -634,34 +633,6 @@ pub struct CreateSnapshotOptions {
     /// runtime or server that creates the snapshot. Without it, the snapshot
     /// doesn't expire.
     pub ttl_ms: Option<NonZeroU64>,
-}
-
-/// Options for one garbage collection of a namespace.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GcOptions {
-    /// How old an unreferenced object must be before the collection deletes it,
-    /// in milliseconds. A runtime rejects a window below its derived minimum.
-    pub grace_window_ms: u64,
-}
-
-impl Default for GcOptions {
-    fn default() -> Self {
-        Self {
-            grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-        }
-    }
-}
-
-impl GcOptions {
-    /// Converts a wire collection request. An absent grace window takes the
-    /// default.
-    pub fn from_request(request: crate::GcRequest) -> Self {
-        Self {
-            grace_window_ms: request
-                .grace_window_ms
-                .unwrap_or(GC_DEFAULT_GRACE_WINDOW_MS),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
             .collect::<Vec<_>>()
     };
     crate::test_support::namespace_store(&recorded, &namespace_id)
-        .gc(&options(), &context(GRACE_MS + 1).clock())
+        .gc(&context(GC_GRACE_WINDOW_MS + 1).clock())
         .await
         .expect("collection");
     // The hint lags, so the probe finds the manifest after the hinted one,
@@ -63,7 +63,7 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
     expected.push(metadata_manifest_object(&namespace_id, &successor));
     assert_eq!(heads(), expected);
     recorded.reset();
-    let report = collect_pool(&recorded, &pool_id, &context(GRACE_MS + 1)).await;
+    let report = collect_pool(&recorded, &pool_id, &context(GC_GRACE_WINDOW_MS + 1)).await;
     assert_eq!(report.deleted.content_objects, 1);
     assert_eq!(heads(), expected);
     let target = NamespaceId::parse("retired-no-heads").expect("target");
@@ -87,7 +87,7 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .expect("delete target");
     recorded.reset();
     let retired = crate::test_support::namespace_store(&recorded, &target)
-        .gc(&options(), &context(1_000 + retirement_ms()).clock())
+        .gc(&context(1_000 + retirement_ms()).clock())
         .await
         .expect("retire fork");
     assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
@@ -121,7 +121,7 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
     let aged = MetadataMapStore::aged(store, KeyPredicate::any());
     let undated = MetadataMapStore::without_last_modified(aged, KeyPredicate::exact(&undated_key));
     let recorded = RecordingStore::new(undated, KeyPredicate::any());
-    let report = collect_pool(&recorded, &pool_id, &context(GRACE_MS + 1)).await;
+    let report = collect_pool(&recorded, &pool_id, &context(GC_GRACE_WINDOW_MS + 1)).await;
     assert_eq!(report.retained.no_provider_timestamp, 1);
     assert_eq!(report.deleted.content_objects, 1);
     let deleted: Vec<_> = recorded
@@ -236,7 +236,7 @@ async fn snapshot_views_add_segment_reads_only_for_uncovered_layout_segments() {
             layout_segments(&previous) != layout_segments(&current),
             own_runs
         );
-        let now_ms = GRACE_MS + 1;
+        let now_ms = GC_GRACE_WINDOW_MS + 1;
         let rooted = RecordingStore::metadata_segments(Arc::clone(&store));
         collect_pool(&rooted, &pool_id, &context(now_ms)).await;
         // Reads within one collection have no fixed order, so both lists are

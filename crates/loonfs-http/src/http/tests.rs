@@ -135,7 +135,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "file_created",
     "file_revision",
     "fork_point_below_floor",
-    "grace_window_ms",
     "head_drift",
     "head_seq",
     "idle_session_close_after_ms",

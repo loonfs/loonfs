@@ -205,7 +205,7 @@ async fn a_collection_reads_each_extent_filter_once_and_lists_content_once() {
             segment_cache: Arc::clone(&cache),
             ..crate::test_support::pool_store(&store, &pool_id)
         }
-        .gc(None, &options(), &context(GRACE_MS + 1).clock())
+        .gc(None, &context(GC_GRACE_WINDOW_MS + 1).clock())
         .await
         .expect("collection");
         assert_eq!(report.deleted.content_objects, deleted.len() as u64);
@@ -308,7 +308,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
         .expect("orphan");
     let pool_id = manifest.pool_id.clone();
     publish_layout_manifest(&store, manifest).await;
-    let report = collect_pool(&store, &pool_id, &context(GRACE_MS + 1)).await;
+    let report = collect_pool(&store, &pool_id, &context(GC_GRACE_WINDOW_MS + 1)).await;
     assert_eq!(report.deleted.content_objects, 0);
 
     // The next manifest lists only a layout segment of another chain.
@@ -318,7 +318,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
     write_namespace_manifest(&store, unlisted)
         .await
         .expect("a manifest that doesn't list the first layout segment");
-    let report = collect_pool(&store, &pool_id, &context(GRACE_MS + 1)).await;
+    let report = collect_pool(&store, &pool_id, &context(GC_GRACE_WINDOW_MS + 1)).await;
     assert_eq!(report.deleted.content_objects, protected.len() as u64 + 1);
     assert!(store.head(&orphan).await.expect("head").is_none());
 }
@@ -378,7 +378,7 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     let pool_id = first.pool_id.clone();
     publish_layout_manifest(&store, first).await;
 
-    let now_ms = GRACE_MS + 1;
+    let now_ms = GC_GRACE_WINDOW_MS + 1;
     let collect = async |deleted, survivors: BTreeSet<String>| {
         let report = collect_pool(&store, &pool_id, &context(now_ms)).await;
         assert_eq!(report.deleted.content_objects, deleted);

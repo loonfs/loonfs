@@ -71,7 +71,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
             now_after_newest_object(
                 &store,
                 namespace_id,
-                UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GRACE_MS + 1,
+                UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GC_GRACE_WINDOW_MS + 1,
             )
             .await,
         );
@@ -79,7 +79,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
     let aged = context(aged_now);
     for index in [0, 1, 1, 0] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(&options(), &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("collect ancestor while grandchild lives");
         assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
@@ -103,14 +103,14 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
     // Deletion alone must not release either link in the protection chain.
     for index in [0, 1] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(&options(), &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("ancestors still kept by unretired descendants");
         assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     }
     for index in [2, 1, 0] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
-            .gc(&options(), &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("retire from leaf to root");
         if index > 0 {

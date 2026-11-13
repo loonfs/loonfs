@@ -30,7 +30,7 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
     aged.now_ms = u64::MAX / 2;
     for _ in 0..2 {
         namespace_store(&store, deleted)
-            .gc(&loonfs_core::GcOptions::default(), &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("collect the deleted namespace");
     }

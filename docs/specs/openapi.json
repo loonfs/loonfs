@@ -4174,12 +4174,6 @@
       "RunMaintenanceJobRequestGc": {
         "description": "A garbage collection job for aged, unreferenced objects, which also collects the grep\nindex's objects when the deployment maintains a grep index.",
         "properties": {
-          "grace_window_ms": {
-            "description": "The minimum age, in milliseconds, that an object must reach before the collection can delete\nit. The value must be at least the server's advertised safety floor. The grep index's\ncollector keeps its own age rules, so this value doesn't change them.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "kind": {
             "enum": [
               "gc"
@@ -4505,12 +4499,6 @@
       "RunPoolMaintenanceJobRequestGc": {
         "description": "A garbage collection job for the pool's aged, unreferenced content objects, upload records,\nand temporary objects.",
         "properties": {
-          "grace_window_ms": {
-            "description": "The minimum age, in milliseconds, that an object must reach before the collection can delete\nit. The value must be at least the server's advertised safety floor. The grep index's\ncollector keeps its own age rules, so this value doesn't change them.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "kind": {
             "enum": [
               "gc"

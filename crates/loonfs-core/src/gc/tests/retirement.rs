@@ -19,13 +19,13 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
         .expect("tombstone");
     store.reset();
     let waiting = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &context(deadline.now_ms - 1).clock())
+        .gc(&context(deadline.now_ms - 1).clock())
         .await
         .expect("before deadline");
     assert_eq!(waiting.retires_at_ms, Some(1_000 + retirement_ms()));
     assert_eq!(waiting.next_reclamation_at_ms, Some(deadline.now_ms));
     let reclaimed = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &deadline.clock())
+        .gc(&deadline.clock())
         .await
         .expect("at deadline");
     assert_eq!(reclaimed.next_reclamation_at_ms, None);
@@ -104,7 +104,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         }),
     );
     let first = crate::test_support::namespace_store(&store, &target)
-        .gc(&options(), &context(setup.now_ms + retirement_ms()).clock())
+        .gc(&context(setup.now_ms + retirement_ms()).clock())
         .await
         .expect("release fork snapshot with retained session");
     // A fork's retirement deletes its fork snapshot and nothing else, and makes
@@ -131,9 +131,9 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
             .expect("collect source segment");
     }
     store.reset();
-    let expired_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS;
+    let expired_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS;
     let repeated = crate::test_support::namespace_store(&store, &target)
-        .gc(&options(), &context(expired_at_ms).clock())
+        .gc(&context(expired_at_ms).clock())
         .await
         .expect("repeat retirement after source collection");
     assert_eq!(repeated.deleted_snapshots_by_owner.fork, 0);
@@ -149,7 +149,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
 
 #[tokio::test]
 async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup() {
-    use crate::limits::{DIRECT_TRANSFER_URL_TTL_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
+    use crate::limits::DIRECT_TRANSFER_URL_TTL_MS;
     use loonfs_test_support::{clock::ManualClock, stores::FakeMultipartStore};
 
     let directory = tempdir().expect("directory");
@@ -197,31 +197,24 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .inner()
         .upload_part(&targets.provider_upload_id, 1, b"part")
         .expect("issued capability still writes after deletion");
-    let options = GcOptions {
-        grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-    };
     let collect_pool = |now_ms: u64| {
         let pool = crate::test_support::pool_store(&store, &pool_id);
-        let options = options.clone();
         async move {
-            pool.gc(None, &options, &context(now_ms).clock())
+            pool.gc(None, &context(now_ms).clock())
                 .await
                 .expect("pool collection")
         }
     };
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options, &context(clock.now_ms()).clock())
+        .gc(&context(clock.now_ms()).clock())
         .await
         .expect("retire");
     let deadline = report.retires_at_ms.expect("deadline");
-    assert_eq!(
-        deadline,
-        clock.now_ms() + NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
-    );
+    assert_eq!(deadline, clock.now_ms() + retirement_ms());
     assert!(deadline > expires_at_ms);
     clock.advance_ms(deadline - clock.now_ms() - 1);
     let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options, &context(clock.now_ms()).clock())
+        .gc(&context(clock.now_ms()).clock())
         .await
         .expect("before deadline");
     assert_eq!(before.next_reclamation_at_ms, Some(deadline));
@@ -234,7 +227,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     assert_eq!(store.counts().deletes, 0);
     clock.advance_ms(1);
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options, &context(clock.now_ms()).clock())
+        .gc(&context(clock.now_ms()).clock())
         .await
         .expect("retirement");
     collect_pool(clock.now_ms()).await;
@@ -245,13 +238,11 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .await
         .expect("open session");
     assert_eq!(open_session.outcome, None);
-    clock.advance_ms(
-        setup.now_ms + UPLOAD_SESSION_LEASE_MS + options.grace_window_ms - clock.now_ms(),
-    );
+    clock.advance_ms(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS - clock.now_ms());
     collect_pool(clock.now_ms()).await;
     assert_eq!(store.inner().aborts(), 1);
     assert_eq!(store.inner().open_uploads(), 0);
-    clock.advance_ms(options.grace_window_ms);
+    clock.advance_ms(GC_GRACE_WINDOW_MS);
     let reaped = collect_pool(clock.now_ms()).await;
     assert_eq!(reaped.deleted.upload_sessions, 1);
     assert_eq!(store.inner().aborts(), 2);
@@ -302,7 +293,7 @@ async fn a_fork_basis_naming_its_snapshot_with_a_different_checksum_is_corrupt()
         .expect("corrupt basis");
     store.reset();
     let error = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &context(setup.now_ms + GRACE_MS).clock())
+        .gc(&context(setup.now_ms + GC_GRACE_WINDOW_MS).clock())
         .await
         .expect_err("corrupt basis");
     assert_matches!(error, CoreError::NamespaceCorrupt(_));
@@ -346,7 +337,7 @@ async fn an_unrecognized_snapshot_key_is_kept_and_blocks_retirement() {
     let retirement = context(setup.now_ms + retirement_ms());
     let listed_bytes = core_listed_bytes(&store, &target).await;
     let kept = crate::test_support::namespace_store(&store, &target)
-        .gc(&options(), &retirement.clock())
+        .gc(&retirement.clock())
         .await
         .expect("kept collection");
     assert_eq!(kept.retained.unrecognized_key, 1);
@@ -355,7 +346,7 @@ async fn an_unrecognized_snapshot_key_is_kept_and_blocks_retirement() {
     assert!(store.head(&unrecognized).await.expect("head").is_some());
     store.delete(&unrecognized).await.expect("remove the key");
     let retired = crate::test_support::namespace_store(&store, &target)
-        .gc(&options(), &retirement.clock())
+        .gc(&retirement.clock())
         .await
         .expect("retirement");
     assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);

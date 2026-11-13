@@ -282,9 +282,9 @@ pub const METADATA_COMPACTION_BUDGET_MS: u64 =
 /// A download URL reads the content of a revision that a view at most the
 /// revalidation bound old refers to. The content of the view's current
 /// revision stays referenced until the URL ends, because a retention advance
-/// passes the commit that replaces the revision only once that commit is a
-/// default grace window old, and the assertion below the default grace keeps
-/// that longer than the bound and this lifetime together. A URL for a
+/// passes the commit that replaces the revision only once that commit is the
+/// advance's minimum commit age old, and an assertion further down this file
+/// keeps that age longer than the bound and this lifetime together. A URL for a
 /// revision that the view already lists as replaced can stop working before
 /// it expires, once a compaction removes the revision and a collection
 /// deletes its content. A part presigned URL writes no object.
@@ -319,9 +319,9 @@ pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
 pub const POOL_ROOTS_READ_BUDGET_MS: u64 =
     NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
 
-pub use loonfs_types::limits::{GC_DEFAULT_GRACE_WINDOW_MS, RETENTION_ADVANCE_MIN_COMMIT_AGE_MS};
+pub use loonfs_types::limits::{GC_GRACE_WINDOW_MS, RETENTION_ADVANCE_MIN_COMMIT_AGE_MS};
 
-const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
+const _: () = assert!(GC_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 
 /// A member that replaces or deletes a revision after a pool's
 /// collection started keeps the revision's rows until a retention advance
@@ -411,17 +411,12 @@ pub const CONTENT_READ_CHUNK_BYTES: NonZeroU64 = NonZeroU64::new(8 * 1024 * 1024
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gc::GcOptions;
 
     #[test]
-    fn derived_minimum_grace_window_sits_below_the_default() {
+    fn derived_minimum_grace_window_keeps_a_margin_above_the_budget() {
         // 15 min publication budget + 5 min request bound + 5 min margin
         // = 25 min.
         assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_500_000);
-        assert!(
-            GC_MIN_GRACE_WINDOW_MS < GcOptions::default().grace_window_ms,
-            "the conservative default grace window must satisfy its own floor"
-        );
         assert!(
             GC_MIN_GRACE_WINDOW_MS
                 > max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)

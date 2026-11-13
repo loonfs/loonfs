@@ -10,7 +10,6 @@ use loonfs_types::{GcResponse, RetainedReason};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) struct Sweep<'a> {
-    pub(super) grace_window_ms: u64,
     pub(super) clock: &'a OperationClock,
     pub(super) live: &'a LiveSet,
     /// The bytes of the listed objects that reached this sweep, as the
@@ -34,7 +33,7 @@ impl Sweep<'_> {
         }
         Decision::aged(
             entry,
-            family.min_age_ms(self.grace_window_ms),
+            family.min_age_ms(),
             self.clock.request_at_ms(),
             family.deleted_counter(),
         )

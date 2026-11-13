@@ -212,7 +212,6 @@ pub use error::{
     classify_store_failure, CoreError, ErrorCode, ErrorKind, HistoryPosition, MergeBound,
     MetadataProjectionLoadError, Result, WriterFence,
 };
-pub use gc::GcOptions;
 pub use loonfs_types::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use manifest::{
     ExtensionBasis, ExtensionPublication, FloorObjectReport, FoldWalOutcome, FoldWalResponse,

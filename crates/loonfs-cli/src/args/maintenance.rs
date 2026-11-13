@@ -36,7 +36,7 @@ pub(crate) enum MaintenanceCommand {
     },
     /// Collect aged, unreferenced objects, including gram index objects when the deployment
     /// maintains the index.
-    Gc(MaintenanceGcArgs),
+    Gc,
     /// Collect a pool's content objects, upload records, and temporary objects.
     Pool {
         #[command(subcommand)]
@@ -165,18 +165,8 @@ pub(crate) struct MaintenanceMetadataArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct MaintenanceGcArgs {
-    /// Objects younger than this are never deleted (server default when
-    /// omitted).
-    #[arg(long)]
-    pub grace_window_ms: Option<u64>,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct MaintenancePoolGcArgs {
     /// Pool to collect. When omitted, the selected namespace's pool.
     #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
     pub pool_id: Option<PoolId>,
-    #[command(flatten)]
-    pub gc: MaintenanceGcArgs,
 }

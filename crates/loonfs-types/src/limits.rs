@@ -8,12 +8,12 @@
 /// that derivation against this value at compile time.
 pub const READ_REVALIDATION_BOUND_MS: u64 = 1_200_000;
 
-/// Default age of an unreachable object before garbage collection may remove
-/// it, in milliseconds.
+/// How old an unreferenced object must be before a collection deletes it, in
+/// milliseconds. Every collection uses this one window.
 ///
 /// `loonfs-core` checks at compile time that it isn't below the derived
 /// minimum grace window.
-pub const GC_DEFAULT_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
+pub const GC_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
 
 /// Age a commit must reach before a retention advance moves the floor past
 /// the commit, in milliseconds.

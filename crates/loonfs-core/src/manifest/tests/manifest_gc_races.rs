@@ -66,16 +66,12 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
             .raise_hint(expected.manifest().manifest_no, None)
             .await
             .expect("raise discovery hint");
-        let options = crate::gc::GcOptions::default();
         let report = crate::test_support::namespace_store(blocked.inner(), &namespace_id)
-            .gc(
-                &options,
-                &WriterAt {
-                    now_ms: options.grace_window_ms + 1,
-                    ..context.clone()
-                }
-                .clock(),
-            )
+            .gc(&WriterAt {
+                now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+                ..context.clone()
+            }
+            .clock())
             .await
             .expect("collect old manifests");
         assert_eq!(report.deleted.manifests, 3);
@@ -192,20 +188,16 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
             crate::test_support::namespace_store(&store, &namespace_id)
                 .raise_hint_to_current_manifest()
                 .await;
-            let options = crate::gc::GcOptions::default();
-            timer.advance_ms(options.grace_window_ms + 1);
+            timer.advance_ms(crate::limits::GC_GRACE_WINDOW_MS + 1);
             let report = crate::NamespaceStore {
                 timer: timer.clone(),
                 ..crate::test_support::namespace_store(&store, &namespace_id)
             }
-            .gc(
-                &options,
-                &WriterAt {
-                    now_ms: timer.now_ms(),
-                    ..context.clone()
-                }
-                .clock(),
-            )
+            .gc(&WriterAt {
+                now_ms: timer.now_ms(),
+                ..context.clone()
+            }
+            .clock())
             .await
             .expect("collect old manifests");
             assert_eq!(report.deleted.manifests, 2);
@@ -289,17 +281,13 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
     crate::test_support::namespace_store(&store, &namespace_id)
         .raise_hint_to_current_manifest()
         .await;
-    let options = crate::gc::GcOptions::default();
-    clock.advance_ms(options.grace_window_ms + 1);
+    clock.advance_ms(crate::limits::GC_GRACE_WINDOW_MS + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(
-            &options,
-            &WriterAt {
-                now_ms: options.grace_window_ms + 1,
-                ..context.clone()
-            }
-            .clock(),
-        )
+        .gc(&WriterAt {
+            now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+            ..context.clone()
+        }
+        .clock())
         .await
         .expect("collect old manifests");
     assert_eq!(report.deleted.manifests, 4);

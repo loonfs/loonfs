@@ -2,7 +2,7 @@
 //! collection sweeps one key at a time.
 
 use super::deletes::Counter;
-use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
+use crate::limits::{GC_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS};
 use loonfs_objectstore::keys::{
     extensions_prefix, metadata_manifest_prefix, metadata_segment_prefix, wal_prefix,
 };
@@ -40,14 +40,14 @@ impl CandidateFamily {
 
     /// Returns how old an unreferenced object of this family has to be before
     /// a collection deletes the object.
-    pub(super) fn min_age_ms(self, grace_window_ms: u64) -> u64 {
+    pub(super) fn min_age_ms(self) -> u64 {
         match self {
             // A compaction may publish output that is exactly the minimum age
             // old, so a segment must be strictly older before it goes.
             Self::MetadataSegments | Self::ExtensionSegments => {
                 UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1
             }
-            Self::Manifests | Self::WalObjects => grace_window_ms,
+            Self::Manifests | Self::WalObjects => GC_GRACE_WINDOW_MS,
         }
     }
 

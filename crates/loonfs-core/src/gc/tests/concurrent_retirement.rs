@@ -87,7 +87,6 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
             .expect("delete");
     }
     let deadline = context(setup.now_ms + retirement_ms());
-    let gc_options = options();
     let target_snapshot_key = snapshot_record(&source, &target_snapshot);
     let store = BlockingStore::new(
         FailStore::new(
@@ -103,17 +102,17 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &target);
     let clock = deadline.clock();
-    let (delayed, ()) = tokio::join!(namespace.gc(&gc_options, &clock), async {
+    let (delayed, ()) = tokio::join!(namespace.gc(&clock), async {
         store.wait_until_blocked().await;
         store.inner().fail_next(1);
         crate::test_support::namespace_store(store.inner(), &target)
-            .gc(&gc_options, &deadline.clock())
+            .gc(&deadline.clock())
             .await
             .expect_err("a delete succeeded but its acknowledgement was lost");
         assert!(!snapshot_record_exists(store.inner(), &source, &target_snapshot).await);
         store.inner().clear();
         let retried = crate::test_support::namespace_store(store.inner(), &target)
-            .gc(&gc_options, &deadline.clock())
+            .gc(&deadline.clock())
             .await
             .expect("second collector retries from the beginning");
         assert_eq!(retried.deleted_snapshots_by_owner.fork, 0);
@@ -128,7 +127,7 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
     // is retained, and the retired target is no longer a member whose views
     // protect the content.
     let aged = context(
-        now_after_newest_object(&store, &source, GRACE_MS + 1)
+        now_after_newest_object(&store, &source, GC_GRACE_WINDOW_MS + 1)
             .await
             .max(deadline.now_ms),
     );

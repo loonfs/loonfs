@@ -4,9 +4,7 @@
 use super::deletes::apply_decisions;
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
-use super::options::validate_gc_options;
 use super::sweep::Sweep;
-use super::GcOptions;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
@@ -23,10 +21,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// The collection lists nothing under its pool's prefix. The pool's own
     /// collection collects the content objects, upload records, and temporary
     /// objects there (see [`crate::PoolStore::gc`]).
-    pub async fn gc(&self, options: &GcOptions, clock: &OperationClock) -> Result<GcResponse> {
-        validate_gc_options(options)?;
+    pub async fn gc(&self, clock: &OperationClock) -> Result<GcResponse> {
         let mut report = GcResponse::empty(self.namespace_id.clone());
-        let mut live = LiveSet::load(self, options.grace_window_ms, clock).await?;
+        let mut live = LiveSet::load(self, clock).await?;
         report.retires_at_ms = live
             .current_tombstone
             .as_ref()
@@ -36,7 +33,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             _ => None,
         };
         let sweep = Sweep {
-            grace_window_ms: options.grace_window_ms,
             clock,
             live: &live,
             listed_bytes: AtomicU64::new(0),

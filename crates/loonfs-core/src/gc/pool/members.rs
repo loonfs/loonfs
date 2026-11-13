@@ -8,7 +8,7 @@ use crate::gc::charged_set::{ChargedMap, ChargedQueue, ChargedSet, CollectionMem
 use crate::gc::live_set::RetirementStatus;
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::gc::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
-use crate::limits::{NAMESPACE_RETIREMENT_GRACE_WINDOW_MS, POOL_ROOTS_READ_BUDGET_MS};
+use crate::limits::POOL_ROOTS_READ_BUDGET_MS;
 use crate::namespace::control::{LoadedHint, LoadedManifest};
 use crate::namespace::read_anchor::project_anchor_tail;
 use crate::namespace::store::NamespaceStore;
@@ -84,8 +84,6 @@ pub(super) struct PoolRoots {
     /// The members whose roots the collection hasn't read yet, in the order that
     /// the fork snapshot listings found them.
     member_queue: ChargedQueue<NamespaceId>,
-    /// The configured grace, or the retirement grace when that's longer.
-    retirement_grace_window_ms: u64,
     now_ms: u64,
 }
 
@@ -112,7 +110,6 @@ impl PoolRoots {
         first_current: Result<(LoadedManifest, LoadedHint)>,
         observed: Observation,
         session_cache: Option<&CompletedUploadSessionCache>,
-        grace_window_ms: u64,
         clock: &OperationClock,
     ) -> Result<Self> {
         let memory = CollectionMemory::new(
@@ -132,7 +129,6 @@ impl PoolRoots {
             members: ChargedMap::new(&memory),
             member_queue: ChargedQueue::new(&memory),
             memory,
-            retirement_grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
             now_ms: clock.request_at_ms(),
         };
         let outcome = async {
@@ -344,7 +340,6 @@ impl PoolRoots {
         let status = RetirementStatus::of(
             head.status.is_deleted().then_some(head),
             has_snapshots,
-            self.retirement_grace_window_ms,
             self.now_ms,
         );
         Ok(MemberRead {

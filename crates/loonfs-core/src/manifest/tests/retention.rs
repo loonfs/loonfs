@@ -1558,14 +1558,11 @@ async fn an_expired_snapshot_serves_no_reads_but_stays_until_a_collection_delete
 
     // The collection after the grace deletes the record.
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(
-            &crate::gc::GcOptions::default(),
-            &writer_at(
-                "expired",
-                context.now_ms + crate::gc::GcOptions::default().grace_window_ms,
-            )
-            .clock(),
+        .gc(&writer_at(
+            "expired",
+            context.now_ms + crate::limits::GC_GRACE_WINDOW_MS,
         )
+        .clock())
         .await
         .expect("collection");
     let error = read_snapshot_files(&store, &namespace_id, &already_expired.snapshot_id)
@@ -1603,7 +1600,7 @@ async fn a_snapshot_without_a_ttl_is_kept_until_it_is_deleted() {
     distant.now_ms = u64::MAX / 2;
     for _ in 0..3 {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(&crate::gc::GcOptions::default(), &distant.clock())
+            .gc(&distant.clock())
             .await
             .expect("collection");
     }
@@ -3179,7 +3176,7 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
         .await;
     let aged = writer_at("gc", u64::MAX / 2);
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&crate::gc::GcOptions::default(), &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("collect past the floor");
     assert_eq!(
@@ -3210,7 +3207,7 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
     // deletes the manifest and segments that only the snapshot kept.
     for _ in 0..2 {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(&crate::gc::GcOptions::default(), &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("collect deleted basis");
     }

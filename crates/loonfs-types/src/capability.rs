@@ -119,10 +119,6 @@ limit_keys! {
     LIMIT_PAGINATION_DEFAULT_LIMIT = "pagination.default_limit";
     /// Advisory capability key for the largest page size accepted by a deployment.
     LIMIT_PAGINATION_MAX_LIMIT = "pagination.max_limit";
-    /// Advisory limit: the smallest accepted `grace_window_ms` on a `gc`
-    /// request; smaller values return `invalid_request`. Derived from the
-    /// publication budgets, not tuned.
-    LIMIT_GC_MIN_GRACE_WINDOW_MS = "maintenance.gc.min_grace_window_ms";
     /// Advisory limit: files a plan-less `allow_scan` grep will scan before
     /// refusing with `query_unindexable`.
     LIMIT_QUERY_GREP_SCAN_BUDGET_FILES = "query.grep.scan_budget_files";

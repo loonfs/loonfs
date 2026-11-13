@@ -963,12 +963,10 @@ async fn a_repeated_collection_of_a_pool_without_members_lists_once_and_deletes_
         .delete_namespace(Default::default())
         .await
         .expect("delete");
-    context.now_ms += crate::GcOptions::default()
-        .grace_window_ms
-        .max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
-        + GC_SAFETY_MARGIN_MS;
+    context.now_ms +=
+        crate::GC_GRACE_WINDOW_MS.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS) + GC_SAFETY_MARGIN_MS;
     loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .gc(&crate::GcOptions::default(), &context.clock())
+        .gc(&context.clock())
         .await
         .expect("retire the namespace");
     // The content's provider ages are real times, so the pool's collections
@@ -977,7 +975,7 @@ async fn a_repeated_collection_of_a_pool_without_members_lists_once_and_deletes_
     store.reset();
     let pool = loonfs_core::test_support::pool_store(store.as_ref(), &pool_id);
     let first = pool
-        .gc(None, &crate::GcOptions::default(), &context.clock())
+        .gc(None, &context.clock())
         .await
         .expect("first collection");
     assert_eq!(first.deleted.content_objects, 3);
@@ -991,7 +989,7 @@ async fn a_repeated_collection_of_a_pool_without_members_lists_once_and_deletes_
     );
     store.reset();
     let repeated = pool
-        .gc(None, &crate::GcOptions::default(), &context.clock())
+        .gc(None, &context.clock())
         .await
         .expect("repeat collection");
     assert_eq!(

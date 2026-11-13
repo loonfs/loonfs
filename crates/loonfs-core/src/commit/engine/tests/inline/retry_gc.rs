@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::GcOptions;
 use crate::test_support::WriterAt;
 use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationSelector};
 use loonfs_types::ErrorCode;
@@ -58,20 +57,16 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
             .outcome,
         FoldWalOutcome::Published
     );
-    let options = GcOptions::default();
     let aged = MetadataMapStore::aged(
         store.clone(),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
     );
     let report = crate::test_support::namespace_store(&aged, &namespace_id)
-        .gc(
-            &options,
-            &WriterAt {
-                now_ms: options.grace_window_ms + 1,
-                ..context.clone()
-            }
-            .clock(),
-        )
+        .gc(&WriterAt {
+            now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+            ..context.clone()
+        }
+        .clock())
         .await
         .expect("collect folded WAL");
     assert_eq!(report.deleted.wal_objects, 2);

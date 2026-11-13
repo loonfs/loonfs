@@ -7,10 +7,9 @@ mod sweep;
 mod uploads;
 
 use super::deletes::apply_decisions;
-use super::options::validate_gc_options;
 use super::session_cache::CompletedUploadSessionCache;
-use super::GcOptions;
 use crate::error::{CoreError, Result};
+use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::pool_store::PoolStore;
 use crate::time::{Observation, OperationClock};
 use content::ContentFilters;
@@ -45,10 +44,8 @@ impl<S: ObjectStore> PoolStore<S> {
     pub async fn gc(
         &self,
         session_cache: Option<&CompletedUploadSessionCache>,
-        options: &GcOptions,
         clock: &OperationClock,
     ) -> Result<PoolGcResponse> {
-        validate_gc_options(options)?;
         let record = self
             .load_pool_record()
             .await?
@@ -64,7 +61,7 @@ impl<S: ObjectStore> PoolStore<S> {
             current => Some(current),
         };
         let Some(first_current) = first_current else {
-            self.collect_pool_record(&record, options.grace_window_ms, clock, &mut report)
+            self.collect_pool_record(&record, clock, &mut report)
                 .await?;
             return Ok(report);
         };
@@ -74,13 +71,11 @@ impl<S: ObjectStore> PoolStore<S> {
             first_current,
             observed,
             session_cache,
-            options.grace_window_ms,
             clock,
         )
         .await?;
         let sweep = PoolSweep {
             pool: self,
-            grace_window_ms: options.grace_window_ms,
             clock,
             roots: &roots,
             session_cache,
@@ -118,13 +113,12 @@ impl<S: ObjectStore> PoolStore<S> {
     async fn collect_pool_record(
         &self,
         record: &PoolPayload,
-        grace_window_ms: u64,
         clock: &OperationClock,
         report: &mut PoolGcResponse,
     ) -> Result<()> {
-        if clock.request_at_ms().saturating_sub(record.created_at_ms) < grace_window_ms {
+        if clock.request_at_ms().saturating_sub(record.created_at_ms) < GC_GRACE_WINDOW_MS {
             report.next_reclamation_at_ms =
-                Some(record.created_at_ms.saturating_add(grace_window_ms));
+                Some(record.created_at_ms.saturating_add(GC_GRACE_WINDOW_MS));
             return Ok(());
         }
         let key = pool_record(&self.pool_id);

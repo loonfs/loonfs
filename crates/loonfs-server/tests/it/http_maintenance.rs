@@ -340,16 +340,6 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
         .expect_err("malformed snapshot id");
     assert_eq!(bogus_delete.code, "invalid_request");
 
-    // Reject grace periods below the safety minimum.
-    let unsafe_gc = post_gc_with(
-        &server_url,
-        namespace.as_str(),
-        serde_json::json!({ "grace_window_ms": 1 }),
-    );
-    let unsafe_gc = unsafe_gc.expect_err("sub-minimum grace window is rejected");
-    assert_eq!(unsafe_gc.code, "invalid_request");
-    assert!(unsafe_gc.message.contains("derived safety minimum"));
-
     let both = post_retention_advance_with(
         &server_url,
         namespace.as_str(),
@@ -482,14 +472,7 @@ async fn client_gc_pool_collects_a_namespace_pool_and_rejects_a_pool_without_a_r
     );
 
     assert_api_code(
-        client
-            .gc_pool_with_options(
-                &PoolId::generate(),
-                &loonfs_client::GcOptions {
-                    grace_window_ms: 86_400_000,
-                },
-            )
-            .await,
+        client.gc_pool(&PoolId::generate()).await,
         404,
         ErrorCode::PoolNotFound,
     );

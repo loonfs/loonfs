@@ -430,10 +430,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     use loonfs_test_support::stores::MetadataMapStore;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("hint-gc").expect("namespace");
-    let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
-    let options = crate::gc::GcOptions {
-        grace_window_ms: grace,
-    };
+    let grace = crate::limits::GC_GRACE_WINDOW_MS;
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
@@ -493,7 +490,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 ..context()
             };
             crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .gc(&options, &aged.clock())
+                .gc(&aged.clock())
                 .await
                 .expect("collect during pending hint");
             store.release();
@@ -526,7 +523,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         ..context()
     };
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("collect after grace");
     assert!(store

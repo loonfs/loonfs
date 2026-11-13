@@ -319,15 +319,6 @@ mod tests {
                 Some(RunMaintenanceJobRequest::Gc(GcRequest::default())),
             ),
             (
-                serde_json::json!({
-                    "kind": "gc",
-                    "grace_window_ms": 600_000
-                }),
-                Some(RunMaintenanceJobRequest::Gc(GcRequest {
-                    grace_window_ms: Some(600_000),
-                })),
-            ),
-            (
                 serde_json::json!({"kind": "retention"}),
                 Some(RunMaintenanceJobRequest::Retention(
                     AdvanceRetentionRequest::default(),
@@ -401,13 +392,11 @@ mod tests {
     #[test]
     fn run_pool_maintenance_job_requests_accept_only_gc() {
         let decoded: RunPoolMaintenanceJobRequest =
-            serde_json::from_value(serde_json::json!({"kind": "gc", "grace_window_ms": 600_000}))
+            serde_json::from_value(serde_json::json!({"kind": "gc"}))
                 .expect("a pool gc request decodes");
         assert_eq!(
             decoded,
-            RunPoolMaintenanceJobRequest::Gc(GcRequest {
-                grace_window_ms: Some(600_000),
-            })
+            RunPoolMaintenanceJobRequest::Gc(GcRequest::default())
         );
         for body in [
             serde_json::json!({"kind": "metadata"}),

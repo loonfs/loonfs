@@ -3,20 +3,13 @@
 use crate::{NamespaceId, PoolId};
 use serde::{Deserialize, Serialize};
 
-/// Optional overrides for one garbage collection.
+/// A request for one garbage collection, which has no fields.
 ///
 /// The server rejects unknown fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct GcRequest {
-    /// The minimum age, in milliseconds, that an object must reach before the collection can delete
-    /// it. The value must be at least the server's advertised safety floor. The grep index's
-    /// collector keeps its own age rules, so this value doesn't change them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub grace_window_ms: Option<u64>,
-}
+pub struct GcRequest {}
 
 /// The candidates that one garbage collection of a namespace inspected but didn't delete,
 /// counted by reason.

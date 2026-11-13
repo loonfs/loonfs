@@ -320,7 +320,7 @@ impl Command {
                         | MaintenanceCommand::Metadata(_)
                         | MaintenanceCommand::Fold
                         | MaintenanceCommand::Retention { .. }
-                        | MaintenanceCommand::Gc(_)
+                        | MaintenanceCommand::Gc
                         | MaintenanceCommand::Pool { .. }
                         | MaintenanceCommand::RecoverAdministrator(_),
                 }

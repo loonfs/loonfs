@@ -21,8 +21,8 @@ use loonfs_types::{
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS,
     FEATURE_MERGES, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
-    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
+    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, MAX_SUBJECT_PRINCIPALS,
+    PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -292,10 +292,6 @@ impl RuntimeCore {
             features: BTreeMap::from([(FEATURE_CHANGES_SPLIT_COMMITS.to_owned(), true)]),
             limits: {
                 let mut limits = loonfs_types::pagination_capability_limits();
-                limits.insert(
-                    LIMIT_GC_MIN_GRACE_WINDOW_MS.to_owned(),
-                    loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
-                );
                 limits.insert(
                     LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST.to_owned(),
                     u64_from_usize(MAX_SUBJECT_PRINCIPALS),

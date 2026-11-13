@@ -7,7 +7,7 @@ use crate::gc::live_set::RetirementStatus;
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
-use crate::limits::CONTENT_RECLAMATION_GRACE_WINDOW_MS;
+use crate::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, GC_GRACE_WINDOW_MS};
 use crate::pool_store::PoolStore;
 use crate::time::OperationClock;
 use crate::upload::abort::AbandonedUpload;
@@ -252,7 +252,6 @@ impl<S: ObjectStore> PoolStore<S> {
     /// and the content are under the pool's prefix.
     pub(super) async fn sweep_upload_session(
         &self,
-        grace_window_ms: u64,
         roots: &PoolRoots,
         clock: &OperationClock,
         state: &UploadSessionState,
@@ -266,13 +265,12 @@ impl<S: ObjectStore> PoolStore<S> {
             });
         }
         match &state.outcome {
-            None => {
-                self.abort_expired_session(grace_window_ms, clock, &state.session)
-                    .await
-            }
+            None => self.abort_expired_session(clock, &state.session).await,
             Some(UploadOutcome::Aborted { aborted_at_ms }) => {
-                if clock.request_at_ms().saturating_sub(*aborted_at_ms) < grace_window_ms {
-                    return Ok(retain_until(aborted_at_ms.saturating_add(grace_window_ms)));
+                if clock.request_at_ms().saturating_sub(*aborted_at_ms) < GC_GRACE_WINDOW_MS {
+                    return Ok(retain_until(
+                        aborted_at_ms.saturating_add(GC_GRACE_WINDOW_MS),
+                    ));
                 }
                 // Repeat provider cleanup so a later collection completes work left by a crash
                 // after the abort.
@@ -310,13 +308,14 @@ impl<S: ObjectStore> PoolStore<S> {
     /// whose clock runs behind the collector's.
     async fn abort_expired_session(
         &self,
-        grace_window_ms: u64,
         clock: &OperationClock,
         session: &UploadSessionPayload,
     ) -> Result<UploadSessionSweep> {
         let expires_at_ms = session.expires_at_ms;
-        if clock.request_at_ms().saturating_sub(expires_at_ms) < grace_window_ms {
-            return Ok(retain_until(expires_at_ms.saturating_add(grace_window_ms)));
+        if clock.request_at_ms().saturating_sub(expires_at_ms) < GC_GRACE_WINDOW_MS {
+            return Ok(retain_until(
+                expires_at_ms.saturating_add(GC_GRACE_WINDOW_MS),
+            ));
         }
         let aborted = UploadOutcome::Aborted {
             aborted_at_ms: clock.request_at_ms(),
@@ -328,7 +327,7 @@ impl<S: ObjectStore> PoolStore<S> {
                     .release(&self.store)
                     .await;
                 Ok(retain_until(
-                    clock.request_at_ms().saturating_add(grace_window_ms),
+                    clock.request_at_ms().saturating_add(GC_GRACE_WINDOW_MS),
                 ))
             }
             Ok(OutcomeCreation::Existing(_)) => {

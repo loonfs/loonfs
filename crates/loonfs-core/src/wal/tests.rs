@@ -183,12 +183,9 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .expect("manifest");
     assert_eq!(current.payload().head_seq, CommitSeq(0));
     assert_eq!(current.payload().folded_wal_no, WalNo(1));
-    let options = crate::gc::GcOptions {
-        grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
-    };
-    let aged = context(options.grace_window_ms + 1);
+    let aged = context(crate::limits::GC_GRACE_WINDOW_MS + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("collect");
     assert_eq!(report.deleted.wal_objects, 1);
@@ -657,10 +654,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
     use loonfs_test_support::stores::MetadataMapStore;
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("tip-gc").expect("namespace");
-    let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
-    let options = crate::gc::GcOptions {
-        grace_window_ms: grace,
-    };
+    let grace = crate::limits::GC_GRACE_WINDOW_MS;
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
@@ -709,7 +703,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             ..context(1_000)
         };
         crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .gc(&options, &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("collect old WAL");
         assert!(store
@@ -761,10 +755,7 @@ async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_
     use loonfs_test_support::stores::MetadataMapStore;
     let temp_dir = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("floor-gc").expect("namespace");
-    let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
-    let options = crate::gc::GcOptions {
-        grace_window_ms: grace,
-    };
+    let grace = crate::limits::GC_GRACE_WINDOW_MS;
     let store = MetadataMapStore::aged(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::any(),
@@ -861,7 +852,7 @@ async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_
                 ..context(1_000)
             };
             namespace
-                .gc(&options, &aged.clock())
+                .gc(&aged.clock())
                 .await
                 .expect("collect the floor object");
             assert!(store
@@ -1238,19 +1229,13 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 .fold_wal_tail(None, &OperationClock::start(0, timer_b.clone()))
                 .await
                 .expect("fold takeover and commit");
-            let options = crate::gc::GcOptions {
-                grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
-            };
-            store_clock.advance_ms(options.grace_window_ms + 1);
+            store_clock.advance_ms(crate::limits::GC_GRACE_WINDOW_MS + 1);
             let report = crate::test_support::namespace_store(blocked.inner(), &namespace_id)
-                .gc(
-                    &options,
-                    &WriterAt {
-                        now_ms: store_clock.now_ms(),
-                        ..context_b.clone()
-                    }
-                    .clock(),
-                )
+                .gc(&WriterAt {
+                    now_ms: store_clock.now_ms(),
+                    ..context_b.clone()
+                }
+                .clock())
                 .await
                 .expect("collect folded fence");
             assert_eq!(report.deleted.wal_objects, 4);
