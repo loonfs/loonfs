@@ -297,7 +297,7 @@ fn compaction_instruments_register_the_closed_vocabularies() {
             input_bytes: 2_000,
             output_bytes: 1_000,
             output_segments: 1,
-            skipped: Vec::new(),
+            skipped: vec![crate::MetadataSkippedWork::ExpiredRowRemovalWalkLimit],
         }),
         25,
     );
@@ -367,6 +367,14 @@ fn compaction_instruments_register_the_closed_vocabularies() {
             &[("direction", "output")],
         ),
         1_000
+    );
+    assert_eq!(
+        counter(
+            &snapshot,
+            "loonfs.maintenance.compaction_skipped",
+            &[("reason", "expired_row_removal_walk_limit")],
+        ),
+        1
     );
 }
 

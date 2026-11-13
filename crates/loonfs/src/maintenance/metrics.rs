@@ -4,7 +4,7 @@ use crate::metrics::labels::{LabeledCounters, MetricLabel};
 use crate::metrics::{
     seconds_from_ms, CounterHandle, HistogramHandle, MetricsRecorder, LATENCY_SECONDS_BOUNDARIES,
 };
-use crate::{GcResponse, GcSkippedWork, PoolGcResponse};
+use crate::{GcResponse, GcSkippedWork, MetadataSkippedWork, PoolGcResponse};
 use loonfs_core::CompactionUnitOutcome;
 use std::sync::Arc;
 
@@ -54,6 +54,17 @@ impl MetricLabel for GcSkippedWork {
     }
 }
 
+impl MetricLabel for MetadataSkippedWork {
+    const VALUES: &'static [Self] = &[Self::ExpiredRowRemovalWalkLimit, Self::Unknown];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExpiredRowRemovalWalkLimit => "expired_row_removal_walk_limit",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// One reclaimable family: its label, and the count a collection reports for it.
 type GcKind<R> = (&'static str, fn(&R) -> u64);
 
@@ -93,6 +104,7 @@ pub(crate) struct CompactionInstruments {
     output_rows: Arc<dyn CounterHandle>,
     input_bytes: Arc<dyn CounterHandle>,
     output_bytes: Arc<dyn CounterHandle>,
+    skipped: LabeledCounters<MetadataSkippedWork>,
 }
 
 impl CompactionInstruments {
@@ -134,6 +146,13 @@ impl CompactionInstruments {
             output_rows: rows("output"),
             input_bytes: bytes("input"),
             output_bytes: bytes("output"),
+            skipped: LabeledCounters::register(
+                recorder,
+                "loonfs.maintenance.compaction_skipped",
+                "Work a metadata compaction unit skipped, by reason",
+                "reason",
+                &[],
+            ),
         }
     }
 
@@ -141,8 +160,8 @@ impl CompactionInstruments {
         &self.outcome_seconds[outcome.index()]
     }
 
-    /// Reports one finished compaction unit and any window it compacted. A
-    /// unit that found nothing to compact reports nothing.
+    /// Reports one finished compaction unit, any window it compacted and any
+    /// work it skipped. A unit that found nothing to compact reports nothing.
     pub(crate) fn finished(&self, outcome: &crate::Result<CompactionUnitOutcome>, elapsed_ms: u64) {
         let outcome = match outcome {
             Ok(CompactionUnitOutcome::NotNeeded) => return,
@@ -151,12 +170,16 @@ impl CompactionInstruments {
                 rows_written,
                 input_bytes,
                 output_bytes,
+                skipped,
                 ..
             }) => {
                 self.input_rows.increment(*rows_read);
                 self.output_rows.increment(*rows_written);
                 self.input_bytes.increment(*input_bytes);
                 self.output_bytes.increment(*output_bytes);
+                for reason in skipped {
+                    self.skipped.get(*reason).increment(1);
+                }
                 CompactionOutcome::Completed
             }
             Ok(CompactionUnitOutcome::Abandoned) => CompactionOutcome::Abandoned,
