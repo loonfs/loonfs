@@ -13,20 +13,6 @@ use loonfs_types::{
 use std::assert_matches;
 use std::collections::BTreeMap;
 
-fn client_for(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-    Client::with_transport(
-        ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        },
-        transport.clone(),
-    )
-    .expect("valid client config")
-}
-
 /// Builds a capability response for the requested direct-read support.
 fn capabilities(direct_get: bool) -> Outcome {
     let document = CapabilityDocument {
@@ -41,7 +27,7 @@ fn capabilities(direct_get: bool) -> Outcome {
 #[tokio::test]
 async fn direct_download_selection_uses_the_cached_capability() {
     let transport = scripted_transport::script([capabilities(true)]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     assert!(client.offers_direct_download().await.expect("capabilities"));
     assert!(client
         .offers_direct_download()
@@ -52,7 +38,7 @@ async fn direct_download_selection_uses_the_cached_capability() {
 #[tokio::test]
 async fn a_deployment_without_the_capability_never_takes_the_grant() {
     let transport = scripted_transport::script([capabilities(false)]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
 
     assert!(!client.offers_direct_download().await.expect("capabilities"));
 }
@@ -60,7 +46,7 @@ async fn a_deployment_without_the_capability_never_takes_the_grant() {
 #[tokio::test]
 async fn a_capability_failure_is_not_reported_as_no_direct_download() {
     let transport = scripted_transport::script([Outcome::Success(b"not json".to_vec())]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
 
     let result = client.offers_direct_download().await;
 
@@ -145,7 +131,7 @@ async fn a_streamed_read_is_refused_when_the_bytes_are_not_what_the_grant_named(
     );
 
     let transport = scripted_transport::script([Outcome::Success(served)]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let mut sink = Vec::new();
     let error = client
         .download_via_presigned_url(
@@ -182,7 +168,7 @@ async fn a_crc32c_only_grant_verifies_the_bytes_it_receives() {
     assert_eq!(served.len(), payload.len());
     let transport =
         scripted_transport::script([Outcome::Success(payload.clone()), Outcome::Success(served)]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
 
     let mut sink = Vec::new();
     let written = client
@@ -220,7 +206,7 @@ async fn a_resumed_crc32c_download_folds_the_prefix_into_the_same_verdict() {
         Outcome::Success(payload[held..].to_vec()),
         Outcome::Success(payload[held..].to_vec()),
     ]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let resumed = grant_from(content_ref, "http://example.invalid/object", held as u64);
     let mut download = client
         .open_direct_download(&resumed)
@@ -258,7 +244,7 @@ async fn a_resumed_download_that_fails_its_checksum_never_reports_completion() {
     let payload = b"the first half and then the second half".to_vec();
     let held = 10;
     let transport = scripted_transport::script([Outcome::Success(payload[held..].to_vec())]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let resumed = grant_from(
         crc32c_content_ref(&payload),
         "http://example.invalid/object",
@@ -298,17 +284,8 @@ async fn a_failed_range_open_is_returned_by_every_later_read() {
         Outcome::TransportFailure,
         Outcome::Success(b"cccc".to_vec()),
     ]);
-    let client = Client::with_transport(
-        ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: true,
-            ca_cert_path: None,
-        },
-        transport.clone(),
-    )
-    .expect("valid client config");
+    let mut client = scripted_transport::client(&transport);
+    client.transport_retry_enabled = false;
     let mut download = client
         .open_direct_download(&grant)
         .await
@@ -340,7 +317,7 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     );
 
     let transport = scripted_transport::script([Outcome::Success(payload.clone())]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let mut sink = Vec::new();
     let written = client
         .download_via_presigned_url(
@@ -369,7 +346,7 @@ async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
             payload[start..start + loonfs_types::usize_from_u64(range.length)].to_vec(),
         )
     }));
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
 
     let mut download = client
         .open_direct_download(&grant)
@@ -474,7 +451,7 @@ async fn a_resume_takes_a_new_grant_and_sends_the_headers_it_returns() {
         Outcome::Success(serde_json::to_vec(&issued).expect("encode grant")),
         Outcome::Success(payload[held..].to_vec()),
     ]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let spec = NamespacePath::parse("demo", "/big.bin").expect("namespace path");
     let resumed = client
         .create_download_with_options(
@@ -538,7 +515,7 @@ async fn a_resumed_inode_download_takes_a_new_grant_from_its_offset() {
         Outcome::Success(serde_json::to_vec(&inode_grant).expect("encode grant")),
         Outcome::Success(payload[held..].to_vec()),
     ]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let resumed = client
         .create_revision_download_by_inode_with_options(
             &NamespaceId::parse("demo").expect("namespace id"),
@@ -625,7 +602,7 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
             Outcome::Success(serde_json::to_vec(&inode_grant).expect("encode grant")),
         ]
     }));
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let spec = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
     let mut expected = Vec::new();
@@ -673,7 +650,7 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
     );
 
     let transport = scripted_transport::script([Outcome::Success(payload[4..].to_vec())]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let mut resumed = client
         .open_direct_download(&grant_from(content_ref, "http://example.invalid/object", 4))
         .await
@@ -704,7 +681,7 @@ async fn a_grant_that_does_not_authorize_a_read_is_refused_before_any_request() 
     *method = "PUT".to_owned();
 
     let mut sink = Vec::new();
-    let error = client_for(&scripted_transport::script([]))
+    let error = scripted_transport::client(&scripted_transport::script([]))
         .download_via_presigned_url(&grant, &mut sink)
         .await
         .expect_err("a write capability cannot serve a read");
@@ -729,7 +706,7 @@ async fn a_grant_from_past_the_start_is_refused_before_any_request() {
 
     let transport = scripted_transport::script([Outcome::Success(payload[5..].to_vec())]);
     let mut sink = Vec::new();
-    let error = client_for(&transport)
+    let error = scripted_transport::client(&transport)
         .download_via_presigned_url(&resumed, &mut sink)
         .await
         .expect_err("the helper takes a grant from offset 0");
@@ -780,7 +757,7 @@ async fn ranges_verify_the_whole_revision_and_resume_inside_the_second_object() 
         Outcome::Success(b"first".to_vec()),
         Outcome::Success(b"SECOND".to_vec()),
     ]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let mut bytes = Vec::new();
     client
         .download_via_presigned_url(&whole, &mut bytes)

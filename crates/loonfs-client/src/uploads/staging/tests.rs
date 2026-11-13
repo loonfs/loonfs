@@ -5,8 +5,7 @@
 //! behavior.
 
 use super::*;
-use crate::scripted_transport::{self, Outcome};
-use crate::transport::tests::retry_policy_client;
+use crate::scripted_transport::{self, client, Outcome};
 use crate::uploads::staging::multipart::DIRECT_MULTIPART_PARTS_IN_FLIGHT;
 use crate::{ClientConfig, NamespacePath};
 use bytes::Bytes;
@@ -124,34 +123,12 @@ fn upload_id() -> UploadId {
     UploadId::parse("upl_00000000000000000000000001").expect("valid upload id")
 }
 
-fn client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-    Client::with_transport(
-        ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        },
-        transport.clone(),
-    )
-    .expect("valid client config")
-}
-
 /// A client whose failures are the test's own, not the retry policy's, so a
 /// scripted conversation is exactly as long as it reads.
 fn client_without_retry(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-    Client::with_transport(
-        ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: true,
-            ca_cert_path: None,
-        },
-        transport.clone(),
-    )
-    .expect("valid client config")
+    let mut client = client(transport);
+    client.transport_retry_enabled = false;
+    client
 }
 
 fn json(value: &impl serde::Serialize) -> Outcome {
@@ -1378,7 +1355,7 @@ async fn staging_rejects_a_non_completed_completion_response() {
             crate::scripted_transport::script([crate::scripted_transport::Outcome::Success(
                 serde_json::to_vec(&response).expect("serialize response"),
             )]);
-        let client = retry_policy_client(&transport);
+        let client = client(&transport);
 
         let error = client
             .complete_staged(&namespace_id, &upload_id)

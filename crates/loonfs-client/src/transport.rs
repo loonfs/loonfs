@@ -9,7 +9,8 @@ use futures::StreamExt as _;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
 use loonfs_types::{
-    headers, ErrorCode, ErrorResponse, NamespaceId, OperationDeadline, TransportRetryOutcome,
+    headers, ErrorCode, ErrorResponse, NamespaceId, OperationDeadline, PageRequest,
+    TransportRetryOutcome,
 };
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
 use std::sync::Arc;
@@ -148,13 +149,6 @@ impl Client {
             .await
             .map(|response| response.bytes)
             .map_err(|attempt| attempt.error)
-    }
-
-    pub(crate) async fn call_for_response_stream(
-        &self,
-        request: &WireRequest,
-    ) -> Result<PayloadStream> {
-        Ok(self.call_for_streamed_response(request).await?.body)
     }
 
     /// Sends a request and returns a successful response with its body
@@ -540,8 +534,10 @@ pub(crate) struct QueryBuilder {
 
 impl QueryBuilder {
     pub(crate) fn new(url: String) -> Self {
-        let has_query = url.contains('?');
-        Self { url, has_query }
+        Self {
+            url,
+            has_query: false,
+        }
     }
 
     pub(crate) fn push(&mut self, name: &str, value: impl std::fmt::Display) {
@@ -554,11 +550,9 @@ impl QueryBuilder {
         ));
     }
 
-    pub(crate) fn pagination(&mut self, limit: Option<u32>, cursor: Option<&str>) {
-        if let Some(limit) = limit {
-            self.push("limit", limit);
-        }
-        if let Some(cursor) = cursor {
+    pub(crate) fn page(&mut self, request: &PageRequest<String>) {
+        self.push("limit", request.limit.get());
+        if let Some(cursor) = &request.cursor {
             self.push("cursor", cursor);
         }
     }

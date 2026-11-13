@@ -54,8 +54,6 @@ impl StoreShape {
 pub struct ConformanceServer {
     /// Base URL for the HTTP API.
     pub base_url: String,
-    /// Bearer token accepted by the HTTP API.
-    pub token: &'static str,
     server_task: JoinHandle<()>,
     provider_task: JoinHandle<()>,
     _temp_dir: TempDir,
@@ -158,7 +156,6 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
 
     Ok(ConformanceServer {
         base_url: format!("http://{api_address}"),
-        token: AUTH_TOKEN,
         server_task,
         provider_task,
         _temp_dir: temp_dir,

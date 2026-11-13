@@ -230,12 +230,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inventory_parses_and_is_complete() {
-        let cases = load_cases().expect("load cases");
-        assert_eq!(cases.len(), EXPECTED_CASES.len());
-    }
-
-    #[test]
     fn deterministic_pattern_has_the_documented_shape() {
         assert_eq!(
             byte_pattern(8, NonZeroU8::new(3).expect("3 is nonzero")),

@@ -87,7 +87,7 @@ impl Client {
         let mut query =
             QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/entries"));
         query.push("path", spec.absolute_path().as_str());
-        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        query.page(&request);
         query.push("include_attributes", options.include_attributes);
         query.push("recursive", options.recursive);
         push_read_at(&mut query, &options.at);
@@ -184,7 +184,7 @@ impl Client {
         let mut query = QueryBuilder::new(
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/children")),
         );
-        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        query.page(&request);
         query.push("include_attributes", options.include_attributes);
         query.push("recursive", options.recursive);
         push_read_at(&mut query, &options.at);
@@ -220,7 +220,7 @@ impl Client {
         let mut query =
             QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/revisions"));
         query.push("path", spec.absolute_path().as_str());
-        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        query.page(&request);
         push_read_at(&mut query, &ReadAt::Live(options.consistency));
         self.send_json(self.request(operations::LIST_FILE_REVISIONS, &query.build()))
             .await
@@ -267,7 +267,7 @@ impl Client {
         let mut query = QueryBuilder::new(
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/revisions")),
         );
-        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        query.page(&request);
         push_read_at(&mut query, &ReadAt::Live(options.consistency));
         self.send_json(self.request(operations::LIST_FILE_REVISIONS_BY_INODE, &query.build()))
             .await
@@ -299,7 +299,7 @@ impl Client {
         options: &ListTrashOptions,
     ) -> Result<ListTrashResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/filesystem/trash"));
-        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        query.page(&request);
         push_read_at(&mut query, &ReadAt::Live(options.consistency));
         self.send_json(self.request(operations::LIST_TRASH, &query.build()))
             .await
@@ -615,8 +615,10 @@ impl Client {
     }
 
     async fn read_content_stream(&self, operation: Operation, url: &str) -> Result<PayloadStream> {
-        self.call_for_response_stream(&self.request(operation, url))
-            .await
+        Ok(self
+            .call_for_streamed_response(&self.request(operation, url))
+            .await?
+            .body)
     }
 
     pub(crate) fn inode_content_url(
@@ -654,25 +656,10 @@ impl Client {
 mod tests {
     use super::*;
     use crate::scripted_transport::{self, Outcome};
-    use crate::ClientConfig;
     use loonfs_types::options::Consistency;
     use loonfs_types::FilesystemEvent;
     use loonfs_types::SnapshotId;
     use loonfs_types::{ContentId, ContentRef, EntryInodeKind, PathEntryKind};
-
-    fn client_for(transport: &scripted_transport::ScriptedTransport) -> Client {
-        Client::with_transport(
-            ClientConfig {
-                server_url: "http://example.invalid".to_owned(),
-                auth_token: None,
-                request_timeout_ms: None,
-                disable_transient_retry: false,
-                ca_cert_path: None,
-            },
-            transport.clone(),
-        )
-        .expect("valid client config")
-    }
 
     #[tokio::test]
     async fn an_unknown_inode_kind_decodes_as_unknown_and_a_known_kind_is_unchanged() {
@@ -736,7 +723,7 @@ mod tests {
             Outcome::Success(listing.to_string().into_bytes()),
             Outcome::Success(trash.to_string().into_bytes()),
         ]);
-        let client = client_for(&transport);
+        let client = scripted_transport::client(&transport);
 
         let page = client
             .list(&NamespacePath::parse("demo", "/docs").expect("namespace path"))
@@ -790,7 +777,7 @@ mod tests {
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),
         ]);
-        let client = client_for(&transport);
+        let client = scripted_transport::client(&transport);
         for at in [
             ReadAt::Live(None),
             ReadAt::Live(Some(Consistency::Strong)),
@@ -854,7 +841,7 @@ mod tests {
                 Outcome::Success(revisions.to_string().into_bytes()),
             ]
         }));
-        let client = client_for(&transport);
+        let client = scripted_transport::client(&transport);
         for consistency in consistencies {
             client
                 .list_trash_with_options(&namespace_id, &ListTrashOptions { consistency })
@@ -941,7 +928,7 @@ mod tests {
         let transport =
             scripted_transport::script([Outcome::Success(feed.to_string().into_bytes())]);
 
-        let page = client_for(&transport)
+        let page = scripted_transport::client(&transport)
             .list_changes(&namespace_id, CommitSeq(418))
             .next()
             .await

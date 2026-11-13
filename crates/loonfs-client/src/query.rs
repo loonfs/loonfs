@@ -43,7 +43,7 @@ impl Client {
         }
         query.push("allow_scan", request.allow_scan);
         query.push("allow_stale", request.allow_stale);
-        query.pagination(Some(page.limit.get()), page.cursor.as_deref());
+        query.page(&page);
         self.send_json(self.request(operations::GREP, &query.build()))
             .await
     }
@@ -53,7 +53,6 @@ impl Client {
 mod tests {
     use super::*;
     use crate::scripted_transport::{self, Outcome};
-    use crate::ClientConfig;
 
     fn grep_page(next_cursor: Option<&str>) -> Outcome {
         Outcome::Success(
@@ -73,17 +72,7 @@ mod tests {
     #[tokio::test]
     async fn a_grep_starts_at_the_pager_cursor_and_then_follows_each_page() {
         let transport = scripted_transport::script([grep_page(Some("second")), grep_page(None)]);
-        let client = Client::with_transport(
-            ClientConfig {
-                server_url: "http://example.invalid".to_owned(),
-                auth_token: None,
-                request_timeout_ms: None,
-                disable_transient_retry: false,
-                ca_cert_path: None,
-            },
-            transport.clone(),
-        )
-        .expect("valid client config");
+        let client = scripted_transport::client(&transport);
         let request = GrepRequest {
             pattern: "needle".to_owned(),
             case_insensitive: false,

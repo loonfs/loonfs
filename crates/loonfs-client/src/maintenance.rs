@@ -68,7 +68,7 @@ impl Client {
             "{}/v0/maintenance/namespaces/{namespace_id}/snapshots",
             self.base_url
         ));
-        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        query.page(&request);
         self.send_json(self.request(operations::LIST_SNAPSHOT_RECORDS, &query.build()))
             .await
     }

@@ -1,6 +1,6 @@
 //! Scripted services and request observations for client tests.
 
-use crate::{Body, TransportError};
+use crate::{Body, Client, ClientConfig, TransportError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{Request, Response};
@@ -84,6 +84,22 @@ pub(crate) fn refusals(code: ErrorCode, count: usize) -> ScriptedTransport {
 
 pub(crate) fn failure_then_success(body: Vec<u8>) -> ScriptedTransport {
     script([Outcome::TransportFailure, Outcome::Success(body)])
+}
+
+/// A client for `http://example.invalid` that sends every request through
+/// `transport`.
+pub(crate) fn client(transport: &ScriptedTransport) -> Client {
+    Client::with_transport(
+        ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        transport.clone(),
+    )
+    .expect("valid client config")
 }
 
 pub(crate) fn script(outcomes: impl IntoIterator<Item = Outcome>) -> ScriptedTransport {
