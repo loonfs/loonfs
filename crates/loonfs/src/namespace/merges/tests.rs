@@ -476,10 +476,10 @@ async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
     assert_eq!(
         page.snapshots
             .iter()
-            .map(|snapshot| snapshot.snapshot_id.clone())
+            .map(|snapshot| (snapshot.snapshot_id.clone(), snapshot.name.clone()))
             .collect::<Vec<_>>(),
-        vec![planned.merge_snapshot.clone()],
-        "the plan takes a snapshot of the fork"
+        vec![(planned.merge_snapshot.clone(), None)],
+        "the plan takes a snapshot of the fork, with no name"
     );
     let mut replans = 0;
     family
