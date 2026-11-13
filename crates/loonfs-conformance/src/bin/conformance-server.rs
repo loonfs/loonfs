@@ -2,7 +2,7 @@
 //!
 //! Server setup doesn't belong here: it's in `loonfs_conformance::server`.
 
-use loonfs_conformance::server::{start_server, StoreShape};
+use loonfs_conformance::server::{start_server, StoreShape, AUTH_TOKEN};
 use serde::Serialize;
 use std::io::{Read, Write};
 
@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server = start_server(shape).await?;
     let info = ServerInfo {
         base_url: &server.base_url,
-        token: server.token,
+        token: AUTH_TOKEN,
     };
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer(&mut stdout, &info)?;

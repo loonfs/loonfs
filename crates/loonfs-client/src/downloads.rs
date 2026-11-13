@@ -436,7 +436,7 @@ impl Client {
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        self.call_for_response_stream(&request).await
+        Ok(self.call_for_streamed_response(&request).await?.body)
     }
 
     /// Streams the granted ranges into `sink` and verifies the complete revision.

@@ -40,6 +40,22 @@ impl Client {
         .await
     }
 
+    /// Applies a commit of one operation.
+    pub(crate) async fn commit_one(
+        &self,
+        namespace_id: &NamespaceId,
+        actor: &ActorId,
+        commit: &CommitOptions,
+        operation: FilesystemOperation,
+    ) -> Result<Commit> {
+        self.commit(
+            namespace_id,
+            actor,
+            &CommitRequest::with_operations(commit, vec![operation]),
+        )
+        .await
+    }
+
     /// Writes file bytes to a path, refusing to replace an existing file.
     pub async fn put_file(
         &self,
@@ -323,17 +339,11 @@ impl Client {
         actor: &ActorId,
         options: &AppendFileOptions,
     ) -> Result<Commit> {
-        self.commit(
+        self.commit_one(
             spec.namespace(),
             actor,
-            &CommitRequest::with_operations(
-                &options.commit,
-                vec![FilesystemOperation::append_file(
-                    spec.absolute_path().clone(),
-                    bytes.to_vec(),
-                    options,
-                )],
-            ),
+            &options.commit,
+            FilesystemOperation::append_file(spec.absolute_path().clone(), bytes.to_vec(), options),
         )
         .await
     }
@@ -352,16 +362,11 @@ impl Client {
         actor: &ActorId,
         options: &CreateDirectoryOptions,
     ) -> Result<Commit> {
-        self.commit(
+        self.commit_one(
             spec.namespace(),
             actor,
-            &CommitRequest::with_operations(
-                &options.commit,
-                vec![FilesystemOperation::create_directory(
-                    spec.absolute_path().clone(),
-                    options,
-                )],
-            ),
+            &options.commit,
+            FilesystemOperation::create_directory(spec.absolute_path().clone(), options),
         )
         .await
     }
@@ -379,16 +384,11 @@ impl Client {
         actor: &ActorId,
         options: &DeleteOptions,
     ) -> Result<Commit> {
-        self.commit(
+        self.commit_one(
             spec.namespace(),
             actor,
-            &CommitRequest::with_operations(
-                &options.commit,
-                vec![FilesystemOperation::delete_path(
-                    spec.absolute_path().clone(),
-                    options,
-                )],
-            ),
+            &options.commit,
+            FilesystemOperation::delete_path(spec.absolute_path().clone(), options),
         )
         .await
     }
@@ -419,17 +419,11 @@ impl Client {
         changes: AttributeChanges,
         options: &UpdateAttributesOptions,
     ) -> Result<Commit> {
-        self.commit(
+        self.commit_one(
             spec.namespace(),
             actor,
-            &CommitRequest::with_operations(
-                &options.commit,
-                vec![FilesystemOperation::update_attributes(
-                    spec.absolute_path().clone(),
-                    changes,
-                    options,
-                )],
-            ),
+            &options.commit,
+            FilesystemOperation::update_attributes(spec.absolute_path().clone(), changes, options),
         )
         .await
     }
@@ -453,17 +447,11 @@ impl Client {
         access: AccessState,
         options: &UpdateAccessOptions,
     ) -> Result<Commit> {
-        self.commit(
+        self.commit_one(
             spec.namespace(),
             actor,
-            &CommitRequest::with_operations(
-                &options.commit,
-                vec![FilesystemOperation::update_access(
-                    spec.absolute_path().clone(),
-                    access,
-                    options,
-                )],
-            ),
+            &options.commit,
+            FilesystemOperation::update_access(spec.absolute_path().clone(), access, options),
         )
         .await
     }
@@ -499,16 +487,14 @@ impl Client {
                 destination_path.namespace()
             )));
         }
-        self.commit(
+        self.commit_one(
             source_path.namespace(),
             actor,
-            &CommitRequest::with_operations(
-                &options.commit,
-                vec![FilesystemOperation::move_path(
-                    source_path.absolute_path().clone(),
-                    destination_path.absolute_path().clone(),
-                    options,
-                )],
+            &options.commit,
+            FilesystemOperation::move_path(
+                source_path.absolute_path().clone(),
+                destination_path.absolute_path().clone(),
+                options,
             ),
         )
         .await
@@ -545,16 +531,14 @@ impl Client {
                 destination_path.namespace()
             )));
         }
-        self.commit(
+        self.commit_one(
             source_path.namespace(),
             actor,
-            &CommitRequest::with_operations(
-                &options.commit,
-                vec![FilesystemOperation::copy_path(
-                    source_path.absolute_path().clone(),
-                    destination_path.absolute_path().clone(),
-                    options,
-                )],
+            &options.commit,
+            FilesystemOperation::copy_path(
+                source_path.absolute_path().clone(),
+                destination_path.absolute_path().clone(),
+                options,
             ),
         )
         .await
@@ -588,17 +572,11 @@ impl Client {
         actor: &ActorId,
         options: &RestoreDeletedOptions,
     ) -> Result<Commit> {
-        self.commit(
+        self.commit_one(
             namespace_id,
             actor,
-            &CommitRequest::with_operations(
-                &options.commit,
-                vec![FilesystemOperation::restore_deleted(
-                    inode_id,
-                    deletion_seq,
-                    &options.destination,
-                )],
-            ),
+            &options.commit,
+            FilesystemOperation::restore_deleted(inode_id, deletion_seq, &options.destination),
         )
         .await
     }
@@ -628,16 +606,11 @@ impl Client {
         actor: &ActorId,
         options: &CommitOptions,
     ) -> Result<Commit> {
-        self.commit(
+        self.commit_one(
             spec.namespace(),
             actor,
-            &CommitRequest::with_operations(
-                options,
-                vec![FilesystemOperation::restore_revision(
-                    spec.absolute_path().clone(),
-                    source_revision_no,
-                )],
-            ),
+            options,
+            FilesystemOperation::restore_revision(spec.absolute_path().clone(), source_revision_no),
         )
         .await
     }

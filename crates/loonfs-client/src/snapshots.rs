@@ -65,7 +65,7 @@ impl Client {
         request: PageRequest<String>,
     ) -> Result<ListSnapshotsResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/snapshots"));
-        query.pagination(Some(request.limit.get()), request.cursor.as_deref());
+        query.page(&request);
         self.send_json(self.request(operations::LIST_SNAPSHOTS, &query.build()))
             .await
     }

@@ -16,7 +16,6 @@ use loonfs_types::ContentRef;
 use loonfs_types::CreateUploadBody;
 use loonfs_types::DeleteSnapshotResponse;
 use loonfs_types::NamespaceDiagnostics;
-use loonfs_types::NamespaceMetadata;
 use loonfs_types::ObjectTransfer;
 use loonfs_types::SnapshotId;
 use loonfs_types::UploadId;
@@ -63,17 +62,7 @@ impl MonotonicTimer for ExpiredAfterFirstRead {
 }
 
 fn deadline_client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
-    let mut client = Client::with_transport(
-        ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        },
-        transport.clone(),
-    )
-    .expect("valid client config");
+    let mut client = scripted_transport::client(transport);
     client.transport_retry = TransportRetryPolicy {
         max_retries: 1,
         initial_backoff_ms: 0,
@@ -190,9 +179,10 @@ async fn content_transfer_retries_are_exempt_from_the_operation_deadline() {
     let transport = scripted_transport::failure_then_success(b"content".to_vec());
     let client = deadline_client(&transport);
     let mut stream = client
-        .call_for_response_stream(&content)
+        .call_for_streamed_response(&content)
         .await
-        .expect("the streamed read resends until a response head arrives");
+        .expect("the streamed read resends until a response head arrives")
+        .body;
     let mut streamed = Vec::new();
     while let Some(chunk) = stream.next().await {
         streamed.extend_from_slice(&chunk.expect("a body chunk"));
@@ -379,12 +369,13 @@ async fn service_timeouts_cover_readiness_headers_and_streamed_bodies() {
         });
         let (client, clock) = timed_client(service, timeout);
         let mut stream = client
-            .call_for_response_stream(&client.request(
+            .call_for_streamed_response(&client.request(
                 Operation::retry_without_deadline(Method::GET),
                 "http://127.0.0.1/content",
             ))
             .await
-            .expect("response headers");
+            .expect("response headers")
+            .body;
         let chunk = stream.next();
         tokio::pin!(chunk);
         assert!(futures::poll!(&mut chunk).is_pending());
@@ -638,17 +629,7 @@ async fn transport_failures_resend_up_to_the_attempt_cap() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let max_attempts = DEFAULT.max_retries as usize + 1;
     let transport = crate::scripted_transport::failures(max_attempts);
-    let retrying = Client::with_transport(
-        ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        },
-        transport.clone(),
-    )
-    .expect("valid client config");
+    let retrying = scripted_transport::client(&transport);
     let error = retrying
         .get_namespace(&namespace_id)
         .await
@@ -675,9 +656,7 @@ async fn transport_failures_resend_up_to_the_attempt_cap() {
     assert_eq!(transport.attempts(), 1);
 }
 
-pub(crate) fn retry_policy_client(
-    transport: &crate::scripted_transport::ScriptedTransport,
-) -> Client {
+fn retry_policy_client(transport: &crate::scripted_transport::ScriptedTransport) -> Client {
     Client::with_transport(
         ClientConfig {
             server_url: "http://example.invalid".to_owned(),
@@ -836,33 +815,6 @@ async fn retry_policy_commit_id_filesystem_mutation_retries() {
         )
         .await
         .expect("commit-id mutation should retry");
-    assert_eq!(actual, response);
-    assert_eq!(transport.attempts(), 2);
-}
-
-#[tokio::test]
-async fn retry_policy_read_retries() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let response = NamespaceMetadata {
-        access: loonfs_types::NamespaceAccessMode::Unrestricted {},
-        created_at_ms: 1_000,
-        created_by: loonfs_test_support::test_actor(),
-        fork_basis: None,
-        pool_id: loonfs_test_support::ids::numbered_pool_id(1),
-        namespace_id: namespace_id.clone(),
-        head_seq: CommitSeq(0),
-        retention_floor_seq: CommitSeq(0),
-        retention_window_ms: None,
-    };
-    let transport = crate::scripted_transport::failure_then_success(
-        serde_json::to_vec(&response).expect("serialize response"),
-    );
-    let client = retry_policy_client(&transport);
-
-    let actual = client
-        .get_namespace(&namespace_id)
-        .await
-        .expect("read should retry");
     assert_eq!(actual, response);
     assert_eq!(transport.attempts(), 2);
 }

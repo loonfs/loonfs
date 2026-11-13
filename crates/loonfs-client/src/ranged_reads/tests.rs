@@ -1,26 +1,11 @@
 //! Ranged reads: the `Range` header they send, and the responses they accept.
 
 use super::*;
-use crate::scripted_transport::{self, Outcome, ScriptedTransport};
-use crate::ClientConfig;
+use crate::scripted_transport::{self, Outcome};
 use loonfs_types::options::ReadAt;
 use loonfs_types::SnapshotId;
 use std::assert_matches;
 use std::num::NonZeroU64;
-
-fn client_for(transport: &ScriptedTransport) -> Client {
-    Client::with_transport(
-        ClientConfig {
-            server_url: "http://example.invalid".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        },
-        transport.clone(),
-    )
-    .expect("valid client config")
-}
 
 fn range(start_offset: u64, length: Option<u64>) -> ReadRange {
     ReadRange {
@@ -47,7 +32,7 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
         Outcome::PartialContent("bytes 2-5/10".to_owned(), b"cdef".to_vec()),
         Outcome::PartialContent("bytes 7-9/10".to_owned(), b"hij".to_vec()),
     ]);
-    let client = client_for(&transport);
+    let client = scripted_transport::client(&transport);
     let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
     let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
         .expect("snapshot ID");
@@ -115,7 +100,7 @@ async fn a_ranged_read_refuses_a_response_other_than_its_range() {
         ),
     ] {
         let transport = scripted_transport::script([outcome]);
-        let error = client_for(&transport)
+        let error = scripted_transport::client(&transport)
             .read_file_range_stream(&spec, requested)
             .await
             .expect_err("a response that isn't the range");
@@ -127,7 +112,7 @@ async fn a_ranged_read_refuses_a_response_other_than_its_range() {
             "bytes 2-5/10".to_owned(),
             body.to_vec(),
         )]);
-        let read = client_for(&transport)
+        let read = scripted_transport::client(&transport)
             .read_file_range_stream(&spec, range(2, Some(4)))
             .await
             .expect("the headers describe the range");
