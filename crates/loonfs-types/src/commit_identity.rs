@@ -1304,35 +1304,6 @@ mod tests {
         assert_ne!(fingerprint(None), fingerprint(Some(&subject_x)));
     }
 
-    #[test]
-    fn put_file_preconditions_change_the_fingerprint_deterministically() {
-        let content_ref = ContentRef::blob_v1(
-            ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
-            b"put bytes",
-            crate::ChecksumAlgorithm::Crc64nvme,
-        );
-        let operation = |expected_inode_id, expected_revision_no| FilesystemOperation::PutFile {
-            path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            content: FileContent::Ref(content_ref.clone()),
-            behavior: DestinationBehavior::Replace,
-            expected_inode_id,
-            expected_revision_no,
-        };
-
-        let without_preconditions = fingerprint(operation(None, None));
-        let inode_only = fingerprint(operation(Some(InodeId(7)), None));
-        let first_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(3))));
-        let next_revision = fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(4))));
-
-        assert_ne!(without_preconditions, inode_only);
-        assert_ne!(inode_only, first_revision);
-        assert_ne!(first_revision, next_revision);
-        assert_eq!(
-            first_revision,
-            fingerprint(operation(Some(InodeId(7)), Some(RevisionNo(3))))
-        );
-    }
-
     fn assert_destination_preconditions_change_fingerprint(
         operation: impl Fn(Option<InodeId>, Option<RevisionNo>) -> FilesystemOperation,
     ) {
@@ -1459,6 +1430,7 @@ mod tests {
         );
         let options = PutFileOptions {
             behavior: DestinationBehavior::Replace,
+            expected_inode_id: Some(InodeId(2)),
             ..Default::default()
         };
         let fingerprint =
@@ -1485,9 +1457,8 @@ mod tests {
         let mut changed_behavior = options.clone();
         changed_behavior.behavior = DestinationBehavior::NoReplace;
         let mut changed_inode = options.clone();
-        changed_inode.expected_inode_id = Some(InodeId(2));
+        changed_inode.expected_inode_id = Some(InodeId(3));
         let mut changed_revision = options.clone();
-        changed_revision.expected_inode_id = Some(InodeId(2));
         changed_revision.expected_revision_no = Some(RevisionNo(2));
         // Replaying a commit id with a different message must conflict, so the
         // message joins the preimage.

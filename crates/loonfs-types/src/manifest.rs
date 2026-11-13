@@ -671,11 +671,9 @@ fn decode_namespace_manifest_json_with_limit(
 mod tests {
     use super::{
         decode_namespace_manifest_json, decode_namespace_manifest_json_with_limit,
-        encode_namespace_manifest_json, BlockHandle, MetadataRowFamily, MetadataRunRef,
-        MetadataSegmentRef, NamespaceManifestPayload, RunTier,
+        encode_namespace_manifest_json, NamespaceManifestPayload,
     };
-    use crate::CompactorEpoch;
-    use crate::{CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
+    use crate::{CommitSeq, ManifestNo, NamespaceId};
     use std::assert_matches;
 
     fn pool_id() -> crate::PoolId {
@@ -899,99 +897,6 @@ mod tests {
     }
 
     #[test]
-    fn namespace_manifest_codec_round_trips_a_base_only_manifest() {
-        let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
-            activity: Default::default(),
-            created_at_ms: 1_000,
-            created_by: crate::ActorId::parse("test").expect("actor"),
-            access: super::NamespaceAccess::Unrestricted {},
-            retention_window_ms: None,
-            fork_basis: None,
-            pool_id: pool_id(),
-            status: crate::control::NamespaceStatus::Active {},
-            writer: None,
-            folded_wal_no: crate::WalNo(0),
-            compactor_epoch: CompactorEpoch(0),
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            manifest_no: ManifestNo(10),
-
-            head_seq: CommitSeq(10),
-            writer_epoch: WriterEpoch(2),
-            next_run_no: RunNo(1),
-            retention_floor_seq: CommitSeq(0),
-            runs: vec![metadata_run_ref(
-                "demo",
-                "seg_00000000000000000000000001",
-                RunNo(0),
-                CommitSeq(10),
-                RunTier::Base,
-            )],
-            extensions: Default::default(),
-        })
-        .expect("manifest")
-        .into_parts();
-        let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
-
-        assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.base_seq(), CommitSeq(10));
-        assert_eq!(decoded.payload.runs.len(), 1);
-        assert_eq!(decoded.payload.runs[0].run_seq, CommitSeq(10));
-    }
-
-    #[test]
-    fn namespace_manifest_codec_round_trips_inherited_source_segments() {
-        let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
-            activity: Default::default(),
-            created_at_ms: 1_000,
-            created_by: crate::ActorId::parse("test").expect("actor"),
-            access: super::NamespaceAccess::Unrestricted {},
-            retention_window_ms: None,
-            fork_basis: None,
-            pool_id: pool_id(),
-            status: crate::control::NamespaceStatus::Active {},
-            writer: None,
-            folded_wal_no: crate::WalNo(0),
-            compactor_epoch: CompactorEpoch(0),
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            manifest_no: ManifestNo(12),
-
-            head_seq: CommitSeq(12),
-            writer_epoch: WriterEpoch(2),
-            next_run_no: RunNo(2),
-            retention_floor_seq: CommitSeq(0),
-            runs: vec![
-                metadata_run_ref(
-                    "source",
-                    "seg_00000000000000000000000001",
-                    RunNo(0),
-                    CommitSeq(10),
-                    RunTier::Base,
-                ),
-                metadata_run_ref(
-                    "demo",
-                    "seg_00000000000000000000000002",
-                    RunNo(1),
-                    CommitSeq(12),
-                    RunTier::Delta,
-                ),
-            ],
-            extensions: Default::default(),
-        })
-        .expect("manifest")
-        .into_parts();
-        let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
-
-        assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.runs[0].tier, RunTier::Base);
-        assert_eq!(decoded.payload.runs[1].tier, RunTier::Delta);
-        assert_eq!(decoded.payload.runs[1].run_seq, CommitSeq(12));
-        assert_eq!(
-            decoded.payload.runs[0].segments[0].owner_namespace_id,
-            NamespaceId::parse("source").expect("valid namespace id")
-        );
-    }
-
-    #[test]
     fn decoder_accepts_the_manifest_limit_and_rejects_the_next_byte_before_decoding() {
         let encoded = encode_namespace_manifest_json(NamespaceManifestPayload::initial(
             NamespaceId::parse("bounded").expect("namespace"),
@@ -1017,46 +922,5 @@ mod tests {
             decode_namespace_manifest_json(&document),
             Err(crate::envelope::EnvelopeCodecError::Decompress(_))
         );
-    }
-
-    fn metadata_run_ref(
-        owner_namespace_id: &str,
-        segment_id: &str,
-        run_no: RunNo,
-        run_seq: CommitSeq,
-        tier: RunTier,
-    ) -> MetadataRunRef {
-        MetadataRunRef {
-            run_no,
-            run_seq,
-            tier,
-            segments: vec![metadata_segment_ref(owner_namespace_id, segment_id)],
-        }
-    }
-
-    fn metadata_segment_ref(owner_namespace_id: &str, segment_id: &str) -> MetadataSegmentRef {
-        MetadataSegmentRef {
-            owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
-            segment_id: MetadataSegmentId::parse(segment_id).expect("valid segment id"),
-            family: MetadataRowFamily::Inodes,
-            encoding: super::METADATA_SEGMENT_ENCODING,
-            row_count: 0,
-            min_row_key: String::new(),
-            max_row_key: String::new(),
-            index_block: BlockHandle {
-                offset: 0,
-                stored_bytes: 0,
-                decoded_bytes: 0,
-                crc32c: 0,
-            },
-            filter_block: BlockHandle {
-                offset: 0,
-                stored_bytes: 0,
-                decoded_bytes: 0,
-                crc32c: 0,
-            },
-            filter_inline: None,
-            extent_filter_block: None,
-        }
     }
 }

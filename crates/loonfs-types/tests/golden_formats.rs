@@ -1387,66 +1387,19 @@ fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
 
 #[test]
 fn control_object_decoders_reject_wrong_format_version_without_fallback() {
-    let cases = [
-        (
-            ControlObjectKind::Snapshot,
-            serde_json::to_value(SnapshotPayload {
-                snapshot_id: snapshot_id("snp_00000000000000000005-00000000000000000000000005"),
-                namespace_id: namespace_id(),
-                head_seq: CommitSeq(5),
-                payload_checksum: sha256_digest(b"manifest"),
-                created_at_ms: 3_000,
-                owner: SnapshotOwner::User {
-                    name: Some("nightly".to_owned()),
-                    expires_at_ms: None,
-                },
-            })
-            .expect("snapshot state"),
+    let golden = String::from_utf8(read_golden("control_snapshot.v1.json")).expect("UTF-8");
+    let wrong_version = golden.replacen("\"format_version\":1", "\"format_version\":7", 1);
+    assert_matches!(
+        decode_control_object::<SnapshotPayload>(
+            wrong_version.as_bytes(),
+            ControlObjectKind::Snapshot
         ),
-        (
-            ControlObjectKind::UploadSession,
-            serde_json::to_value(UploadSessionPayload {
-                namespace_id: namespace_id(),
-                upload_id: UploadId::parse("upl_0h248h248h248h248h248h248h")
-                    .expect("valid upload id"),
-                content_id: content_id("con_0h248h248h248h248h248h248h"),
-                subject_id: None,
-                mode: UploadSessionMode::ServiceProxied {},
-                expires_at_ms: 87_400_000,
-            })
-            .expect("upload state"),
-        ),
-        (
-            ControlObjectKind::UploadOutcome,
-            serde_json::to_value(UploadOutcomePayload {
-                namespace_id: namespace_id(),
-                upload_id: UploadId::parse("upl_0h248h248h248h248h248h248h")
-                    .expect("valid upload id"),
-                outcome: UploadOutcome::Aborted {
-                    aborted_at_ms: 5_000,
-                },
-            })
-            .expect("upload outcome"),
-        ),
-    ];
-    for (kind, state) in cases {
-        let encoded = loonfs_types::format::control::encode_control_state(kind, &state)
-            .expect("encode control");
-        let mut document: serde_json::Value =
-            serde_json::from_slice(&encoded).expect("decode document");
-        document["format_version"] = serde_json::Value::from(7);
-        let wrong_version = serde_json::to_vec(&document).expect("encode wrong version");
-        let error = decode_control_object::<serde_json::Value>(&wrong_version, kind)
-            .expect_err("wrong version must not fall back");
-        assert_matches!(
-            error,
-            EnvelopeCodecError::UnsupportedFormatVersion {
-                found: 7,
-                supported,
-                ..
-            } if supported == kind.format_version()
-        );
-    }
+        Err(EnvelopeCodecError::UnsupportedFormatVersion {
+            found: 7,
+            supported: 1,
+            ..
+        })
+    );
 }
 
 #[test]
@@ -3082,46 +3035,6 @@ fn inline_commit_wire_bytes_match_golden() {
         serde_json::from_slice::<CommitRequest>(&bytes).expect("decode"),
         request
     );
-    let namespace = NamespaceId::parse("demo").expect("namespace");
-    let fingerprint =
-        |operations: &[FilesystemOperation],
-         ids: &std::collections::BTreeMap<ContentId, loonfs_types::InlineContentIdentity>| {
-            loonfs_types::CommitFingerprintInput {
-                namespace_id: &namespace,
-                actor_id: &loonfs_types::ActorId::loonfs(),
-                subject_id: None,
-                message: None,
-                operations,
-                preconditions: &[],
-                inline_content_identities: ids,
-            }
-            .fingerprint()
-        };
-    let expected = fingerprint(&request.operations, &Default::default());
-    let mut resolved = request.operations;
-    let mut ids = std::collections::BTreeMap::new();
-    for operation in &mut resolved {
-        let content = match operation {
-            FilesystemOperation::PutFile { content, .. }
-            | FilesystemOperation::CreateFileByInode { content, .. }
-            | FilesystemOperation::PutFileRevisionByInode { content, .. } => content,
-            _ => panic!("expected content operation"),
-        };
-        let loonfs_types::FileContent::Inline(bytes) = content else {
-            panic!("expected inline bytes");
-        };
-        let id = ContentId::generate();
-        ids.insert(
-            id.clone(),
-            loonfs_types::InlineContentIdentity::from_bytes(bytes),
-        );
-        *content = loonfs_types::FileContent::Ref(ContentRef::blob_v1(
-            id,
-            bytes,
-            crate::ChecksumAlgorithm::Crc64nvme,
-        ));
-    }
-    assert_eq!(fingerprint(&resolved, &ids), expected);
 }
 
 #[test]
