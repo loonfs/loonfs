@@ -10,7 +10,7 @@ use super::publish_path_planning::{
 };
 use crate::authorize::Replacement;
 use crate::commit::engine::TemporaryMove;
-use crate::commit::{CommitOperation, CommitValidationError};
+use crate::commit::{CommitOperation, CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use loonfs_objectstore::ObjectStore;
@@ -262,11 +262,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     return Err(CoreError::PathNotFound(path));
                 }
                 let child_inode_id = self.next_inode_id()?;
-                ops.push(CommitOperation::CreateFile {
+                ops.push(CommitOperation::Create {
                     child_inode_id,
                     parent_inode_id,
                     display_name: name,
-                    content_ref: revision.content_ref.clone(),
+                    child: NewChild::File(revision.content_ref.clone()),
                 });
                 // A copy to a vacant destination is a new resource that
                 // stands for the source, so it starts with the source's

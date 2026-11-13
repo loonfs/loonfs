@@ -528,7 +528,6 @@ impl CommitCandidate {
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
-        self.validate_request_has_operations()?;
         if self.merge.is_some() {
             self.validate_message_limit()?;
             return self.validate_merge_content();

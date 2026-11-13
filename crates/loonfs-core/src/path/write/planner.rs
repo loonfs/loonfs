@@ -4,8 +4,7 @@
 use super::intent::{CommitIntent, FilesystemOperation};
 use super::planned_pieces::CommitPieces;
 use super::preconditions::{
-    validate_access_precondition, validate_attributes_precondition, validate_expected_file_state,
-    PreconditionFields,
+    validate_expected_file_state, validate_revision_precondition, PreconditionFields,
 };
 use super::publish_path_planning::{
     CompiledFilesystemOperation, Destination, PlanningView, Target,
@@ -287,7 +286,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 expected_inode_id,
                 expected_attributes_revision_no: expected,
             } => {
-                validate_attributes_precondition(*expected_inode_id, *expected)?;
+                validate_revision_precondition(
+                    *expected_inode_id,
+                    expected.is_some(),
+                    "expected_attributes_revision_no",
+                )?;
                 let target = Target::path(path, *expected_inode_id);
                 self.plan_update_attributes(target, set, remove, *expected)
                     .await
@@ -309,7 +312,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 expected_inode_id,
                 expected_access_revision_no: expected,
             } => {
-                validate_access_precondition(*expected_inode_id, *expected)?;
+                validate_revision_precondition(
+                    *expected_inode_id,
+                    expected.is_some(),
+                    "expected_access_revision_no",
+                )?;
                 let target = Target::path(path, *expected_inode_id);
                 self.plan_update_access(target, *boundary, grants, *expected)
                     .await

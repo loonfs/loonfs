@@ -3,6 +3,7 @@
 use super::super::engine::CommitCandidate;
 use super::super::CommitPlan;
 use super::*;
+use crate::commit::wal_payload_from_commit_plan;
 use crate::limits::{MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS};
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
@@ -10,7 +11,7 @@ use crate::path::write::PublishPlanningSession;
 use crate::segment::VerifiedMetadataSegments;
 use crate::storage::inline_content::InlineContent;
 use crate::storage::tail_content::ContentWrites;
-use crate::wal::prepare_wal_object;
+use crate::wal::prepare_commits_object;
 use loonfs_test_support::ids::{attribute_key, attribute_text};
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 use loonfs_types::format::wal::{
@@ -306,8 +307,12 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             merge: None,
             ..plan.clone()
         });
-        let encoded = prepare_wal_object(namespace_id.clone(), head.writer_epoch, &head, &[plan])
-            .expect("encode");
+        let encoded = prepare_commits_object(
+            &head,
+            head.writer_epoch,
+            vec![wal_payload_from_commit_plan(&plan)],
+        )
+        .expect("encode");
         assert!(
             encoded.document_bytes() <= estimate,
             "{kind}: {} > {estimate}",
@@ -315,11 +320,10 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         );
         if let Some(without_merge) = without_merge {
             let merge_bytes = encoded.document_bytes()
-                - prepare_wal_object(
-                    namespace_id.clone(),
-                    head.writer_epoch,
+                - prepare_commits_object(
                     &head,
-                    &[without_merge],
+                    head.writer_epoch,
+                    vec![wal_payload_from_commit_plan(&without_merge)],
                 )
                 .expect("encode without the merge record")
                 .document_bytes();

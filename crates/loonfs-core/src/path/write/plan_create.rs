@@ -39,18 +39,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         let child_inode_id = self.next_inode_id()?;
         let parent_inode_id = destination.parent_inode_id;
         let display_name = destination.name;
-        let op = match child {
-            NewChild::Directory => CommitOperation::CreateDirectory {
-                child_inode_id,
-                parent_inode_id,
-                display_name,
-            },
-            NewChild::File(content_ref) => CommitOperation::CreateFile {
-                child_inode_id,
-                parent_inode_id,
-                display_name,
-                content_ref,
-            },
+        let op = CommitOperation::Create {
+            child_inode_id,
+            parent_inode_id,
+            display_name,
+            child,
         };
         Ok(CompiledFilesystemOperation::new(vec![op]))
     }
@@ -82,10 +75,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         self.view.ensure_vacant_path(absolute_path).await?;
         let display_name = final_component(absolute_path)?;
         let child_inode_id = self.next_inode_id()?;
-        ops.push(CommitOperation::CreateDirectory {
+        ops.push(CommitOperation::Create {
             child_inode_id,
             parent_inode_id: parents.parent_inode_id,
             display_name,
+            child: NewChild::Directory,
         });
         Ok(CompiledFilesystemOperation::new(ops))
     }
@@ -283,11 +277,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
                 }
                 let child_inode_id = self.next_inode_id()?;
-                ops.push(CommitOperation::CreateFile {
+                ops.push(CommitOperation::Create {
                     child_inode_id,
                     parent_inode_id: parents.parent_inode_id,
                     display_name: final_name.clone(),
-                    content_ref,
+                    child: NewChild::File(content_ref),
                 });
             }
             Err(other) => return Err(other),
@@ -351,10 +345,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             }
 
             let child_inode_id = self.next_inode_id()?;
-            ops.push(CommitOperation::CreateDirectory {
+            ops.push(CommitOperation::Create {
                 child_inode_id,
                 parent_inode_id: current_inode,
                 display_name,
+                child: NewChild::Directory,
             });
             current_inode = child_inode_id;
         }

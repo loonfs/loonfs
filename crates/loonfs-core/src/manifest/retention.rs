@@ -217,8 +217,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     manifest_retention_floor_seq,
                 });
             }
-            let floor_object =
-                prepare_floor_object(self.namespace_id.clone(), head.writer_epoch, head, target)?;
+            let floor_object = prepare_floor_object(head, head.writer_epoch, target)?;
             match publish_wal_object(&self.store, &floor_object, &anchor.checked).await {
                 Ok(()) => {
                     return Ok(FloorObjectReport {
