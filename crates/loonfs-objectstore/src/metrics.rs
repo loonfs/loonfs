@@ -711,9 +711,9 @@ fn classify_key(key: &str) -> ObjectKeyKind {
             ObjectKeyKind::Content
         }
         DurableObjectFamily::WalObject => ObjectKeyKind::WalObject,
-        DurableObjectFamily::MetadataManifest | DurableObjectFamily::Hint => {
-            ObjectKeyKind::NamespaceManifest
-        }
+        DurableObjectFamily::MetadataManifest
+        | DurableObjectFamily::Hint
+        | DurableObjectFamily::Boundary => ObjectKeyKind::NamespaceManifest,
         DurableObjectFamily::MetadataSegment => ObjectKeyKind::MetadataSegment,
         DurableObjectFamily::ExtensionSegment => ObjectKeyKind::ExtensionSegment,
         DurableObjectFamily::Snapshot => ObjectKeyKind::GcControl,

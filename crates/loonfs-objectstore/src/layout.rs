@@ -2,10 +2,11 @@
 //! namespace and pool listings built on it.
 
 use crate::keys::{
-    namespace_prefix, pool_prefix, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY, HINT_NAME,
-    MANIFEST_DIRECTORY, MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, POOLS_DIRECTORY, POOL_RECORD_NAME,
-    SEGMENT_DIRECTORY, SEGMENT_SUFFIX, SNAPSHOT_DIRECTORY, SNAPSHOT_SUFFIX, TEMPORARY_DIRECTORY,
-    UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
+    namespace_prefix, pool_prefix, BOUNDARY_NAME, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY,
+    HINT_NAME, MANIFEST_DIRECTORY, MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, POOLS_DIRECTORY,
+    POOL_RECORD_NAME, SEGMENT_DIRECTORY, SEGMENT_SUFFIX, SNAPSHOT_DIRECTORY, SNAPSHOT_SUFFIX,
+    TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX,
+    WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
 use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, PoolId, UploadId};
@@ -34,6 +35,9 @@ pub enum DurableObjectFamily {
     WalObject,
     /// Starts forward discovery of namespace manifests.
     Hint,
+    /// Records the manifest number at or below which every manifest of a
+    /// namespace is replaced.
+    Boundary,
     /// Classifies an immutable numbered namespace manifest.
     MetadataManifest,
     /// Classifies an immutable metadata segment.
@@ -59,8 +63,9 @@ pub enum DurableObjectFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyPrefix<'a> {
     /// The prefix of a namespace (`namespaces/{namespace_id}/`), which
-    /// contains the namespace's WAL objects, manifests, hint, snapshots, and the
-    /// metadata and extension segments that the namespace owns.
+    /// contains the namespace's WAL objects, manifests, hint, manifest
+    /// boundary, snapshots, and the metadata and extension segments that the
+    /// namespace owns.
     Namespace(&'a str),
     /// The prefix of a pool (`pools/{pool_id}/`), which contains the pool's
     /// pool record, content objects, upload records, and temporary objects.
@@ -146,6 +151,11 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             }),
         [NAMESPACES_DIRECTORY, namespace, HINT_NAME] => Some(parsed(
             DurableObjectFamily::Hint,
+            KeyPrefix::Namespace(namespace),
+            None,
+        )),
+        [NAMESPACES_DIRECTORY, namespace, BOUNDARY_NAME] => Some(parsed(
+            DurableObjectFamily::Boundary,
             KeyPrefix::Namespace(namespace),
             None,
         )),
@@ -422,9 +432,9 @@ mod tests {
 
     use super::{parse_object_key, DurableObjectFamily, KeyPrefix};
     use crate::keys::{
-        content_blob, extension_segment, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_prefix, pool_record, snapshot_record, temporary_object, upload_outcome,
-        upload_session, wal_object, wal_prefix,
+        boundary, content_blob, extension_segment, hint, metadata_manifest_object,
+        metadata_segment, metadata_segment_prefix, pool_record, snapshot_record, temporary_object,
+        upload_outcome, upload_session, wal_object, wal_prefix,
     };
     use loonfs_test_support::ids::numbered_pool_id;
     use loonfs_types::{
@@ -487,6 +497,12 @@ mod tests {
             (
                 hint(&namespace_id),
                 DurableObjectFamily::Hint,
+                namespace,
+                None,
+            ),
+            (
+                boundary(&namespace_id),
+                DurableObjectFamily::Boundary,
                 namespace,
                 None,
             ),

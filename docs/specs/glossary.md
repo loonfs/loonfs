@@ -16,6 +16,10 @@ A numbered, immutable object that describes a namespace: its identity and status
 
 A small object that records the number of a recent manifest, so readers know where to start looking for the current one. The hint is best effort. LoonFS updates it after it publishes a manifest, but the update can lag, so the hint is a safe starting point but not an authoritative pointer to the current manifest. Readers load the hinted manifest and then check for newer ones. See [The current manifest and WAL tip](format.md#24-the-current-manifest-and-wal-tip).
 
+### Manifest boundary
+
+A manifest number, stored in one small object for each namespace (`namespaces/{namespace_id}/boundary.json`), such that every manifest of the namespace numbered at or below it has been replaced by a newer manifest. A namespace's [collection](#collection) raises the boundary to the highest manifest number that it's about to delete, before it deletes any manifest, so every manifest that a collection deletes is at or below the boundary. The number never decreases, and a missing object means that no manifest is at or below the boundary. For example, if a collection deletes manifests 31 to 37 and 39 to 44, it first raises the boundary to 44. See [One complete collection](format.md#111-one-complete-collection).
+
 ### WAL
 
 The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits, a single [fence](#fence), or a [floor object](#floor-object). Successfully writing the next WAL object to object storage commits every record contained in that WAL object. See [Publishing a commit](format.md#6-publishing-a-commit).
@@ -234,7 +238,7 @@ A namespace setting, in milliseconds, for how much recent history a scheduled re
 
 ### Control object
 
-A small object used for discovery, retained views, upload state, or a pool's creation: the hint, snapshots, the session and outcome records of upload sessions, and [pool records](#pool-record). Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
+A small object used for discovery, manifest cleanup, retained views, upload state, or a pool's creation: the hint, the [manifest boundary](#manifest-boundary), snapshots, the session and outcome records of upload sessions, and [pool records](#pool-record). Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
 
 ## Reads and retained views
 

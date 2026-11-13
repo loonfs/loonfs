@@ -41,6 +41,7 @@ use loonfs_types::options::DeleteNamespaceOptions;
 use std::assert_matches;
 use tempfile::tempdir;
 
+mod boundary;
 mod concurrent_retirement;
 mod extension_segments;
 mod fork_chain;

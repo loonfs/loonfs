@@ -351,6 +351,7 @@ Each namespace's objects are stored under its own prefix, except its content obj
 ```text
 namespaces/{namespace_id}/
 ├── hint.json
+├── boundary.json
 ├── manifests/{manifest_no:020}.json.zst
 ├── wal/{wal_no:020}.wal.zst
 ├── segments/{segment_id}.sst
@@ -378,6 +379,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | Manifest | The namespace's identity, lifecycle status, writer authority, metadata runs, and retention floor | A new manifest is published at the next number. |
 | WAL object | Commits, a writer fence, or a [floor object](glossary.md#floor-object), after the folded boundary | A new WAL object is created at the next number. |
 | Hint | A recent manifest number, where discovery starts | Compare-and-swap. The number never decreases. |
+| Manifest boundary | A manifest number at or below which every manifest of the namespace has been replaced by a newer manifest | Created with put-if-absent, then changed by compare-and-swap. The number never decreases. Garbage collection writes it. |
 | Metadata segment | Sorted metadata rows that a manifest references | A new immutable object is written. |
 | Extension segment | Sorted rows of an extension's state, which an extension entry in a manifest lists | A new immutable object is written. |
 | Snapshot | A reference that keeps one manifest for a user or a fork | Created and deleted. A user snapshot's expiry time can be extended, and its deletion recorded, by compare-and-swap. |
@@ -1621,6 +1623,8 @@ A pool's collection reads the pool record, lists the pool's upload sessions, and
 
 Each collection then lists each of its candidate families completely, from the beginning. To collect content, a pool's collection reads the extent filter of each distinct layout segment of the members' rooted manifests and lists the pool's content prefix once (see [Content roots](#119-content-roots)). The only exact sets of content roots are the chains of the members' WAL tails and the content IDs of the upload sessions, and they use read working memory together with the extent filters. A collection stores no durable progress, run, phase, reference table, or cursor. Snapshot cleanup determines which snapshots can be deleted from the complete snapshot listing that establishes a namespace's roots. Session cleanup determines which session records can be deleted from the complete session listing that establishes the pool's roots.
 
+A namespace's collection lists the namespace's manifests, chooses the manifests to delete under the rules in [Candidate and age rules](#113-candidate-and-age-rules), raises the [manifest boundary](glossary.md#manifest-boundary) to the highest chosen number, and then deletes exactly the chosen manifests. If the chosen manifests don't fit the collection's read working memory, the collection works through them in number order, a batch at a time, and raises the boundary to a batch's highest number before it deletes that batch. To raise the boundary, the collection loads the boundary object, and writes nothing if the stored number is already that high. Otherwise it creates a missing object with put-if-absent, or writes the higher number with a compare-and-swap, and after a lost write it loads the boundary again and tries again. If a raise fails, the collection fails before it deletes another manifest. A collection that chooses no manifest sends no request for the boundary. The boundary isn't progress that a later collection continues from: each collection chooses its manifests from its own listing. For example, suppose the boundary is 30, the newest manifest is 45, the observed hint is 45, and snapshots keep manifests 7 and 38. If manifests 31 to 44 are older than the grace window, the collection chooses 31 to 37 and 39 to 44, raises the boundary to 44, and deletes those 13 manifests. Manifests 7 and 38 stay. [The manifest boundary](../design/manifest-boundary.md#cleaning-up-manifests) explains the reasons for this order.
+
 Every age decision in a collection uses the same `now_ms`, captured when the collection starts. A later collection reads fresh roots and uses its own clock. Concurrent collectors can delete eligible objects independently, and an object that's already gone needs no more cleanup. A failed collection might have deleted some candidates already, but the next collection can safely start over.
 
 ### 11.2 Reference roots
@@ -1661,7 +1665,7 @@ Being unreferenced makes an object a candidate for deletion, but it doesn't make
 | Temporary object | A provider age of at least `T`. |
 | Pool record | The pool has no members because its create call failed, and the record's creation grace has passed (see [Content roots](#119-content-roots)). |
 
-The hint and the current manifest are never deleted. Core garbage collection keeps unrecognized keys. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
+The hint, the manifest boundary, and the current manifest are never deleted. Core garbage collection keeps unrecognized keys. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
 
 For example, suppose a collector observes hint 8 and current manifest 10. It keeps manifests 8, 9, and 10 for discovery, and it keeps the segments in manifest 10 and in any manifest that a snapshot keeps. A segment that only manifest 8 or 9 lists is a candidate, even if manifest 10 was published a moment ago, but it still has to be strictly older than `T` before it's deleted.
 
@@ -1971,7 +1975,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 
 ### A.1 Family versions
 
-There are five kinds of control object: `hint`, `snapshot`, `upload_session`, `upload_outcome`, and `pool`.
+There are six kinds of control object: `hint`, `snapshot`, `upload_session`, `upload_outcome`, `pool`, and `boundary`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
@@ -1983,6 +1987,7 @@ There are five kinds of control object: `hint`, `snapshot`, `upload_session`, `u
 | Upload session record | `upload_session` | Uncompressed JSON | 1 |
 | Upload outcome record | `upload_outcome` | Uncompressed JSON | 1 |
 | Pool record | `pool` | Uncompressed JSON | 1 |
+| Manifest boundary | `boundary` | Uncompressed JSON | 1 |
 | Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
 | Grep segment | No envelope | Block sections with grep rows | 1, given by the grep entry's `version` |
 
@@ -2065,6 +2070,7 @@ These tables list the durable payload fields. The protocol sections define how t
 | Upload session record | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `expires_at_ms` |
 | Upload outcome record | `namespace_id`, `upload_id`, `outcome` |
 | Pool record | `pool_id`, `first_member_namespace_id`, `created_at_ms` |
+| Manifest boundary | `namespace_id`, `boundary` |
 
 Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `cmt_00000000000000000000000000`.
 
@@ -2074,6 +2080,8 @@ Snapshot owners have the fields in [Records and owners](#81-records-and-owners),
 - Outcome, in the outcome record: `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`.
 
 Both upload records are stored under the prefix of the pool of the namespace that created the session (see [Object keys](#a8-object-keys)), and their `namespace_id` is that namespace.
+
+A manifest boundary is stored under the prefix of its namespace, and its `namespace_id` MUST match the key. Its `boundary` is `{"kind":"manifest"}` with a required `manifest_no` of at least 1, as in `{"kind":"manifest","manifest_no":44}`. A missing boundary object means that no manifest of the namespace is at or below the boundary.
 
 A pool record is stored under the prefix of its pool, and its `pool_id` MUST match the key. Its `first_member_namespace_id` is the namespace that was created with the pool, and its `created_at_ms` is that create call's request clock (see [Creating a namespace](#91-creating-a-namespace)).
 
@@ -2423,6 +2431,7 @@ These patterns define the core object families. A segment's owner can be differe
 | Upload sessions | `pools/{pool_id}/uploads/{upload_id}.json` |
 | Upload outcomes | `pools/{pool_id}/uploads/{upload_id}.outcome.json` |
 | Hint | `namespaces/{namespace_id}/hint.json` |
+| Manifest boundary | `namespaces/{namespace_id}/boundary.json` |
 | Pool records | `pools/{pool_id}/pool.json` |
 | Content objects | `pools/{pool_id}/content/{content_id}` |
 | Content span objects | `pools/{pool_id}/content/{content_id}-{start:020}-{end:020}` |

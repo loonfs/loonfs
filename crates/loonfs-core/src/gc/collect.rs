@@ -1,16 +1,18 @@
 //! One collection of a namespace's own objects, with a fixed clock and no
 //! durable progress.
 
-use super::deletes::apply_decisions;
+use super::charged_set::{ChargedQueue, CollectionMemory};
+use super::deletes::{apply_decisions, CollectionReport, Decision};
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
 use super::sweep::Sweep;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::{stream, Stream, StreamExt, TryStreamExt};
+use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::GcResponse;
+use loonfs_types::{GcResponse, ManifestNo};
 use std::sync::atomic::AtomicU64;
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -46,7 +48,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .map_err(|error| CoreError::store(&prefix, &error))
                 .map_ok(|entry| sweep.candidate(family, entry))
                 .boxed();
-            apply_decisions(&self.store, decisions, &mut report).await?;
+            if family == CandidateFamily::Manifests {
+                self.collect_manifests(decisions, &live.memory, &mut report)
+                    .await?;
+            } else {
+                apply_decisions(&self.store, decisions, &mut report).await?;
+            }
         }
         report.listed_bytes += sweep.listed_bytes.into_inner() + live.snapshot_listed_bytes;
         // The snapshots go after the objects that they protect, from the listing
@@ -56,4 +63,63 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.retire_namespace(&live, &mut report).await?;
         Ok(report)
     }
+
+    /// Records the decisions that keep a manifest, and deletes the manifests
+    /// that the other decisions choose in batches that fit the collection's
+    /// memory. The listing is in number order, so each batch raises the
+    /// manifest boundary to the batch's highest manifest number, at or above
+    /// the raise before, and then deletes exactly the batch's manifests.
+    async fn collect_manifests(
+        &self,
+        mut decisions: impl Stream<Item = Result<Decision<GcResponse>>> + Unpin,
+        memory: &CollectionMemory,
+        report: &mut GcResponse,
+    ) -> Result<()> {
+        let mut batch = ChargedQueue::new(memory);
+        while let Some(decision) = decisions.try_next().await? {
+            match decision {
+                Decision::Retain {
+                    reason,
+                    reclaimable_at_ms,
+                } => report.record_retained(reason, reclaimable_at_ms),
+                Decision::Gone => {}
+                Decision::Delete { .. } => {
+                    if let Err(decision) = batch.try_push_back(decision) {
+                        self.delete_manifests(&mut batch, report).await?;
+                        batch.push_back(decision)?;
+                    }
+                }
+            }
+        }
+        self.delete_manifests(&mut batch, report).await
+    }
+
+    /// Raises the manifest boundary to the highest manifest number in
+    /// `batch`, and then deletes the batch's manifests.
+    async fn delete_manifests(
+        &self,
+        batch: &mut ChargedQueue<Decision<GcResponse>>,
+        report: &mut GcResponse,
+    ) -> Result<()> {
+        if let Some(manifest_no) = raise_target(batch.iter()) {
+            self.raise_boundary(manifest_no).await?;
+        }
+        let deletes = std::iter::from_fn(|| batch.pop_front()).map(Ok);
+        apply_decisions(&self.store, stream::iter(deletes), report).await
+    }
+}
+
+/// Returns the highest manifest number that `decisions` delete, or `None`
+/// when they delete no manifest.
+fn raise_target<'a>(
+    decisions: impl Iterator<Item = &'a Decision<GcResponse>>,
+) -> Option<ManifestNo> {
+    decisions
+        .filter_map(|decision| match decision {
+            Decision::Delete { keys, .. } => {
+                keys.iter().filter_map(|key| manifest_no_of(key)).max()
+            }
+            Decision::Retain { .. } | Decision::Gone => None,
+        })
+        .max()
 }
