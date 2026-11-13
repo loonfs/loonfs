@@ -15,21 +15,30 @@ pub(crate) enum Refusal {
     Fail,
 }
 
-/// Returns the server's error response for a merge or a rebase that it
-/// refused, or returns `error` when the request's outcome isn't known (a
-/// transport failure or an outcome-unknown error) or the server refused the
-/// request with a transient error, so that the step leaves the state as it
-/// was and the next step sends the same request.
+/// Returns whether sending the request again can get past `error`: the
+/// request's outcome isn't known (a transport failure or an outcome-unknown
+/// error), or the server refused the request with a transient error.
 ///
 /// A transient error is `commit_queue_full`, `server_busy`, or
 /// `shutting_down` (see [`ErrorCode::retryable_without_operator_action`]),
 /// which the client has already retried with a backoff.
-pub(crate) fn refused(error: ClientError) -> Result<ErrorResponse> {
-    let send_again = error.code().is_some_and(|code| {
-        code.kind() == ErrorKind::OutcomeUnknown || code.retryable_without_operator_action()
-    });
+pub(crate) fn sends_again(error: &ClientError) -> bool {
     match error {
-        ClientError::Api { response, .. } if !send_again => Ok(*response),
+        ClientError::Api { .. } => error.code().is_some_and(|code| {
+            code.kind() == ErrorKind::OutcomeUnknown || code.retryable_without_operator_action()
+        }),
+        _ => true,
+    }
+}
+
+/// Returns the server's error response for a merge or a rebase that it
+/// refused, or returns `error` when sending the request again can get past
+/// it (see [`sends_again`]), so that the step leaves the state as it was and
+/// the next step sends the same request.
+pub(crate) fn refused(error: ClientError) -> Result<ErrorResponse> {
+    let sends_again = sends_again(&error);
+    match error {
+        ClientError::Api { response, .. } if !sends_again => Ok(*response),
         error => Err(error.into()),
     }
 }

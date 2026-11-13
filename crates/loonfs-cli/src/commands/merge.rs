@@ -8,8 +8,11 @@ use crate::error::{CliError, Result};
 use crate::merge_record::{MergeAttempt, MergeRecordFile};
 use crate::render::{human_merge_step, write_stderr_progress};
 use loonfs_client::Client;
-use loonfs_merge::{DefaultResolver, MergeSession, MergeSessionOptions, MergeSessionStatus};
+use loonfs_merge::{
+    DefaultResolver, MergeError, MergeSession, MergeSessionOptions, MergeSessionStatus,
+};
 use loonfs_types::ActorId;
+use std::path::Path;
 
 pub(crate) async fn run_merge(
     invocation: &Invocation,
@@ -51,7 +54,11 @@ pub(crate) async fn run_merge(
     // command, each split hint shortens the range, the session's rebases
     // create at most `MAX_NEW_FORKS` new forks, and each cleanup step deletes
     // one of them.
-    while let Some(outcome) = session.step().await.map_err(|error| context.fail(error))? {
+    while let Some(outcome) = session
+        .step()
+        .await
+        .map_err(|error| context.fail(step_error(error, record.path())))?
+    {
         record
             .save(&attempt, session.state())
             .map_err(|error| context.fail(error))?;
@@ -69,6 +76,22 @@ pub(crate) async fn run_merge(
         session: session.state().clone(),
         steps,
     }))
+}
+
+/// Returns the CLI's error for `error`, which a step of the session saved at
+/// `record_path` returned. When running the step again can get past the
+/// error, the message also says that the session is saved, because the next
+/// run of the command continues the session.
+fn step_error(error: MergeError, record_path: &Path) -> CliError {
+    let retryable = error.is_retryable();
+    let mut error = CliError::from(error);
+    if retryable {
+        error.message.push_str(&format!(
+            "\nthe session is saved in `{}`; run the same command again to continue it",
+            record_path.display()
+        ));
+    }
+    error
 }
 
 /// Resumes the session that the record keeps, or recovers it from the
@@ -117,4 +140,40 @@ async fn open_session(
     .await?;
     record.save(&attempt, session.state())?;
     Ok((attempt, session))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_error;
+    use loonfs_client::ClientError;
+    use loonfs_merge::MergeError;
+    use loonfs_types::{ErrorCode, ErrorResponse};
+    use std::path::Path;
+
+    /// Checks that a step's error says that the session is saved when
+    /// running the command again can get past the error (a transient error
+    /// or a transport failure), and doesn't say so for another error.
+    #[test]
+    fn a_step_error_says_the_session_is_saved_when_a_rerun_can_get_past_it() {
+        let record_path = Path::new("/state/merge.json");
+        let saved = "\nthe session is saved in `/state/merge.json`; run the same command again to \
+                     continue it";
+        let refused = |code| {
+            MergeError::Client(ClientError::from_error_response(
+                503,
+                ErrorResponse::new(code, "refused"),
+            ))
+        };
+
+        let busy = step_error(refused(ErrorCode::ServerBusy), record_path);
+        assert_eq!(busy.code, ErrorCode::ServerBusy.as_str());
+        assert_eq!(busy.message, format!("refused{saved}"));
+        let unreachable = step_error(
+            MergeError::Client(ClientError::Http("connection refused".to_owned())),
+            record_path,
+        );
+        assert_eq!(unreachable.message, format!("connection refused{saved}"));
+        let gone = step_error(refused(ErrorCode::NamespaceNotFound), record_path);
+        assert_eq!(gone.message, "refused");
+    }
 }

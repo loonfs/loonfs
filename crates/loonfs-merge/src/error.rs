@@ -50,5 +50,15 @@ pub enum MergeError {
     },
 }
 
+impl MergeError {
+    /// Returns whether running the step again can get past the error: a
+    /// request's outcome isn't known, or the server returned a transient
+    /// error. The session is as it was before the step, so the next step
+    /// sends the same request.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Client(error) if crate::refusal::sends_again(error))
+    }
+}
+
 /// Result type returned by the merge loop.
 pub type Result<T> = std::result::Result<T, MergeError>;
