@@ -75,17 +75,18 @@ impl<M: crate::Mode> Namespace<M> {
 }
 
 impl Namespace<Writable> {
-    /// Creates a snapshot of the current namespace state that doesn't expire.
+    /// Creates a snapshot of the current namespace state that has no label and
+    /// doesn't expire.
     ///
     /// See [`Self::create_snapshot_with_options`].
-    pub async fn create_snapshot(&self, name: &str) -> Result<Snapshot> {
-        self.create_snapshot_with_options(name, &CreateSnapshotOptions::default())
+    pub async fn create_snapshot(&self) -> Result<Snapshot> {
+        self.create_snapshot_with_options(&CreateSnapshotOptions::default())
             .await
     }
 
-    /// Creates a snapshot of the current namespace state. The name is a
-    /// label that doesn't need to be unique, and every call creates a new
-    /// snapshot with a new id.
+    /// Creates a snapshot of the current namespace state. `options.name` is an
+    /// optional label that doesn't need to be unique, and every call creates a
+    /// new snapshot with a new id.
     ///
     /// A snapshot created with `options.ttl_ms` expires that many
     /// milliseconds from now. After that it can't be read or forked, and it
@@ -98,7 +99,6 @@ impl Namespace<Writable> {
     /// the session's own, and it starts from the session's position.
     pub async fn create_snapshot_with_options(
         &self,
-        name: &str,
         options: &CreateSnapshotOptions,
     ) -> Result<Snapshot> {
         trace::in_operation(
@@ -114,7 +114,7 @@ impl Namespace<Writable> {
                         let engine = self.engine();
                         async move {
                             engine
-                                .create_snapshot(name.to_owned(), expires_at_ms, manifest)
+                                .create_snapshot(options.name.clone(), expires_at_ms, manifest)
                                 .await
                         }
                     })

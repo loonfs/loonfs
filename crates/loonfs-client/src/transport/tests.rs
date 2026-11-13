@@ -752,8 +752,8 @@ async fn retry_policy_matches_snapshot_and_maintenance_operation_classes() {
         client
             .create_snapshot_with_options(
                 &namespace_id,
-                "backup",
                 &crate::CreateSnapshotOptions {
+                    name: Some("backup".to_owned()),
                     ttl_ms: std::num::NonZeroU64::new(10_000),
                 },
             )

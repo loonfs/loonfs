@@ -1440,7 +1440,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let owner = |expires_at_ms| loonfs_types::format::control::SnapshotOwner::User {
-        name: "test-snapshot".to_owned(),
+        name: Some("test-snapshot".to_owned()),
         expires_at_ms,
     };
     let context = test_context();
@@ -1529,7 +1529,7 @@ async fn an_expired_snapshot_serves_no_reads_but_stays_until_a_collection_delete
     let already_expired = namespace
         .create_snapshot_record(
             loonfs_types::format::control::SnapshotOwner::User {
-                name: "test-snapshot".to_owned(),
+                name: Some("test-snapshot".to_owned()),
                 expires_at_ms: Some(context.now_ms),
             },
             crate::test_support::folded_manifest(&namespace)
@@ -1668,7 +1668,7 @@ async fn snapshot_creation_deletes_its_record_when_the_floor_passed_its_manifest
     let error = crate::test_support::namespace_store(&store, &namespace_id)
         .create_snapshot_record(
             loonfs_types::format::control::SnapshotOwner::User {
-                name: "old".to_owned(),
+                name: Some("old".to_owned()),
                 expires_at_ms: None,
             },
             initial.basis().manifest().clone(),
@@ -1755,7 +1755,7 @@ async fn snapshot_basis_verification_store_failure_deletes_the_record() {
     let error = crate::test_support::namespace_store(&store, &namespace_id)
         .create_snapshot_record(
             loonfs_types::format::control::SnapshotOwner::User {
-                name: "failed".to_owned(),
+                name: Some("failed".to_owned()),
                 expires_at_ms: None,
             },
             initial.basis().manifest().clone(),

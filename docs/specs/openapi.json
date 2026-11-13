@@ -898,7 +898,7 @@
         "description": "A request to create a snapshot.",
         "properties": {
           "name": {
-            "description": "The snapshot's label, which doesn't need to be unique.",
+            "description": "The snapshot's label, which doesn't need to be unique. Omit the field for a snapshot with no\nlabel.",
             "type": "string"
           },
           "ttl_ms": {
@@ -908,9 +908,6 @@
             "type": "integer"
           }
         },
-        "required": [
-          "name"
-        ],
         "type": "object"
       },
       "CreateUploadBody": {
@@ -4673,7 +4670,7 @@
             "type": "integer"
           },
           "name": {
-            "description": "The snapshot's label.",
+            "description": "The snapshot's label. The field is left out for a snapshot created without a label.",
             "type": "string"
           },
           "namespace_id": {
@@ -4688,7 +4685,6 @@
         "required": [
           "snapshot_id",
           "namespace_id",
-          "name",
           "captured_seq",
           "created_at_ms"
         ],
@@ -4729,7 +4725,7 @@
           },
           "owner": {
             "$ref": "#/components/schemas/SnapshotRecordOwner",
-            "description": "The snapshot's owner. For a user snapshot, the owner includes the label."
+            "description": "The snapshot's owner. For a user snapshot with a label, the owner includes the label."
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/SnapshotId",
@@ -4794,12 +4790,11 @@
             "type": "string"
           },
           "name": {
-            "description": "The label that the creator recorded. Labels don't need to be unique.",
+            "description": "The label that the creator recorded, if any. Labels don't need to be unique.",
             "type": "string"
           }
         },
         "required": [
-          "name",
           "kind"
         ],
         "type": "object"

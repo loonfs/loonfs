@@ -9,8 +9,11 @@ use std::num::NonZeroU64;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateSnapshotRequest {
-    /// The snapshot's label, which doesn't need to be unique.
-    pub name: String,
+    /// The snapshot's label, which doesn't need to be unique. Omit the field for a snapshot with no
+    /// label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub name: Option<String>,
     /// The snapshot's lifetime in milliseconds, counted from the server's current time. Omit it to
     /// keep the snapshot until it's deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,8 +42,10 @@ pub enum SnapshotRecordOwner {
     /// A snapshot, which a caller created. It's deleted by its ID or after it expires.
     #[cfg_attr(feature = "openapi", schema(title = "SnapshotRecordOwnerUser"))]
     User {
-        /// The label that the creator recorded. Labels don't need to be unique.
-        name: String,
+        /// The label that the creator recorded, if any. Labels don't need to be unique.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "openapi", schema(nullable = false))]
+        name: Option<String>,
     },
     /// A snapshot that keeps the source state that one fork attempt starts from.
     #[cfg_attr(feature = "openapi", schema(title = "SnapshotRecordOwnerFork"))]
@@ -62,7 +67,7 @@ pub struct SnapshotRecord {
     pub namespace_id: NamespaceId,
     /// The snapshot's durable ID.
     pub snapshot_id: SnapshotId,
-    /// The snapshot's owner. For a user snapshot, the owner includes the label.
+    /// The snapshot's owner. For a user snapshot with a label, the owner includes the label.
     pub owner: SnapshotRecordOwner,
     /// The time the snapshot record was created, in Unix milliseconds.
     pub created_at_ms: u64,
@@ -85,8 +90,10 @@ pub struct Snapshot {
     pub snapshot_id: SnapshotId,
     /// The namespace whose state the snapshot captured.
     pub namespace_id: NamespaceId,
-    /// The snapshot's label.
-    pub name: String,
+    /// The snapshot's label. The field is left out for a snapshot created without a label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub name: Option<String>,
     /// The namespace sequence that the snapshot captured.
     pub captured_seq: CommitSeq,
     /// The time the snapshot record was created, in Unix milliseconds.
@@ -157,7 +164,7 @@ mod tests {
             snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
                 .expect("snapshot id"),
             owner: SnapshotRecordOwner::User {
-                name: "release".to_owned(),
+                name: Some("release".to_owned()),
             },
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: Some(1_752_626_600_000),
@@ -198,7 +205,7 @@ mod tests {
             snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
                 .expect("snapshot id"),
             owner: SnapshotRecordOwner::User {
-                name: "release".to_owned(),
+                name: Some("release".to_owned()),
             },
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: None,

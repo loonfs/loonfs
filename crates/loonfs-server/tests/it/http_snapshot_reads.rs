@@ -703,7 +703,13 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
 
     let unexpiring = harness
         .client
-        .create_snapshot(&namespace, "operator")
+        .create_snapshot_with_options(
+            &namespace,
+            &loonfs_client::CreateSnapshotOptions {
+                name: Some("operator".to_owned()),
+                ..loonfs_client::CreateSnapshotOptions::default()
+            },
+        )
         .await
         .expect("create a snapshot without an expiry");
     assert_eq!(unexpiring.expires_at_ms, None);

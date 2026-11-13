@@ -93,7 +93,10 @@ async fn snapshot_fold_reads(
             }
             SnapshotCreation::Snapshot => {
                 namespace
-                    .create_snapshot("snapshot")
+                    .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+                        name: Some("snapshot".to_owned()),
+                        ..crate::CreateSnapshotOptions::default()
+                    })
                     .await
                     .expect("create snapshot");
             }

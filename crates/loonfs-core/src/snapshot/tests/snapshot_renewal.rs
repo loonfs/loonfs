@@ -20,7 +20,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
         let snapshot = namespace
             .create_snapshot_record(
                 SnapshotOwner::User {
-                    name: "short lease".to_owned(),
+                    name: Some("short lease".to_owned()),
                     expires_at_ms: Some(1_001),
                 },
                 crate::test_support::folded_manifest(&namespace)
@@ -102,7 +102,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
         let snapshot = namespace
             .create_snapshot_record(
                 SnapshotOwner::User {
-                    name: "short lease".to_owned(),
+                    name: Some("short lease".to_owned()),
                     expires_at_ms: Some(1_001),
                 },
                 crate::test_support::folded_manifest(&namespace)
@@ -169,7 +169,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
     let snapshot = namespace
         .create_snapshot_record(
             SnapshotOwner::User {
-                name: "short lease".to_owned(),
+                name: Some("short lease".to_owned()),
                 expires_at_ms: Some(1_001),
             },
             crate::test_support::folded_manifest(&namespace)

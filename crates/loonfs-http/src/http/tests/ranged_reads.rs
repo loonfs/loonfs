@@ -87,7 +87,10 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
         .await
         .expect("fold revision 1");
     let snapshot = namespace
-        .create_snapshot("before-append")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("before-append".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("snapshot");
     namespace

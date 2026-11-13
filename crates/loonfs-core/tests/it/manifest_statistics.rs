@@ -204,7 +204,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
     let engine = namespace_engine(&store, &parent, &context);
     let snapshot = engine
         .create_snapshot(
-            "baseline".to_owned(),
+            Some("baseline".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &parent))
                 .await
@@ -237,7 +237,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
     engine.fold_wal().await.expect("fold parent");
     let layout_snapshot = engine
         .create_snapshot(
-            "layout".to_owned(),
+            Some("layout".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &parent))
                 .await

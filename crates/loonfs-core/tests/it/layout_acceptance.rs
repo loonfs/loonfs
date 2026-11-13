@@ -200,7 +200,7 @@ async fn maintenance_preserves_the_logical_head() {
 
     engine
         .create_snapshot(
-            "test-snapshot".to_owned(),
+            Some("test-snapshot".to_owned()),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &namespace_id))
                 .await

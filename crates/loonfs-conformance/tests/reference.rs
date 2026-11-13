@@ -999,7 +999,13 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
     }
 
     let snapshot = client
-        .create_snapshot(&namespace, &request.snapshot_name)
+        .create_snapshot_with_options(
+            &namespace,
+            &loonfs_client::CreateSnapshotOptions {
+                name: Some(request.snapshot_name.clone()),
+                ..loonfs_client::CreateSnapshotOptions::default()
+            },
+        )
         .await
         .expect("create snapshot");
     let captured = client
@@ -2146,14 +2152,17 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
             .post(&snapshots_url)
             .bearer_auth(AUTH_TOKEN)
             .json(&CreateSnapshotRequest {
-                name: request.snapshot_name.clone(),
+                name: Some(request.snapshot_name.clone()),
                 ttl_ms: Some(request.create_ttl_ms),
             }),
         "create snapshot",
     )
     .await;
     assert_eq!(snapshot.namespace_id, namespace);
-    assert_eq!(snapshot.name, request.snapshot_name);
+    assert_eq!(
+        snapshot.name.as_deref(),
+        Some(request.snapshot_name.as_str())
+    );
     assert_eq!(snapshot.captured_seq.0, expected.snapshot_head_seq);
     assert!(snapshot
         .expires_at_ms
@@ -2342,7 +2351,10 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
     .await;
     assert_eq!(extended.snapshot_id, snapshot.snapshot_id);
     assert_eq!(extended.captured_seq.0, expected.snapshot_head_seq);
-    assert_eq!(extended.name, request.snapshot_name);
+    assert_eq!(
+        extended.name.as_deref(),
+        Some(request.snapshot_name.as_str())
+    );
     assert!(extended.expires_at_ms > snapshot.expires_at_ms);
 
     let listed: ListSnapshotsResponse = raw_success_json(
@@ -2444,13 +2456,16 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
             .post(&snapshots_url)
             .bearer_auth(AUTH_TOKEN)
             .json(&CreateSnapshotRequest {
-                name: request.unexpiring_snapshot_name.clone(),
+                name: Some(request.unexpiring_snapshot_name.clone()),
                 ttl_ms: None,
             }),
         "create snapshot without a ttl",
     )
     .await;
-    assert_eq!(unexpiring.name, request.unexpiring_snapshot_name);
+    assert_eq!(
+        unexpiring.name.as_deref(),
+        Some(request.unexpiring_snapshot_name.as_str())
+    );
     assert_eq!(unexpiring.expires_at_ms, None);
     let unexpiring_id = unexpiring.snapshot_id.as_str();
     let unexpiring_extended: Snapshot = raw_success_json(

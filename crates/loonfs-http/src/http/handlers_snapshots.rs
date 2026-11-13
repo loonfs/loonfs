@@ -49,12 +49,10 @@ pub(super) async fn create_snapshot(
 ) -> Result<Json<Snapshot>, ApiResponseError> {
     let namespace = state.open_writer(&namespace_id, subject).await?;
     let snapshot = namespace
-        .create_snapshot_with_options(
-            &request.name,
-            &loonfs::CreateSnapshotOptions {
-                ttl_ms: request.ttl_ms,
-            },
-        )
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: request.name,
+            ttl_ms: request.ttl_ms,
+        })
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_body_field_params(&["/name"]))?;
     Ok(Json(snapshot))

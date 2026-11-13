@@ -255,7 +255,10 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_publication_store(temp_dir.path(), &namespace_id));
     let (writer, namespace) = published_namespace(store.clone() as SharedStore).await;
-    let options = crate::CreateSnapshotOptions::default();
+    let options = crate::CreateSnapshotOptions {
+        name: Some("during".to_owned()),
+        ..crate::CreateSnapshotOptions::default()
+    };
     let before = writer
         .core
         .writer_position(&namespace_id)
@@ -267,9 +270,8 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         ))),
         async {
             store.wait_until_blocked().await;
-            let (snapshot, ()) = futures::join!(
-                namespace.create_snapshot_with_options("during", &options),
-                async {
+            let (snapshot, ()) =
+                futures::join!(namespace.create_snapshot_with_options(&options), async {
                     // The snapshot's manifest is durable, and its move of
                     // the position waits for the publish's engine.
                     bounded(Duration::from_secs(10), async {
@@ -291,8 +293,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                         before.read_basis.basis.manifest_no()
                     );
                     store.release();
-                }
-            );
+                });
             snapshot.expect("snapshot")
         }
     );

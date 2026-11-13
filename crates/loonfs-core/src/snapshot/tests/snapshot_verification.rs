@@ -181,7 +181,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
     let (result, ()) = tokio::join!(
         namespace.create_snapshot_record(
             SnapshotOwner::User {
-                name: "racing".to_owned(),
+                name: Some("racing".to_owned()),
                 expires_at_ms: None
             },
             current.manifest(),
@@ -315,11 +315,11 @@ async fn a_fork_snapshot_id_is_read_like_a_user_snapshot_and_refused_by_every_ot
     let mut snapshots = Vec::new();
     for owner in [
         SnapshotOwner::User {
-            name: "user".to_owned(),
+            name: Some("user".to_owned()),
             expires_at_ms: None,
         },
         SnapshotOwner::User {
-            name: "snapshot".to_owned(),
+            name: Some("snapshot".to_owned()),
             expires_at_ms: Some(u64::MAX),
         },
         SnapshotOwner::Fork {

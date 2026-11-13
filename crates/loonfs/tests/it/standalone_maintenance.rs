@@ -154,12 +154,10 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
     let snapshot = future_runtime
         .open_namespace(&namespace_id)
         .expect("open namespace")
-        .create_snapshot_with_options(
-            "pinned",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(1_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("pinned".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(1_000),
+        })
         .await
         .expect("snapshot");
     assert_eq!(snapshot.created_at_ms, clock.now_ms());

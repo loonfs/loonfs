@@ -58,7 +58,13 @@ async fn http_paginates_the_snapshot_inventory_and_rejects_invalid_requests() {
         expected_ids.push(
             harness
                 .client
-                .create_snapshot(&demo, &format!("snapshot-{index}"))
+                .create_snapshot_with_options(
+                    &demo,
+                    &loonfs_client::CreateSnapshotOptions {
+                        name: Some(format!("snapshot-{index}")),
+                        ..loonfs_client::CreateSnapshotOptions::default()
+                    },
+                )
                 .await
                 .expect("create snapshot")
                 .snapshot_id,

@@ -94,7 +94,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let snapshot = namespace
         .create_snapshot_record(
             SnapshotOwner::User {
-                name: "before reuse".into(),
+                name: Some("before reuse".into()),
                 expires_at_ms: Some(u64::MAX),
             },
             crate::test_support::folded_manifest(&namespace)

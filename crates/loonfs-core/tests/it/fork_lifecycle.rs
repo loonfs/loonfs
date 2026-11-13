@@ -103,7 +103,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
         .create_snapshot(
-            "basis".to_owned(),
+            Some("basis".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
                 .await
@@ -190,7 +190,7 @@ async fn invalid_snapshot_forks_write_nothing() {
     let engine = namespace_engine(&store, &source, &context);
     let expired = engine
         .create_snapshot(
-            "expired".to_owned(),
+            Some("expired".to_owned()),
             Some(1),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
                 .await
@@ -200,7 +200,7 @@ async fn invalid_snapshot_forks_write_nothing() {
         .expect("expired snapshot");
     let foreign = namespace_engine(&store, &other, &context)
         .create_snapshot(
-            "foreign".to_owned(),
+            Some("foreign".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &other))
                 .await
@@ -235,7 +235,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
         .create_snapshot(
-            "basis".to_owned(),
+            Some("basis".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
                 .await
@@ -572,7 +572,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .expect("seed shared file");
     namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
-            "test-snapshot".to_owned(),
+            Some("test-snapshot".to_owned()),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(
                 &store,
@@ -1101,7 +1101,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
     let snapshot = namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
-            "test-snapshot".to_owned(),
+            Some("test-snapshot".to_owned()),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(
                 &store,

@@ -963,7 +963,10 @@ fn maintenance_snapshot_and_retention_are_explicit_one_shot_calls() {
         let snapshot = maintenance_runtime
             .open_namespace(&namespace_id)
             .expect("open namespace")
-            .create_snapshot("handle-snapshot")
+            .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+                name: Some("handle-snapshot".to_owned()),
+                ..loonfs::CreateSnapshotOptions::default()
+            })
             .await
             .expect("create snapshot");
         assert!(snapshot.snapshot_id.manifest_no() > ManifestNo(0));

@@ -426,7 +426,10 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<Snapshot> {
         self.namespace_writer(namespace_id)?
-            .create_snapshot("test-snapshot")
+            .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+                name: Some("test-snapshot".to_owned()),
+                ..loonfs::CreateSnapshotOptions::default()
+            })
             .await
     }
 

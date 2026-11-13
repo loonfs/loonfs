@@ -361,7 +361,7 @@ impl Namespace<Writable> {
                     .writer_engine(&self.mode.writer.writer_id, fork_id);
                 async move {
                     engine
-                        .create_snapshot("merge".to_owned(), expires_at_ms, manifest)
+                        .create_snapshot(Some("merge".to_owned()), expires_at_ms, manifest)
                         .await
                 }
             })

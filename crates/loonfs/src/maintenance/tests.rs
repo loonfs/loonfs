@@ -394,7 +394,10 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     maintenance_runtime
         .open_namespace(&namespace)
         .expect("open namespace")
-        .create_snapshot("basis")
+        .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+            name: Some("basis".to_owned()),
+            ..crate::CreateSnapshotOptions::default()
+        })
         .await
         .expect("snapshot");
     let before = current_manifest_payload(store.as_ref(), &namespace).await;

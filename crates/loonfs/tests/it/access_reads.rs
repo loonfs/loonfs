@@ -550,7 +550,10 @@ async fn listing_a_snapshots_files_requires_an_administrator() {
         .open_namespace(&namespace_id)
         .expect("open namespace")
         .with_subject(subject("prn_root"))
-        .create_snapshot("snapshot")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("snapshot".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("create snapshot");
     let list = |principal: &str| {

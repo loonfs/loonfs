@@ -750,7 +750,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Abort an upload session | `abort_upload` | `idempotent` | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable, and a completed session can't be aborted) |
 | Read committed changes | `list_changes` | `idempotent` | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100&snapshot_id=...` (`snapshot_id` is optional) |
 | Read the differences between two sequences | `list_diff` | `idempotent` | `GET /v0/namespaces/{ns}/diff?from_seq=418&to_seq=425&path=/docs&after_seq=418&limit=100` (`to_seq`, `path`, and `after_seq` are optional) |
-| Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`. Requires `name`, and accepts `ttl_ms`. |
+| Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`. Accepts `name` and `ttl_ms`. |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
 | Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (returns an expired snapshot that garbage collection hasn't deleted, and a missing ID returns `snapshot_not_found`) |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and never moves the expiry earlier. |
@@ -976,9 +976,9 @@ A pool's job that deletes two content objects and the records of one upload sess
 
 A "snapshot" is a stored record that keeps one manifest of a namespace, and the segments it lists, so that version of the namespace stays readable (see [Snapshots](format.md#8-snapshots)). Every snapshot has an owner. A caller creates and deletes a "user snapshot", and a fork keeps a "fork snapshot" on its source until the fork is retired. The snapshot routes manage only user snapshots. For example, a sandbox can create a snapshot before an agent edits it, and then read the snapshot, or fork it into a new namespace, after the edits. A snapshot's `snapshot_id` is its ID, and its `captured_seq` is the namespace sequence it captured.
 
-A create request requires `name`, and it accepts `ttl_ms`. The name is a label, not a key. Every create call writes a new record, so several snapshots can have the same name. Creating a snapshot first folds any WAL tail after the current manifest, and then writes a snapshot that keeps the resulting manifest. A snapshot with `ttl_ms` expires that many milliseconds after the server's current time, and a snapshot without it doesn't expire. A `ttl_ms` of zero returns `invalid_request`.
+A create request accepts an optional `name` and an optional `ttl_ms`. The name is a label of 1 to 128 characters, not a key, and an empty name returns `invalid_request`. Every create call writes a new record, so several snapshots can have the same name. For example, the body `{}` creates a snapshot with no name that doesn't expire. Creating a snapshot first folds any WAL tail after the current manifest, and then writes a snapshot that keeps the resulting manifest. A snapshot with `ttl_ms` expires that many milliseconds after the server's current time, and a snapshot without it doesn't expire. A `ttl_ms` of zero returns `invalid_request`.
 
-Create, list, retrieve, and extend return the same snapshot object, which contains `snapshot_id`, `namespace_id`, `name`, `captured_seq`, `created_at_ms`, and an optional `expires_at_ms`. For example:
+Create, list, retrieve, and extend return the same snapshot object, which contains `snapshot_id`, `namespace_id`, `captured_seq`, `created_at_ms`, an optional `name`, and an optional `expires_at_ms`. The object has no `name` field for a snapshot that was created without a name. For example:
 
 ```json
 {"snapshot_id":"snp_00000000000000000009-00000000000000000000000009","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
@@ -1016,7 +1016,7 @@ Why does an expired snapshot stay listed when it can't be read? A snapshot's exp
 
 The snapshot inventory lists every snapshot of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes user snapshots, whose `owner.kind` is `user`, and fork snapshots, whose `owner.kind` is `fork`. The inventory has no create or delete routes. User snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork snapshot once its target namespace no longer reads through it.
 
-Each entry is a snapshot record, which contains `namespace_id`, `snapshot_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a user snapshot, `owner` contains its `name`.
+Each entry is a snapshot record, which contains `namespace_id`, `snapshot_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a user snapshot that has a name, `owner` contains the `name`.
 
 A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
 

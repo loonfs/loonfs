@@ -56,14 +56,14 @@ fn a_created_snapshot_is_listed_with_its_expiry() {
     )
     .expect("put file");
 
-    let snapshot = block_on(namespace.create_snapshot_with_options(
-        "report-run",
-        &CreateSnapshotOptions {
+    let snapshot = block_on(
+        namespace.create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("report-run".to_owned()),
             ttl_ms: std::num::NonZeroU64::new(60_000),
-        },
-    ))
+        }),
+    )
     .expect("create snapshot");
-    assert_eq!(snapshot.name, "report-run");
+    assert_eq!(snapshot.name.as_deref(), Some("report-run"));
     let expires_at_ms = snapshot
         .expires_at_ms
         .expect("a snapshot with a TTL expires");
@@ -76,7 +76,7 @@ fn a_created_snapshot_is_listed_with_its_expiry() {
         .iter()
         .find(|listed| listed.snapshot_id == snapshot.snapshot_id.clone())
         .expect("the snapshot is in the snapshot listing");
-    assert_eq!(listed_snapshot.name, "report-run");
+    assert_eq!(listed_snapshot.name.as_deref(), Some("report-run"));
     assert_eq!(listed_snapshot.expires_at_ms, Some(expires_at_ms));
     assert_eq!(listed_snapshot.captured_seq, snapshot.captured_seq);
 }
@@ -106,7 +106,10 @@ async fn snapshot_create_recovers_a_record_write_with_an_ambiguous_outcome() {
     store.fail_next(1);
 
     let snapshot = namespace
-        .create_snapshot("report-run")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("report-run".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("reconcile the durable snapshot record");
 
@@ -145,12 +148,10 @@ async fn snapshot_extension_recovers_a_record_write_with_an_ambiguous_outcome() 
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace
-        .create_snapshot_with_options(
-            "report-run",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(60_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("report-run".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(60_000),
+        })
         .await
         .expect("create snapshot");
     store.fail_next(1);
@@ -192,7 +193,10 @@ async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace
-        .create_snapshot("report-run")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("report-run".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("create snapshot");
     store.fail_next(1);
@@ -311,7 +315,12 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
         ErrorCode::NamespaceDeleted,
     );
     assert_core_error_kind(
-        namespace.create_snapshot("after-delete").await,
+        namespace
+            .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+                name: Some("after-delete".to_owned()),
+                ..loonfs::CreateSnapshotOptions::default()
+            })
+            .await,
         ErrorCode::NamespaceDeleted,
     );
 }
@@ -342,12 +351,10 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
         .await
         .expect("put file");
     let snapshot = namespace
-        .create_snapshot_with_options(
-            "short",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(1_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("short".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(1_000),
+        })
         .await
         .expect("create snapshot");
     let expires_at_ms = snapshot.expires_at_ms.expect("an expiry");
@@ -446,7 +453,10 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     let root = namespace_reader.stat("/").await.expect("root");
     let before = namespace_reader.stat("/file").await.expect("file");
     let snapshot = namespace_writer
-        .create_snapshot("options")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("options".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("snapshot");
     // A later revision and a deletion don't change what the snapshot lists.
@@ -539,7 +549,10 @@ async fn shared_file_and_download_options_select_the_snapshot() {
         .await
         .expect("file");
     let snapshot = namespace_writer
-        .create_snapshot("file-options")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("file-options".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("snapshot");
     namespace_writer

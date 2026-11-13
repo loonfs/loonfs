@@ -92,7 +92,13 @@ async fn a_restarted_server_reads_its_metadata_blocks_from_the_ssd_tier() {
     // moves the head, so reads resolve against the folded manifest.
     first
         .client
-        .create_snapshot(&namespace, "warm")
+        .create_snapshot_with_options(
+            &namespace,
+            &loonfs_client::CreateSnapshotOptions {
+                name: Some("warm".to_owned()),
+                ..loonfs_client::CreateSnapshotOptions::default()
+            },
+        )
         .await
         .expect("create snapshot");
     let extra = NamespacePath::parse("warm", "/docs/after.txt").expect("parse path");

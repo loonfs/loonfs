@@ -503,8 +503,8 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
         .client
         .create_snapshot_with_options(
             &source,
-            "basis",
             &loonfs_client::CreateSnapshotOptions {
+                name: Some("basis".to_owned()),
                 ttl_ms: std::num::NonZeroU64::new(60_000),
             },
         )

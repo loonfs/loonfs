@@ -1178,7 +1178,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
     let first = namespace
         .create_snapshot_record(
             SnapshotOwner::User {
-                name: "keeper".to_owned(),
+                name: Some("keeper".to_owned()),
                 expires_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
@@ -1193,7 +1193,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
     let second = namespace
         .create_snapshot_record(
             SnapshotOwner::User {
-                name: "releaser".to_owned(),
+                name: Some("releaser".to_owned()),
                 expires_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
@@ -2339,15 +2339,15 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
     let mut snapshots = Vec::new();
     for owner in [
         SnapshotOwner::User {
-            name: "permanent".to_owned(),
+            name: Some("permanent".to_owned()),
             expires_at_ms: None,
         },
         SnapshotOwner::User {
-            name: "expiring".to_owned(),
+            name: Some("expiring".to_owned()),
             expires_at_ms: Some(2_000),
         },
         SnapshotOwner::User {
-            name: "snapshot".to_owned(),
+            name: Some("snapshot".to_owned()),
             expires_at_ms: Some(2_000),
         },
         SnapshotOwner::Fork {
@@ -2440,7 +2440,7 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
     let initial = namespace
         .create_snapshot_record(
             SnapshotOwner::User {
-                name: "initial".to_owned(),
+                name: Some("initial".to_owned()),
                 expires_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)

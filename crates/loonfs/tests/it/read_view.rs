@@ -89,12 +89,10 @@ async fn read_during_compaction_and_collection(
     let snapshot = if durable {
         Some(
             namespace_writer
-                .create_snapshot_with_options(
-                    "durable",
-                    &CreateSnapshotOptions {
-                        ttl_ms: std::num::NonZeroU64::new(60_000),
-                    },
-                )
+                .create_snapshot_with_options(&CreateSnapshotOptions {
+                    name: Some("durable".to_owned()),
+                    ttl_ms: std::num::NonZeroU64::new(60_000),
+                })
                 .await
                 .expect("snapshot"),
         )
@@ -276,12 +274,10 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .await
         .expect("file");
     let snapshot = namespace_writer
-        .create_snapshot_with_options(
-            "durable",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(60_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("durable".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(60_000),
+        })
         .await
         .expect("snapshot");
     let unexpiring = runtime
@@ -367,12 +363,10 @@ async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_snapshot
         .await
         .expect("file");
     let snapshot = namespace_writer
-        .create_snapshot_with_options(
-            "deleted",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(60_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("deleted".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(60_000),
+        })
         .await
         .expect("snapshot");
     let unexpiring = runtime
@@ -468,11 +462,17 @@ async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapsho
             .expect("seed file");
     }
     let first = namespace_writer
-        .create_snapshot("first")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("first".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("create first snapshot");
     let twin = namespace_writer
-        .create_snapshot("twin")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("twin".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("create a snapshot of the same head");
     runtime
@@ -485,7 +485,10 @@ async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapsho
         .await
         .expect("change the directory");
     let later = namespace_writer
-        .create_snapshot("later")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("later".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("create later snapshot");
     let at = |snapshot: &loonfs::Snapshot| ListOptions {
@@ -578,12 +581,10 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
     }
 
     let first_snapshot = namespace_writer
-        .create_snapshot_with_options(
-            "first",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(60_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("first".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(60_000),
+        })
         .await
         .expect("create first snapshot");
     let first_view = namespace
@@ -620,12 +621,10 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         .await
         .expect("change current directory");
     let second_snapshot = namespace_writer
-        .create_snapshot_with_options(
-            "second",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(60_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("second".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(60_000),
+        })
         .await
         .expect("create second snapshot");
     let second_view = namespace
@@ -1074,12 +1073,10 @@ async fn snapshot_read_views_serve_captured_state_and_enforce_release() {
         .await
         .expect("resolve captured file");
     let snapshot = namespace_writer
-        .create_snapshot_with_options(
-            "reader",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(60_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("reader".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(60_000),
+        })
         .await
         .expect("create snapshot");
     let snapshot_options = loonfs::StatOptions {
@@ -1199,12 +1196,10 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace_writer
-        .create_snapshot_with_options(
-            "clock",
-            &CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(EXPIRES_AT_MS - 1_750_000_000_000),
-            },
-        )
+        .create_snapshot_with_options(&CreateSnapshotOptions {
+            name: Some("clock".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(EXPIRES_AT_MS - 1_750_000_000_000),
+        })
         .await
         .expect("create snapshot");
     assert_eq!(snapshot.expires_at_ms, Some(EXPIRES_AT_MS));
@@ -1255,7 +1250,10 @@ async fn a_snapshot_read_view_rejects_options_naming_another_snapshot() {
     for name in ["first", "second"] {
         snapshots.push(
             namespace_writer
-                .create_snapshot(name)
+                .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+                    name: Some(name.to_owned()),
+                    ..loonfs::CreateSnapshotOptions::default()
+                })
                 .await
                 .expect("create snapshot"),
         );

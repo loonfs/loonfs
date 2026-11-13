@@ -713,7 +713,13 @@ async fn gcp_gcs_append_keeps_crc32c_after_a_snapshot() {
 
     harness
         .client
-        .create_snapshot(&namespace_id, "appended")
+        .create_snapshot_with_options(
+            &namespace_id,
+            &loonfs_client::CreateSnapshotOptions {
+                name: Some("appended".to_owned()),
+                ..loonfs_client::CreateSnapshotOptions::default()
+            },
+        )
         .await
         .expect("snapshot append");
     let folded = harness

@@ -121,7 +121,8 @@ pub(crate) struct MergeArgs {
 pub(crate) enum SnapshotCommand {
     /// Save the namespace's current state as a new snapshot.
     ///
-    /// Every call creates a new snapshot. The name is a label, not a key.
+    /// Every call creates a new snapshot. The name is an optional label, not a
+    /// key.
     Create(SnapshotCreateArgs),
     /// List snapshots in snapshot ID order.
     ///
@@ -144,9 +145,10 @@ pub(crate) struct SnapshotTargetArgs {
 pub(crate) struct SnapshotCreateArgs {
     #[command(flatten)]
     pub target: SnapshotTargetArgs,
-    /// Snapshot label. Labels don't need to be unique.
+    /// Snapshot label. Labels don't need to be unique. Without it, the
+    /// snapshot has no label.
     #[arg(long)]
-    pub name: String,
+    pub name: Option<String>,
     /// How long the snapshot remains available, in milliseconds. Without
     /// it, the snapshot lasts until it's deleted.
     #[arg(long)]

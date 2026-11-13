@@ -43,8 +43,8 @@ async fn run_snapshot_create(
         .client
         .create_snapshot_with_options(
             context.namespace(),
-            &args.name,
             &CreateSnapshotOptions {
+                name: args.name,
                 ttl_ms: args.ttl_ms,
             },
         )

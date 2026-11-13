@@ -56,7 +56,15 @@ fn start_creations(
     let source = namespace_id.clone();
     let target = NamespaceId::parse(format!("{namespace_id}-fork")).expect("fork namespace id");
     vec![
-        tokio::spawn(async move { namespace.create_snapshot("snapshot").await.map(|_| ()) }),
+        tokio::spawn(async move {
+            namespace
+                .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+                    name: Some("snapshot".to_owned()),
+                    ..crate::CreateSnapshotOptions::default()
+                })
+                .await
+                .map(|_| ())
+        }),
         tokio::spawn(async move {
             fork_writer
                 .fork_namespace(&source, &target, &loonfs_test_support::test_actor())
@@ -92,12 +100,10 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     let snapshot = writer
         .open_namespace(&folded)
         .expect("open namespace")
-        .create_snapshot_with_options(
-            "fork-basis",
-            &crate::CreateSnapshotOptions {
-                ttl_ms: std::num::NonZeroU64::new(60_000),
-            },
-        )
+        .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+            name: Some("fork-basis".to_owned()),
+            ttl_ms: std::num::NonZeroU64::new(60_000),
+        })
         .await
         .expect("create the snapshot a fork starts from");
     let unfolded_tail = wal_tail_objects(store.as_ref(), &unfolded).await;
@@ -263,7 +269,14 @@ async fn snapshots_that_wait_for_a_fold_share_the_next_fold() {
     let folds_before = folds_run(&recorder);
     let snapshot = |name: &'static str| {
         let namespace = namespace.clone();
-        tokio::spawn(async move { namespace.create_snapshot(name).await })
+        tokio::spawn(async move {
+            namespace
+                .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+                    name: Some(name.to_owned()),
+                    ..crate::CreateSnapshotOptions::default()
+                })
+                .await
+        })
     };
 
     store.block_next();

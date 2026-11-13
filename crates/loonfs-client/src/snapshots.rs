@@ -15,33 +15,30 @@ use std::num::NonZeroU64;
 pub type SnapshotsPager = Pager<ListSnapshotsResponse, ClientError>;
 
 impl Client {
-    /// Saves the namespace's current state as a snapshot that doesn't expire.
+    /// Saves the namespace's current state as a snapshot that has no label and
+    /// doesn't expire.
     ///
     /// See [`Self::create_snapshot_with_options`].
-    pub async fn create_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-        name: &str,
-    ) -> Result<Snapshot> {
-        self.create_snapshot_with_options(namespace_id, name, &CreateSnapshotOptions::default())
+    pub async fn create_snapshot(&self, namespace_id: &NamespaceId) -> Result<Snapshot> {
+        self.create_snapshot_with_options(namespace_id, &CreateSnapshotOptions::default())
             .await
     }
 
-    /// Saves the namespace's current state as a snapshot. With
-    /// `options.ttl_ms`, the snapshot expires that many milliseconds from the
-    /// server's current time, and without it, the snapshot doesn't expire.
+    /// Saves the namespace's current state as a snapshot. With `options.name`,
+    /// the snapshot has that label, and without it, the snapshot has no label.
+    /// With `options.ttl_ms`, the snapshot expires that many milliseconds from
+    /// the server's current time, and without it, the snapshot doesn't expire.
     ///
     /// Retrying this request starts a distinct attempt.
     pub async fn create_snapshot_with_options(
         &self,
         namespace_id: &NamespaceId,
-        name: &str,
         options: &CreateSnapshotOptions,
     ) -> Result<Snapshot> {
         let url = self.namespace_url(namespace_id, "/snapshots");
         self.send_json(self.request(operations::CREATE_SNAPSHOT, &url).json(
             &CreateSnapshotRequest {
-                name: name.to_owned(),
+                name: options.name.clone(),
                 ttl_ms: options.ttl_ms,
             },
         )?)

@@ -19,15 +19,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a snapshot of `manifest`, the manifest that the caller's fold
     /// of the WAL tail published or found current.
     ///
-    /// Every call generates a fresh `SnapshotId`, and `name` is a label, not a
-    /// key. A manifest that stopped being current before the snapshot's
-    /// verification returns `snapshot_unavailable`, so the caller folds
-    /// and snapshots again. A snapshot with `expires_at_ms` can't be read
+    /// Every call generates a fresh `SnapshotId`, and `name` is an optional
+    /// label, not a key. A manifest that stopped being current before the
+    /// snapshot's verification returns `snapshot_unavailable`, so the caller
+    /// folds and snapshots again. A snapshot with `expires_at_ms` can't be read
     /// after that time, and it stays listed until collection deletes it.
     /// `None` keeps the snapshot until it's deleted.
     pub async fn create_snapshot(
         &self,
-        name: String,
+        name: Option<String>,
         expires_at_ms: Option<u64>,
         manifest: ManifestRef,
     ) -> Result<Snapshot> {
@@ -92,7 +92,9 @@ fn validate_snapshot_owner(owner: &SnapshotOwner) -> Result<()> {
             name,
             expires_at_ms,
         } => {
-            validate_snapshot_name(name)?;
+            if let Some(name) = name {
+                validate_snapshot_name(name)?;
+            }
             if *expires_at_ms == Some(0) {
                 return Err(CoreError::InvalidSnapshotRequest(
                     "snapshot expiry must not be zero".to_owned(),

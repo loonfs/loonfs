@@ -1245,7 +1245,7 @@ Each snapshot is stored at `snapshots/{snapshot_id}.json`. Its ID includes the n
 
 | Owner | Stored owner fields | Reads | Removal |
 | --- | --- | --- | --- |
-| `user` | `name`, optional `expires_at_ms` | Readable before its expiry time. A snapshot without an expiry stays readable while the record exists. | Explicit deletion, or garbage collection after expiry plus the grace window. Without an expiry, only explicit deletion removes it from an active namespace. |
+| `user` | optional `name`, optional `expires_at_ms` | Readable before its expiry time. A snapshot without an expiry stays readable while the record exists. | Explicit deletion, or garbage collection after expiry plus the grace window. Without an expiry, only explicit deletion removes it from an active namespace. |
 | `fork` | `target_namespace_id` | Readable while the record exists. It keeps the runs that the target's manifest lists. | Garbage collection, after the target stops depending on it (see [Snapshot cleanup](#117-snapshot-cleanup)). |
 
 The record also stores the namespace, head sequence, payload checksum, and creation time. The manifest number comes from the snapshot ID. A snapshot has no lifecycle status. Creating the record creates the snapshot, and deleting the record ends it. Fork snapshots have no expiry and no renewal protocol.
