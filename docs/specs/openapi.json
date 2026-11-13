@@ -863,7 +863,7 @@
           "retention_window_ms": {
             "description": "The namespace's retention window, in milliseconds, which must be at least the grace window\n(86400000, which is 24 hours). The reference server's maintenance sweep uses this window\nfor the namespace. Without this field, the namespace's window is the server's\n`retention_window_ms` setting, if the server has that setting. A `retention_window`\nmaintenance job can change or clear the window later.",
             "format": "int64",
-            "minimum": 1,
+            "minimum": 86400000,
             "type": "integer"
           }
         },
@@ -4264,7 +4264,7 @@
           "retention_window_ms": {
             "description": "The namespace's new retention window, in milliseconds, which must be at least the grace\nwindow (86400000, which is 24 hours). Without it, the job clears the namespace's window,\nand the reference server's maintenance sweep no longer advances the namespace's floor.",
             "format": "int64",
-            "minimum": 1,
+            "minimum": 86400000,
             "type": "integer"
           }
         },
