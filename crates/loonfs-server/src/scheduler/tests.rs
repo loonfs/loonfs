@@ -1097,9 +1097,9 @@ enum Grep {
 /// WAL number after the manifest and a second manifest HEAD. The docs quote
 /// these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
-    (Grep::NotMaintained, 35, 10),
-    (Grep::Maintained, 39, 10),
-    (Grep::Enabled, 40, 10),
+    (Grep::NotMaintained, 34, 9),
+    (Grep::Maintained, 38, 9),
+    (Grep::Enabled, 39, 9),
 ];
 
 #[tokio::test(start_paused = true)]

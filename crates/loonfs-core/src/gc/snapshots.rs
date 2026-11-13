@@ -1,6 +1,7 @@
 //! Snapshot deletion decisions, the collection rules for fork snapshots, and grace
 //! window age checks.
 
+use super::deletes::{Counter, Decision};
 use super::live_set::LiveSet;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
@@ -9,17 +10,7 @@ use crate::snapshot::record::load_snapshot_record_at_key;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, SnapshotOwner, SnapshotPayload};
-use loonfs_types::NamespaceId;
-
-pub(super) enum SnapshotSweep {
-    DeleteFork,
-    DeleteUser,
-    Gone,
-    /// Kept. `reclaimable_at_ms` is when a user snapshot becomes deletable.
-    Retain {
-        reclaimable_at_ms: Option<u64>,
-    },
-}
+use loonfs_types::{GcResponse, NamespaceId, RetainedReason};
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Reads the snapshot record at `key` and decides what to do with the snapshot.
@@ -29,13 +20,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         grace_window_ms: u64,
         live: &LiveSet,
         clock: &OperationClock,
-    ) -> Result<SnapshotSweep> {
+    ) -> Result<Decision<GcResponse>> {
         match self.load_listed_snapshot_record(key).await? {
             Some(record) => {
                 self.sweep_snapshot_record(key, &record, grace_window_ms, live, clock)
                     .await
             }
-            None => Ok(SnapshotSweep::Gone),
+            None => Ok(Decision::Gone),
         }
     }
 
@@ -47,9 +38,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         grace_window_ms: u64,
         live: &LiveSet,
         clock: &OperationClock,
-    ) -> Result<SnapshotSweep> {
-        let deletion = match &record.owner {
-            SnapshotOwner::User { .. } => SnapshotSweep::DeleteUser,
+    ) -> Result<Decision<GcResponse>> {
+        let now_ms = clock.request_at_ms();
+        let delete = |counter: Counter<GcResponse>| Decision::Delete {
+            keys: vec![key.to_owned()],
+            counter,
+        };
+        let user: Counter<GcResponse> = match &record.owner {
+            SnapshotOwner::User { .. } => |report| &mut report.deleted_snapshots_by_owner.user,
             SnapshotOwner::Fork {
                 target_namespace_id,
             } => {
@@ -63,12 +59,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         )
                         .await?
                     {
-                        false => SnapshotSweep::DeleteFork,
+                        false => delete(|report| &mut report.deleted_snapshots_by_owner.fork),
                         true => {
                             tracing::debug!(object_key = key, "retaining fork snapshot");
-                            SnapshotSweep::Retain {
-                                reclaimable_at_ms: None,
-                            }
+                            Decision::retain(RetainedReason::SnapshotNotDeletable, None, now_ms)
                         }
                     },
                 );
@@ -84,8 +78,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .then(|| record.created_at_ms.saturating_add(grace_window_ms));
         let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
         Ok(match reclaimable_at_ms {
-            Some(at_ms) if clock.request_at_ms() >= at_ms => deletion,
-            _ => SnapshotSweep::Retain { reclaimable_at_ms },
+            Some(at_ms) if now_ms >= at_ms => delete(user),
+            _ => Decision::retain(
+                RetainedReason::SnapshotNotDeletable,
+                reclaimable_at_ms,
+                now_ms,
+            ),
         })
     }
 

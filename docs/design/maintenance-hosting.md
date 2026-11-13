@@ -124,7 +124,7 @@ A daily sweep costs one namespace listing per page, one pool listing per page, a
 
 | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- |
-| 25 GET or HEAD and 10 LIST | 29 GET or HEAD and 10 LIST | 30 GET or HEAD and 10 LIST |
+| 25 GET or HEAD and 9 LIST | 29 GET or HEAD and 9 LIST | 30 GET or HEAD and 9 LIST |
 
 Objects that are still inside their grace windows, work that's due, and the roots of each fork in a pool add more requests. Deleted namespaces are still listed, because their tombstone manifests are still stored.
 

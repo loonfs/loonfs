@@ -3,6 +3,7 @@
 
 use super::snapshots::GraceAge;
 use crate::error::{CoreError, Result};
+use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use futures::{Stream, TryStreamExt};
 use loonfs_objectstore::{ListedObject, ObjectStore};
@@ -65,6 +66,15 @@ pub(super) enum Decision<R: CollectionReport> {
         counter: Counter<R>,
     },
     Gone,
+}
+
+impl<R: CollectionReport> HeapBytes for Decision<R> {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Delete { keys, .. } => keys.heap_bytes(),
+            Self::Retain { .. } | Self::Gone => 0,
+        }
+    }
 }
 
 impl<R: CollectionReport> Decision<R> {
