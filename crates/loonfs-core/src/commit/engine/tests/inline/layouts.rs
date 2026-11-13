@@ -1320,6 +1320,75 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     }
 }
 
+/// Checks that a failed layout write names the request's operation when an
+/// earlier operation of the request plans two internal operations.
+#[tokio::test]
+async fn a_failed_layout_write_names_the_requests_operation() {
+    use crate::path::write::PublishPlanningSession;
+    use loonfs_test_support::stores::{FailStore, InjectedError, OperationKind};
+
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace.namespace_id.clone();
+    let source = inline(Bytes::from_static(b"source"));
+    publish(&mut engine, &context, candidate("source", vec![source]))
+        .await
+        .expect("source");
+    let denied = FailStore::matching(
+        store,
+        |operation| {
+            matches!(
+                operation.kind(),
+                OperationKind::Put { .. } | OperationKind::Assemble { .. }
+            ) && loonfs_objectstore::layout::content_id_of(operation.key()).is_some()
+        },
+        InjectedError::PermissionDenied("read-only store".to_owned()),
+    );
+    denied.fail_all();
+    let candidate = CommitCandidate::new(CommitIntent {
+        commit_id: CommitId::parse("copy").expect("commit"),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        preconditions: Vec::new(),
+        operations: vec![
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/a/b").expect("path"),
+                parents: true,
+            },
+            FilesystemOperation::CopyPath {
+                source_path: AbsolutePath::parse("/source-0").expect("path"),
+                destination_path: AbsolutePath::parse("/target").expect("path"),
+                precondition: loonfs_types::DestinationPrecondition::default(),
+            },
+        ],
+    });
+    let namespace = crate::test_support::namespace_store(&denied, &namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
+    let content_writes = crate::test_support::content_writes();
+    let error = PublishPlanningSession::new(
+        view.head(),
+        view.wal_tail(),
+        view.metadata_view(),
+        ContentWrites::new(&namespace.store, &content_writes, view.head()),
+        context.now_ms,
+    )
+    .prepare_commit(
+        &candidate,
+        Authorizer::Unrestricted,
+        candidate.semantic_identity(&namespace_id),
+    )
+    .await
+    .expect_err("copy plan");
+    assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
+    assert_matches!(
+        error,
+        CoreError::FailedOperation {
+            operation_index: 1,
+            ..
+        }
+    );
+}
+
 #[tokio::test]
 async fn downloads_report_unwritable_pieces_without_changing_content() {
     use loonfs_test_support::stores::{FailStore, InjectedError, OperationKind};
