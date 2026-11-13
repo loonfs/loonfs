@@ -290,6 +290,15 @@ pub const METADATA_COMPACTION_BUDGET_MS: u64 =
 /// deletes its content. A part presigned URL writes no object.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 
+/// Lifetime of a snapshot that LoonFS takes for one of its own operations,
+/// such as the snapshot of the fork that a merge or a rebase plans from,
+/// and of the content proofs of the operation's plan.
+///
+/// The operation deletes its snapshot when it ends. The lifetime is for an
+/// operation that can't delete its snapshot, so that the namespace's
+/// collector deletes the snapshot after it expires.
+pub const OPERATION_SNAPSHOT_TTL_MS: u64 = 5 * 60 * 1000;
+
 /// Minimum retirement grace from the deletion call's clock.
 ///
 /// The tombstone put starts within the publication budget, and the provider

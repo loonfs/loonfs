@@ -11,7 +11,7 @@ use crate::{
     NextMergeRangeResponse, Result, SnapshotId, Writable,
 };
 use futures::future::BoxFuture;
-use loonfs_core::limits::DIRECT_TRANSFER_URL_TTL_MS;
+use loonfs_core::limits::OPERATION_SNAPSHOT_TTL_MS;
 use loonfs_core::{MergeAllowance, MergeRequest};
 use loonfs_types::format::wal::MergeRecord;
 use std::sync::{Mutex, MutexGuard};
@@ -351,7 +351,7 @@ impl Namespace<Writable> {
         fork_id: &NamespaceId,
         prepared_at_ms: u64,
     ) -> Result<(PinnedRead, SnapshotId)> {
-        let expires_at_ms = Some(prepared_at_ms + DIRECT_TRANSFER_URL_TTL_MS);
+        let expires_at_ms = Some(prepared_at_ms + OPERATION_SNAPSHOT_TTL_MS);
         let snapshot = self
             .mode
             .publisher
