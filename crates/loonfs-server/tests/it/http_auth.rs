@@ -133,7 +133,7 @@ async fn path_puts_without_a_proof_for_their_content_fail_content_not_prepared()
             }],
         };
         assert_content_not_prepared_response(
-            send_commit(&harness.server_url, &namespace, &request),
+            send_commit_json(&harness.server_url, &namespace, &request),
             &request,
             &match rejection {
                 Some(reason) => rejected_content_token_message(&request, reason),
@@ -180,7 +180,7 @@ async fn committed_path_put_replays_after_content_token_is_absent_rejected_or_ga
     // fresh evaluation that could phrase the same outcome differently.
     let send = |request: &CommitRequest| {
         response_bytes(
-            send_commit(&harness.server_url, &namespace, request)
+            send_commit_json(&harness.server_url, &namespace, request)
                 .expect("committed put should replay"),
         )
     };
@@ -256,8 +256,8 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
             expected_revision_no: None,
         }],
     };
-    let response =
-        send_commit(&harness.server_url, &namespace, &request).expect("covered ref is prepared");
+    let response = send_commit_json(&harness.server_url, &namespace, &request)
+        .expect("covered ref is prepared");
     let response: Commit =
         serde_json::from_reader(response.into_reader()).expect("decode operation response");
     assert_eq!(response.committed_seq, CommitSeq(1));
@@ -285,7 +285,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
             expected_revision_no: None,
         }],
     };
-    send_commit(&harness.server_url, &namespace, &repeat_ref)
+    send_commit_json(&harness.server_url, &namespace, &repeat_ref)
         .expect("repeated ref is still prepared");
     assert_eq!(
         harness

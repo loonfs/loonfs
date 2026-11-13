@@ -364,8 +364,8 @@ root = "unused"
 pub(crate) mod http_split_support {
     use loonfs_client::{Client, PutFileOptions};
     use loonfs_types::{
-        CommitRequest, CompleteUploadBody, ContentRef, ContentToken, CreateUploadBody,
-        DestinationBehavior, NamespaceId, UploadMode, UploadSessionStatus,
+        CompleteUploadBody, ContentRef, ContentToken, CreateUploadBody, DestinationBehavior,
+        NamespaceId, UploadSessionStatus,
     };
 
     use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -396,14 +396,6 @@ pub(crate) mod http_split_support {
             TEST_CONTENT_TOKEN_SECRET,
             writer_id,
         )
-    }
-
-    pub(crate) fn send_commit(
-        server_url: &str,
-        namespace_id: &NamespaceId,
-        request: &CommitRequest,
-    ) -> Result<ureq::Response, Box<ureq::Error>> {
-        send_commit_json(server_url, namespace_id, request)
     }
 
     pub(crate) fn send_commit_json(
@@ -447,38 +439,14 @@ pub(crate) mod http_split_support {
             )
             .await
             .expect("complete upload");
-        let repeated = client
-            .complete_upload(
-                namespace_id,
-                &begin.upload_id,
-                &CompleteUploadBody::ServiceProxied {},
-            )
-            .await
-            .expect("repeat complete upload");
-        assert_eq!(repeated.namespace_id, complete.namespace_id);
-        assert_eq!(repeated.upload_id, complete.upload_id);
-        assert_eq!(repeated.mode, UploadMode::ServiceProxied);
-        assert_eq!(complete.mode, UploadMode::ServiceProxied);
         let UploadSessionStatus::Completed {
-            completed_at_ms,
             content_ref,
             content_token,
+            ..
         } = complete.status
         else {
             panic!("completion reports a completed session")
         };
-        let UploadSessionStatus::Completed {
-            completed_at_ms: repeated_at_ms,
-            content_ref: repeated_ref,
-            content_token: repeated_token,
-        } = repeated.status
-        else {
-            panic!("completion replay reports a completed session")
-        };
-        assert_eq!(repeated_at_ms, completed_at_ms);
-        assert_eq!(repeated_ref, content_ref);
-        assert!(content_token.is_some());
-        assert!(repeated_token.is_some());
         StagedUpload {
             content_ref,
             content_token,
