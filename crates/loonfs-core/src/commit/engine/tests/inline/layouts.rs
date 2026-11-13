@@ -91,14 +91,17 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
 }
 
 #[tokio::test]
-async fn folds_write_whole_then_spans_and_combine_small_tail_extents() {
+async fn folds_write_spans_and_combine_small_tail_extents() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     let first = layout(&store, &original).await;
     assert_eq!(first.layout.extents.len(), 1);
-    assert_eq!(first.layout.extents[0].object, ExtentObject::Whole);
+    assert_eq!(
+        first.layout.extents[0].object,
+        ExtentObject::Span { start: 0, end: 100 }
+    );
     for (revision, added, expected_lengths) in [
         (2_u8, 10, vec![100, 10]),
         (3, 3, vec![100, 10, 3]),
@@ -156,10 +159,10 @@ async fn folds_write_whole_then_spans_and_combine_small_tail_extents() {
     let pool_id = pool_id(&store).await;
     assert_eq!(
         store
-            .get(&content_blob(&pool_id, &original.content_id), None)
+            .get(&content_span(&pool_id, &original.content_id, 0, 100), None)
             .await
             .expect("get")
-            .expect("whole"),
+            .expect("first span"),
         vec![b'a'; 100]
     );
 }
@@ -334,7 +337,7 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
 }
 
 #[tokio::test]
-async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
+async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let original = inline(Bytes::from_static(b"first"));
@@ -365,7 +368,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
         assemble_tail_content(&pool_id(&store).await, &content).expect("pieces"),
     )
     .await
-    .expect("whole before manifest");
+    .expect("span before manifest");
     let access = ReadAccess::live(Authorizer::Unrestricted);
     let pool_id = pool_id(&store).await;
     assert_eq!(
@@ -377,10 +380,10 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
             &crate::test_support::content_writes(),
         )
         .await
-        .expect("equal whole download")
+        .expect("equal span download")
         .ranges[0]
             .object_key,
-        content_blob(&pool_id, &original.content_ref().content_id)
+        content_span(&pool_id, &original.content_ref().content_id, 0, 5)
     );
     let inode_id = tail.revisions().next().expect("revision").inode_id;
     let reference = commit_piece(
@@ -437,15 +440,44 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     );
     assert_eq!(
         store
-            .get(&content_blob(&pool_id, &reference.content_id), None)
+            .get(&content_span(&pool_id, &reference.content_id, 0, 5), None)
             .await
-            .expect("get whole")
-            .expect("whole"),
+            .expect("get first span")
+            .expect("first span"),
         b"first".as_slice()
     );
     assert_eq!(
         read_file(&store, &namespace_id, RevisionNo(2)).await,
         b"first+next"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_chain_folds_again_after_bytes_follow_it() {
+    let (_directory, store, mut engine, context) = setup().await;
+    let namespace_id = engine.namespace.namespace_id.clone();
+    let (inode_id, empty) = folded_file(&store, &mut engine, &context, b"").await;
+    assert_eq!(
+        layout(&store, &empty).await.layout.extents[0].object,
+        ExtentObject::Whole
+    );
+    commit_piece(
+        &store,
+        &namespace_id,
+        (inode_id, RevisionNo(2)),
+        &empty.content_id,
+        b"bytes",
+        0,
+        None,
+    )
+    .await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("second fold");
+    assert_eq!(
+        read_file(&store, &namespace_id, RevisionNo(2)).await,
+        b"bytes"
     );
 }
 
@@ -780,7 +812,10 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .await
         .expect("superseded span")
         .is_none());
-    let shared_keys = [content_blob(&pool_id, &original.content_id), rooted_span];
+    let shared_keys = [
+        content_span(&pool_id, &original.content_id, 0, 5),
+        rooted_span,
+    ];
     for key in &shared_keys {
         assert!(store.head(key).await.expect("head").is_some(), "{key}");
     }

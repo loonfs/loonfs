@@ -241,6 +241,15 @@ async fn read_file(
         .bytes
 }
 
+/// Returns the key of the object that a fold writes for the whole value of
+/// `content_ref`: a span from offset 0, or the whole object for zero bytes.
+fn folded_key(pool_id: &loonfs_types::PoolId, content_ref: &ContentRef) -> String {
+    match content_ref.size_bytes {
+        0 => loonfs_objectstore::keys::content_blob(pool_id, &content_ref.content_id),
+        size => loonfs_objectstore::keys::content_span(pool_id, &content_ref.content_id, 0, size),
+    }
+}
+
 fn assert_no_writes(store: &RecordingStore<LocalFsStore>) {
     let counts = store.counts();
     assert_eq!(counts.puts, 0);
@@ -517,10 +526,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
             fold::assert_content_before_metadata(&store, values.len());
             for value in &values {
-                let key = crate::storage::content::content_object_key_for_ref(
-                    &pool_id(&store).await,
-                    value.content_ref(),
-                );
+                let key = folded_key(&pool_id(&store).await, value.content_ref());
                 assert_eq!(
                     store
                         .get(&key, None)

@@ -677,8 +677,12 @@ async fn publish_inline(
         .load_catalog_entry()
         .await
         .expect("catalog");
-    let key =
-        loonfs_objectstore::keys::content_blob(catalog.pool_id(), &value.content_ref().content_id);
+    let key = loonfs_objectstore::keys::content_span(
+        catalog.pool_id(),
+        &value.content_ref().content_id,
+        0,
+        value.content_ref().size_bytes,
+    );
     let request = CommitIntent::single(
         loonfs_types::CommitId::parse(format!("write-{index}")).expect("commit"),
         loonfs_test_support::test_actor(),

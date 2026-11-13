@@ -297,8 +297,6 @@ async fn tail_extent_plan<L: LayoutLookup>(
             })
             .collect();
     }
-    // The whole key can already contain the first reference after a failed fold.
-    let whole = location.extents.is_empty() && !lookup.content_has_other_size(newest);
     let extents = location.extents;
     let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();
     let CombinePlan {
@@ -307,7 +305,8 @@ async fn tail_extent_plan<L: LayoutLookup>(
     } = combine_plan(&extents, newest, tail_length);
     let combined_length = candidate_length - tail_length;
     start -= combined_length;
-    let object = if whole && start == 0 {
+    // A layout of zero bytes is one whole extent of length zero.
+    let object = if newest.size_bytes == 0 {
         ExtentObject::Whole
     } else {
         ExtentObject::Span {

@@ -5,7 +5,7 @@ use loonfs::{AppendFileOptions, LoonFs, SharedObjectStore};
 use loonfs_core::publish::{
     CommitCandidate, CommitIntent, FilesystemOperation, InlineContent, NamespaceCommitEngine,
 };
-use loonfs_objectstore::keys::{content_blob, content_prefix};
+use loonfs_objectstore::keys::{content_prefix, content_span};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreExtension};
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
@@ -108,7 +108,10 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
         assert_eq!(recording.count(OperationSelector::Put), 1);
 
         let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
-        assert_eq!(object_key, content_blob(&pool_id, &content_ref.content_id));
+        assert_eq!(
+            object_key,
+            content_span(&pool_id, &content_ref.content_id, 0, content_ref.size_bytes)
+        );
         assert_eq!(
             store
                 .get(&object_key, None)
