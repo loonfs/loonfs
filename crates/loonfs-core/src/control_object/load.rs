@@ -64,6 +64,18 @@ where
     })
 }
 
+/// Returns `None` for a missing control object, and the load error for any
+/// other failure.
+pub(crate) fn present<T>(
+    loaded: Result<LoadedControl<T>, ControlObjectLoadError>,
+) -> crate::error::Result<Option<LoadedControl<T>>> {
+    match loaded {
+        Ok(loaded) => Ok(Some(loaded)),
+        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+        Err(error) => Err(crate::error::CoreError::ControlObjectLoad(error)),
+    }
+}
+
 /// Returns `namespace_mismatch` for the object at `object_key` when the
 /// namespace its payload embeds isn't `expected`.
 pub(crate) fn expect_namespace(

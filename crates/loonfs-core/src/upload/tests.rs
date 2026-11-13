@@ -329,14 +329,7 @@ async fn complete<S: ObjectStore + ?Sized>(
 ) -> Result<CompletedUpload> {
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .complete_upload(
-            &crate::test_support::namespace_store(store, namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog"),
-            upload_id,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(upload_id, CompleteUploadBody::ServiceProxied {})
         .await
 }
 
@@ -509,10 +502,6 @@ async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
         .complete_upload(
-            &crate::test_support::namespace_store(&store, &namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog"),
             &direct.session.upload_id,
             CompleteUploadBody::DirectPut {
                 content: UploadContentClaim {
@@ -632,10 +621,6 @@ async fn a_direct_put_requires_the_session_algorithm_and_replays_completion() {
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(2_000))
             .engine()
             .complete_upload(
-                &crate::test_support::namespace_store(&store, &namespace_id)
-                    .load_catalog_entry()
-                    .await
-                    .expect("load the catalog"),
                 &begin.session.upload_id,
                 CompleteUploadBody::DirectPut {
                     content: UploadContentClaim {
@@ -668,26 +653,12 @@ async fn a_direct_put_requires_the_session_algorithm_and_replays_completion() {
     };
     let first = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
         .engine()
-        .complete_upload(
-            &crate::test_support::namespace_store(&store, &namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog"),
-            &begin.session.upload_id,
-            completion.clone(),
-        )
+        .complete_upload(&begin.session.upload_id, completion.clone())
         .await
         .expect("complete direct put");
     let replay = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
         .engine()
-        .complete_upload(
-            &crate::test_support::namespace_store(&store, &namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog"),
-            &begin.session.upload_id,
-            completion,
-        )
+        .complete_upload(&begin.session.upload_id, completion)
         .await
         .expect("replay direct-put completion");
     assert_eq!(replay, first);
@@ -790,10 +761,6 @@ async fn a_mismatched_direct_put_claim_is_rejected_and_a_matching_one_completes(
     let error = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(2_000))
         .engine()
         .complete_upload(
-            &crate::test_support::namespace_store(&store, &namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog"),
             &begin.session.upload_id,
             CompleteUploadBody::DirectPut {
                 content: UploadContentClaim {
@@ -819,10 +786,6 @@ async fn a_mismatched_direct_put_claim_is_rejected_and_a_matching_one_completes(
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
             .engine()
             .complete_upload(
-                &crate::test_support::namespace_store(&store, &namespace_id)
-                    .load_catalog_entry()
-                    .await
-                    .expect("load the catalog"),
                 &begin.session.upload_id,
                 CompleteUploadBody::DirectPut {
                     content: UploadContentClaim {

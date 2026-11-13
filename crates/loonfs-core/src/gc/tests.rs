@@ -550,10 +550,6 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
         .complete_upload(
-            &crate::test_support::namespace_store(store, namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog"),
             upload_id,
             loonfs_types::CompleteUploadBody::ServiceProxied {},
         )

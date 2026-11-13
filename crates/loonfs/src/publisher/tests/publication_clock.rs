@@ -51,7 +51,6 @@ async fn publish_after_retry_delay(
         .expect("upload bytes");
     let completed = engine
         .complete_upload(
-            &catalog,
             &upload.upload_id,
             loonfs_types::CompleteUploadBody::ServiceProxied {},
         )

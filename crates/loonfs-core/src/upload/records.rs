@@ -8,9 +8,7 @@
 //!
 //! [upload sessions]: https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#51-upload-sessions
 
-use crate::control_object::{
-    expect_identity_field, load_control_object, ControlObjectLoadError, LoadedControl,
-};
+use crate::control_object::{expect_identity_field, load_control_object, present};
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -214,16 +212,6 @@ pub(crate) fn upload_session_record_keys(pool_id: &PoolId, upload_id: &UploadId)
         upload_session(pool_id, upload_id),
         upload_outcome(pool_id, upload_id),
     ]
-}
-
-fn present<T>(
-    loaded: std::result::Result<LoadedControl<T>, ControlObjectLoadError>,
-) -> Result<Option<LoadedControl<T>>> {
-    match loaded {
-        Ok(loaded) => Ok(Some(loaded)),
-        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
-        Err(error) => Err(CoreError::ControlObjectLoad(error)),
-    }
 }
 
 /// Refuses an outcome that contradicts its session record.

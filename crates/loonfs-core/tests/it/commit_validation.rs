@@ -136,11 +136,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .await
         .expect("load namespace catalog");
     let completed = engine
-        .complete_upload(
-            &catalog,
-            &upload.upload_id,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .expect("complete upload");
     let content_ref = completed
@@ -257,16 +253,8 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .upload_content(&upload.upload_id, b"deadline")
         .await
         .expect("stage content");
-    let catalog = namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("load namespace catalog");
     let completed = engine
-        .complete_upload(
-            &catalog,
-            &upload.upload_id,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .expect("complete upload");
     let completed_at_ms = match &completed.response.status {
@@ -1064,11 +1052,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .await
         .expect("load namespace catalog");
     let completed = engine
-        .complete_upload(
-            &catalog,
-            &upload.upload_id,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .expect("complete upload");
     // The evidence the completion handed back, past its life.

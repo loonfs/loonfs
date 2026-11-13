@@ -179,8 +179,7 @@ impl WalkFrame {
 /// have a `listed` row and no `removed` row, a page at a time.
 struct TrashScan {
     lower_bound: String,
-    /// `None` reads to the end of the family.
-    upper_bound: Option<String>,
+    upper_bound: String,
     /// The rows of the last page that the reader hasn't returned yet.
     unread: VecDeque<TrashRecord>,
     /// Whether the last page reached the end of the range.
@@ -195,7 +194,8 @@ impl TrashScan {
     fn above(after_seq: CommitSeq) -> Self {
         Self {
             lower_bound: lookup_keys::trash_key_after_seq(after_seq),
-            upper_bound: string_prefix_upper_bound(lookup_keys::TRASH_ROW_PREFIX),
+            upper_bound: string_prefix_upper_bound(lookup_keys::TRASH_ROW_PREFIX)
+                .expect("the trash prefix should have an upper bound"),
             unread: VecDeque::new(),
             scanned_to_end: false,
             removed: None,
@@ -232,7 +232,7 @@ impl TrashScan {
             let rows = trash_rows_page(
                 segments,
                 &self.lower_bound,
-                self.upper_bound.as_deref(),
+                Some(self.upper_bound.as_str()),
                 KEPT_INODE_SCAN_ROWS,
             )
             .await?;

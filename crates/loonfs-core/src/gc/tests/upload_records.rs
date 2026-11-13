@@ -55,14 +55,7 @@ async fn complete_proxied<S: ObjectStore + ?Sized>(
 ) -> crate::error::Result<crate::upload::complete::CompletedUpload> {
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context(now_ms))
         .engine()
-        .complete_upload(
-            &crate::test_support::namespace_store(store, namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog"),
-            upload_id,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(upload_id, CompleteUploadBody::ServiceProxied {})
         .await
 }
 
@@ -427,10 +420,6 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         let result = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside)
             .engine()
             .complete_upload(
-                &crate::test_support::namespace_store(&store, &namespace_id)
-                    .load_catalog_entry()
-                    .await
-                    .expect("load the catalog"),
                 &upload_id,
                 loonfs_types::CompleteUploadBody::ServiceProxied {},
             )
@@ -470,12 +459,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let store = blocking_outcome_store(store, BlockedOutcome::Completed);
     let engine =
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside).engine();
-    let catalog = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("load the catalog");
     let completion = engine.complete_upload(
-        &catalog,
         &upload_id,
         loonfs_types::CompleteUploadBody::ServiceProxied {},
     );
