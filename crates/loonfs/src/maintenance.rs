@@ -676,7 +676,9 @@ impl Maintenance {
     /// Sets the namespace's retention window.
     ///
     /// `None` clears the window, and a host doesn't advance the floor of a
-    /// namespace without a window on a schedule.
+    /// namespace without a window on a schedule. A window shorter than the
+    /// grace window ([`GC_GRACE_WINDOW_MS`](crate::GC_GRACE_WINDOW_MS))
+    /// returns [`Error::InvalidRequest`].
     ///
     /// The call publishes a manifest that changes nothing else, and if the
     /// namespace already has the window, it publishes nothing. See
@@ -687,6 +689,7 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         retention_window_ms: Option<NonZeroU64>,
     ) -> Result<SetRetentionWindowResponse> {
+        crate::config::check_retention_window(retention_window_ms)?;
         trace::in_operation(
             operation_span!(self.core, "set_retention_window", namespace_id),
             async {

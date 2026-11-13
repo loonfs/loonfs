@@ -27,7 +27,7 @@ async fn a_namespace_created_without_a_window_has_the_runtimes_default_window() 
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
     let default_window_ms = NonZeroU64::new(30 * 86_400_000);
     let own_window_ms = NonZeroU64::new(86_400_000);
-    let writer = LoonFs::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("default-window"))
         .config(RuntimeConfig {
             default_retention_window_ms: default_window_ms,
@@ -64,6 +64,21 @@ async fn a_namespace_created_without_a_window_has_the_runtimes_default_window() 
             "{name}"
         );
     }
+
+    let short = LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("short-window"))
+        .config(RuntimeConfig {
+            default_retention_window_ms: NonZeroU64::new(loonfs::GC_GRACE_WINDOW_MS - 1),
+            ..RuntimeConfig::default()
+        })
+        .build()
+        .await
+        .err()
+        .expect("a default window shorter than the grace window fails the build");
+    assert!(
+        matches!(&short, loonfs::Error::Config(message) if message.contains("default_retention_window_ms")),
+        "{short:?}"
+    );
 }
 
 #[tokio::test]

@@ -56,10 +56,11 @@ pub(crate) struct NamespaceCreateArgs {
     /// for more principals.
     #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
     pub administrators: Vec<PrincipalId>,
-    /// The namespace's retention window, in milliseconds. The server's
-    /// maintenance sweep keeps this many milliseconds of the namespace's
-    /// history. Without this option, the namespace's window is the server's
-    /// `retention_window_ms` setting, if the server has that setting.
+    /// The namespace's retention window, in milliseconds, at least 86400000
+    /// (24 hours). The server's maintenance sweep keeps this many
+    /// milliseconds of the namespace's history. Without this option, the
+    /// namespace's window is the server's `retention_window_ms` setting, if
+    /// the server has that setting.
     /// `loonfs maintenance retention window` can change or clear the window
     /// later.
     #[arg(long)]

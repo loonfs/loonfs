@@ -3,7 +3,7 @@
 
 use crate::trace::TraceMode;
 use crate::{Error, ReadConsistency, Result};
-use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
+use loonfs_core::limits::{GC_GRACE_WINDOW_MS, READ_REVALIDATION_BOUND_MS};
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -251,7 +251,8 @@ pub struct RuntimeConfig {
     /// Retention window, in milliseconds, that the runtime records in the
     /// first manifest of each namespace that it creates without a window in
     /// the request. Defaults to `None`, so such a namespace has no window. A
-    /// fork copies its source's window instead.
+    /// fork copies its source's window instead. A window shorter than the
+    /// grace window ([`GC_GRACE_WINDOW_MS`]) fails the build.
     pub default_retention_window_ms: Option<NonZeroU64>,
 }
 
@@ -294,6 +295,40 @@ impl RuntimeConfig {
                 )));
             }
         }
+        if let Some(message) = short_retention_window(
+            "default_retention_window_ms",
+            self.default_retention_window_ms,
+        ) {
+            return Err(Error::Config(message));
+        }
         self.inline_content.validate()
     }
+}
+
+/// Returns [`Error::InvalidRequest`] for a retention window shorter than the
+/// grace window.
+pub(crate) fn check_retention_window(retention_window_ms: Option<NonZeroU64>) -> Result<()> {
+    match short_retention_window("retention_window_ms", retention_window_ms) {
+        Some(message) => Err(Error::InvalidRequest {
+            message,
+            param: "retention_window_ms",
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Returns why the retention window in `setting` is refused, when the window
+/// is shorter than the grace window ([`GC_GRACE_WINDOW_MS`]). An advance
+/// never moves the floor past a commit younger than the grace window, so a
+/// shorter window couldn't be kept (format spec, "Advancing the retention
+/// floor").
+fn short_retention_window(setting: &str, window_ms: Option<NonZeroU64>) -> Option<String> {
+    window_ms
+        .filter(|window_ms| window_ms.get() < GC_GRACE_WINDOW_MS)
+        .map(|window_ms| {
+            format!(
+                "`{setting}` is {window_ms} ms, which is shorter than the grace window of \
+                 {GC_GRACE_WINDOW_MS} ms"
+            )
+        })
 }

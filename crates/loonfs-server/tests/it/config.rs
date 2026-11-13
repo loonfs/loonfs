@@ -2,6 +2,7 @@
 //! loaders.
 
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
+use loonfs::GC_GRACE_WINDOW_MS;
 use loonfs_server::{
     load_server_config, JobMode, MetadataCacheConfig, MetadataCacheSsdConfig, ReadConsistency,
     ServerConfig, ServerError, StoreConfig, TlsServerConfig, TransportConfig,
@@ -702,7 +703,7 @@ root = "/tmp/loonfs-server"
 }
 
 #[test]
-fn a_retention_window_is_optional_and_must_be_positive() {
+fn a_retention_window_is_optional_and_at_least_the_grace_window() {
     let config = |setting: &str| {
         write_config(&format!(
             r#"
@@ -738,6 +739,11 @@ root = "/tmp/loonfs-server"
         ),
         other => panic!("expected a decode error, got {other:?}"),
     }
+    let short = format!("retention_window_ms = {}", GC_GRACE_WINDOW_MS - 1);
+    assert_invalid_field(
+        load_server_config(config(&short)).expect_err("a window shorter than the grace window"),
+        "retention_window_ms",
+    );
 }
 
 #[test]

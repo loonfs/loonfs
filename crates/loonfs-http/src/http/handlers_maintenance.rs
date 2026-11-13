@@ -78,10 +78,16 @@ pub(super) async fn run_maintenance_job(
                 .await
                 .map(RunMaintenanceJobResponse::Retention)
         }
-        RunMaintenanceJobRequest::RetentionWindow(request) => maintenance
-            .set_retention_window(&namespace_id, request.retention_window_ms)
-            .await
-            .map(RunMaintenanceJobResponse::RetentionWindow),
+        RunMaintenanceJobRequest::RetentionWindow(request) => {
+            return maintenance
+                .set_retention_window(&namespace_id, request.retention_window_ms)
+                .await
+                .map(|response| Json(RunMaintenanceJobResponse::RetentionWindow(response)))
+                .map_err(|error| {
+                    ApiResponseError::runtime(error)
+                        .with_body_field_params(&["/retention_window_ms"])
+                });
+        }
         RunMaintenanceJobRequest::RecoverAdministrator(request) => {
             let actor_id = actor_id.ok_or_else(missing_actor)?;
             let namespace = state.open_writer(&namespace_id, None).await?;

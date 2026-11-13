@@ -21,17 +21,22 @@ pub struct CreateNamespaceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub namespace_id: Option<NamespaceId>,
-    /// The namespace's retention window, in milliseconds, which must be positive. The reference
-    /// server's maintenance sweep uses this window for the namespace. Without this field, the
-    /// namespace's window is the server's `retention_window_ms` setting, if the server has that
-    /// setting. A `retention_window` maintenance job can change or clear the window later.
+    /// The namespace's retention window, in milliseconds, which must be at least the grace window
+    /// (86400000, which is 24 hours). The reference server's maintenance sweep uses this window
+    /// for the namespace. Without this field, the namespace's window is the server's
+    /// `retention_window_ms` setting, if the server has that setting. A `retention_window`
+    /// maintenance job can change or clear the window later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",
-        schema(value_type = Option<u64>, nullable = false, minimum = 1)
+        schema(value_type = Option<u64>, nullable = false, minimum = 86400000)
     )]
     pub retention_window_ms: Option<NonZeroU64>,
 }
+
+// The schema declares the smallest retention window as a literal, because the
+// `ToSchema` derive takes only a literal bound.
+const _: () = assert!(crate::limits::GC_GRACE_WINDOW_MS == 86_400_000);
 
 /// A request to fork a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

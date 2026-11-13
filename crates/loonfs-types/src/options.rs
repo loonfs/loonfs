@@ -598,7 +598,9 @@ pub struct CreateNamespaceOptions {
     pub access: NamespaceAccess,
     /// The namespace's retention window, which a host's scheduled retention
     /// advance uses, or `None` for the runtime's default window, if the
-    /// runtime has a default.
+    /// runtime has a default. A window shorter than the grace window
+    /// ([`GC_GRACE_WINDOW_MS`](crate::limits::GC_GRACE_WINDOW_MS)) is
+    /// refused.
     pub retention_window_ms: Option<NonZeroU64>,
     /// Whether creating a namespace that already exists succeeds and returns
     /// the existing namespace's state.

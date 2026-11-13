@@ -45,16 +45,20 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SetRetentionWindowRequest {
-    /// The namespace's new retention window, in milliseconds, which must be positive. Without it,
-    /// the job clears the namespace's window, and the reference server's maintenance sweep no
-    /// longer advances the namespace's floor.
+    /// The namespace's new retention window, in milliseconds, which must be at least the grace
+    /// window (86400000, which is 24 hours). Without it, the job clears the namespace's window,
+    /// and the reference server's maintenance sweep no longer advances the namespace's floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",
-        schema(value_type = Option<u64>, nullable = false, minimum = 1)
+        schema(value_type = Option<u64>, nullable = false, minimum = 86400000)
     )]
     pub retention_window_ms: Option<NonZeroU64>,
 }
+
+// The schema declares the smallest retention window as a literal, because the
+// `ToSchema` derive takes only a literal bound.
+const _: () = assert!(crate::limits::GC_GRACE_WINDOW_MS == 86_400_000);
 
 /// The namespace's retention window after a `retention_window` job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

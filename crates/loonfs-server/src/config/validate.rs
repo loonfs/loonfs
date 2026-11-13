@@ -6,6 +6,7 @@ use super::memory::read_cgroup_memory_limit;
 use super::{AuthConfig, MemorySizing, ServerConfig, TransportConfig};
 use crate::{Result, ServerError};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
+use loonfs::GC_GRACE_WINDOW_MS;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_http::AuthPolicy;
 use loonfs_types::config::{non_blank, validate_non_empty, ConfigFieldError};
@@ -115,6 +116,15 @@ impl ServerConfig {
                     ),
                 }));
             }
+        }
+        if self
+            .retention_window_ms
+            .is_some_and(|window_ms| window_ms.get() < GC_GRACE_WINDOW_MS)
+        {
+            return Err(ServerError::Config(ConfigFieldError::Invalid {
+                field: "retention_window_ms",
+                reason: format!("must be at least {GC_GRACE_WINDOW_MS}, the grace window"),
+            }));
         }
         let invalid_grep = |reason: String| {
             ServerError::Config(ConfigFieldError::Invalid {

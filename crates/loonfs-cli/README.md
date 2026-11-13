@@ -174,9 +174,9 @@ Namespace management
     an ID, prints it on stderr before it sends the request, and shows it
     with the new namespace. With --json, the ID appears only in the result.
     --retention-window-ms sets how many milliseconds of the namespace's
-    history the server's maintenance sweep keeps. Without this option, the
-    namespace's window is the server's retention_window_ms setting, if the
-    server has that setting
+    history the server's maintenance sweep keeps, at least 86400000 (24
+    hours). Without this option, the namespace's window is the server's
+    retention_window_ms setting, if the server has that setting
 
   loonfs namespace show [namespace]
     Show the selected namespace's status, creator, retention window, and
@@ -435,10 +435,10 @@ Maintenance
   loonfs maintenance retention window (--retention-window-ms <ms> | --clear)
     Set or clear the namespace's retention window. The server's
     maintenance sweep keeps this much of the namespace's history, in
-    milliseconds. --clear removes the namespace's window, so the sweep
-    doesn't advance the namespace's floor. The new window takes effect at
-    the sweep's next full pass, and the command doesn't move the floor
-    itself.
+    milliseconds, at least 86400000 (24 hours). --clear removes the
+    namespace's window, so the sweep doesn't advance the namespace's floor.
+    The new window takes effect at the sweep's next full pass, and the
+    command doesn't move the floor itself.
 
   loonfs maintenance gc
     Run one collection of the namespace and print its report. Each

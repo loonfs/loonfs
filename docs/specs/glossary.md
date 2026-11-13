@@ -230,7 +230,7 @@ The sequence number below which a namespace's history is no longer guaranteed. A
 
 ### Retention window
 
-A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's [sweep](#sweep) advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. The sweep reads the window from the namespace's manifest (`retention_window_ms`), and it doesn't advance the floor of a namespace without a window. When a create request doesn't include a window, the server records its own `retention_window_ms` setting as the new namespace's window. For example, a namespace with a 7-day window keeps at least 7 days of revisions and of deletions in the [trash](#trash). See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The window is at least the [grace window](#grace-window) (24 hours). The reference server's [sweep](#sweep) advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. The sweep reads the window from the namespace's manifest (`retention_window_ms`), and it doesn't advance the floor of a namespace without a window. When a create request doesn't include a window, the server records its own `retention_window_ms` setting as the new namespace's window. For example, a namespace with a 7-day window keeps at least 7 days of revisions and of deletions in the [trash](#trash). See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Control object
 

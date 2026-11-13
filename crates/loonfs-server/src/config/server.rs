@@ -199,7 +199,8 @@ pub struct ServerConfig {
     /// advances every active namespace's floor to the last commit at or
     /// before the current time minus the namespace's window, and leaves the
     /// floor of a namespace without a window where it is. Absent, a
-    /// namespace created without a window has no window.
+    /// namespace created without a window has no window. The window must be
+    /// at least 86400000, the grace window.
     pub retention_window_ms: Option<NonZeroU64>,
     /// Idle milliseconds before a caught-up session with no request handle
     /// closes. A later write opens a new session. Defaults to 30 minutes.
