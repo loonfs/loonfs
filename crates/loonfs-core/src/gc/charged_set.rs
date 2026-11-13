@@ -205,6 +205,21 @@ impl<T: HeapBytes> ChargedQueue<T> {
             .grow_to(self.values.capacity() * std::mem::size_of::<T>() + self.heap_bytes)
     }
 
+    /// Pushes `value`, or returns `value` when the memory can't fit the queue
+    /// with it.
+    pub(super) fn try_push_back(&mut self, value: T) -> std::result::Result<(), T> {
+        self.values.reserve(1);
+        let bytes = self.values.capacity() * std::mem::size_of::<T>()
+            + self.heap_bytes
+            + value.heap_bytes();
+        if self.charge.grow_to(bytes).is_err() {
+            return Err(value);
+        }
+        self.heap_bytes += value.heap_bytes();
+        self.values.push_back(value);
+        Ok(())
+    }
+
     pub(super) fn iter(&self) -> impl Iterator<Item = &T> {
         self.values.iter()
     }

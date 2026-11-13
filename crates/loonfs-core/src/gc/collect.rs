@@ -2,7 +2,7 @@
 //! durable progress.
 
 use super::charged_set::{ChargedQueue, CollectionMemory};
-use super::deletes::{apply_decisions, Decision};
+use super::deletes::{apply_decisions, CollectionReport, Decision};
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
 use super::sweep::Sweep;
@@ -64,24 +64,48 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(report)
     }
 
-    /// Keeps the collection's decision about every listed manifest, raises
-    /// the manifest boundary to the highest manifest number that the decisions
-    /// delete, and then deletes exactly those manifests.
+    /// Records the decisions that keep a manifest, and deletes the manifests
+    /// that the other decisions choose in batches that fit the collection's
+    /// memory. The listing is in number order, so each batch raises the
+    /// manifest boundary to the batch's highest manifest number, at or above
+    /// the raise before, and then deletes exactly the batch's manifests.
     async fn collect_manifests(
         &self,
         mut decisions: impl Stream<Item = Result<Decision<GcResponse>>> + Unpin,
         memory: &CollectionMemory,
         report: &mut GcResponse,
     ) -> Result<()> {
-        let mut kept = ChargedQueue::new(memory);
+        let mut batch = ChargedQueue::new(memory);
         while let Some(decision) = decisions.try_next().await? {
-            kept.push_back(decision)?;
+            match decision {
+                Decision::Retain {
+                    reason,
+                    reclaimable_at_ms,
+                } => report.record_retained(reason, reclaimable_at_ms),
+                Decision::Gone => {}
+                Decision::Delete { .. } => {
+                    if let Err(decision) = batch.try_push_back(decision) {
+                        self.delete_manifests(&mut batch, report).await?;
+                        batch.push_back(decision)?;
+                    }
+                }
+            }
         }
-        if let Some(manifest_no) = raise_target(kept.iter()) {
+        self.delete_manifests(&mut batch, report).await
+    }
+
+    /// Raises the manifest boundary to the highest manifest number in
+    /// `batch`, and then deletes the batch's manifests.
+    async fn delete_manifests(
+        &self,
+        batch: &mut ChargedQueue<Decision<GcResponse>>,
+        report: &mut GcResponse,
+    ) -> Result<()> {
+        if let Some(manifest_no) = raise_target(batch.iter()) {
             self.raise_boundary(manifest_no).await?;
         }
-        let kept = std::iter::from_fn(|| kept.pop_front()).map(Ok);
-        apply_decisions(&self.store, stream::iter(kept), report).await
+        let deletes = std::iter::from_fn(|| batch.pop_front()).map(Ok);
+        apply_decisions(&self.store, stream::iter(deletes), report).await
     }
 }
 
