@@ -72,11 +72,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .owner
             .expires_at_ms()
             .map(|expiry| expiry.saturating_add(grace_window_ms));
+        let deleted_at_ms = record
+            .owner
+            .deleted_at_ms()
+            .map(|deletion| deletion.saturating_add(grace_window_ms));
         let ages_out_at_ms = live
             .current_tombstone
             .is_some()
             .then(|| record.created_at_ms.saturating_add(grace_window_ms));
-        let reclaimable_at_ms = expires_at_ms.into_iter().chain(ages_out_at_ms).min();
+        let reclaimable_at_ms = expires_at_ms
+            .into_iter()
+            .chain(deleted_at_ms)
+            .chain(ages_out_at_ms)
+            .min();
         Ok(match reclaimable_at_ms {
             Some(at_ms) if now_ms >= at_ms => delete(user),
             _ => Decision::retain(

@@ -9,7 +9,7 @@ use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::snapshot::record::write_snapshot_record;
-use crate::snapshot::{ensure_unexpired, load_snapshot_basis};
+use crate::snapshot::{ensure_live, load_snapshot_basis};
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{
@@ -264,7 +264,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             source_head.status,
         )?;
         let snapshot = self.load_user_snapshot(snapshot_id).await?;
-        Ok(ensure_unexpired(snapshot, clock.now_ms())?.state)
+        Ok(ensure_live(snapshot, clock.now_ms())?.state)
     }
 
     pub(crate) async fn target_retains_snapshot(&self, record: &SnapshotPayload) -> Result<bool> {

@@ -12,6 +12,7 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
         SnapshotOwner::User {
             name: Some("abandoned".to_owned()),
             expires_at_ms: Some(2_000),
+            deleted_at_ms: None,
         },
         SnapshotOwner::Fork {
             target_namespace_id: NamespaceId::parse("never-published").expect("target"),
@@ -228,6 +229,7 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
                 owner: SnapshotOwner::User {
                     name: Some(format!("snapshot-{index}")),
                     expires_at_ms: (index == 0).then_some(2_000),
+                    deleted_at_ms: None,
                 },
             },
         )

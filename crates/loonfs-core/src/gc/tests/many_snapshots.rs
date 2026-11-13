@@ -44,6 +44,7 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             owner: SnapshotOwner::User {
                 name: Some("expired".to_owned()),
                 expires_at_ms: Some(2_000),
+                deleted_at_ms: None,
             },
             ..basis.clone()
         };

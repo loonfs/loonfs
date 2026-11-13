@@ -130,7 +130,7 @@ pub(crate) enum SnapshotCommand {
     List(SnapshotListArgs),
     /// Keep an unexpired snapshot available for longer.
     Extend(SnapshotExtendArgs),
-    /// Delete the snapshot record. Deleting a missing snapshot succeeds.
+    /// Delete the snapshot. Deleting a missing snapshot succeeds.
     Delete(SnapshotDeleteArgs),
 }
 

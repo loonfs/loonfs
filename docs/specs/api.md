@@ -752,7 +752,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Read the differences between two sequences | `list_diff` | `idempotent` | `GET /v0/namespaces/{ns}/diff?from_seq=418&to_seq=425&path=/docs&after_seq=418&limit=100` (`to_seq`, `path`, and `after_seq` are optional) |
 | Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`. Accepts `name` and `ttl_ms`. |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
-| Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (returns an expired snapshot that garbage collection hasn't deleted, and a missing ID returns `snapshot_not_found`) |
+| Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (returns an expired snapshot that garbage collection hasn't deleted, and a missing or deleted snapshot returns `snapshot_not_found`) |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and never moves the expiry earlier. |
 | Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the snapshot, and a missing ID succeeds) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
@@ -988,15 +988,17 @@ An expired snapshot can't be read, forked, or extended. Each of those requests r
 
 An extension measures its requested `ttl_ms` from the server's current time, and it moves an unexpired snapshot's expiry to that time. It never moves the expiry earlier, so extending a snapshot without an expiry returns the snapshot unchanged.
 
-`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, including expired snapshots, and it leaves out fork snapshots. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, or the ID of a fork snapshot, returns `snapshot_not_found`.
+`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, including expired snapshots, and it leaves out deleted snapshots and fork snapshots. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, the ID of a deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`.
 
-Deleting a snapshot removes its record and returns the addressed namespace and snapshot:
+Deleting a snapshot records the time of the deletion in the snapshot's record (`deleted_at_ms`), leaves its expiry unchanged, and returns the addressed namespace and snapshot:
 
 ```json
 {"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-00000000000000000000000009"}
 ```
 
-Deleting a missing snapshot, including one that was already deleted, returns the same response, so a client can retry a delete safely. The ID of a fork snapshot returns `snapshot_not_found`, because only garbage collection deletes a fork snapshot. Deletion stays available after the namespace is deleted (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
+After a delete, a caller can't read through the snapshot, fork it, extend it, retrieve it, or list it. Each request by ID returns `snapshot_not_found`, and the snapshot listing leaves the snapshot out. Garbage collection deletes the record after the grace window, at the time of the deletion plus the grace window, or earlier if the snapshot's expiry plus the grace window comes first. Until then, the record keeps the snapshot's manifest and segments, and the [snapshot inventory](#snapshot-inventory) shows the snapshot with its `deleted_at_ms`.
+
+Deleting a missing snapshot, or one that was already deleted, returns the same response without a write, so a client can retry a delete safely. The ID of a fork snapshot returns `snapshot_not_found`, because only garbage collection deletes a fork snapshot. Deletion stays available after the namespace is deleted (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
 
 In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
 
@@ -1010,13 +1012,15 @@ A directory cursor from a read view of a snapshot identifies that snapshot. A re
 
 A snapshot read requires an unexpired user snapshot or a fork snapshot. A read of a missing snapshot, or of a deleted or expired snapshot, returns `snapshot_not_found`, and the read never falls back to the current namespace state.
 
-Why does an expired snapshot stay listed when it can't be read? A snapshot's expiry controls whether it can be read, and garbage collection deletes the snapshot later, after the grace window. Until then, the snapshot still keeps its manifest and segments, so the listing shows the snapshot as one of the records that keep old data.
+Why does an expired snapshot stay listed when it can't be read? A snapshot's expiry controls whether it can be read, and garbage collection deletes the snapshot later, after the grace window. Until then, the snapshot still keeps its manifest and segments, so the listing shows the snapshot as one of the records that keep old data. A deleted snapshot's record also stays for the grace window, so an operation that checked the snapshot just before the delete has the same time to finish as one that checked it just before an expiry.
+
+Why is a deletion recorded in its own field instead of as an expiry? Hosts' clocks differ. If a delete set the expiry to the deleting host's current time, a host whose clock is behind would still treat the snapshot, which expired a moment ago on the deleting host's clock, as usable, and could read through the snapshot, fork it, or extend it. Every host refuses a snapshot that has `deleted_at_ms`, whatever its own clock reads.
 
 ### Snapshot inventory
 
 The snapshot inventory lists every snapshot of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes user snapshots, whose `owner.kind` is `user`, and fork snapshots, whose `owner.kind` is `fork`. The inventory has no create or delete routes. User snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork snapshot once its target namespace no longer reads through it.
 
-Each entry is a snapshot record, which contains `namespace_id`, `snapshot_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a user snapshot that has a name, `owner` contains the `name`.
+Each entry is a snapshot record, which contains `namespace_id`, `snapshot_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, an optional `deleted_at_ms`, `captured_seq`, and `manifest_no`. For a user snapshot that has a name, `owner` contains the `name`. A user snapshot that a caller deleted has `deleted_at_ms`, the time of the deletion.
 
 A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
 
@@ -1026,13 +1030,13 @@ A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 3
 {"namespace_id":"demo","snapshots":[{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-00000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-000000000000000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
 ```
 
-`GET /v0/maintenance/namespaces/{ns}/snapshots/{snapshot_id}` returns one existing snapshot, as the same object the listing returns for it, including an expired snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
+`GET /v0/maintenance/namespaces/{ns}/snapshots/{snapshot_id}` returns one existing snapshot, as the same object the listing returns for it, including an expired or deleted snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
 
 `limit` follows the advertised pagination limits, and the response leaves out `next_cursor` after the final page. Cursors are opaque and tied to this namespace and operation, so clients should pass them back unchanged. A namespace-scoped cursor from another namespace returns `invalid_request`.
 
 The snapshot inventory is live, not a point-in-time view. Snapshots that are created, deleted, or collected while a client is paging can change later pages.
 
-An expired snapshot stays listed until GC deletes it, after its expiry plus the grace window. A snapshot without an expiry, on a live namespace, stays until it's explicitly deleted. [Records and owners](format.md#81-records-and-owners) defines reads and removal for each snapshot owner.
+An expired snapshot stays listed until GC deletes it, after its expiry plus the grace window. A deleted snapshot stays listed, with its `deleted_at_ms`, until GC deletes it, after the time of the deletion plus the grace window (or after its expiry plus the grace window, if that comes first). A snapshot without an expiry, on a live namespace, stays until it's explicitly deleted. [Records and owners](format.md#81-records-and-owners) defines reads and removal for each snapshot owner.
 
 ### Deleting, retaining, and reclaiming
 

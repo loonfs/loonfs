@@ -120,15 +120,24 @@ impl<S: ObjectStore> NamespaceStore<S> {
         present(load_snapshot_record_at_key(&self.store, &object_key).await)
     }
 
-    /// Loads the user snapshot `snapshot_id`. A missing snapshot, or a fork snapshot, returns
-    /// `snapshot_not_found`, because the snapshot API reads only user snapshots.
+    /// Loads the user snapshot `snapshot_id`. A missing snapshot, a deleted snapshot, or a fork
+    /// snapshot returns `snapshot_not_found`, because the snapshot API reads only user snapshots
+    /// that aren't deleted.
     pub(crate) async fn load_user_snapshot(
         &self,
         snapshot_id: &SnapshotId,
     ) -> Result<LoadedSnapshotRecord> {
         self.load_snapshot_record(snapshot_id)
             .await?
-            .filter(|loaded| matches!(loaded.state.owner, SnapshotOwner::User { .. }))
+            .filter(|loaded| {
+                matches!(
+                    loaded.state.owner,
+                    SnapshotOwner::User {
+                        deleted_at_ms: None,
+                        ..
+                    }
+                )
+            })
             .ok_or_else(|| CoreError::SnapshotNotFound {
                 snapshot_id: snapshot_id.clone(),
             })
@@ -219,6 +228,7 @@ mod tests {
             owner: SnapshotOwner::User {
                 name: Some("test".to_owned()),
                 expires_at_ms: None,
+                deleted_at_ms: None,
             },
         }
     }

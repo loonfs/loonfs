@@ -78,8 +78,8 @@ impl SnapshotRecordPageCursor {
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Loads one existing snapshot of any owner by id, as the snapshot inventory
-    /// returns it. An expired record stays readable until garbage collection
-    /// deletes it. A missing snapshot returns `snapshot_not_found`.
+    /// returns it. An expired or deleted record stays readable until garbage
+    /// collection deletes it. A missing snapshot returns `snapshot_not_found`.
     pub async fn get_snapshot_record(&self, snapshot_id: &SnapshotId) -> Result<SnapshotRecord> {
         self.namespace.load_current_manifest().await?;
         let loaded = self
@@ -93,8 +93,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Lists one page of existing snapshots, fork snapshots included, in
-    /// ascending id order. Expired records remain visible until garbage
-    /// collection deletes them.
+    /// ascending id order. Expired and deleted records remain visible until
+    /// garbage collection deletes them.
     pub async fn list_snapshot_records_page(
         &self,
         request: PageRequest<SnapshotRecordPageCursor>,
@@ -106,7 +106,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Lists one page of snapshots (the user snapshots) in ascending ID order,
-    /// including expired snapshots that garbage collection hasn't deleted.
+    /// including expired snapshots that garbage collection hasn't deleted. A
+    /// deleted snapshot is left out.
     pub async fn list_snapshots_page(
         &self,
         request: PageRequest<SnapshotPageCursor>,

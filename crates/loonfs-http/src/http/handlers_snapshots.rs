@@ -30,7 +30,7 @@ use std::sync::Arc;
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "Create snapshot",
-        description = "Creates a snapshot of the current namespace state. The server first folds any WAL tail after the current manifest. Every accepted call creates a new snapshot with a new ID, and the name is a label, not a key. A snapshot with `ttl_ms` expires that many milliseconds from the server's current time, and a snapshot without it doesn't expire. The snapshot keeps its manifest until it's deleted, either explicitly or by garbage collection after it expires and its grace window passes.",
+        description = "Creates a snapshot of the current namespace state. The server first folds any WAL tail after the current manifest. Every accepted call creates a new snapshot with a new ID, and the name is a label, not a key. A snapshot with `ttl_ms` expires that many milliseconds from the server's current time, and a snapshot without it doesn't expire. The snapshot keeps its manifest until garbage collection deletes it, after it expires or is deleted and its grace window passes.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body = CreateSnapshotRequest,
         responses(
@@ -76,7 +76,7 @@ pub(super) async fn create_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
-        description = "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance snapshot inventory lists.",
+        description = "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out deleted snapshots and fork snapshots, which the maintenance snapshot inventory lists.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             PageQuery
@@ -121,7 +121,7 @@ pub(super) async fn list_snapshots(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
         tag = "namespaces",
         summary = "Extend snapshot",
-        description = "Moves an unexpired snapshot's expiry to `ttl_ms` from the server's current time. The expiry never moves earlier, so a snapshot without an expiry is returned unchanged. A missing or expired snapshot returns `snapshot_not_found`. Repeating the request has the same result.",
+        description = "Moves an unexpired snapshot's expiry to `ttl_ms` from the server's current time. The expiry never moves earlier, so a snapshot without an expiry is returned unchanged. A missing, deleted, or expired snapshot returns `snapshot_not_found`. Repeating the request has the same result.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
@@ -167,7 +167,7 @@ pub(super) async fn extend_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Retrieve snapshot",
-        description = "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork snapshot, returns `snapshot_not_found`.",
+        description = "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, the ID of a deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
@@ -211,7 +211,7 @@ pub(super) async fn get_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Delete snapshot",
-        description = "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
+        description = "Deletes a snapshot by recording the server's current time as its delete time. From then on, the snapshot can't be read, forked, extended, or retrieved, and the snapshot listing leaves it out. Garbage collection can then reclaim its unreferenced manifest and runs after the grace window. Deleting a missing or deleted snapshot succeeds without a write, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
@@ -271,7 +271,7 @@ pub(super) struct SnapshotPathParams {
         path = "/v0/maintenance/namespaces/{namespace_id}/snapshots",
         tag = "maintenance",
         summary = "List snapshot records",
-        description = "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
+        description = "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window, and a deleted snapshot stays, with its `deleted_at_ms`, until its delete time plus the grace window. A cursor continues the listing against the current set of snapshots.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             PageQuery
@@ -315,7 +315,7 @@ pub(super) async fn list_snapshot_records(
         path = "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "maintenance",
         summary = "Retrieve snapshot record",
-        description = "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
+        description = "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired or deleted snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("snapshot_id" = String, Path, description = "The snapshot ID.")

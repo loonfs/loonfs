@@ -1,7 +1,7 @@
 //! Snapshot expiry must include time spent loading and retrying its record.
 
 use super::*;
-use crate::snapshot::lifecycle::ensure_unexpired;
+use crate::snapshot::lifecycle::ensure_live;
 use loonfs_objectstore::keys;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_types::format::control::SnapshotOwner;
@@ -22,6 +22,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
                 SnapshotOwner::User {
                     name: Some("short lease".to_owned()),
                     expires_at_ms: Some(1_001),
+                    deleted_at_ms: None,
                 },
                 crate::test_support::folded_manifest(&namespace)
                     .await
@@ -80,7 +81,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             Some(1_002)
         );
         assert_eq!(
-            ensure_unexpired(stored.expect("snapshot"), clock.now_ms())
+            ensure_live(stored.expect("snapshot"), clock.now_ms())
                 .expect_err("later reads see expiry")
                 .code(),
             ErrorCode::SnapshotNotFound
@@ -104,6 +105,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
                 SnapshotOwner::User {
                     name: Some("short lease".to_owned()),
                     expires_at_ms: Some(1_001),
+                    deleted_at_ms: None,
                 },
                 crate::test_support::folded_manifest(&namespace)
                     .await
@@ -130,7 +132,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
         let expire = async {
             store.wait_until_blocked().await;
             clock.advance_ms(2);
-            let error = ensure_unexpired(
+            let error = ensure_live(
                 crate::test_support::namespace_store(&inner, &namespace_id)
                     .load_snapshot_record(&snapshot.snapshot_id)
                     .await
@@ -171,6 +173,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
             SnapshotOwner::User {
                 name: Some("short lease".to_owned()),
                 expires_at_ms: Some(1_001),
+                deleted_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
                 .await

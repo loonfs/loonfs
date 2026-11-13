@@ -4709,6 +4709,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "deleted_at_ms": {
+            "description": "The time a caller deleted the snapshot, in Unix milliseconds. Garbage collection waits\none more grace window before it deletes the record.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "expires_at_ms": {
             "description": "The time the snapshot expires, in Unix milliseconds. Garbage collection waits one more\ngrace window before it deletes the record.",
             "format": "int64",
@@ -5834,7 +5840,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
+        "description": "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window, and a deleted snapshot stays, with its `deleted_at_ms`, until its delete time plus the grace window. A cursor continues the listing against the current set of snapshots.",
         "operationId": "list_snapshot_records",
         "parameters": [
           {
@@ -5934,7 +5940,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
       "get": {
-        "description": "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
+        "description": "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired or deleted snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
         "operationId": "get_snapshot_record",
         "parameters": [
           {
@@ -9793,7 +9799,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance snapshot inventory lists.",
+        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out deleted snapshots and fork snapshots, which the maintenance snapshot inventory lists.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -9890,7 +9896,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "post": {
-        "description": "Creates a snapshot of the current namespace state. The server first folds any WAL tail after the current manifest. Every accepted call creates a new snapshot with a new ID, and the name is a label, not a key. A snapshot with `ttl_ms` expires that many milliseconds from the server's current time, and a snapshot without it doesn't expire. The snapshot keeps its manifest until it's deleted, either explicitly or by garbage collection after it expires and its grace window passes.",
+        "description": "Creates a snapshot of the current namespace state. The server first folds any WAL tail after the current manifest. Every accepted call creates a new snapshot with a new ID, and the name is a label, not a key. A snapshot with `ttl_ms` expires that many milliseconds from the server's current time, and a snapshot without it doesn't expire. The snapshot keeps its manifest until garbage collection deletes it, after it expires or is deleted and its grace window passes.",
         "operationId": "create_snapshot",
         "parameters": [
           {
@@ -9994,7 +10000,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
       "delete": {
-        "description": "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
+        "description": "Deletes a snapshot by recording the server's current time as its delete time. From then on, the snapshot can't be read, forked, extended, or retrieved, and the snapshot listing leaves it out. Garbage collection can then reclaim its unreferenced manifest and runs after the grace window. Deleting a missing or deleted snapshot succeeds without a write, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
         "operationId": "delete_snapshot",
         "parameters": [
           {
@@ -10073,7 +10079,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "get": {
-        "description": "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork snapshot, returns `snapshot_not_found`.",
+        "description": "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, the ID of a deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`.",
         "operationId": "get_snapshot",
         "parameters": [
           {
@@ -10154,7 +10160,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend": {
       "post": {
-        "description": "Moves an unexpired snapshot's expiry to `ttl_ms` from the server's current time. The expiry never moves earlier, so a snapshot without an expiry is returned unchanged. A missing or expired snapshot returns `snapshot_not_found`. Repeating the request has the same result.",
+        "description": "Moves an unexpired snapshot's expiry to `ttl_ms` from the server's current time. The expiry never moves earlier, so a snapshot without an expiry is returned unchanged. A missing, deleted, or expired snapshot returns `snapshot_not_found`. Repeating the request has the same result.",
         "operationId": "extend_snapshot",
         "parameters": [
           {

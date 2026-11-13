@@ -1,7 +1,7 @@
 //! Lists files from the manifest kept by a snapshot, or at a sequence of
 //! the live namespace.
 
-use super::lifecycle::ensure_unexpired;
+use super::lifecycle::ensure_live;
 use super::read_basis::{load_snapshot_basis, SnapshotBasis};
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::Result;
@@ -133,7 +133,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         options: ListSnapshotFilesOptions,
     ) -> Result<SnapshotFilesPage> {
         let now_ms = self.wall_clock.now_ms();
-        let record = ensure_unexpired(self.load_user_snapshot(snapshot_id).await?, now_ms)?.state;
+        let record = ensure_live(self.load_user_snapshot(snapshot_id).await?, now_ms)?.state;
         let SnapshotBasis { manifest, segments } =
             load_snapshot_basis(&self.store, &self.segment_cache, record).await?;
 
