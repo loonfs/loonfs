@@ -5,6 +5,7 @@ use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, PublishedManifest};
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
+use crate::namespace::boundary::LoadedBoundary;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -25,6 +26,8 @@ pub struct NamespaceReadAnchor {
     /// When the anchor's checks began, read before the anchor loaded
     /// `manifest` and confirmed it with a successor check.
     pub(crate) checked: crate::time::Observation,
+    /// The manifest boundary as the anchor's last check read it.
+    pub(crate) boundary: Option<LoadedBoundary>,
 }
 
 impl NamespaceReadAnchor {
@@ -50,12 +53,17 @@ impl NamespaceReadAnchor {
         self.tail.wal_bytes()
     }
 
-    /// Returns the anchor's manifest, with the time that the anchor's checks
-    /// began, as a basis that a publication can build on.
+    /// Returns the manifest boundary as the anchor's last check read it.
+    pub fn boundary(&self) -> Option<LoadedBoundary> {
+        self.boundary.clone()
+    }
+
+    /// Returns the anchor's manifest, with the manifest boundary that the
+    /// anchor's last check read, as a basis that a publication can build on.
     pub fn publication_basis(&self) -> PublicationBasis {
         PublicationBasis {
             manifest: self.manifest.clone(),
-            checked: self.checked.clone(),
+            boundary: self.boundary.clone(),
         }
     }
 }
@@ -65,8 +73,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         observed: crate::time::Observation,
     ) -> CoreResult<NamespaceReadAnchor> {
-        let manifest = self.load_current_manifest().await?;
-        self.load_read_anchor_from_manifest(manifest, observed)
+        let current = self.load_current_basis().await?;
+        self.load_read_anchor_from_manifest(current.manifest, current.boundary, observed)
             .await
     }
 
@@ -83,21 +91,34 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(anchor)
     }
 
+    /// Loads the read anchor at `manifest`, where `boundary` is the manifest
+    /// boundary as the caller last read it.
+    ///
+    /// After the WAL tail above the manifest, the call checks the manifest:
+    /// a HEAD request for its successor, and then the boundary (see
+    /// [`Self::above_boundary`]). A successor, or a manifest at or below the
+    /// boundary, makes the call find the newest manifest from the boundary
+    /// and start again (format spec, "Replaying the visible WAL"). A
+    /// tombstone has no successor, so it isn't checked.
     pub(crate) async fn load_read_anchor_from_manifest(
         &self,
         mut manifest: LoadedManifest,
+        mut boundary: Option<LoadedBoundary>,
         mut observed: crate::time::Observation,
     ) -> CoreResult<NamespaceReadAnchor> {
         for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
             match discover_tail(&self.store, &manifest).await {
                 Ok(DiscoveredTail { head: state, tail }) => {
                     if !state.status.is_deleted() {
-                        let successor = self
-                            .manifest_has_successor(manifest.manifest().manifest_no)
-                            .await?;
-                        if successor || !observed.is_within_revalidation_bound() {
+                        let manifest_no = manifest.manifest().manifest_no;
+                        let mut newest = false;
+                        if !self.manifest_has_successor(manifest_no).await? {
+                            (newest, boundary) = self.above_boundary(manifest_no, boundary).await?;
+                        }
+                        if !newest {
                             observed = observed.renew();
-                            manifest = self.load_current_manifest().await?;
+                            PublicationBasis { manifest, boundary } =
+                                self.load_current_basis().await?;
                             continue;
                         }
                     }
@@ -106,15 +127,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         manifest,
                         tail,
                         checked: observed,
+                        boundary,
                     });
                 }
                 Err(error @ ControlObjectLoadError::Codec { .. }) => {
                     observed = observed.renew();
-                    let current = self.load_current_manifest().await?;
-                    if current.manifest().manifest_no == manifest.manifest().manifest_no {
+                    let current = self.load_current_basis().await?;
+                    if current.manifest.manifest().manifest_no == manifest.manifest().manifest_no {
                         return Err(error.into());
                     }
-                    manifest = current;
+                    PublicationBasis { manifest, boundary } = current;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -184,7 +206,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             if payload.writer_epoch != writer_epoch || payload.status.is_deleted() {
                 break;
             }
-            moves.push(PublishedManifest::new(&loaded.envelope, None));
+            moves.push(PublishedManifest::new(&loaded.envelope, None, None));
             manifest_no = next;
         }
         Ok(None)

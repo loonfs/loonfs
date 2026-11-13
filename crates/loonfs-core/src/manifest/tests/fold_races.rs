@@ -4,15 +4,13 @@ use super::super::PublishedManifest;
 use super::fold::{FoldWalResponse, FoldedWalTail};
 use super::*;
 use crate::error::Result;
-use crate::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::namespace::control::LoadedManifest;
 use crate::publish::{InlineContent, WriterPosition};
-use crate::time::Observation;
 use crate::wal::WalPublishError;
 use crate::FoldWalOutcome;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::layout::{parse_object_key, wal_no_of, DurableObjectFamily};
-use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{RecordedOperation, StoreCounts};
 use loonfs_types::{ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
 
@@ -482,57 +480,6 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_with_no_request_first() 
             ("put", manifest(next)),
             ("get", boundary(&writer.namespace_id)),
         ]
-    );
-}
-
-/// Checks that a fold from a position whose last check is at the
-/// revalidation bound loads the tail from the store instead of reading the
-/// position's manifest, which garbage collection removes once the manifest
-/// is replaced and older than the grace window.
-#[tokio::test]
-async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
-    let mut writer = Writer::open().await;
-    writer.commit("first", Vec::new(), &["/a"]).await;
-    let mut held = writer.engine.writer_position().expect("tail");
-    let clock = Arc::new(ManualClock::new(0));
-    held.basis_checked = Observation::now(clock.clone());
-    let superseded =
-        metadata_manifest_object(&writer.namespace_id, &held.read_basis.basis.manifest_no());
-
-    // Another process folds the tail, and garbage collection removes the position's manifest, which the fold replaced,
-    // once that manifest is older than the grace window.
-    let other = writer.other_process();
-    let folded_by_other = crate::test_support::namespace_store(&other, &writer.namespace_id)
-        .fold_wal()
-        .await
-        .expect("the other process folds");
-    assert_eq!(folded_by_other.outcome, FoldWalOutcome::Published);
-    writer
-        .store
-        .delete(&superseded)
-        .await
-        .expect("remove the superseded manifest");
-    clock.advance_ms(READ_REVALIDATION_BOUND_MS);
-
-    writer.store.reset();
-    let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
-        .fold_wal_tail(Some(held), &deadline())
-        .await
-        .expect("a fold past the bound loads the tail from the store");
-    assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
-    assert_eq!(
-        folded.manifest.manifest.manifest_no,
-        folded_by_other.manifest_no
-    );
-    let requests = control_requests(&writer.namespace_id, &writer.store.take());
-    assert_eq!(
-        requests.first(),
-        Some(&("get", boundary(&writer.namespace_id))),
-        "the fold starts from the manifest boundary: {requests:?}"
-    );
-    assert!(
-        !requests.contains(&("get", superseded)),
-        "the fold never reads the position's manifest: {requests:?}"
     );
 }
 

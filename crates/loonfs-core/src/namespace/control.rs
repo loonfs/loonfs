@@ -3,6 +3,7 @@
 use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
 use crate::limits::{MANIFEST_PROBE_WINDOW, MAX_CONTENTION_ATTEMPTS};
+use crate::namespace::basis::PublicationBasis;
 use crate::namespace::boundary::boundary_manifest_no;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -82,7 +83,13 @@ pub(crate) fn ensure_namespace_live(
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads the namespace's current manifest from the manifest boundary.
     pub async fn load_current_manifest(&self) -> crate::error::Result<LoadedManifest> {
-        self.load_current_manifest_if_present()
+        Ok(self.load_current_basis().await?.manifest)
+    }
+
+    /// Loads the namespace's current manifest from the manifest boundary,
+    /// with the boundary of the last read.
+    pub async fn load_current_basis(&self) -> crate::error::Result<PublicationBasis> {
+        self.find_newest_manifest()
             .await?
             .ok_or_else(|| self.namespace_not_found())
     }
@@ -90,7 +97,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn load_current_manifest_if_present(
         &self,
     ) -> crate::error::Result<Option<LoadedManifest>> {
-        self.find_newest_manifest().await
+        Ok(self
+            .find_newest_manifest()
+            .await?
+            .map(|current| current.manifest))
     }
 
     /// Returns the error for a namespace that has no manifest above its
@@ -114,9 +124,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// unchanged missing boundary means that no namespace has the ID, and
     /// under an unchanged boundary object it means a corrupt store, because
     /// a collection never leaves a namespace without a manifest above its
-    /// boundary. The call returns `store_contention` after
-    /// [`MAX_CONTENTION_ATTEMPTS`] attempts.
-    async fn find_newest_manifest(&self) -> crate::error::Result<Option<LoadedManifest>> {
+    /// boundary. The call returns the manifest with the boundary of its last
+    /// read, and returns `store_contention` after [`MAX_CONTENTION_ATTEMPTS`]
+    /// attempts.
+    pub(crate) async fn find_newest_manifest(
+        &self,
+    ) -> crate::error::Result<Option<PublicationBasis>> {
         let prefix = metadata_manifest_prefix(&self.namespace_id);
         for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
             let boundary = self.load_boundary().await?;
@@ -152,7 +165,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             };
             let reloaded = self.reload_boundary(boundary).await?;
             if manifest_no > boundary_manifest_no(reloaded.as_ref()) {
-                return Ok(Some(manifest));
+                return Ok(Some(PublicationBasis {
+                    manifest,
+                    boundary: reloaded,
+                }));
             }
         }
         Err(CoreError::contention_exhausted(

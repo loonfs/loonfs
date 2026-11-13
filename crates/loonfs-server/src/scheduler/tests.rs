@@ -775,12 +775,9 @@ impl SchedulerServer {
 
 /// Checks a failing metadata step's schedule with the default 5-second
 /// maintenance interval and 5-minute metadata retry interval: the later of
-/// the retry interval and a backoff that starts at one maintenance interval,
-/// while the session's writer position is current. Once the position passes
-/// the revalidation bound, the session steps run no metadata step for the
-/// session, and the sweep makes the call instead.
+/// the retry interval and a backoff that starts at one maintenance interval.
 #[tokio::test]
-async fn a_failing_metadata_step_waits_its_interval_until_the_position_passes_the_bound() {
+async fn a_failing_metadata_step_waits_its_interval() {
     const WAIT_SECONDS: [u64; 3] = [300, 300, 300];
     let directory = tempdir().expect("tempdir");
     let mut config = scheduler_config(None);
@@ -805,17 +802,6 @@ async fn a_failing_metadata_step_waits_its_interval_until_the_position_passes_th
     server
         .run_steps_through_retries(&namespace_id, MaintenanceCall::Metadata, &WAIT_SECONDS)
         .await;
-    // The next retry time comes after the position's revalidation bound.
-    let failures = server.call_failures(MaintenanceCall::Metadata);
-    server
-        .run_steps_after(config.metadata_retry_interval_ms.get())
-        .await;
-    assert_eq!(
-        server.call_failures(MaintenanceCall::Metadata),
-        failures,
-        "the session steps run no metadata step for a session without a current position"
-    );
-
     store.clear();
     server.sweep_after(0).await;
     assert_eq!(
@@ -1061,13 +1047,19 @@ enum Grep {
 /// lists. The sweep includes the collection of the namespace's pool. Each
 /// call finds the namespace's newest manifest with a read of the manifest
 /// boundary, a listing of the manifests, a GET of the newest manifest, and a
-/// second read of the boundary. The retention advance plans from the view,
-/// so its share also includes a GET of the WAL number after the manifest and
-/// a HEAD of the manifest number after it. The docs quote these numbers.
+/// second read of the boundary. The metadata call, the retention advance, and
+/// the two collections then check the manifest with a GET of the WAL number
+/// after it, a HEAD of the manifest number after it, and a read of the
+/// boundary, so each of them sends 7 requests before its own listings. The
+/// namespace's collection adds 5 listings, and the pool's collection adds a
+/// read of the pool record and 4 listings, so the four calls cost 7, 7, 12,
+/// and 12. A maintained grep index adds a call that finds the newest manifest
+/// (4), and an enabled one also reads the WAL number after it (5). The docs
+/// quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
-    (Grep::NotMaintained, 34, 13),
-    (Grep::Maintained, 38, 14),
-    (Grep::Enabled, 39, 14),
+    (Grep::NotMaintained, 38, 13),
+    (Grep::Maintained, 42, 14),
+    (Grep::Enabled, 43, 14),
 ];
 
 #[tokio::test(start_paused = true)]

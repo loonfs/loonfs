@@ -4,7 +4,6 @@
 #![allow(clippy::disallowed_methods)]
 
 use crate::commit::engine::{CommitCandidate, NamespaceCommitEngine};
-use crate::limits::READ_REVALIDATION_BOUND_MS;
 use crate::test_support::WriterAt;
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::{metadata_manifest_object, wal_object, wal_prefix};
@@ -245,88 +244,6 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         .expect("manifest");
     assert_eq!(current.payload().head_seq, CommitSeq(0));
     assert_eq!(current.payload().folded_wal_no, WalNo(2));
-}
-
-/// Checks that an acquisition whose anchor load is held past the revalidation
-/// bound, while a fold, a compactor claim, and a collection run, stops when
-/// its publication budget runs out and writes no fence over the collected
-/// objects.
-#[tokio::test]
-async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("late-claim").expect("namespace");
-    // The claim's manifest doesn't fold the first fence, so the acquisition's
-    // first read after the claim is the first fence.
-    let store = BlockingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(1))),
-        OperationSelector::Read,
-    );
-    let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
-        .create()
-        .await
-        .expect("create");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&setup.writer_id)
-        .await
-        .expect("first fence");
-    let timer = Arc::new(ManualClock::new(0));
-    store.block_next();
-    let namespace = crate::NamespaceStore {
-        timer: timer.clone(),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    };
-    let (acquired, ()) = futures::join!(namespace.acquire_writer(&setup.writer_id), async {
-        // The claim is written and its first WAL read is held. Meanwhile
-        // a fold folds the first fence, a compactor claim supersedes the
-        // fold, and collection removes the folded manifest and the folded
-        // fence.
-        store.wait_until_blocked().await;
-        let claim = crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("claim")
-            .manifest()
-            .manifest_no;
-        crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .fold_wal()
-            .await
-            .expect("fold");
-        crate::test_support::NamespaceFixture::new(
-            store.inner(),
-            &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        )
-        .engine()
-        .claim_compactor()
-        .await
-        .expect("compactor claim")
-        .published
-        .expect("a published claim");
-        for key in [
-            metadata_manifest_object(&namespace_id, &claim.successor().expect("next")),
-            wal_object(&namespace_id, &WalNo(1)),
-        ] {
-            store.inner().delete(&key).await.expect("collect");
-        }
-        timer.advance_ms(READ_REVALIDATION_BOUND_MS);
-        store.release();
-    });
-    // The revalidation bound is longer than the publication budget, so the
-    // acquisition reloads its anchor and then runs out of budget at the fence.
-    let error = acquired.expect_err("the held acquisition runs out of budget");
-    assert_matches!(
-        error,
-        crate::error::CoreError::MetadataPublicationBudgetExceeded { .. }
-    );
-    for number in [1, 2] {
-        assert!(store
-            .head(&wal_object(&namespace_id, &WalNo(number)))
-            .await
-            .expect("head")
-            .is_none());
-    }
 }
 
 #[tokio::test]

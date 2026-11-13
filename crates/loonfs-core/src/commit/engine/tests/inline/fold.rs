@@ -164,9 +164,9 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
         };
         assert_eq!(
             gets(DurableObjectFamily::Boundary),
-            2,
-            "the search for the newest manifest reads the manifest boundary twice; \
-             {operations:?}"
+            3,
+            "the search for the newest manifest reads the manifest boundary twice, and the \
+             check of the loaded manifest once more; {operations:?}"
         );
         assert_eq!(
             gets(DurableObjectFamily::MetadataManifest),

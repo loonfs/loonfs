@@ -368,9 +368,10 @@ impl Maintenance {
             // A caller may drop the response, so its counts survive only when
             // this shared collection path records them here.
             self.core.instruments().gc.record_collection(&report);
-            // A collection publishes no manifest, and its grace covers the
-            // revalidation bound, so the session's position and the cached
-            // head stay (format.md sections 11.2 and 11.4).
+            // A collection publishes no manifest, so the session's position
+            // and the cached head stay, and their next check reads the
+            // manifest boundary that the collection raised (format.md
+            // sections 11.2 and 11.4).
             Ok(report)
         })
         .await
@@ -601,9 +602,7 @@ impl Maintenance {
                 &position,
             )
             .await?;
-            if let Some(basis) = basis {
-                return Ok((basis.manifest, position.retention_floor_seq()));
-            }
+            return Ok((basis.manifest, position.retention_floor_seq()));
         }
         let anchor = self
             .core

@@ -230,29 +230,6 @@ pub const PUBLICATION_COMPLETION_BOUND_MS: u64 =
 
 pub use loonfs_types::limits::READ_REVALIDATION_BOUND_MS;
 
-/// The revalidation bound is the longest publication budget plus the
-/// provider's request bound. A WAL object or claim manifest that another
-/// writer creates after this writer's successor check is younger than the
-/// grace when a put that the check allowed runs, so the put collides with it
-/// instead of finding a collected number.
-const _: () = assert!(
-    READ_REVALIDATION_BOUND_MS
-        == max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
-            + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-);
-
-const _: () =
-    assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= PUBLICATION_COMPLETION_BOUND_MS);
-
-/// A writer checks its basis once the last confirmation is more than a WAL
-/// publication budget old, and the writer uses the result only within the
-/// revalidation bound of that confirmation. A writer whose commits are less
-/// than a budget apart sends that check when the basis is up to two budgets
-/// old. If two budgets were longer than the bound, a writer whose commits
-/// are spaced between half the bound and the budget would find its basis past
-/// the bound at every other commit, and drop its position and replay its tail.
-const _: () = assert!(2 * WAL_PUBLISH_BUDGET_MS <= READ_REVALIDATION_BOUND_MS);
-
 const _: () = assert!(
     3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_GRACE_WINDOW_MS,
     "3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_GRACE_WINDOW_MS: \

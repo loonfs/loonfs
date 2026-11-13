@@ -127,51 +127,40 @@ impl RuntimeCore {
     ) -> std::result::Result<CachedHead, CoreError> {
         let namespace = self.namespace_store(namespace_id);
         if let Some(mut head) = cached {
-            // Measure every response against the previous check, not against the probe
-            // it responds to. A successor published after that check cannot be collected
-            // within the bound. A response that arrives later may miss one, however
-            // recently its probe was sent, so the new check replaces the previous one
-            // only after both responses are in.
-            let checked = head.basis_checked.clone();
-            if checked.is_within_revalidation_bound() {
-                let check_due =
-                    checked.age_ms() >= self.inner.config.manifest_revalidation_interval_ms;
-                let observed = self.observation();
-                let matches = !check_due
-                    || !namespace
-                        .manifest_has_successor(head.read_basis.basis.manifest_no())
+            // The WAL probe comes first, and the manifest check after its
+            // response. If a fold moved a WAL object above the view's tip into
+            // a newer manifest and a collection then deleted the WAL object,
+            // the WAL probe finds nothing, but the manifest check finds the
+            // newer manifest, or the boundary above the view's manifest.
+            let check_due =
+                head.basis_checked.age_ms() >= self.inner.config.manifest_revalidation_interval_ms;
+            let observed = self.observation();
+            let mut context = self.read_context(head.read_basis.clone(), None);
+            let probed = loonfs_core::control::probe_namespace_wal(
+                self.store(),
+                &self.inner.head_and_wal_tail_cache,
+                &mut context,
+            )
+            .instrument(phase_span!(self, Phase::ValidationWalProbe, namespace_id))
+            .await
+            .map_err(MetadataProjectionLoadError::LoadHead)?;
+            let current = probed
+                && (!check_due
+                    || self
+                        .check_cached_manifest(&namespace, &mut head)
                         .instrument(phase_span!(
                             self,
                             Phase::ValidationManifestProbe,
                             namespace_id
                         ))
-                        .await
-                        .map_err(MetadataProjectionLoadError::LoadHead)?;
-                if matches {
-                    let mut context = self.read_context(head.read_basis.clone(), None);
-                    let probed = loonfs_core::control::probe_namespace_wal(
-                        self.store(),
-                        &self.inner.head_and_wal_tail_cache,
-                        &mut context,
-                    )
-                    .instrument(phase_span!(self, Phase::ValidationWalProbe, namespace_id))
-                    .await;
-                    // Check the bound before using the probe's result, so a view that passed
-                    // the bound while the probe ran is reloaded whatever the probe returned.
-                    // By then, garbage collection might have deleted WAL objects after the
-                    // view's tip that a fold moved into a newer manifest, and the probe can
-                    // fail on them.
-                    if checked.is_within_revalidation_bound()
-                        && probed.map_err(MetadataProjectionLoadError::LoadHead)?
-                    {
-                        head.head_confirmed = observed.clone();
-                        if check_due {
-                            head.basis_checked = observed;
-                        }
-                        head.read_basis.head = context.read_basis.head;
-                        return Ok(head);
-                    }
+                        .await?);
+            if current {
+                head.head_confirmed = observed.clone();
+                if check_due {
+                    head.basis_checked = observed;
                 }
+                head.read_basis.head = context.read_basis.head;
+                return Ok(head);
             }
         }
         let observed = self.observation();
@@ -193,6 +182,29 @@ impl RuntimeCore {
             );
         }
         Ok(cached_head(loaded, observed))
+    }
+
+    /// Returns whether the manifest of `head` is the namespace's newest: no
+    /// manifest follows it, and it's above the manifest boundary. The head
+    /// keeps the boundary that the call read.
+    async fn check_cached_manifest(
+        &self,
+        namespace: &loonfs_core::NamespaceStore<crate::SharedObjectStore>,
+        head: &mut CachedHead,
+    ) -> std::result::Result<bool, CoreError> {
+        let manifest_no = head.read_basis.basis.manifest_no();
+        if namespace
+            .manifest_has_successor(manifest_no)
+            .await
+            .map_err(MetadataProjectionLoadError::LoadHead)?
+        {
+            return Ok(false);
+        }
+        let above;
+        (above, head.boundary) = namespace
+            .above_boundary(manifest_no, head.boundary.take())
+            .await?;
+        Ok(above)
     }
 
     /// Returns the read context of the namespace's current head, confirmed
@@ -394,6 +406,7 @@ impl RuntimeCore {
 /// Returns the head that a load observed at `observed` read, with both its
 /// manifest check and its head confirmed at that observation.
 fn cached_head(anchor: NamespaceReadAnchor, observed: Observation) -> CachedHead {
+    let boundary = anchor.boundary();
     CachedHead {
         read_basis: ReadBasis {
             basis: anchor.basis(),
@@ -401,5 +414,6 @@ fn cached_head(anchor: NamespaceReadAnchor, observed: Observation) -> CachedHead
         },
         basis_checked: observed.clone(),
         head_confirmed: observed,
+        boundary,
     }
 }

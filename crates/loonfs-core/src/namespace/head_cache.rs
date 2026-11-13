@@ -14,6 +14,7 @@ use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::manifest::{move_read_basis, PublishedManifest};
 use crate::namespace::basis::ReadBasis;
+use crate::namespace::boundary::{higher_boundary, LoadedBoundary};
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use loonfs_types::{CommitSeq, ManifestNo, NamespaceId, WalNo};
@@ -54,9 +55,10 @@ impl DecodedBlockKey for NamespaceId {
 #[derive(Debug, Clone)]
 pub struct CachedHead {
     pub read_basis: ReadBasis,
-    /// The successor check that last confirmed `basis`. A read trusts the
-    /// basis only while this check is younger than the revalidation bound.
+    /// The successor check that last confirmed `basis`.
     pub basis_checked: Observation,
+    /// The manifest boundary as the last check of `basis` read it.
+    pub boundary: Option<LoadedBoundary>,
     /// When the WAL probe last confirmed `head`, or when the head was loaded.
     /// The observation is taken before the probe or the load is sent, so
     /// `head` includes every commit acknowledged before it. An eventual read
@@ -283,6 +285,7 @@ impl HeadAndWalTailCache {
                 CachedHead {
                     basis_checked: basis_checked.unwrap_or_else(|| cached.basis_checked.clone()),
                     head_confirmed: head_confirmed.unwrap_or_else(|| cached.head_confirmed.clone()),
+                    boundary: higher_boundary(cached.boundary.clone(), candidate.boundary),
                     ..CachedHead::clone(&cached)
                 }
             }
@@ -314,7 +317,8 @@ impl HeadAndWalTailCache {
     /// The moved head's head confirmation stays, and its manifest check is
     /// the younger of the cached head's check and the start of the call that
     /// published `manifest`, because neither check found a manifest after
-    /// `manifest`.
+    /// `manifest`. The moved head keeps the higher of the cached head's
+    /// manifest boundary and the one that `manifest` carries.
     pub fn move_head(&self, namespace_id: &NamespaceId, manifest: &PublishedManifest) {
         if let Some(moved) = self.moved_head(namespace_id, manifest) {
             self.install_moved_head(namespace_id, manifest, moved);
@@ -359,6 +363,7 @@ impl HeadAndWalTailCache {
             read_basis,
             basis_checked,
             head_confirmed: cached.head_confirmed.clone(),
+            boundary: higher_boundary(cached.boundary.clone(), manifest.boundary.clone()),
         })
     }
 
@@ -489,6 +494,7 @@ mod tests {
             },
             basis_checked: checked.clone(),
             head_confirmed: checked.clone(),
+            boundary: None,
         }
     }
 
@@ -533,6 +539,7 @@ mod tests {
             folded_wal_no: WalNo(0),
             retention_floor_seq: CommitSeq(0),
             started: Some(started.clone()),
+            boundary: None,
         }
     }
 

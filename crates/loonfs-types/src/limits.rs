@@ -1,11 +1,10 @@
 //! Bounds that the wire schemas and the core's proofs share.
 
-/// Longest gap a reader may leave between the manifest probe it relies on and
-/// the successor check that confirms it, in milliseconds.
+/// The largest maximum staleness that a live read accepts, and the largest
+/// interval between the manifest checks of a cached view, in milliseconds.
 ///
-/// It's also the largest maximum staleness that a live read accepts.
-/// `loonfs-core` derives the bound from its publication budgets and checks
-/// that derivation against this value at compile time.
+/// An eventual read uses a cached view without a request only while the
+/// view's last manifest check is younger than this bound.
 pub const READ_REVALIDATION_BOUND_MS: u64 = 1_200_000;
 
 /// How old an unreferenced object must be before a collection deletes it, in

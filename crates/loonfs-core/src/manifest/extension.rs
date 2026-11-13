@@ -63,13 +63,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// change, and starts the clock of the change's publication.
     pub async fn load_extension_basis(&self) -> Result<ExtensionBasis> {
         let clock = self.namespace.start_clock();
-        let checked = clock.observe();
-        let manifest = self.namespace.load_current_manifest().await?;
-        ensure_namespace_live(&manifest.payload().namespace_id, manifest.payload().status)?;
-        Ok(ExtensionBasis {
-            basis: PublicationBasis { manifest, checked },
-            clock,
-        })
+        let basis = self.namespace.load_current_basis().await?;
+        let payload = basis.manifest.payload();
+        ensure_namespace_live(&payload.namespace_id, payload.status)?;
+        Ok(ExtensionBasis { basis, clock })
     }
 
     /// Publishes a change to the entry of extension `name` in the manifest
@@ -101,7 +98,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         entry: ExtensionEntry,
     ) -> Result<PublicationReport<ExtensionPublication>> {
         let built_on = basis.find_entry(name);
-        let checked = basis.clock.observe();
         let update = self
             .namespace
             .update_manifest(
@@ -122,10 +118,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let published = update.current_manifest();
         Ok(PublicationReport {
             response: ExtensionPublication::Published(ExtensionBasis {
-                basis: PublicationBasis {
-                    manifest: update.current,
-                    checked,
-                },
+                basis: update.current,
                 clock: self.namespace.start_clock(),
             }),
             published: Some(published),

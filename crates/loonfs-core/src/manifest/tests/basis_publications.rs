@@ -5,7 +5,6 @@ use super::*;
 use crate::limits::{MANIFEST_PROBE_WINDOW, READ_REVALIDATION_BOUND_MS};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::PublicationBasis;
-use crate::time::Observation;
 use loonfs_test_support::clock::ManualClock;
 
 /// The probe window, as a count of manifest numbers.
@@ -34,19 +33,15 @@ async fn claimed_namespace(
     (store, namespace_id)
 }
 
-/// Loads the current manifest as a basis checked at `checked`.
-async fn basis_checked_at<S: ObjectStore + ?Sized>(
+/// Loads the current manifest as a basis, with the manifest boundary.
+async fn current_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checked: Observation,
 ) -> PublicationBasis {
-    PublicationBasis {
-        manifest: crate::test_support::namespace_store(store, namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current manifest"),
-        checked,
-    }
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_current_basis()
+        .await
+        .expect("current manifest")
 }
 
 /// Publishes a copy of the current manifest as its successor, starting from
@@ -68,7 +63,7 @@ async fn republish<S: ObjectStore + ?Sized>(
         })
         .await
         .expect("publish");
-    published
+    published.manifest
 }
 
 /// Returns the manifest objects from `first` through `last`.
@@ -78,20 +73,21 @@ fn manifests(namespace_id: &NamespaceId, first: u64, last: u64) -> Vec<String> {
         .collect()
 }
 
-/// Checks that a publication from a basis checked just now sends its
-/// manifest put with no request before it, and one read of the manifest
-/// boundary after it.
+/// Checks that a publication from a basis loaded more than the revalidation
+/// bound ago sends its manifest put with no request before it, and one read
+/// of the manifest boundary after it.
 #[tokio::test]
-async fn a_publication_from_a_fresh_basis_puts_with_no_request_first() {
+async fn a_publication_from_an_old_basis_puts_with_no_request_first() {
     let directory = tempdir().expect("directory");
     let (store, namespace_id) = claimed_namespace(directory.path()).await;
-    let basis = basis_checked_at(
-        store.inner(),
-        &namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await;
-    let deadline = OperationClock::start(0, crate::test_support::std_timer());
+    crate::test_support::namespace_store(store.inner(), &namespace_id)
+        .raise_boundary(ManifestNo(1))
+        .await
+        .expect("raise the boundary");
+    let basis = current_basis(store.inner(), &namespace_id).await;
+    let clock = Arc::new(ManualClock::new(0));
+    clock.advance_ms(READ_REVALIDATION_BOUND_MS + 1);
+    let deadline = OperationClock::start(0, clock);
     let published = republish(&store, &namespace_id, Some(basis), &deadline).await;
     assert_eq!(published.manifest().manifest_no, ManifestNo(3));
     assert_eq!(
@@ -106,70 +102,16 @@ async fn a_publication_from_a_fresh_basis_puts_with_no_request_first() {
     );
 }
 
-/// Checks that a publication from a basis checked less than the revalidation
-/// bound ago puts with no request first, and that a basis checked the bound
-/// ago or longer makes the publication find the newest manifest from the
-/// manifest boundary first: the boundary, a listing of the manifests, the
-/// newest manifest, and the boundary again.
-#[tokio::test]
-async fn a_basis_at_the_revalidation_bound_finds_the_newest_manifest_from_the_boundary() {
-    for (age_ms, discovers) in [
-        (READ_REVALIDATION_BOUND_MS - 1, false),
-        (READ_REVALIDATION_BOUND_MS, true),
-    ] {
-        let directory = tempdir().expect("directory");
-        let (store, namespace_id) = claimed_namespace(directory.path()).await;
-        let clock = Arc::new(ManualClock::new(0));
-        let basis = basis_checked_at(
-            store.inner(),
-            &namespace_id,
-            Observation::now(clock.clone()),
-        )
-        .await;
-        clock.advance_ms(age_ms);
-        let published = republish(
-            &store,
-            &namespace_id,
-            Some(basis),
-            &OperationClock::start(0, clock),
-        )
-        .await;
-        assert_eq!(published.manifest().manifest_no, ManifestNo(3));
-        let boundary = boundary(&namespace_id);
-        let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
-        let mut expected = Vec::new();
-        if discovers {
-            expected.extend([
-                ("get", boundary.clone()),
-                ("list", metadata_manifest_prefix(&namespace_id)),
-                ("get", manifest(2)),
-                ("get", boundary.clone()),
-            ]);
-        }
-        expected.extend([("put", manifest(3)), ("get", boundary)]);
-        assert_eq!(
-            control_requests(&namespace_id, &store.take()),
-            expected,
-            "a basis checked {age_ms} ms ago"
-        );
-    }
-}
-
 /// Checks that a publication whose put loses to two manifests that another
 /// process published probes above its basis (one HEAD request for the next
 /// number, which exists, and then one window of numbers above that), loads
-/// only the newest manifest, and publishes on it. Only the put that
-/// succeeds is followed by a read of the manifest boundary.
+/// only the newest manifest, reads the manifest boundary, and publishes on
+/// it.
 #[tokio::test]
 async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest() {
     let directory = tempdir().expect("directory");
     let (store, namespace_id) = claimed_namespace(directory.path()).await;
-    let basis = basis_checked_at(
-        store.inner(),
-        &namespace_id,
-        crate::test_support::observed_now(),
-    )
-    .await;
+    let basis = current_basis(store.inner(), &namespace_id).await;
     let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
     let gate = BlockingStore::new(
         store,
@@ -204,14 +146,14 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
         "the publication builds on the newest claim"
     );
     let mut expected = vec![("put", manifest(3))];
-    // The put lost, so the attempt probes the numbers above its basis, and
-    // loads the newest manifest that the probe found.
+    // The put lost, so the attempt probes the numbers above its basis, loads
+    // the newest manifest that the probe found, and reads the boundary.
     expected.extend(
         manifests(&namespace_id, 3, 3 + MANIFEST_PROBE_WINDOW_U64)
             .into_iter()
             .map(|key| ("head", key)),
     );
-    expected.push(("get", manifest(4)));
+    expected.extend([("get", manifest(4)), ("get", boundary(&namespace_id))]);
     // The next attempt builds on that manifest without a request first.
     expected.extend([("put", manifest(5)), ("get", boundary(&namespace_id))]);
     assert_eq!(

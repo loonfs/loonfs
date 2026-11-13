@@ -125,26 +125,23 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
 }
 
 /// Returns the manifest of a writer session's position as a basis that a
-/// publication can build on, loaded through `segment_cache`, or `None` when
-/// the position's last check is at the revalidation bound.
+/// publication can build on, loaded through `segment_cache`, with the
+/// manifest boundary that the position keeps.
 pub async fn load_position_basis<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: &MetadataSegmentCache,
     position: &WriterPosition,
-) -> crate::error::Result<Option<PublicationBasis>> {
-    if !position.basis_checked.is_within_revalidation_bound() {
-        return Ok(None);
-    }
+) -> crate::error::Result<PublicationBasis> {
     let segments = load_manifest_segments(
         store,
         Some(segment_cache),
         position.read_basis.basis.manifest(),
     )
     .await?;
-    Ok(Some(PublicationBasis {
+    Ok(PublicationBasis {
         manifest: segments.loaded_manifest(),
-        checked: position.basis_checked.clone(),
-    }))
+        boundary: position.boundary.clone(),
+    })
 }
 
 pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(

@@ -2,7 +2,6 @@
 //! the session's position instead of the read cache.
 
 use crate::common::{is_manifest_head, wait_for_operation};
-use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::{counter, writer};
 use loonfs::{
@@ -181,6 +180,26 @@ impl Fixture {
         (stats.heads.hits, stats.heads.misses)
     }
 
+    /// Returns whether `operation` is a request of a check of a manifest: a
+    /// HEAD of a manifest, or a read of the manifest boundary.
+    fn is_check(&self, operation: &RecordedOperation) -> bool {
+        is_manifest_head(operation, &self.namespace_id)
+            || operation.key() == boundary(&self.namespace_id)
+    }
+
+    /// Forks the namespace, which drops the session's position and the
+    /// cached head, so the next read loads the namespace from the store.
+    pub(crate) async fn drop_position(&self) {
+        self.writer
+            .fork_namespace(
+                &self.namespace_id,
+                &namespace_id(&format!("{}-dropped", self.namespace_id)),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .expect("fork");
+    }
+
     fn tail_replays(&self) -> u64 {
         counter(
             &self.recorder.snapshot(),
@@ -218,7 +237,8 @@ impl Fixture {
 
 /// Checks that a strong stat and a strong 1 KiB read after a commit in the
 /// writer's runtime start from the writer's position, and that each sends
-/// one request, the session's check of the position's manifest.
+/// only the session's check of the position's manifest: a HEAD and a read of
+/// the manifest boundary.
 #[tokio::test]
 async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
     let fixture = fixture("position-reads", Parked::WalPuts).await;
@@ -244,10 +264,10 @@ async fn strong_reads_after_a_commit_send_one_manifest_check_each() {
     assert_eq!(file.bytes, [b's'; 1024]);
     let operations = fixture.recording.take();
     assert!(
-        operations.len() == 2
+        operations.len() == 4
             && operations
                 .iter()
-                .all(|operation| is_manifest_head(operation, &fixture.namespace_id)),
+                .all(|operation| fixture.is_check(operation)),
         "{operations:?}"
     );
     assert_eq!(fixture.head_sources(), (positions + 2, anchors));
@@ -340,7 +360,7 @@ async fn a_read_during_a_publish_starts_from_the_head_before_it() {
         assert!(
             operations
                 .iter()
-                .all(|operation| is_manifest_head(operation, &fixture.namespace_id)),
+                .all(|operation| fixture.is_check(operation)),
             "{operations:?}"
         );
         gate.release();
@@ -498,7 +518,7 @@ async fn another_runtimes_fold_moves_the_position_past_the_staleness() {
             && is_manifest_get(&operations[2], &fixture.namespace_id, after_fold)
             && operations
                 .iter()
-                .all(|operation| operation.key() != boundary(&fixture.namespace_id)),
+                .all(|operation| !matches!(operation, RecordedOperation::List { .. })),
         "the check finds the fold's manifest, loads it, finds nothing after it, and runs no \
          discovery: {operations:?}"
     );
@@ -699,8 +719,8 @@ async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() 
 /// and finishes after the runtime dropped its view for that change, installs
 /// nothing, so the next read loads the namespace by discovery.
 ///
-/// A read past the revalidation bound drops the position and loads the
-/// namespace into the read cache. A strong read's refresh of that view then
+/// A fork drops the position, and a read loads the namespace into the read
+/// cache. A strong read's refresh of that view then
 /// waits at its WAL probe while a fork, whose fold of the source's tail
 /// isn't reported, drops the view. The refresh's head is from before the
 /// fork, so an eventual read after it would otherwise start from that head
@@ -708,7 +728,7 @@ async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() 
 #[tokio::test]
 async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
     let fixture = fixture("spanning-refresh", Parked::WalReads).await;
-    fixture.clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+    fixture.drop_position().await;
     fixture
         .reader
         .stat("/small.txt")
@@ -753,34 +773,54 @@ async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
 }
 
-/// Checks that a read doesn't start from a position whose last manifest
-/// check is past the revalidation bound. A check's answer can't confirm the
-/// position then, so the read drops the position and reloads the namespace,
-/// and the session's next publish loads the namespace too.
+/// Checks that a check of a writer position whose manifest's successors a
+/// collection deleted drops the position. The check's HEAD finds no
+/// successor, but the manifest boundary is above the position's manifest, so
+/// the read loads the newest manifest instead.
 #[tokio::test]
-async fn a_position_past_the_revalidation_bound_is_not_read_from() {
-    let fixture = fixture("position-bound", Parked::WalPuts).await;
-    fixture.clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+async fn a_position_at_the_boundary_is_dropped_by_its_check() {
+    let fixture = fixture("position-boundary", Parked::WalPuts).await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let namespace =
+        || loonfs_core::test_support::namespace_store(store.clone(), &fixture.namespace_id);
+    let position = namespace()
+        .load_current_manifest()
+        .await
+        .expect("the position's manifest")
+        .manifest()
+        .manifest_no;
+    // Another process claims the compactor twice, and a collection one grace
+    // window later deletes the manifests below the newest claim.
+    for _ in 0..2 {
+        loonfs_core::NamespaceEngine::writer(namespace(), writer_id("position-boundary-peer"))
+            .claim_compactor()
+            .await
+            .expect("another process claims the compactor");
+    }
+    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
+        .await
+        .gc(&fixture.namespace_id)
+        .await
+        .expect("collect");
+
+    fixture.clock.advance_ms(MAX_STALENESS_MS);
     let (positions, anchors) = fixture.head_sources();
     fixture.recording.reset();
     fixture.reader.stat("/small.txt").await.expect("stat");
     let operations = fixture.recording.take();
+    let successor = metadata_manifest_object(
+        &fixture.namespace_id,
+        &position.successor().expect("next manifest number"),
+    );
     assert!(
         matches!(
-            operations.first(),
-            Some(RecordedOperation::GetWithMetadata { key, .. })
-                if *key == boundary(&fixture.namespace_id)
+            operations.as_slice(),
+            [RecordedOperation::Head { key }, RecordedOperation::GetWithMetadata { key: read, .. }, ..]
+                if *key == successor && *read == boundary(&fixture.namespace_id)
         ),
-        "the read reloads from the manifest boundary without a successor check: {operations:?}"
+        "the check reads the boundary after its HEAD: {operations:?}"
     );
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
-
-    let replays = fixture.tail_replays();
-    fixture.put("/after.txt").await.expect("commit");
-    assert_eq!(fixture.tail_replays(), replays + 1);
-    fixture.recording.reset();
-    fixture.reader.stat("/after.txt").await.expect("stat");
-    assert_eq!(fixture.recording.take(), []);
 }
 
 /// Checks that the reads that need a check of the position share the

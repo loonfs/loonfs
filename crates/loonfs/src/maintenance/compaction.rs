@@ -74,25 +74,23 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<PublicationBasis> {
-        let checked = self.core.observation();
-        let manifest = self
+        let basis = self
             .core
             .namespace_store(namespace_id)
-            .load_current_manifest()
+            .load_current_basis()
             .await?;
-        if manifest.payload().status.is_deleted() {
+        if basis.manifest.payload().status.is_deleted() {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: namespace_id.clone(),
             }
             .into());
         }
-        Ok(PublicationBasis { manifest, checked })
+        Ok(basis)
     }
 
     /// Returns the manifest of this runtime's writer position as a basis,
     /// loaded through the segment cache, or `None` when the runtime has no
-    /// position for the namespace or the position's last check is at the
-    /// revalidation bound.
+    /// position for the namespace.
     pub(super) async fn load_position_basis(
         &self,
         namespace_id: &NamespaceId,
@@ -101,10 +99,10 @@ impl Maintenance {
             return Ok(None);
         };
         let segment_cache = self.core.metadata_segment_cache();
-        Ok(
+        Ok(Some(
             loonfs_core::control::load_position_basis(self.core.store(), &segment_cache, &position)
                 .await?,
-        )
+        ))
     }
 
     /// Runs size-tiered compaction units on `namespace_id` while a unit is
@@ -209,15 +207,16 @@ impl Maintenance {
     /// runs.
     ///
     /// The basis is `observed` when it's given. Otherwise it's this runtime's
-    /// writer position while the position's last check is within the
-    /// revalidation bound, and without such a position, the current manifest
-    /// when this runtime has no claim to plan under. The caller has the
+    /// writer position, and without a position, the current manifest when
+    /// this runtime has no claim to plan under. The caller has the
     /// namespace's compaction lock, but `observed` and the position may have
     /// been read before it: another unit may have published since, in this
     /// runtime or in another process, such as another process's compactor
     /// claim. So before a due unit plans from either, one HEAD checks the
-    /// basis's manifest for a successor, and the unit plans from the newer
-    /// manifest when one exists. For a position, the check is a strong read's
+    /// basis's manifest for a successor, and a read of the manifest boundary
+    /// follows it. The unit plans from the newest manifest when the HEAD
+    /// finds a successor or the basis is at or below the boundary. For a
+    /// position, the check is a strong read's
     /// (see [`RuntimeCore::checked_writer_position`]), which moves the
     /// position onto the manifests after it that have its writer epoch, or
     /// drops the position.
@@ -253,16 +252,28 @@ impl Maintenance {
                 Some(basis) => basis,
                 None => self.load_live_basis(namespace_id).await?,
             }
-        } else if self
-            .core
-            .namespace_store(namespace_id)
-            .manifest_has_successor(basis.manifest.manifest().manifest_no)
-            .await
-            .map_err(CoreError::from)?
-        {
-            self.load_live_basis(namespace_id).await?
         } else {
-            return Ok(ControlFlow::Continue(Some(basis)));
+            let namespace = self.core.namespace_store(namespace_id);
+            let manifest_no = basis.manifest.manifest().manifest_no;
+            if namespace
+                .manifest_has_successor(manifest_no)
+                .await
+                .map_err(CoreError::from)?
+            {
+                self.load_live_basis(namespace_id).await?
+            } else {
+                let (above, boundary) = namespace
+                    .above_boundary(manifest_no, basis.boundary.clone())
+                    .await?;
+                if !above {
+                    self.load_live_basis(namespace_id).await?
+                } else {
+                    return Ok(ControlFlow::Continue(Some(PublicationBasis {
+                        boundary,
+                        ..basis
+                    })));
+                }
+            }
         };
         Ok(self.screen(namespace_id, claimed, basis).await)
     }
@@ -381,7 +392,7 @@ impl Maintenance {
                 self.publisher
                     .invalidate_namespace(
                         namespace_id,
-                        NamespaceChange::Published(manifest.clone()),
+                        NamespaceChange::Published(Box::new(manifest.clone())),
                     )
                     .await;
             }

@@ -34,7 +34,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<PublicationReport<DeleteNamespaceResponse>> {
         let basis = match &position {
             Some(position) => {
-                load_position_basis(&self.store, &self.segment_cache, position).await?
+                Some(load_position_basis(&self.store, &self.segment_cache, position).await?)
             }
             None => None,
         };

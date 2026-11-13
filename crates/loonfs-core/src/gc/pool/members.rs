@@ -291,7 +291,7 @@ impl PoolRoots {
         observed: Observation,
     ) -> Result<MemberRead> {
         let anchor = member
-            .load_read_anchor_from_manifest(manifest, observed)
+            .load_read_anchor_from_manifest(manifest, None, observed)
             .await?;
         let head = anchor.manifest.payload();
         // A tombstone's runs cover its whole WAL, so it has no tail.

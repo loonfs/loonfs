@@ -8,6 +8,7 @@ use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
 use crate::manifest::retention::verify_manifest_segments_exist;
 use crate::manifest::{FloorObjectReport, ManifestLoadError, PublishedManifest};
+use crate::namespace::boundary::higher_boundary;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
@@ -200,7 +201,8 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// one existed then either. Once the position is on a manifest that this
     /// runtime published or found current, the start of that call is a check
     /// of the manifest too, because no manifest followed it then, so the
-    /// position keeps the younger of the two checks.
+    /// position keeps the younger of the two checks. The position keeps the
+    /// higher of its manifest boundary and the one that `manifest` carries.
     pub fn record_manifest_published(&mut self, manifest: PublishedManifest) {
         let state = &mut self.position;
         let Some(position) = state.current.as_mut() else {
@@ -210,6 +212,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             state.invalidate_projection();
             return;
         }
+        position.boundary = higher_boundary(position.boundary.take(), manifest.boundary);
         let Some(started) = manifest.started else {
             return;
         };
@@ -242,8 +245,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// [`Self::publish_batch`]. Fenced sessions fail before accessing the store,
     /// and a takeover detected during manifest publication permanently fences the
     /// session. A deletion first folds the WAL tail under the namespace's run
-    /// policy. Both publications build on the position's manifest while the
-    /// position's last check is within the revalidation bound.
+    /// policy. Both publications build on the position's manifest.
     pub async fn delete_namespace(
         &mut self,
         options: DeleteNamespaceOptions,
@@ -394,6 +396,29 @@ impl PositionState {
         })
     }
 
+    /// Returns whether the position's tip and basis are current: no WAL
+    /// object after `tip`, no manifest after `manifest_no`, and `manifest_no`
+    /// above the manifest boundary. The position keeps the boundary that the
+    /// call read.
+    async fn confirm_tip<S: ObjectStore>(
+        &mut self,
+        namespace: &NamespaceStore<S>,
+        tip: WalNo,
+        manifest_no: ManifestNo,
+    ) -> Result<bool> {
+        if namespace.tip_has_successor(tip, manifest_no).await? {
+            return Ok(false);
+        }
+        let Some(position) = self.current.as_mut() else {
+            return Ok(false);
+        };
+        let above;
+        (above, position.boundary) = namespace
+            .above_boundary(manifest_no, position.boundary.take())
+            .await?;
+        Ok(above)
+    }
+
     /// Records that the session found its namespace deleted or missing, when
     /// `error` says so. Every caller passes an error from a read of the
     /// session's own namespace, so an error about another namespace, such as
@@ -462,15 +487,6 @@ impl PositionState {
         let tip_expired = self.projection_observed.as_ref().is_some_and(|observed| {
             observed.age_at(&attempt) > crate::limits::WAL_PUBLISH_BUDGET_MS
         });
-        // A response can't confirm a basis whose last confirmation is at the
-        // revalidation bound, so the position is dropped without a probe.
-        if tip_expired
-            && !self.current.as_ref().is_some_and(|position| {
-                position.basis_checked.age_at(&attempt) < crate::limits::READ_REVALIDATION_BOUND_MS
-            })
-        {
-            self.invalidate_projection();
-        }
         // A put that took effect confirms the tip, not the manifest the batch was planned
         // against: a fold or compaction (including our own) may have succeeded.
         // The confirmation is a discovery of one WAL object: a HEAD request
@@ -482,21 +498,25 @@ impl PositionState {
         // created after the WAL response is too young to be collected before
         // the put, so the put collides with it. After this session's own put
         // with an unknown outcome, the engine has already dropped the
-        // position. Bound the response by the previous basis confirmation so a
-        // collected successor can't look absent. A confirmation that finds an
-        // object or a manifest, or fails, reloads the view.
+        // position. The manifest boundary is read after the two requests, so
+        // a successor that a collection deleted can't look absent: the
+        // collection raised the boundary over the basis first. A confirmation
+        // that finds an object or a manifest, finds the basis at or below the
+        // boundary, or fails, reloads the view.
         if let Some((tip, manifest_no)) = self.unconfirmed_tip(&attempt, tip_expired) {
-            let successor = namespace.tip_has_successor(tip, manifest_no).await;
-            match (successor, self.current.as_mut()) {
-                (Ok(false), Some(position))
-                    if position.basis_checked.is_within_revalidation_bound() =>
-                {
+            if self
+                .confirm_tip(namespace, tip, manifest_no)
+                .await
+                .unwrap_or(false)
+            {
+                if let Some(position) = self.current.as_mut() {
                     position.basis_checked = attempt.clone();
-                    if tip_expired {
-                        self.projection_observed = Some(attempt.clone());
-                    }
                 }
-                _ => self.invalidate_projection(),
+                if tip_expired {
+                    self.projection_observed = Some(attempt.clone());
+                }
+            } else {
+                self.invalidate_projection();
             }
         }
         let acquired_anchor = self.acquired_anchor.take();

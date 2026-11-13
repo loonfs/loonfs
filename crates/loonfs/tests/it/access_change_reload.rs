@@ -10,9 +10,7 @@ use loonfs::{
     ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
-use loonfs_objectstore::keys::{
-    boundary, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
-};
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -243,9 +241,9 @@ impl Fixture {
     }
 
     /// Commits a file, and checks that the publish replays no WAL tail and
-    /// reloads no head: it reads no manifest boundary or WAL object, and at most one
-    /// manifest (the one it plans against, the first time it plans against
-    /// it).
+    /// reloads no head: it lists no manifests, reads no WAL object, and reads
+    /// at most one manifest (the one it plans against, the first time it
+    /// plans against it).
     ///
     /// The clock first moves past the publish budget, so the publish checks
     /// its manifest for a successor. A publisher left on a manifest that
@@ -266,11 +264,12 @@ impl Fixture {
                 )
             })
         };
-        let reloads = gets()
-            .filter(|operation| {
-                operation.key() == boundary(namespace_id)
-                    || operation.key().starts_with(&wal_prefix(namespace_id))
-            })
+        let reloads = operations
+            .iter()
+            .filter(|operation| matches!(operation, RecordedOperation::List { .. }))
+            .chain(
+                gets().filter(|operation| operation.key().starts_with(&wal_prefix(namespace_id))),
+            )
             .count();
         let manifests = gets()
             .filter(|operation| {
@@ -281,28 +280,26 @@ impl Fixture {
             .count();
         assert!(
             reloads == 0 && manifests <= 1 && self.tail_replays() == replays,
-            "write after {after}: {reloads} boundary or WAL GETs, {manifests} manifest GETs, \
+            "write after {after}: {reloads} manifest listings or WAL GETs, {manifests} manifest GETs, \
              {} replays: {operations:?}",
             self.tail_replays() - replays
         );
     }
 
     /// Checks that the read uses at most four storage requests without
-    /// reloading the manifest boundary or any manifests.
+    /// listing or loading any manifests.
     fn assert_no_reload(&self, read: &str) {
         let operations = self.recording.take();
         let reloads = operations
             .iter()
             .filter(|operation| {
                 let key = operation.key();
-                key.ends_with("boundary.json")
-                    || (key.contains("/manifests/")
-                        && !matches!(operation, RecordedOperation::Head { .. }))
+                key.contains("/manifests/") && !matches!(operation, RecordedOperation::Head { .. })
             })
             .count();
         assert!(
             operations.len() <= 4 && reloads == 0,
-            "{read}: {} requests, {reloads} boundary or manifest GETs: {operations:?}",
+            "{read}: {} requests, {reloads} manifest listings or GETs: {operations:?}",
             operations.len()
         );
     }
@@ -421,8 +418,8 @@ async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
     assert!(
         operations
             .iter()
-            .all(|operation| operation.key() != boundary(&fixture.namespace_id)),
-        "the first read loads the compaction's manifests, not the boundary: {operations:?}"
+            .all(|operation| !matches!(operation, RecordedOperation::List { .. })),
+        "the first read loads the compaction's manifests, not a listing: {operations:?}"
     );
     for (round, kind) in COMMIT_KINDS.into_iter().enumerate() {
         let user_granted = fixture.commit(kind, round).await;
@@ -538,8 +535,8 @@ async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
         .expect("read");
     // A position left on the replaced manifest would find the snapshot's
     // manifest as its successor and reload. A position on the snapshot's
-    // manifest checks the manifest after it, and reads no other manifest or
-    // the manifest boundary.
+    // manifest checks the manifest after it and the manifest boundary, and
+    // reads no other manifest.
     let operations = fixture.recording.take();
     let manifest = |manifest_no| metadata_manifest_object(&fixture.namespace_id, &manifest_no);
     let snapshot_manifest_no = snapshot.snapshot_id.manifest_no();
@@ -549,8 +546,7 @@ async fn a_publish_in_flight_while_a_snapshot_publishes_ends_on_its_manifest() {
         .iter()
         .filter(|operation| {
             let key = operation.key();
-            (key == boundary(&fixture.namespace_id)
-                || key.starts_with(&metadata_manifest_prefix(&fixture.namespace_id)))
+            key.starts_with(&metadata_manifest_prefix(&fixture.namespace_id))
                 && !checks_successor(operation)
                 && key != manifest(snapshot_manifest_no)
         })

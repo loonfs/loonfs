@@ -90,9 +90,9 @@ impl LiveSet {
     ) -> Result<Self> {
         let namespace_id = &namespace.namespace_id;
         let observed = Observation::now(Arc::clone(&namespace.timer));
-        let manifest = namespace.load_current_manifest().await?;
+        let current = namespace.load_current_basis().await?;
         let anchor = namespace
-            .load_read_anchor_from_manifest(manifest, observed)
+            .load_read_anchor_from_manifest(current.manifest, current.boundary, observed)
             .await?;
         let memory = CollectionMemory::new(
             namespace_id.to_string(),

@@ -260,7 +260,7 @@ async fn a_metadata_step_waits_for_the_sessions_fold_instead_of_folding_the_tail
 }
 
 /// Checks that a sweep folds every idle tail: the tail of a held session
-/// with a current writer position, the tail of a held session without a
+/// with a writer position, the tail of a held session without a
 /// position, and the tail of a namespace without a session. The session
 /// without a position never published, so the session steps run no
 /// metadata step for it, and its tail, which an earlier writer left, waits
@@ -312,127 +312,6 @@ async fn a_sweep_folds_every_idle_tail() {
             "the sweep folds the idle tail of {namespace_id}"
         );
     }
-    server.runtime.shutdown().await.expect("shutdown");
-}
-
-/// Checks that the session steps fold a tail at its idle fold age after the
-/// session's writer position has passed the revalidation bound. The run
-/// right after the commit reads the idle fold's due time from the position.
-/// The idle fold age is longer than the bound, so until the age the session
-/// steps run no metadata step for the session, and at the age one step reads
-/// the tail from the store and folds it. The fold leaves the session a
-/// current position again, so later runs cost nothing.
-#[tokio::test]
-async fn session_steps_fold_an_idle_tail_after_the_position_passes_the_bound() {
-    const IDLE_FOLD_AFTER_MS: u64 = 25 * 60 * 1000;
-    let directory = tempdir().expect("tempdir");
-    let store = Arc::new(RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let mut config = scheduler_config(None);
-    config.idle_fold_after_ms = Some(IDLE_FOLD_AFTER_MS);
-    let server = SchedulerServer::start(store.clone(), &config, 0).await;
-    let namespace_id = namespace_id("stale-position");
-    server
-        .runtime
-        .create_namespace(&namespace_id, &test_actor())
-        .await
-        .expect("create");
-    let held = server
-        .scheduler
-        .inner
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .expect("open");
-    held.put_file("/note", b"data", &test_actor())
-        .await
-        .expect("publish");
-    server.scheduler.run_due_steps().await;
-    server
-        .run_steps_after(loonfs_core::limits::READ_REVALIDATION_BOUND_MS + 1)
-        .await;
-    assert!(!held.has_current_writer_position());
-    store.reset();
-    server
-        .run_steps_after(IDLE_FOLD_AFTER_MS - loonfs_core::limits::READ_REVALIDATION_BOUND_MS - 2)
-        .await;
-    assert!(
-        store.take().is_empty(),
-        "a session without a position gets no metadata step before the idle fold age"
-    );
-    server.run_steps_after(1).await;
-    assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
-    assert!(held.has_current_writer_position());
-    server.scheduler.run_due_steps().await;
-    store.reset();
-    for _ in 0..20 {
-        server
-            .run_steps_after(config.maintenance_interval_ms.get())
-            .await;
-    }
-    assert!(store.take().is_empty(), "the idle fold runs once");
-    server.runtime.shutdown().await.expect("shutdown");
-}
-
-/// Checks that the session steps fold a tail at its idle fold age when no
-/// run happened between the session's commit and its writer position
-/// passing the revalidation bound. The first run after the bound reads the
-/// tail from the store, because the session has committed since a metadata
-/// step last dated its tail, and that step reports when the idle fold comes
-/// due. The runs until that age then cost nothing, and the step at that age folds the
-/// tail.
-#[tokio::test]
-async fn session_steps_fold_an_idle_tail_when_no_run_saw_the_position() {
-    const IDLE_FOLD_AFTER_MS: u64 = 25 * 60 * 1000;
-    let directory = tempdir().expect("tempdir");
-    let store = Arc::new(RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let mut config = scheduler_config(None);
-    config.idle_fold_after_ms = Some(IDLE_FOLD_AFTER_MS);
-    let server = SchedulerServer::start(store.clone(), &config, 0).await;
-    let namespace_id = namespace_id("unseen-position");
-    server
-        .runtime
-        .create_namespace(&namespace_id, &test_actor())
-        .await
-        .expect("create");
-    let held = server
-        .scheduler
-        .inner
-        .namespaces
-        .open(&namespace_id)
-        .await
-        .expect("open");
-    held.put_file("/note", b"data", &test_actor())
-        .await
-        .expect("publish");
-    store.reset();
-    server
-        .run_steps_after(loonfs_core::limits::READ_REVALIDATION_BOUND_MS + 1)
-        .await;
-    assert!(!held.has_current_writer_position());
-    assert!(
-        !store.take().is_empty(),
-        "the first run after the commit dates the tail from the store"
-    );
-    assert!(server.idle_fold_due_at_ms(&namespace_id).is_some());
-    server
-        .run_steps_after(IDLE_FOLD_AFTER_MS - loonfs_core::limits::READ_REVALIDATION_BOUND_MS - 2)
-        .await;
-    assert!(
-        store.take().is_empty(),
-        "the runs before the idle fold age make no request"
-    );
-    server.run_steps_after(1).await;
-    assert_eq!(
-        server.wal_tail_objects(&namespace_id).await,
-        0,
-        "the step at the idle fold age folds the tail"
-    );
     server.runtime.shutdown().await.expect("shutdown");
 }
 
@@ -538,7 +417,8 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
 /// Checks that a session whose compactor another runtime has claimed finds
 /// the claim before it plans a compaction unit. Its position doesn't show
 /// the claim, so one HEAD finds the manifests after the position's manifest,
-/// the position moves onto them, and the unit stops as fenced without
+/// a read of the manifest boundary follows the walk over them, the position
+/// moves onto them, and the unit stops as fenced without
 /// writing a segment or a manifest. The session's own claim manifest is in
 /// the segment cache from its publication, so the metadata step doesn't read it
 /// again. The session waits for the metadata retry interval before it tries
@@ -601,7 +481,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         Vec::<String>::new(),
         "the session writes no segment and no manifest"
     );
-    assert_eq!(operations.len(), 5, "{operations:#?}");
+    assert_eq!(operations.len(), 6, "{operations:#?}");
     assert!(server.metadata_left_due(&namespace_id));
     for _ in 0..59 {
         server

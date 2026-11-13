@@ -291,6 +291,7 @@ fn compaction_instruments_register_the_closed_vocabularies() {
                 folded_wal_no: loonfs_types::WalNo(1),
                 retention_floor_seq: loonfs_types::CommitSeq(0),
                 started: None,
+                boundary: None,
             },
             rows_read: 20,
             rows_written: 10,
