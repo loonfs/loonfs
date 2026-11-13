@@ -39,8 +39,9 @@ pub enum NamespaceSessionStatus {
     /// Another writer acquired a later epoch. Mutations fail with
     /// `writer_fenced` for the rest of the session.
     Fenced,
-    /// The session admits no more work. It was closed, its namespace was
-    /// deleted, or the runtime is shutting down.
+    /// The session is finished. It was closed, its namespace was deleted
+    /// through it, its last publish found its namespace deleted or missing,
+    /// or the runtime is shutting down.
     Closed,
 }
 

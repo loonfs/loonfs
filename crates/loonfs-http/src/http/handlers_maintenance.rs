@@ -85,10 +85,7 @@ pub(super) async fn run_maintenance_job(
                 .recover_administrator(&request.principal_id, &actor_id)
                 .await
                 .map(|recovered| Json(RunMaintenanceJobResponse::RecoverAdministrator(recovered)))
-                .map_err(ApiResponseError::for_namespace_writer(
-                    state.namespaces.as_ref(),
-                    &namespace_id,
-                ));
+                .map_err(ApiResponseError::runtime);
         }
     };
     response.map(Json).map_err(ApiResponseError::runtime)

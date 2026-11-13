@@ -56,14 +56,7 @@ pub(super) async fn create_snapshot(
             },
         )
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                &namespace_id,
-                error,
-            )
-            .with_body_field_params(&["/name"])
-        })?;
+        .map_err(|error| ApiResponseError::runtime(error).with_body_field_params(&["/name"]))?;
     Ok(Json(snapshot))
 }
 
@@ -145,10 +138,7 @@ pub(super) async fn extend_snapshot(
     let response = namespace
         .extend_snapshot(&snapshot_id, request.ttl_ms)
         .await
-        .map_err(ApiResponseError::for_namespace_writer(
-            state.namespaces.as_ref(),
-            &namespace_id,
-        ))?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -234,9 +224,10 @@ pub(super) async fn delete_snapshot(
     };
     let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
     let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
-    let response = namespace.delete_snapshot(&snapshot_id).await.map_err(
-        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
-    )?;
+    let response = namespace
+        .delete_snapshot(&snapshot_id)
+        .await
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 

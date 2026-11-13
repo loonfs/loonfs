@@ -56,8 +56,8 @@ pub enum TailSource {
     Store,
 }
 
-/// Tracks writer state for one namespace session: unacquired, acquired, or
-/// permanently fenced.
+/// Tracks writer state for one namespace session: unacquired, acquired,
+/// permanently fenced, or without a namespace that the store still has.
 ///
 /// Object storage cannot reconstruct whether the current session was fenced.
 /// Runtimes should therefore share one instance across engines for the same
@@ -75,6 +75,12 @@ pub enum WriterSessionStatus {
     /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
     /// requires an explicit caller action.
     Fenced(WriterFence),
+    /// The session's last read of its namespace for a publish found the
+    /// namespace deleted or missing. A runtime that keeps sessions open reads
+    /// this record to stop keeping the session. The record changes no later
+    /// publish: each one reads the store again, and acquires a writer epoch
+    /// if the namespace exists.
+    NamespaceGone,
 }
 
 /// Shared handle to one namespace's [`WriterSessionStatus`].
@@ -409,6 +415,22 @@ impl PositionState {
         })
     }
 
+    /// Records that the session found its namespace deleted or missing, when
+    /// `error` says so. Every caller passes an error from a read of the
+    /// session's own namespace, so an error about another namespace, such as
+    /// a merge's fork, is never recorded. A fence stays recorded.
+    fn record_namespace_gone(&self, error: &CoreError) {
+        if matches!(
+            error,
+            CoreError::NamespaceDeleted { .. } | CoreError::NamespaceNotFound { .. }
+        ) {
+            let mut session = self.lock_session();
+            if !matches!(*session, WriterSessionStatus::Fenced(_)) {
+                *session = WriterSessionStatus::NamespaceGone;
+            }
+        }
+    }
+
     fn record_published_manifest_no(&mut self, manifest_no: ManifestNo) {
         self.published_manifest_no = Some(
             self.published_manifest_no
@@ -429,12 +451,15 @@ impl PositionState {
                 return Err(CoreError::WriterFenced(fence.clone()))
             }
             WriterSessionStatus::Acquired(acquired_writer) => Some(acquired_writer.clone()),
-            WriterSessionStatus::Unacquired => None,
+            WriterSessionStatus::Unacquired | WriterSessionStatus::NamespaceGone => None,
         };
         if let Some(acquired_writer) = already_acquired {
             return Ok(acquired_writer);
         }
-        let acquisition = namespace.acquire_writer(writer_id).await?;
+        let acquisition = namespace
+            .acquire_writer(writer_id)
+            .await
+            .inspect_err(|error| self.record_namespace_gone(error))?;
         let acquired_writer = acquisition.writer;
         self.record_published_manifest_no(acquisition.claim.manifest.manifest_no);
         self.acquired_anchor = Some(acquisition.anchor);
@@ -521,6 +546,7 @@ impl PositionState {
                 if let CoreError::WriterFenced(fence) = &error {
                     *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
                 }
+                self.record_namespace_gone(&error);
                 return Err(error);
             }
         };

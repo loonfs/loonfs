@@ -335,9 +335,10 @@ pub(super) async fn delete_namespace(
         expected_head_seq: query.expected_head_seq,
     };
     let namespace = state.open_writer(&namespace_id, subject).await?;
-    let response = namespace.delete_with_options(&options).await.map_err(
-        ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
-    )?;
+    let response = namespace
+        .delete_with_options(&options)
+        .await
+        .map_err(ApiResponseError::runtime)?;
     state.namespaces.forget(&namespace_id);
     Ok(Json(response))
 }
@@ -453,13 +454,9 @@ pub(super) async fn merge_fork(
         .merge_fork_with_options(&source_namespace_id, &actor_id, &options)
         .await
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                &namespace_id,
-                error,
-            )
-            .with_body_field_params(MERGE_BODY_FIELDS)
-            .with_commit_id(&commit_id)
+            ApiResponseError::runtime(error)
+                .with_body_field_params(MERGE_BODY_FIELDS)
+                .with_commit_id(&commit_id)
         })?;
     Ok(Json(response))
 }
@@ -642,13 +639,9 @@ pub(super) async fn replay_fork(
         .replay_fork_with_options(&source_namespace_id, &actor_id, &options)
         .await
         .map_err(|error| {
-            ApiResponseError::runtime_for_namespace_writer(
-                state.namespaces.as_ref(),
-                &namespace_id,
-                error,
-            )
-            .with_body_field_params(REPLAY_BODY_FIELDS)
-            .with_commit_id(&commit_id)
+            ApiResponseError::runtime(error)
+                .with_body_field_params(REPLAY_BODY_FIELDS)
+                .with_commit_id(&commit_id)
         })?;
     Ok(Json(response))
 }
