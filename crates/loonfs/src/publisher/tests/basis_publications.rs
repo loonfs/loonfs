@@ -183,8 +183,8 @@ async fn a_retention_advance_from_a_live_session_folds_on_its_basis_and_reads_no
         .await
         .expect("fold the first commit");
     fixture.writer.drain().await.expect("drain");
-    // Every commit is an hour old, so the advance can pass them.
-    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    // Every commit is a grace window old, so the advance can pass them.
+    clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
     let next = fixture
         .current_manifest_no()
         .await

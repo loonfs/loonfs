@@ -513,7 +513,7 @@ impl Maintenance {
     /// floor object in the WAL, and claims no writer epoch.
     ///
     /// Whatever the target, the floor doesn't pass a commit dated less than
-    /// [`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`](crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS)
+    /// the grace window ([`GC_GRACE_WINDOW_MS`](crate::GC_GRACE_WINDOW_MS))
     /// before the runtime's wall clock (format spec, "Advancing the retention
     /// floor"), and the response includes the floor that the advance reached.
     /// Advancing the floor abandons the replay history below it, and a later

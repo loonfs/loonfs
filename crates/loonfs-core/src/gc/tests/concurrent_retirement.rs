@@ -86,7 +86,7 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
             .await
             .expect("delete");
     }
-    let deadline = context(setup.now_ms + retirement_ms());
+    let deadline = context(setup.now_ms + GC_GRACE_WINDOW_MS);
     let target_snapshot_key = snapshot_record(&source, &target_snapshot);
     let store = BlockingStore::new(
         FailStore::new(

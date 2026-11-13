@@ -1,7 +1,6 @@
 //! Retained namespace views across metadata maintenance and collection.
 
 use crate::common::*;
-use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
@@ -279,10 +278,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 // Every object is fresh, so the pass runs at a clock past
                 // every age gate. The user snapshot and the fork snapshots are the only
                 // roots for the pre-rebuild file set.
-                let now_ms = loonfs_core::time::current_time_ms()
-                    + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
-                    + GC_GRACE_WINDOW_MS
-                    + 1;
+                let now_ms = loonfs_core::time::current_time_ms() + GC_GRACE_WINDOW_MS + 1;
                 let collected =
                     loonfs_core::test_support::namespace_store(object_store.as_ref(), &source)
                         .gc(&WriterAt {

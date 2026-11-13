@@ -98,11 +98,7 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
         assert_eq!(young.code(), ErrorCode::NamespaceCorrupt);
 
         let collected = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(&writer_at(
-                "collector",
-                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_001,
-            )
-            .clock())
+            .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_001).clock())
             .await
             .expect("reap abandoned snapshot once owner rules permit deletion");
         assert_eq!(
@@ -111,11 +107,7 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
         );
         assert!(store.head(&snapshots[0]).await.expect("snapshot").is_none());
         crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(&writer_at(
-                "collector",
-                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_002,
-            )
-            .clock())
+            .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_002).clock())
             .await
             .expect("next collection also succeeds");
         crate::test_support::namespace_store(&store, &namespace_id)
@@ -158,10 +150,7 @@ async fn snapshot_removed_after_listing_does_not_make_a_collected_basis_corrupti
         KeyPredicate::exact(&old_manifest),
         OperationSelector::Read,
     );
-    let aged = writer_at(
-        "collector",
-        crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
-    );
+    let aged = writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 1);
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = aged.clock();
@@ -247,10 +236,7 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
         .delete(&manifest.object_key)
         .await
         .expect("remove snapshot's manifest");
-    let aged = writer_at(
-        "collector",
-        crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
-    );
+    let aged = writer_at("collector", 2_000 + crate::limits::GC_GRACE_WINDOW_MS);
     let error = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&aged.clock())
         .await

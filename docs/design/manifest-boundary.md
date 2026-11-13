@@ -51,7 +51,7 @@ To publish a manifest at the next number `n`, including manifest 1 and a tombsto
 
 The publisher makes no assumption about how long it waited before step 1, or between step 1 and step 3. For example, a fold that has had manifest 40 for two hours puts manifest 41. If other processes have since published manifests 41 to 45, and cleanup has deleted 41 to 44 and raised the boundary to 44, the put succeeds, but the boundary read returns 44, so the fold treats its put as lost.
 
-This rule has one consequence. If a call's put is good (its manifest was the namespace's newest), and the call then stalls between its put and its boundary read while another process publishes a later manifest and a cleanup raises the boundary over the call's manifest, the call is told that it lost. For a create, that's `namespace_exists` for a namespace that this call created. Cleanup raises the boundary only over manifests older than the [grace window](../specs/glossary.md#grace-window), so this takes a wait longer than the grace window (one hour) between two adjacent steps of one call.
+This rule has one consequence. If a call's put is good (its manifest was the namespace's newest), and the call then stalls between its put and its boundary read while another process publishes a later manifest and a cleanup raises the boundary over the call's manifest, the call is told that it lost. For a create, that's `namespace_exists` for a namespace that this call created. Cleanup raises the boundary only over manifests older than the [grace window](../specs/glossary.md#grace-window), so this takes a wait longer than the grace window (24 hours) between two adjacent steps of one call.
 
 Why read the boundary after the put? A put-if-absent at a number that cleanup emptied succeeds. If two creates of `sandbox` both found no namespace, and the second put manifest 1 after a request published manifest 2 and a collection deleted the first manifest 1, both creates would report that they created `sandbox` without the read.
 
@@ -130,7 +130,7 @@ After step 2, the namespace has no roots, so every manifest (the tombstone inclu
 
 A request to a retired namespace returns `namespace_deleted`, as before the retirement, and so does a create or fork that uses a retired ID.
 
-For example, `sandbox`, a fork of `main`, writes its last segments at 09:50 on Monday, is deleted at 10:00, and with the one-hour grace window is eligible at 11:00. The sweep at 03:00 on Tuesday deletes `sandbox`'s fork snapshot on `main`, raises the boundary to retired, and deletes the manifests and WAL objects. The segments are 17 hours old, so the sweep on Wednesday deletes the segments. Later sweeps list `sandbox`, read its boundary, and find nothing else under the prefix.
+For example, `sandbox`, a fork of `main`, writes its last segments at 09:50 on Monday, is deleted at 10:00, and with the 24-hour grace window is eligible at 10:00 on Tuesday. The sweep at 03:00 on Wednesday deletes `sandbox`'s fork snapshot on `main`, raises the boundary to retired, and deletes the manifests, the WAL objects, and the segments, which are all more than 24 hours old. Later sweeps list `sandbox`, read its boundary, and find nothing else under the prefix.
 
 Why is the fork snapshot deleted before the boundary is raised? The tombstone's fork basis is the record of which snapshot to delete, and the tombstone stays until the boundary is retired. If the boundary were raised first and the collection stopped, a later collection could delete the tombstone under the age rules. The fork snapshot would then stay on the source until the source's snapshot cleanup found that the snapshot's target has no manifest (see [Snapshot cleanup](../specs/format.md#117-snapshot-cleanup)).
 
@@ -155,7 +155,7 @@ The design has no rule that a manifest publication's basis was confirmed within 
 
 - A WAL writer that confirmed its tip within `WAL_PUBLISH_BUDGET_MS` puts the next WAL object without a check.
 - A create or fork finishes inside the creation grace of the pool record or fork snapshot that it wrote before manifest 1.
-- The retirement deadline is computed as in [Retirement](../specs/format.md#95-retirement). Its minimum (`NAMESPACE_RETIREMENT_GRACE_WINDOW_MS`, 45 minutes) covers a tombstone publication that's applied late and the readers after the tombstone. A manifest put that a provider applies after the retirement doesn't depend on the deadline. Every manifest number is at or below a retired boundary, so the put's publisher counts the put as lost, and no reader takes that manifest as the newest.
+- The retirement deadline is computed as in [Retirement](../specs/format.md#95-retirement): the grace window (24 hours) after the deletion, which covers a tombstone publication that's applied late and the readers after the tombstone. A manifest put that a provider applies after the retirement doesn't depend on the deadline. Every manifest number is at or below a retired boundary, so the put's publisher counts the put as lost, and no reader takes that manifest as the newest.
 - The age rules for segments, content objects, and upload records.
 
 ## Costs

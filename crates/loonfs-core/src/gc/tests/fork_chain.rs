@@ -67,14 +67,8 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
     }
     let mut aged_now = 0;
     for namespace_id in &namespaces {
-        aged_now = aged_now.max(
-            now_after_newest_object(
-                &store,
-                namespace_id,
-                UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GC_GRACE_WINDOW_MS + 1,
-            )
-            .await,
-        );
+        aged_now = aged_now
+            .max(now_after_newest_object(&store, namespace_id, 2 * GC_GRACE_WINDOW_MS + 1).await);
     }
     let aged = context(aged_now);
     for index in [0, 1, 1, 0] {

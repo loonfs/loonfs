@@ -123,7 +123,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .gc(&writer_at(
             "collector",
             (selected_modified_ms + crate::limits::GC_GRACE_WINDOW_MS + 1)
-                .max(crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
+                .max(crate::limits::GC_GRACE_WINDOW_MS + 1),
         )
         .clock())
         .await

@@ -153,7 +153,7 @@ pub struct GcResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,
-    /// The deletion time of the current tombstone plus the configured retirement grace.
+    /// The deletion time of the current tombstone plus the grace window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retires_at_ms: Option<u64>,

@@ -319,11 +319,11 @@ impl ContentFixture {
     /// writer session, so they join that session's queue and fence nothing.
     /// The advance plans its target from the folded manifest before it folds
     /// the tail itself, so the call folds the tail first and the floor can
-    /// reach the head. The floor never passes a commit younger than an hour,
-    /// so the call also moves the runtime's clock an hour ahead, and the
-    /// floor can then pass every commit made so far. Each call moves the
-    /// clock another hour, which does no harm because this clock stamps every
-    /// commit the fixture makes.
+    /// reach the head. The floor never passes a commit younger than the grace
+    /// window, so the call also moves the runtime's clock a grace window
+    /// ahead, and the floor can then pass every commit made so far. Each call
+    /// moves the clock another grace window, which does no harm because this
+    /// clock stamps every commit the fixture makes.
     pub(crate) async fn advance_retention_floor(&self) -> CommitSeq {
         self.maintenance
             .maintain_metadata_with_options(
@@ -334,8 +334,7 @@ impl ContentFixture {
             )
             .await
             .expect("fold wal");
-        self.clock
-            .advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+        self.clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
         self.maintenance
             .advance_retention_floor(&self.namespace_id)
             .await

@@ -1005,8 +1005,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .status
         .deleted_at_ms()
         .expect("deletion stamp")
-        + loonfs_core::limits::GC_GRACE_WINDOW_MS
-            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
+        + loonfs_core::limits::GC_GRACE_WINDOW_MS;
     let parent_waiting = namespace_store(&store, &parent)
         .gc(&aged.clock())
         .await
@@ -1857,8 +1856,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .status
         .deleted_at_ms()
         .expect("deletion stamp")
-        + loonfs_core::limits::GC_GRACE_WINDOW_MS
-            .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
+        + loonfs_core::limits::GC_GRACE_WINDOW_MS;
     for _ in 0..3 {
         aged.now_ms += loonfs_core::limits::GC_GRACE_WINDOW_MS;
         let report = namespace_store(&store, &source)

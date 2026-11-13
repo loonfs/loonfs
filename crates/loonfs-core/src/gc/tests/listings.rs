@@ -87,7 +87,7 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .expect("delete target");
     recorded.reset();
     let retired = crate::test_support::namespace_store(&recorded, &target)
-        .gc(&context(1_000 + retirement_ms()).clock())
+        .gc(&context(1_000 + GC_GRACE_WINDOW_MS).clock())
         .await
         .expect("retire fork");
     assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);

@@ -119,8 +119,8 @@ async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_withou
         ))
         .await
         .expect("delete above the floor");
-    // Every folded commit is now an hour old.
-    clock.advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    // Every folded commit is now a grace window old.
+    clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
     let advanced = maintenance
         .advance_retention_floor(&namespace_id)
         .await

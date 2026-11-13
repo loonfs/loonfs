@@ -4,8 +4,7 @@ use crate::commit::engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::error::CoreError;
 use crate::in_flight::{STORE_READS_IN_FLIGHT, STORE_WRITES_IN_FLIGHT};
 use crate::limits::{
-    CONTENT_RECLAMATION_GRACE_WINDOW_MS, GC_GRACE_WINDOW_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS,
-    UNREFERENCED_SEGMENT_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS,
+    CONTENT_RECLAMATION_GRACE_WINDOW_MS, GC_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS,
 };
 use crate::manifest::tests::{compact_a_family_group, create_snapshot, write_test_file, writer_at};
 use crate::manifest::RetentionTarget;
@@ -59,11 +58,6 @@ mod upload_records;
 
 fn context(now_ms: u64) -> WriterAt {
     writer_at("gc-test", now_ms)
-}
-
-/// How long after its deletion a namespace retires.
-fn retirement_ms() -> u64 {
-    GC_GRACE_WINDOW_MS.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
 }
 
 async fn snapshot_record_exists<S: ObjectStore + ?Sized>(
@@ -302,12 +296,12 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .await
         .expect("unreferenced object")
         .is_none());
-    let reaped = context(aged.now_ms + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS);
+    let reaped = context(aged.now_ms + GC_GRACE_WINDOW_MS);
     store.reset();
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&reaped.clock())
         .await
-        .expect("collection after segment grace");
+        .expect("collection after the grace window");
     assert_eq!(
         report.deleted_snapshots_by_owner,
         loonfs_types::DeletedSnapshotsByOwner::default()
@@ -726,14 +720,8 @@ async fn published_compaction_segments_are_referenced_and_kept() {
     let staged = compact_a_family_group(&store, &namespace_id).await;
 
     // Far past every window this collector knows, including the staging one.
-    let long_after = context(
-        now_after_newest_object(
-            &store,
-            &namespace_id,
-            UNREFERENCED_SEGMENT_GRACE_WINDOW_MS * 4,
-        )
-        .await,
-    );
+    let long_after =
+        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS * 4).await);
     let report = collect(&store, &namespace_id, &long_after).await;
     assert!(
         report.deleted.metadata_segments > 0,
@@ -1000,14 +988,8 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
     // Compaction rewrites the delta runs into fresh base segments; the
     // superseded run segments then age out on the next collection.
     crate::test_support::compact_every_group(&store, &namespace_id).await;
-    let aged = context(
-        now_after_newest_object(
-            &store,
-            &namespace_id,
-            UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
-        )
-        .await,
-    );
+    let aged =
+        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let after_compaction = collect(&store, &namespace_id, &aged).await;
     assert!(
         after_compaction.deleted.metadata_segments > 0,
@@ -1977,7 +1959,7 @@ async fn concurrent_collectors_keep_snapshot_and_current_roots_and_young_objects
         OperationSelector::Delete,
     );
     store.block_next();
-    let clock = context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).clock();
+    let clock = context(GC_GRACE_WINDOW_MS + 1).clock();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let (first, second) = tokio::join!(namespace.gc(&clock), async {
         store.wait_until_blocked().await;
@@ -2048,7 +2030,7 @@ async fn unreferenced_segments_are_deleted_concurrently_within_the_write_wave() 
     });
     let store = ConcurrencyWatchStore::new(MetadataMapStore::aged(inner, watched.clone()), watched);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).clock())
+        .gc(&context(GC_GRACE_WINDOW_MS + 1).clock())
         .await
         .expect("collection");
     let deletes = store.deletes();
@@ -2242,7 +2224,7 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
             ..Default::default()
         }
     );
-    assert_eq!(retired.retires_at_ms, Some(deleted_at + retirement_ms()));
+    assert_eq!(retired.retires_at_ms, Some(deleted_at + GC_GRACE_WINDOW_MS));
 }
 
 #[tokio::test]
