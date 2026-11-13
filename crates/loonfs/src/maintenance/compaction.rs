@@ -150,7 +150,7 @@ impl Maintenance {
             let compaction = self
                 .compact_once(namespace_id, observed.take(), cancellation)
                 .await?;
-            let won = match compaction {
+            match compaction {
                 MetadataCompactionOutcome::Published {
                     skipped: unit_skipped,
                     ..
@@ -160,9 +160,10 @@ impl Maintenance {
                             skipped.push(reason);
                         }
                     }
-                    true
+                    published_units += 1;
+                    lost_races = 0;
                 }
-                MetadataCompactionOutcome::Abandoned => false,
+                MetadataCompactionOutcome::Abandoned => lost_races += 1,
                 MetadataCompactionOutcome::NotNeeded if cancellation.is_cancelled() => {
                     break MetadataMaintenanceOutcome::Due
                 }
@@ -170,12 +171,6 @@ impl Maintenance {
                 MetadataCompactionOutcome::Cancelled | MetadataCompactionOutcome::Fenced => {
                     break MetadataMaintenanceOutcome::Due
                 }
-            };
-            if won {
-                published_units += 1;
-                lost_races = 0;
-            } else {
-                lost_races += 1;
             }
         };
         Ok(MetadataMaintenanceResponse {

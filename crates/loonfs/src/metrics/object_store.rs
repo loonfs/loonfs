@@ -34,23 +34,20 @@ impl ObjectStoreInstruments {
         result: &'static str,
         key_class: &'static str,
     ) -> ObjectStoreReading {
-        let operation_registered = match self.lock_operations().get(operation) {
-            Some(instruments) => match instruments.reading(result, key_class) {
-                Some(reading) => return reading,
-                None => true,
-            },
-            None => false,
-        };
+        if let Some(reading) = self
+            .lock_operations()
+            .get(operation)
+            .and_then(|instruments| instruments.reading(result, key_class))
+        {
+            return reading;
+        }
         let recorder = self.recorder.as_ref();
-        let registered = (!operation_registered)
-            .then(|| ObjectStoreOperationInstruments::register(recorder, operation));
+        let registered = ObjectStoreOperationInstruments::register(recorder, operation);
         let outcome = ObjectStoreOperationInstruments::register_outcome(
             recorder, operation, result, key_class,
         );
         let mut registry = self.lock_operations();
-        let instruments = registry.entry(operation).or_insert_with(|| {
-            registered.expect("an operation found unregistered should be registered here")
-        });
+        let instruments = registry.entry(operation).or_insert(registered);
         instruments
             .outcomes
             .entry((result, key_class))
