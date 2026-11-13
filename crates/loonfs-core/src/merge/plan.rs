@@ -15,7 +15,7 @@ use crate::commit::engine::CommitCandidate;
 use crate::commit::wal_size::commit_fields_bytes;
 use crate::engine::NamespaceEngine;
 use crate::error::Result;
-use crate::limits::DIRECT_TRANSFER_URL_TTL_MS;
+use crate::limits::OPERATION_SNAPSHOT_TTL_MS;
 use crate::path::read::LoadedMetadataView;
 use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::ObjectStore;
@@ -165,7 +165,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .iter()
             .filter_map(|operation| operation.content_ref())
             .collect();
-        let expires_at_ms = prepared_at_ms.saturating_add(DIRECT_TRANSFER_URL_TTL_MS);
+        let expires_at_ms = prepared_at_ms.saturating_add(OPERATION_SNAPSHOT_TTL_MS);
         let proofs = classifier
             .layouts
             .drain()
