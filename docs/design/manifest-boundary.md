@@ -4,7 +4,7 @@ This note describes how LoonFS finds a [namespace](../specs/glossary.md#namespac
 
 ## The problem
 
-This section describes how LoonFS finds the current manifest and records a namespace ID today, and what that costs.
+This section describes how LoonFS finds the current manifest and records a namespace ID, and what that costs.
 
 Each namespace has a hint (`namespaces/{namespace_id}/hint.json`), a [control object](../specs/glossary.md#control-object) that records a recent manifest number. After each manifest publication, the runtime raises the hint with one [compare-and-swap](../specs/glossary.md#compare-and-swap-cas) (see [The current manifest and WAL tip](../specs/format.md#24-the-current-manifest-and-wal-tip)). A cold read loads the hinted manifest and probes the next numbers until one is missing (see [Resolving the metadata basis](../specs/format.md#41-resolving-the-metadata-basis)), so a [collection](../specs/glossary.md#collection) deletes only manifests below the hint value it observed (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)).
 
@@ -49,29 +49,33 @@ To publish a manifest at the next number `n`, including manifest 1 and a tombsto
 2. If the put loses, finds the manifest that won and tries again, as in [Publishing a manifest](../specs/format.md#72-publishing-a-manifest).
 3. If the put succeeds, reads the boundary. If `n` is above `B`, the publication succeeded. If `n` is at or below `B`, the put is treated as lost, like a put that found the number taken.
 
-The publisher makes no assumption about how long it waited before step 1, or between step 1 and step 3. For example, a fold that has had manifest 40 for two hours puts manifest 41. If other processes have since published manifests 41 to 45, and cleanup has deleted 41 to 44 and raised the boundary to 44, the put succeeds, but the boundary read returns 44, so the fold treats its put as lost.
+The publisher makes no assumption about how long it waited before step 1, or between step 1 and step 3. For example, a fold that has had manifest 40 for two days puts manifest 41. If other processes have since published manifests 41 to 45, and cleanup has raised the boundary to 44 and deleted manifests 41 to 44, the put succeeds, but the boundary read returns 44, so the fold treats its put as lost.
 
-This rule has one consequence. If a call's put is good (its manifest was the namespace's newest), and the call then stalls between its put and its boundary read while another process publishes a later manifest and a cleanup raises the boundary over the call's manifest, the call is told that it lost. For a create, that's `namespace_exists` for a namespace that this call created. Cleanup raises the boundary only over manifests older than the [grace window](../specs/glossary.md#grace-window), so this takes a wait longer than the grace window (24 hours) between two adjacent steps of one call.
+This rule has one consequence. If a call's put is good (its manifest was the namespace's newest), and the call then stalls between its put and its boundary read while another process publishes a later manifest and a cleanup raises the boundary over the call's manifest, the call is told that it lost. For a create, that's `namespace_exists` for a namespace that this call created. Cleanup raises the boundary only over manifests older than the publication completion bound (`PUBLICATION_COMPLETION_BOUND_MS`, 25 minutes; see [Clock and operation assumptions](../specs/format.md#114-clock-and-operation-assumptions)), so this takes a wait longer than that bound between two adjacent steps of one call. A call that's within its time limits reads the boundary as soon as its put returns.
 
 Why read the boundary after the put? A put-if-absent at a number that cleanup emptied succeeds. If two creates of `sandbox` both found no namespace, and the second put manifest 1 after a request published manifest 2 and a collection deleted the first manifest 1, both creates would report that they created `sandbox` without the read.
 
 ### Cleaning up manifests
 
-To delete the manifests that nothing needs, a namespace's collection:
+To raise the boundary and delete the manifests that nothing needs, a namespace's collection:
 
 1. Finds the namespace's newest manifest `N` (see [Finding the newest manifest](#finding-the-newest-manifest)). The collection never deletes `N`.
 2. Lists the namespace's snapshots, after step 1.
-3. Chooses the manifests to delete: every manifest below `N` that's older than the grace window and that no snapshot in the listing keeps.
-4. If it chose any, raises the stored boundary to at least the highest chosen number, with a compare-and-swap that it retries until the stored boundary is that high.
-5. Deletes exactly the manifests that it chose in step 3.
+3. Raises the stored boundary to at least the highest manifest below `N` that's older than the publication completion bound, with a compare-and-swap that it retries until the stored boundary is that high. If no manifest below `N` is that old, the collection leaves the boundary as it is.
+4. Chooses the manifests to delete: every manifest below `N` that's older than the [grace window](../specs/glossary.md#grace-window) and that no snapshot in the listing keeps. The grace window is longer than the publication completion bound, so each of these manifests is at or below the boundary of step 3.
+5. Deletes exactly the manifests that it chose in step 4.
 
 Cleanup never deletes a manifest above the boundary, and raises the boundary to `N` or higher only to retire the namespace.
 
-For example, `main`'s boundary is 30, its newest manifest is 45, and its snapshots keep manifests 7 and 38. Manifests 31 to 44 are older than the grace window. The collection chooses 31 to 37 and 39 to 44, raises the boundary to 44, and deletes those 13 manifests. Manifests 7 and 38 stay, and both are dead.
+For example, `main`'s boundary is 30, its newest manifest is 45, and its snapshots keep manifests 7 and 38. Manifests 31 to 44 are older than the publication completion bound, and manifests 31 to 40 are older than the grace window. The collection raises the boundary to 44, chooses 31 to 37, 39, and 40, and deletes those 9 manifests. Manifests 41 to 44 stay until they're older than the grace window, and manifests 7 and 38 stay while their snapshots keep them. All six are dead.
+
+Why does the boundary rise before a manifest is old enough to delete? A cold read lists the manifests above the boundary (see [Finding the newest manifest](#finding-the-newest-manifest)). If the boundary rose only over manifests that the collection deletes, it would trail the newest manifest by the grace window, and every cold read of a busy namespace would list a day of manifests. A manifest is dead once the boundary passes it, whatever its age, and the collection deletes it later under the ordinary age rule.
+
+Why does the boundary wait for the publication completion bound? A publisher counts its put as lost when the boundary has passed its manifest (see [Publishing a manifest](#publishing-a-manifest)). The publication completion bound is the longest time, with the clock allowance, from the start of a publication until the provider applies its put, and a publisher reads the boundary as soon as its put returns. So the boundary passes a manifest only after a publisher that's within its time limits has read the boundary.
 
 Why is the snapshot listing taken after the newest manifest is found? A snapshot is created on the manifest that's newest at that moment, so a snapshot that the listing misses keeps manifest `N` or a higher one. If the listing came first, a snapshot could be created on manifest 1 after the listing, a request could publish manifest 2, and the collection would find manifest 2 and delete manifest 1, which the snapshot keeps.
 
-Why does a collection delete only the manifests that it chose, and not every manifest at or below the stored boundary? Suppose collection A finds manifest 1 as the newest and lists no snapshots. A snapshot is then created on manifest 1, a request publishes manifests 2 and 3, and collection B chooses manifest 2 and raises the boundary to 2. If A deleted every unlisted manifest at or below the stored boundary, it would delete manifest 1.
+Why does a collection delete only the manifests that it chose, and not every manifest at or below the stored boundary? Suppose collection A finds manifest 1 as the newest and lists no snapshots. A snapshot is then created on manifest 1, a request publishes manifests 2 and 3, and collection B raises the boundary to 2. If A deleted every unlisted manifest at or below the stored boundary, it would delete manifest 1.
 
 Why raise the boundary before the delete? If the collection deleted manifest 1 first, a create that put manifest 1 at the empty number before the raise would read `B = 0` and report success.
 
@@ -151,6 +155,7 @@ When a fork snapshot's target is retired, the target has no roots. The source's 
 The design has no rule that a manifest publication's basis was confirmed within `READ_REVALIDATION_BOUND_MS` before its put, and a process's check of whether its manifest is the newest doesn't depend on that bound. These time rules stay:
 
 - A WAL writer that confirmed its tip within `WAL_PUBLISH_BUDGET_MS` puts the next WAL object without a check.
+- Cleanup raises the boundary over a manifest only once the manifest is older than the publication completion bound (see [Cleaning up manifests](#cleaning-up-manifests)). The design is safe with any age there. The age keeps a publisher that's within its time limits from being told that a good put was lost.
 - The retirement deadline is computed as in [Retirement](../specs/format.md#95-retirement): the grace window (24 hours) after the deletion, which covers a tombstone publication that's applied late and the readers after the tombstone. A manifest put that a provider applies after the retirement doesn't depend on the deadline. Every manifest number is at or below a retired boundary, so the put's publisher counts the put as lost, and no reader takes that manifest as the newest.
 - The age rules for segments, content objects, and upload records.
 
