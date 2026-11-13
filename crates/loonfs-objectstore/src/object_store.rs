@@ -113,14 +113,30 @@ pub struct ObjectBody {
     pub bytes: Bytes,
 }
 
-/// How a read with an ETag ended for an object that exists.
+/// How a read with a compare token ended for an object that exists.
+///
+/// The compare token is an [`ObjectMetadata::etag`], which is the provider's
+/// ETag, or the object generation on GCS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GetIfChangedOutcome {
-    /// The object's ETag is the one the caller gave, so the read returned no bytes.
+    /// The object's compare token is the one the caller gave, so the read
+    /// returned no bytes.
     Unchanged,
-    /// The object's ETag differs from the one the caller gave, and the read
-    /// returned the object's bytes and metadata.
+    /// The object's compare token differs from the one the caller gave, and
+    /// the read returned the object's bytes and metadata.
     Changed(ObjectBody),
+}
+
+impl GetIfChangedOutcome {
+    /// Compares the compare token of `body` with `etag`, and keeps the body
+    /// only when the two differ.
+    pub(crate) fn from_body(body: ObjectBody, etag: &str) -> Self {
+        if body.metadata.etag.as_deref() == Some(etag) {
+            Self::Unchanged
+        } else {
+            Self::Changed(body)
+        }
+    }
 }
 
 /// Controls the write semantics of a `put` call.
@@ -531,21 +547,20 @@ pub trait ObjectStore: Send + Sync + Debug {
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>>;
 
     /// Reads an object as [`Self::get_with_metadata`] does, unless the
-    /// object's ETag is `etag`.
+    /// object's compare token is `etag`.
     ///
-    /// `etag` is an [`ObjectMetadata::etag`] that an earlier call returned for
-    /// `key`. Returns `None` when the object is absent, and
+    /// `etag` is the compare token that an earlier call returned for `key` in
+    /// [`ObjectMetadata::etag`], which is the provider's ETag, or the object
+    /// generation on GCS. Returns `None` when the object is absent, and
     /// [`GetIfChangedOutcome::Unchanged`] without the object's bytes when its
-    /// ETag is still `etag`. The default reads the object and compares the
-    /// ETags. Errors are returned as [`Self::get_with_metadata`] returns them.
+    /// compare token is still `etag`. The default reads the object and
+    /// compares the compare tokens. Errors are returned as
+    /// [`Self::get_with_metadata`] returns them.
     async fn get_if_changed(&self, key: &str, etag: &str) -> Result<Option<GetIfChangedOutcome>> {
-        Ok(self.get_with_metadata(key).await?.map(|body| {
-            if body.metadata.etag.as_deref() == Some(etag) {
-                GetIfChangedOutcome::Unchanged
-            } else {
-                GetIfChangedOutcome::Changed(body)
-            }
-        }))
+        Ok(self
+            .get_with_metadata(key)
+            .await?
+            .map(|body| GetIfChangedOutcome::from_body(body, etag)))
     }
 
     /// Reads a full object or one half-open byte range, returning `None` when absent.

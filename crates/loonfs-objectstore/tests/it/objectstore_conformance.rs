@@ -13,7 +13,7 @@ use loonfs_objectstore::presign::{DirectMultipartIssuer, PresignedPartRequest};
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_objectstore::{AssemblySource, ObjectStoreError};
+use loonfs_objectstore::{AssemblySource, GetIfChangedOutcome, ObjectStoreError};
 use loonfs_objectstore::{
     AwsS3Credentials, ByteRange, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
     SharedObjectStore, StoreConfig,
@@ -332,6 +332,27 @@ async fn gcp_gcs_streamed_write_round_trips() {
     assert_streamed_write_round_trips(&store).await;
 }
 
+#[tokio::test]
+#[ignore = "requires real AWS S3 credentials"]
+async fn aws_s3_get_if_changed_round_trips() {
+    let store = aws_s3_store();
+    assert_get_if_changed_round_trips(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Cloudflare R2 credentials"]
+async fn cloudflare_r2_get_if_changed_round_trips() {
+    let store = cloudflare_r2_store();
+    assert_get_if_changed_round_trips(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real GCP GCS credentials"]
+async fn gcp_gcs_get_if_changed_round_trips() {
+    let store = gcp_gcs_store();
+    assert_get_if_changed_round_trips(&store).await;
+}
+
 /// The live provider sweep: the store contract probe, plus the key
 /// rejection the probe deliberately leaves to tests.
 ///
@@ -641,6 +662,46 @@ fn stored_checksum_test_key() -> String {
         &loonfs_test_support::ids::numbered_pool_id(1),
         &ContentId::parse("con_4t8707tnf2847v7hprw7sa7d65").expect("valid content id"),
     )
+}
+
+/// Verifies that a read with the current compare token returns no bytes, and
+/// that a read with an old compare token returns the replacing bytes.
+async fn assert_get_if_changed_round_trips<S: ObjectStore>(store: &S) {
+    let key = "conformance/get-if-changed.json";
+    let absent_key = "conformance/get-if-changed-absent.json";
+    let _ = store.delete(key).await;
+    let _ = store.delete(absent_key).await;
+
+    let first = store
+        .put_if_absent(key, Bytes::from_static(b"one"))
+        .await
+        .expect("create the test object");
+    let first_token = first.etag.expect("compare token");
+    assert_eq!(
+        store.get_if_changed(key, &first_token).await.expect("read"),
+        Some(GetIfChangedOutcome::Unchanged)
+    );
+
+    let second = store
+        .compare_and_swap(key, &first_token, Bytes::from_static(b"two"))
+        .await
+        .expect("replace the test object");
+    let Some(GetIfChangedOutcome::Changed(body)) =
+        store.get_if_changed(key, &first_token).await.expect("read")
+    else {
+        panic!("a replaced object returns its body");
+    };
+    assert_eq!(body.bytes, Bytes::from_static(b"two"));
+    assert_eq!(body.metadata.etag, second.etag);
+
+    assert_eq!(
+        store
+            .get_if_changed(absent_key, &first_token)
+            .await
+            .expect("read"),
+        None
+    );
+    store.delete(key).await.expect("delete the test object");
 }
 
 /// Verifies that provider metadata matches the uploaded bytes.
