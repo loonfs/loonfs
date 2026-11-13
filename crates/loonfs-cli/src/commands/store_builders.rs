@@ -177,12 +177,6 @@ pub(crate) fn absolute_local_root(root: &Path) -> Result<String> {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct LocalFsFields<'a> {
-    pub(crate) root: &'a String,
-    pub(crate) key_prefix: Option<&'a String>,
-}
-
-#[derive(Clone, Copy)]
 pub(crate) struct RemoteFields<'a> {
     pub(crate) server_url: &'a String,
     pub(crate) auth_token: Option<&'a SecretString>,
@@ -190,13 +184,13 @@ pub(crate) struct RemoteFields<'a> {
 }
 
 pub(crate) fn local_store(
-    current: Option<LocalFsFields<'_>>,
+    current: Option<&LocalFsStoreConfig>,
     args: &LocalStoreArgs,
     source: FieldSource,
 ) -> Result<StoreConfig> {
     let root = required_field(
         args.root.as_ref(),
-        current.map(|value| value.root),
+        current.map(|value| &value.root),
         "root",
         source,
     )?;
@@ -210,7 +204,7 @@ pub(crate) fn local_store(
         root,
         key_prefix: optional_field(
             args.key_prefix.as_ref(),
-            current.and_then(|value| value.key_prefix),
+            current.and_then(|value| value.key_prefix.as_ref()),
             "key prefix",
             source,
         )?,

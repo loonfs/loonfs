@@ -98,14 +98,10 @@ pub(crate) async fn run_filesystem_annotate(
         .await
         .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(CommandData::FileMutation {
-        human_target: None,
-        target: render_target(context.namespace(), spec.absolute_path()),
-        committed_seq: result.committed_seq,
-        commit_id: result.commit_id,
-        inode_id: None,
-        recovery_command: None,
-    }))
+    Ok(context.output(CommandData::file_mutation(
+        render_target(context.namespace(), spec.absolute_path()),
+        result,
+    )))
 }
 
 pub(crate) async fn run_filesystem_grep(

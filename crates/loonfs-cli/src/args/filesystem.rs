@@ -1,6 +1,6 @@
 //! The filesystem commands, `access`, `trash`, and `changes`.
 
-use super::flags::{ActorSelectorArgs, CommitArgs, PaginationArgs, SeqPaginationArgs};
+use super::flags::{ActorSelectorArgs, CommitArgs, PageLimitArgs, PaginationArgs};
 use super::parse::{
     parse_access_revision_no, parse_attributes_revision_no, parse_change_seq,
     parse_public_inode_id, parse_revision_no,
@@ -338,7 +338,7 @@ pub(crate) struct ChangesArgs {
     #[arg(long, value_parser = parse_change_seq)]
     pub after: Option<CommitSeq>,
     #[command(flatten)]
-    pub pagination: SeqPaginationArgs,
+    pub page_limits: PageLimitArgs,
     /// End the change feed at this snapshot.
     #[arg(long, value_hint = ValueHint::Other)]
     pub snapshot_id: Option<SnapshotId>,

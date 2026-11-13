@@ -4,7 +4,7 @@
 use crate::args::{CommitArgs, FilesystemMkdirArgs, FilesystemRestoreArgs, FilesystemRmArgs};
 use crate::commands::context::{
     create_directory_tolerating_existing, namespace_path, render_target, shell_quote, Invocation,
-    NamespaceContext, ProfileSource, RemoteDirectoryOutcome, RestoreDeletedHint, RootPath,
+    NamespaceContext, RemoteDirectoryOutcome, RestoreDeletedHint, RootPath,
 };
 use crate::commands::output::{CommandData, CommandFailure, CommandOutput};
 use crate::error::{CliError, Result};
@@ -82,12 +82,8 @@ pub(crate) async fn run_filesystem_rm(
     // printed command restores in place with no destination — and keeps
     // working even if the enclosing directories are renamed before the
     // paste.
-    let recovery_command = RestoreDeletedHint::new(
-        &context,
-        &invocation.config,
-        ProfileSource::from_selectors(&invocation.selectors),
-    )
-    .command(deleted_inode, result.committed_seq);
+    let recovery_command =
+        RestoreDeletedHint::new(&context, invocation).command(deleted_inode, result.committed_seq);
 
     Ok(context.output(CommandData::FileMutation {
         human_target: None,
@@ -151,14 +147,10 @@ async fn restore_revision(
         .await
         .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(CommandData::FileMutation {
-        human_target: None,
-        target: render_target(context.namespace(), spec.absolute_path()),
-        committed_seq: result.committed_seq,
-        commit_id: result.commit_id,
-        inode_id: None,
-        recovery_command: None,
-    }))
+    Ok(context.output(CommandData::file_mutation(
+        render_target(context.namespace(), spec.absolute_path()),
+        result,
+    )))
 }
 
 async fn restore_deleted(
@@ -250,12 +242,8 @@ pub(crate) async fn run_filesystem_mkdir(
         }
     };
 
-    Ok(context.output(CommandData::FileMutation {
-        human_target: None,
-        target: render_target(context.namespace(), spec.absolute_path()),
-        committed_seq: result.committed_seq,
-        commit_id: result.commit_id,
-        inode_id: None,
-        recovery_command: None,
-    }))
+    Ok(context.output(CommandData::file_mutation(
+        render_target(context.namespace(), spec.absolute_path()),
+        result,
+    )))
 }

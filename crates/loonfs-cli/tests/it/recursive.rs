@@ -4,10 +4,7 @@ use super::common::*;
 
 #[test]
 fn a_recursive_transfer_counts_files_and_bytes_for_the_whole_tree() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let tree = harness.temp_dir.path().join("tree");
     fs::create_dir_all(tree.join("docs")).expect("create tree dirs");
@@ -65,10 +62,7 @@ fn a_recursive_transfer_counts_files_and_bytes_for_the_whole_tree() {
 
 #[test]
 fn a_recursive_put_counts_a_large_file_as_it_is_read() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let tree = harness.temp_dir.path().join("tree");
     fs::create_dir_all(tree.join("docs")).expect("create tree dirs");
@@ -176,10 +170,7 @@ fn a_recursive_put_streams_a_large_file_over_the_remote_transport() {
 #[cfg(unix)]
 #[test]
 fn a_recursive_put_names_what_it_will_not_transfer() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let tree = harness.temp_dir.path().join("tree");
     fs::create_dir_all(&tree).expect("create tree dir");
@@ -220,10 +211,7 @@ fn a_recursive_put_names_what_it_will_not_transfer() {
 
 #[test]
 fn recursive_transfers_roundtrip_a_tree() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     // A local tree with nesting, an empty directory chain, and a root file.
     let tree = harness.temp_dir.path().join("tree");
@@ -358,10 +346,7 @@ fn recursive_transfers_roundtrip_a_tree() {
 
 #[test]
 fn recursive_put_reuses_existing_directories_but_rejects_files() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let tree = harness.temp_dir.path().join("empty-tree");
     fs::create_dir_all(tree.join("empty")).expect("create empty directory");
@@ -392,10 +377,7 @@ fn recursive_put_reuses_existing_directories_but_rejects_files() {
 
 #[test]
 fn recursive_copy_accepts_existing_destination_directories() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let tree = harness.temp_dir.path().join("copy-tree");
     fs::create_dir_all(tree.join("docs/nested")).expect("create nested directory");
@@ -614,10 +596,7 @@ fn recursive_get_names_only_the_paths_it_could_not_write_in_both_modes() {
 
 #[test]
 fn rm_recursive_deletes_a_populated_directory_in_one_commit() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"body").expect("write payload");
@@ -722,10 +701,7 @@ fn recursive_get_reports_drift_across_listing_pages() {
 
 #[test]
 fn recursive_copy_rejects_its_own_subtree_including_equivalent_names() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     assert_success(&harness.run(&["mkdir", "-p", "/Straße/sub"]));
     let before = harness.run(&["--json", "changes"]);
     assert_success(&before);
@@ -750,10 +726,7 @@ fn recursive_copy_rejects_its_own_subtree_including_equivalent_names() {
 
 #[test]
 fn recursive_transfers_preserve_a_completely_empty_root() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let tree = harness.temp_dir.path().join("empty");
     fs::create_dir(&tree).expect("empty tree");
     let put = harness.run(&[
@@ -936,10 +909,7 @@ async fn a_recursive_put_finishes_the_folds_it_started_before_returning() {
     // started. A tail that the put's last few publishes bring to the fold
     // threshold leaves that fold running when the put's requests end.
     for seed_objects in (fold_at - FILES - 1)..=(fold_at - FILES + 1) {
-        let harness = Harness::new();
-        harness.add_embedded_profile("default");
-        assert_success(&harness.run(&["namespace", "create", "demo"]));
-        assert_success(&harness.run(&["use", "demo"]));
+        let harness = Harness::with_demo_namespace();
         let store =
             loonfs_objectstore::local_fs_store::LocalFsStore::new(harness.store_root("default"))
                 .expect("store");

@@ -9,7 +9,7 @@ use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
 use loonfs_merge::{MergeSessionOutcome, MergeSessionState, MergeSessionStatus};
 use loonfs_types::{
-    AbsolutePath, CapabilityDocument, CommitId, CommitSeq, DeleteNamespaceResponse,
+    AbsolutePath, CapabilityDocument, Commit, CommitId, CommitSeq, DeleteNamespaceResponse,
     DeleteSnapshotResponse, FileRevision, GrepIndex, GrepMatch, InodeId, ListChangesResponse,
     ListSnapshotRecordsResponse, ListSnapshotsResponse, NamespaceId, NamespaceMetadata, PathEntry,
     RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
@@ -340,6 +340,18 @@ pub(crate) enum CommandData {
 }
 
 impl CommandData {
+    /// Returns the output of a command that committed one change to `target`.
+    pub(crate) fn file_mutation(target: String, commit: Commit) -> Self {
+        Self::FileMutation {
+            target,
+            human_target: None,
+            committed_seq: commit.committed_seq,
+            commit_id: commit.commit_id,
+            inode_id: None,
+            recovery_command: None,
+        }
+    }
+
     /// Whether this success-shaped output still reports failed items, so
     /// the process can exit nonzero without discarding the structured
     /// results a partial failure produced.

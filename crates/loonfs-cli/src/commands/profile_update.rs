@@ -1,29 +1,26 @@
 //! Applies `profile update` flags or prompts to a stored profile, keeping the
 //! fields that the update leaves out.
 
-use crate::args::{
-    GcsStoreArgs, LocalStoreArgs, ProfileProviderCommand, R2StoreArgs, RemoteServerArgs,
-    S3StoreArgs, SubjectSelectors,
-};
+use crate::args::{ProfileProviderCommand, SubjectSelectors};
 use crate::commands::profile_config::{
     profile_provider, provider_name, FieldSource, ProfileProvider,
 };
 use crate::commands::store_builders::{
-    gcs_store, local_store, r2_store, remote_connection, s3_store, LocalFsFields, RemoteFields,
+    gcs_store, local_store, r2_store, remote_connection, s3_store, RemoteFields,
 };
 use crate::config::{ProfileConfig, ProfileConnection, StoreConfig};
 use crate::error::{CliError, Result};
 use crate::prompt;
-use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
 use loonfs_types::SecretString;
 
-/// Applies an update's flags to a stored profile, keeping every field that
-/// the update doesn't set.
-pub(super) fn apply_update_flags(
+/// Applies an update's flags, or prompts when `source` is `Prompt`, to a
+/// stored profile, keeping every field that the update doesn't set.
+pub(super) fn apply_update(
     existing: ProfileConfig,
     command: &ProfileProviderCommand,
     subject: &SubjectSelectors,
+    source: FieldSource,
 ) -> Result<ProfileConfig> {
     let name = command.name();
     let stored_provider = profile_provider(&existing);
@@ -32,25 +29,17 @@ pub(super) fn apply_update_flags(
     let connection = match (&existing.connection, command) {
         (ProfileConnection::Embedded { store, writer_id }, provider) => {
             let store = match (store, provider) {
-                (
-                    StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }),
-                    ProfileProviderCommand::Local(args),
-                ) => local_store(
-                    Some(LocalFsFields {
-                        root,
-                        key_prefix: key_prefix.as_ref(),
-                    }),
-                    &args.store,
-                    FieldSource::Fail,
-                )?,
+                (StoreConfig::LocalFs(current), ProfileProviderCommand::Local(args)) => {
+                    local_store(Some(current), &args.store, source)?
+                }
                 (StoreConfig::AwsS3(current), ProfileProviderCommand::S3(args)) => {
-                    s3_store(Some(current), &args.store, FieldSource::Fail)?
+                    s3_store(Some(current), &args.store, source)?
                 }
                 (StoreConfig::CloudflareR2(current), ProfileProviderCommand::R2(args)) => {
-                    r2_store(Some(current), &args.store, FieldSource::Fail)?
+                    r2_store(Some(current), &args.store, source)?
                 }
                 (StoreConfig::GcpGcs(current), ProfileProviderCommand::Gcs(args)) => {
-                    gcs_store(Some(current), &args.store, FieldSource::Fail)?
+                    gcs_store(Some(current), &args.store, source)?
                 }
                 _ => return Err(mismatch()),
             };
@@ -74,7 +63,7 @@ pub(super) fn apply_update_flags(
                 ca_cert_path: ca_cert_path.as_ref(),
             }),
             &args.server,
-            FieldSource::Fail,
+            source,
         )?,
         _ => return Err(mismatch()),
     };
@@ -85,19 +74,6 @@ pub(super) fn apply_update_flags(
     })
 }
 
-pub(super) fn validate_update_provider(
-    existing: &ProfileConfig,
-    command: &ProfileProviderCommand,
-) -> Result<()> {
-    let stored = profile_provider(existing);
-    let requested = command.provider();
-    if stored == requested {
-        Ok(())
-    } else {
-        Err(provider_mismatch(command.name(), stored, requested))
-    }
-}
-
 fn provider_mismatch(name: &str, stored: ProfileProvider, requested: ProfileProvider) -> CliError {
     CliError::invalid_request(format!(
         "profile `{name}` uses provider `{}` not `{}`",
@@ -105,59 +81,6 @@ fn provider_mismatch(name: &str, stored: ProfileProvider, requested: ProfileProv
         provider_name(requested),
     ))
     .with_param("provider")
-}
-
-/// Edits a stored profile's connection at prompts, keeping its identity and
-/// default namespace.
-pub(super) fn apply_update_interactive(
-    name: &str,
-    existing: ProfileConfig,
-) -> Result<ProfileConfig> {
-    let connection = match &existing.connection {
-        ProfileConnection::Embedded { store, writer_id } => {
-            let store = match store {
-                StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }) => local_store(
-                    Some(LocalFsFields {
-                        root,
-                        key_prefix: key_prefix.as_ref(),
-                    }),
-                    &LocalStoreArgs::default(),
-                    FieldSource::Prompt,
-                )?,
-                StoreConfig::AwsS3(current) => {
-                    s3_store(Some(current), &S3StoreArgs::default(), FieldSource::Prompt)?
-                }
-                StoreConfig::CloudflareR2(current) => {
-                    r2_store(Some(current), &R2StoreArgs::default(), FieldSource::Prompt)?
-                }
-                StoreConfig::GcpGcs(current) => {
-                    gcs_store(Some(current), &GcsStoreArgs::default(), FieldSource::Prompt)?
-                }
-            };
-            ProfileConnection::Embedded {
-                store,
-                writer_id: writer_id.clone(),
-            }
-        }
-        ProfileConnection::Remote {
-            server_url,
-            auth_token,
-            ca_cert_path,
-        } => remote_connection(
-            name,
-            Some(RemoteFields {
-                server_url,
-                auth_token: auth_token.as_ref(),
-                ca_cert_path: ca_cert_path.as_ref(),
-            }),
-            &RemoteServerArgs::default(),
-            FieldSource::Prompt,
-        )?,
-    };
-    Ok(ProfileConfig {
-        connection,
-        ..existing
-    })
 }
 
 pub(crate) fn prompt_aws_credentials(current: AwsS3Credentials) -> Result<AwsS3Credentials> {

@@ -32,14 +32,10 @@ pub(crate) async fn run_access_set(
         .update_access_with_options(&spec, context.actor(), access, &options)
         .await
         .map_err(|error| context.fail(error))?;
-    Ok(context.output(CommandData::FileMutation {
-        human_target: None,
-        target: render_target(context.namespace(), spec.absolute_path()),
-        committed_seq: result.committed_seq,
-        commit_id: result.commit_id,
-        inode_id: None,
-        recovery_command: None,
-    }))
+    Ok(context.output(CommandData::file_mutation(
+        render_target(context.namespace(), spec.absolute_path()),
+        result,
+    )))
 }
 
 fn parse_grants(grants: &[String]) -> Result<AccessGrants> {
