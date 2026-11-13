@@ -2,9 +2,7 @@
 //! attributes and access revisions, and content layouts.
 
 use super::manifest_index;
-use super::manifest_tail_combiner::{
-    lowest_tail_rows, ManifestPage, ManifestTailCombiner, TieOrder,
-};
+use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
 use crate::error::{CoreError, Result};
 use crate::metadata::view::newest;
 use crate::metadata::view::MetadataView;
@@ -12,6 +10,8 @@ use crate::metadata::{
     AccessRevisionRecord, AttributesRevisionRecord, ContentLayoutRecord, RevisionRecord,
 };
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::lookup_keys;
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{
     AccessRevisionNo, Attributes, AttributesProjection, AttributesRevisionNo, CommitSeq, InodeId,
     InodeKind, NamespaceId, RevisionNo,
@@ -113,22 +113,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         limit: usize,
     ) -> Result<Vec<(String, RevisionRecord)>> {
         let visible_seq = self.visible_seq();
-        // Each tail row at or below the view's sequence that the page reads
-        // is one of the rows that it returns, so the page reads at most the
-        // `limit` lowest of them. A revision's fields sort in row-key order,
-        // but `lower_bound` is a row key, so the rows are chosen by their
-        // formatted keys.
-        let tail = lowest_tail_rows(
-            self.row_states()
-                .flat_map(|state| state.revisions())
-                .filter(|revision| {
-                    revision.committed_seq <= visible_seq
-                        && inode_id.is_none_or(|inode_id| revision.inode_id == inode_id)
-                }),
-            revision_row_key,
-            lower_bound,
-            limit,
-        );
+        let upper_bound = inode_id.and_then(|inode_id| {
+            string_prefix_upper_bound(&lookup_keys::revision_prefix(inode_id))
+        });
+        let tail = self.tail_rows(lower_bound, upper_bound.as_deref());
         let segments = self.manifest_segments();
         // A short page is the end of the range.
         let refill = |lower_bound: String| async move {
@@ -340,16 +328,6 @@ fn access_order_key(record: &AccessRevisionRecord) -> (AccessRevisionNo, CommitS
         record.access_revision_no,
         record.committed_seq,
         record.delta_index,
-    )
-}
-
-/// Returns the revisions family's row key of `revision`.
-fn revision_row_key(revision: &RevisionRecord) -> String {
-    loonfs_types::format::manifest::lookup_keys::revision_row_key(
-        revision.inode_id,
-        revision.revision_no,
-        revision.committed_seq,
-        revision.delta_index,
     )
 }
 

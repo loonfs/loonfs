@@ -14,6 +14,7 @@ mod manifest_tail_combiner;
 mod queries;
 pub(crate) mod row_decode;
 mod rows;
+mod tail_rows;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -37,6 +38,7 @@ pub(crate) use self::rows::hiding_tombstone_from_records;
 pub(crate) use self::rows::{
     listed_trash_entry_from_record, trash_record_from_tombstone, ListedTrashEntry, TrashRange,
 };
+pub(crate) use self::tail_rows::RowOrders;
 pub(crate) use self::view::MetadataView;
 pub(crate) use self::view_session::{
     preload_inode_groups, LeafRevisionPreload, MetadataViewSession,

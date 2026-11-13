@@ -273,21 +273,36 @@ async fn revision_pages_list_each_revision_once_when_the_tail_has_more_rows_than
         (&folded, b"three\n"),
         (&unfolded, b"one\n"),
     ];
+    let mut tail_seqs = Vec::new();
     for (files, bytes) in writes {
-        fixture
+        let commit = fixture
             .write_files_bytes(files, bytes)
             .await
             .expect("write the revisions that stay in the tail");
+        tail_seqs.push(commit.committed_seq);
     }
 
-    let mut expected = Vec::new();
-    for (files, newest) in [(&folded, 3), (&unfolded, 1)] {
+    // Each file's newest revision at the head, and at the first tail commit.
+    let mut newest = Vec::new();
+    for (files, at_head, inside) in [(&folded, 3, 2), (&unfolded, 1, 0)] {
         for path in files {
             let inode_id = crate::test_support::visible_inode_id(&store, &namespace_id, path).await;
-            expected.extend((1..=newest).map(|revision_no| (inode_id, RevisionNo(revision_no))));
+            newest.push((inode_id, at_head, inside));
         }
     }
-    expected.sort_by_key(|(inode_id, revision_no)| (*inode_id, std::cmp::Reverse(*revision_no)));
+    let revisions_through = |newest_of: fn(&(InodeId, u64, u64)) -> u64| {
+        let mut revisions: Vec<_> = newest
+            .iter()
+            .flat_map(|file| {
+                (1..=newest_of(file)).map(|revision_no| (file.0, RevisionNo(revision_no)))
+            })
+            .collect();
+        revisions
+            .sort_by_key(|(inode_id, revision_no)| (*inode_id, std::cmp::Reverse(*revision_no)));
+        revisions
+    };
+    let expected = revisions_through(|file| file.1);
+    let expected_inside = revisions_through(|file| file.2);
     let rewritten = expected[0].0;
     let of_rewritten: Vec<_> = expected
         .iter()
@@ -310,11 +325,17 @@ async fn revision_pages_list_each_revision_once_when_the_tail_has_more_rows_than
         "the tail has the revisions written after the fold"
     );
     let view = loaded.metadata_view();
+    let inside = view.at_seq(tail_seqs[0]);
     for limit in [1, 3, 100] {
         assert_eq!(
             paged_revisions(&view, None, limit).await,
             expected,
             "limit {limit}"
+        );
+        assert_eq!(
+            paged_revisions(&inside, None, limit).await,
+            expected_inside,
+            "a view inside the tail, limit {limit}"
         );
         assert_eq!(
             paged_revisions(&view, Some(rewritten), limit).await,
@@ -914,5 +935,141 @@ async fn inode_pages_list_each_inode_once_when_the_tail_has_more_rows_than_a_pag
             }
         }
         assert_eq!(listed, expected, "limit {limit}");
+    }
+}
+
+/// Reads the children of `parent` in `view` in pages of `limit`, each page in
+/// a new session, and returns each child's name and revision number in the
+/// order read.
+async fn paged_children<S: ObjectStore + ?Sized>(
+    view: &crate::metadata::MetadataView<'_, '_, S>,
+    parent: InodeId,
+    limit: usize,
+) -> Vec<(String, u64)> {
+    let mut after: Option<NameKey> = None;
+    let mut read = Vec::new();
+    loop {
+        let page = view
+            .session()
+            .visible_children_page_by_name_key(parent, after.as_ref(), limit)
+            .await
+            .expect("children page");
+        assert!(page.len() <= limit, "limit {limit}");
+        if let Some(last) = page.last() {
+            after = Some(last.binding.name_key.clone());
+        }
+        read.extend(page.iter().map(|child| {
+            let revision = match &child.binding.state {
+                loonfs_types::format::manifest::DirentryBindingState::Bound {
+                    revision, ..
+                } => revision.as_ref(),
+                loonfs_types::format::manifest::DirentryBindingState::Unbound => None,
+            };
+            (
+                child.binding.name_key.as_str().to_owned(),
+                revision
+                    .expect("a listed file has a revision")
+                    .revision_no
+                    .0,
+            )
+        }));
+        if page.len() < limit {
+            return read;
+        }
+    }
+}
+
+/// Checks that the pages of a directory, read one after another, list each
+/// child once in name order with its value at the view's sequence, when the
+/// manifest and the WAL tail both have the directory's rows and the tail has
+/// more rows than a page. The tail unbinds names that the manifest binds,
+/// binds one of them again, and has two versions of one entry, and a view at
+/// a sequence inside the tail lists the children at that sequence.
+#[tokio::test]
+async fn directory_pages_list_each_child_once_when_the_tail_has_more_rows_than_a_page() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("directory-pages").expect("namespace");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+    let paths = |name: &str| -> Vec<String> {
+        (0..8).map(|index| format!("/dir/{name}-{index}")).collect()
+    };
+    fixture
+        .write_files_bytes(&paths("m"), b"one\n")
+        .await
+        .expect("write the files that the fold moves into the manifest");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
+    for path in ["/dir/m-1", "/dir/m-3", "/dir/m-5"] {
+        fixture
+            .delete_path(path, None)
+            .await
+            .expect("unbind a name that the manifest binds");
+    }
+    let inside_seq = fixture
+        .write_files_bytes(&paths("t")[..5], b"one\n")
+        .await
+        .expect("write files that stay in the tail")
+        .committed_seq;
+    // Two more versions of `m-6`, and a new file bound at `m-3` between them.
+    for path in ["/dir/m-6", "/dir/m-3", "/dir/m-6"] {
+        fixture
+            .write_file_bytes(path, b"two\n", None)
+            .await
+            .expect("write a version, or bind a name again");
+    }
+
+    let names = |rewritten: u64| -> Vec<(String, u64)> {
+        let mut names: Vec<_> = [
+            "m-0", "m-2", "m-4", "m-7", "t-0", "t-1", "t-2", "t-3", "t-4",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), 1))
+        .chain([("m-6".to_owned(), rewritten)])
+        .collect();
+        names.sort();
+        names
+    };
+    let mut expected = names(3);
+    expected.push(("m-3".to_owned(), 1));
+    expected.sort();
+    let expected_inside = names(1);
+
+    let parent = crate::test_support::visible_inode_id(&store, &namespace_id, "/dir").await;
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let loaded = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    let tail_bindings: usize = loaded
+        .wal_tail
+        .row_states(loaded.visible_seq())
+        .map(|state| state.direntry_binds().len())
+        .sum();
+    // Three unbinds, a bind and a revision summary for each of the five new
+    // files and the rebound name, and one summary for each new version.
+    assert_eq!(
+        tail_bindings, 17,
+        "the tail has the rows written after the fold"
+    );
+    let view = loaded.metadata_view();
+    let inside = view.at_seq(inside_seq);
+    for limit in [1, 3, 100] {
+        assert_eq!(
+            paged_children(&view, parent, limit).await,
+            expected,
+            "limit {limit}"
+        );
+        assert_eq!(
+            paged_children(&inside, parent, limit).await,
+            expected_inside,
+            "a view inside the tail, limit {limit}"
+        );
     }
 }

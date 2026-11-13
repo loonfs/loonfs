@@ -4,6 +4,7 @@
 use super::durable_cache::{DurableVisibilityCache, DurableVisibilityCacheInner, SharedRows};
 use super::manifest_index;
 use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
+use super::tail_rows::{TailFamily, TailRows};
 use super::view_session::{LeafRevisionPreload, MetadataViewSession};
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
@@ -22,7 +23,7 @@ use loonfs_types::format::manifest::{
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{AbsolutePath, CommitId, CommitSeq, InodeId, NameKey, NamespaceId};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -225,6 +226,31 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .flatten()
     }
 
+    /// Returns a merge of the view's rows of `F` whose keys are at or after
+    /// `lower_bound` and before `upper_bound`, at or below the view's
+    /// sequence.
+    pub(super) fn tail_rows<F: TailFamily>(
+        &self,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+    ) -> TailRows<'a, F> {
+        let visible_seq = self.visible_seq;
+        let chunks = self
+            .sources
+            .wal_tail
+            .into_iter()
+            .flat_map(move |tail| tail.visible_chunks(visible_seq))
+            .map(|chunk| (&chunk.rows, Some(&chunk.orders)));
+        TailRows::new(
+            self.overlay_states()
+                .map(|state| (state, None))
+                .chain(chunks),
+            lower_bound,
+            upper_bound,
+            visible_seq,
+        )
+    }
+
     fn durable_row_states(&self) -> impl Iterator<Item = &'a MetadataState> + '_ {
         let visible_seq = self.visible_seq;
         self.sources
@@ -379,38 +405,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// `after`, in inode order. The manifest's rows combine with the WAL
     /// tail's rows, as in [`Self::revisions_page`].
     ///
-    /// A page copies at most `limit` of the tail's rows, however many rows
-    /// the tail has.
+    /// A page reads the tail's rows from its start key, and only as many as
+    /// it returns.
     pub(crate) async fn inodes_page(
         &self,
         after: Option<InodeId>,
         limit: usize,
     ) -> Result<Vec<InodeRecord>> {
         let visible_seq = self.visible_seq();
-        // A page returns at most `limit` rows, so every tail row in the page
-        // is among the `limit` lowest tail rows at the view's sequence. Row
-        // keys sort by inode ID (see `InodeId::body`), so the walk compares
-        // IDs and copies nothing, and the rows that it keeps are copied
-        // afterwards.
-        let mut lowest: BTreeMap<InodeId, &InodeRecord> = BTreeMap::new();
-        for inode in self.row_states().flat_map(MetadataState::inodes) {
-            if inode.committed_seq <= visible_seq
-                && after.is_none_or(|after| inode.inode_id > after)
-            {
-                lowest.entry(inode.inode_id).or_insert(inode);
-                if lowest.len() > limit {
-                    lowest.pop_last();
-                }
-            }
-        }
-        let tail = lowest
-            .into_values()
-            .map(|inode| (lookup_keys::inode_key(inode.inode_id), inode.clone()))
-            .collect();
         let lower_bound = match after {
             Some(after) => lookup_keys::inode_key_after(after),
             None => lookup_keys::INODE_ROW_PREFIX.to_owned(),
         };
+        let tail = self.tail_rows(&lower_bound, None);
         let segments = self.manifest_segments();
         let upper_bound = string_prefix_upper_bound(lookup_keys::INODE_ROW_PREFIX);
         let upper_bound = upper_bound.as_deref();
