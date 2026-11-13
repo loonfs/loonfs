@@ -1053,7 +1053,7 @@ A pool's collection reclaims a content object once it's older than the grace win
 
 The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../jobs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`, and the reference server advances it on a schedule under each namespace's [retention window](glossary.md#retention-window), as described below. After the floor advances, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
 
-Completed upload sessions in active namespaces keep their records for the derived completed-content grace, which is slightly longer than seven days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a collection after the record is removed.
+Completed upload sessions in active namespaces keep their records for the completed-content grace, which is eight days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a collection after the record is removed.
 
 GC needs to run repeatedly, including after a collection finds nothing left to delete. A presigned upload URL that was issued before the deletion can still write an object after the deletion, and a late write that one listing misses is found by the next collection. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, snapshot cleanup, or maintenance that isn't running.
 

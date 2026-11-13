@@ -267,10 +267,14 @@ const _: () = assert!(
 /// A compaction unit writes its output under `segments/` as it goes and
 /// publishes at the end, so its earliest segment is unreferenced for the whole
 /// run, and a collection deletes an unreferenced segment once it is older than
-/// the grace window. A unit that starts its last publication attempt at this
-/// budget finishes within the publication completion bound, which the grace
-/// window reserves after the budget.
-pub const METADATA_COMPACTION_BUDGET_MS: u64 = GC_GRACE_WINDOW_MS - PUBLICATION_COMPLETION_BOUND_MS;
+/// the grace window. The assertion below keeps the budget plus the
+/// publication completion bound shorter than the grace window, so a unit
+/// that starts its last publication attempt at this budget finishes before
+/// its earliest unreferenced segment is old enough to delete.
+pub const METADATA_COMPACTION_BUDGET_MS: u64 = 12 * 60 * 60 * 1000;
+
+const _: () =
+    assert!(METADATA_COMPACTION_BUDGET_MS + PUBLICATION_COMPLETION_BOUND_MS < GC_GRACE_WINDOW_MS);
 
 /// Lifetime of a direct download or direct put presigned URL.
 ///
@@ -372,13 +376,18 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
 /// Minimum age of unreferenced content from a completed upload before
 /// collection.
 ///
-/// The value covers the receipt window, receipt lifetime, and a final
-/// publication with the clock-error and scheduling allowance. Every mint checks
-/// the upload's receipt issuance window. Immediately before the WAL
-/// put-if-absent, content proofs are checked against the request clock plus the
-/// whole attempt's elapsed monotonic time.
-pub const CONTENT_RECLAMATION_GRACE_WINDOW_MS: u64 =
-    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + PUBLICATION_COMPLETION_BOUND_MS;
+/// The assertion below keeps this window at least the admission window plus
+/// the publication completion bound, so a commit that uses the last proof of
+/// the admission window finishes its publication before the upload's records
+/// are deleted. Every mint checks the upload's receipt issuance window.
+/// Immediately before the WAL put-if-absent, content proofs are checked
+/// against the request clock plus the whole attempt's elapsed monotonic time.
+pub const CONTENT_RECLAMATION_GRACE_WINDOW_MS: u64 = 8 * 24 * 60 * 60 * 1000;
+
+const _: () = assert!(
+    CONTENT_RECLAMATION_GRACE_WINDOW_MS
+        >= COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + PUBLICATION_COMPLETION_BOUND_MS
+);
 
 /// Bounds a chain's own extents while keeping shared base extents separate.
 pub(crate) const MAX_LAYOUT_EXTENTS: usize = 32;

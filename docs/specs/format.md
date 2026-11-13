@@ -1579,13 +1579,13 @@ A compaction runs under two deadlines:
 | Compaction deadline | Before the compaction reads its input | The compaction starts its last publication attempt within `METADATA_COMPACTION_BUDGET_MS`. | The compaction returns `abandoned`. |
 | Publication deadline | When finalization starts | Every finalization attempt runs under one `METADATA_PUBLICATION_BUDGET_MS`. | The attempt fails with the metadata publication budget error. |
 
-Segments that no root references are protected until their provider age is more than the grace window (24 hours). The compaction deadline reserves the publication completion bound (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)) inside that interval:
+Segments that no root references are protected until their provider age is more than the grace window (24 hours). The compaction deadline plus the publication completion bound (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)) is shorter than that interval:
 
 ```text
-compaction deadline + publication completion bound <= grace window
+compaction deadline + publication completion bound < grace window
 ```
 
-With the current constants, a compaction can start its publication for at most 23 hours and 35 minutes after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed compaction leaves output that's subject to the same age rule.
+With the current constants, a compaction can start its last publication attempt up to 12 hours after its timer starts (before it writes any output), and that attempt finishes within 12 hours and 25 minutes, before its earliest unreferenced output is old enough to delete. After 12 hours, the compaction abandons the publication. A cancelled or crashed compaction leaves output that's subject to the same age rule.
 
 A compaction applies the row-retention rules for its selected window, and it MUST preserve every retained view. A restart begins a new plan from the current manifest, and there's no durable compaction cursor or output-protection record.
 
@@ -1728,17 +1728,20 @@ completion
 |<-- receipt issuance window -->|
                                 |<-- final token lifetime -->|
                                                              |<-- publication completion bound -->|
-                                                                                   earliest cleanup
+|<--------------------------------- completed-content grace (eight days) ------------------------------------>|
+                                                                                               earliest cleanup
 ```
 
 In milliseconds:
 
 ```text
 CONTENT_RECLAMATION_GRACE_WINDOW_MS
-    = COMPLETED_UPLOAD_RECEIPT_WINDOW_MS
-      + CONTENT_RECEIPT_TTL_MS
-      + PUBLICATION_COMPLETION_BOUND_MS
+    >= COMPLETED_UPLOAD_RECEIPT_WINDOW_MS
+       + CONTENT_RECEIPT_TTL_MS
+       + PUBLICATION_COMPLETION_BOUND_MS
 ```
+
+With the current constants, that's eight days, against seven days, one hour, and twenty-five minutes.
 
 Every token issue checks the original completion time, so a retained receipt can't extend its issuance window. In-process proofs expire at the end of the admission window, and publication checks proof expiry immediately before the numbered WAL put. After the full completed-content grace, an unpublished upload can't be committed for the first time. Published content stays while a content root refers to it.
 
@@ -2593,7 +2596,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `PUBLICATION_COMPLETION_BOUND_MS` | 1,500,000 | The publication completion bound: the longest publication budget, plus the provider's request bound, plus the combined allowance. |
 | `READ_REVALIDATION_BOUND_MS` | 1,200,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, a writer position, or a manifest publication's basis. |
 | `GC_GRACE_WINDOW_MS` | 86,400,000 | The grace window that every collection uses. An unreferenced segment MUST be strictly older than this before it's deleted, a deleted namespace is retired this long after its deletion, and a retention advance doesn't move the floor past a younger commit. |
-| `METADATA_COMPACTION_BUDGET_MS` | 84,900,000 | The longest time before a compaction starts its publication. |
+| `METADATA_COMPACTION_BUDGET_MS` | 43,200,000 | The longest time before a compaction starts its publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a presigned download URL and of a presigned URL for a whole-object upload. A presigned URL for one part of a multipart upload lasts one hour. |
 | `OPERATION_SNAPSHOT_TTL_MS` | 300,000 | The lifetime of a snapshot that LoonFS takes for one of its own operations (the snapshot of the fork that a merge or a rebase plans from), and of the content proofs of the operation's plan. |
 | `POOL_ROOTS_READ_BUDGET_MS` | 43,200,000 | The monotonic time, from the start of a pool's collection, within which the collection reads the roots of every member of the pool, or skips the pool's content sweep. |
@@ -2609,12 +2612,16 @@ PUBLICATION_COMPLETION_BOUND_MS
 READ_REVALIDATION_BOUND_MS
     = max(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-
-METADATA_COMPACTION_BUDGET_MS
-    = GC_GRACE_WINDOW_MS - PUBLICATION_COMPLETION_BOUND_MS
 ```
 
-The grace window `T` can't be lower than the publication completion bound. A pool's collection keeps content safe when this inequality holds (see [Content roots](#119-content-roots)):
+The grace window `T` can't be lower than the publication completion bound. A compaction's last publication attempt finishes before the compaction's earliest unreferenced output is old enough to delete when this inequality holds:
+
+```text
+METADATA_COMPACTION_BUDGET_MS + PUBLICATION_COMPLETION_BOUND_MS
+    < GC_GRACE_WINDOW_MS
+```
+
+With the current constants, that's 12 hours and 25 minutes, against 24 hours. A pool's collection keeps content safe when this inequality holds (see [Content roots](#119-content-roots)):
 
 ```text
 POOL_ROOTS_READ_BUDGET_MS + GC_SAFETY_MARGIN_MS
@@ -2632,9 +2639,9 @@ With the current constants, that's 12 hours plus 15 minutes, against 24 hours. R
 | `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | The seven-day window in which completed content can issue new receipts. |
 | `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | The one-hour token lifetime. |
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | The receipt issuance window plus the final token's lifetime. |
-| `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 609,900,000 | The admission window plus the publication completion bound. |
+| `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 691,200,000 | The completed-content grace, at least the admission window plus the publication completion bound. |
 
-The completed-content interval is seven days, one hour, and twenty-five minutes. Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
+The completed-content interval is eight days, which is longer than the admission window plus the publication completion bound (seven days, one hour, and twenty-five minutes). Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
 
 A direct multipart upload is also subject to the provider's transfer limits. The current reference limits are 10,000 parts, a 5 MiB minimum configured part size, a 5 GiB maximum configured part size, and 1,000 presigned part URLs per signing request. These limits don't override a provider's lower maximum object size, or other constraints of supported providers.
 
