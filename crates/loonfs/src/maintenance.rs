@@ -8,7 +8,7 @@
 //! hosts drive it.
 
 use crate::pagers::{decode_page_request, encode_next_cursor, SnapshotRecordsPager};
-use crate::publisher::{FoldWhen, NamespaceChange, NamespaceFold, PublisherRegistry};
+use crate::publisher::{FoldWhen, NamespaceFold, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
 use crate::{
@@ -384,14 +384,9 @@ impl Maintenance {
             // A caller may drop the response, so its counts survive only when
             // this shared collection path records them here.
             self.core.instruments().gc.record_collection(&report);
-            // A collection publishes no manifest, so the head didn't move. The
-            // publisher keeps its position, and the cached head stays confirmed.
-            // The collection grace covers the revalidation bound, so a head
-            // inside its bound never lists a segment that a collection deleted
-            // (format.md sections 11.2 and 11.4).
-            self.publisher
-                .invalidate_namespace(namespace_id, NamespaceChange::Unchanged)
-                .await;
+            // A collection publishes no manifest, and its grace covers the
+            // revalidation bound, so the session's position and the cached
+            // head stay (format.md sections 11.2 and 11.4).
             Ok(report)
         })
         .await

@@ -8,11 +8,11 @@ use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result,
-    SharedObjectStore, WriterState,
+    WriterState,
 };
 use futures::future::BoxFuture;
 use loonfs_core::control::LoadedManifest;
-use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
+use loonfs_core::publish::WriterPosition;
 use loonfs_core::{FloorObjectReport, Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
 use loonfs_types::{CommitSeq, ManifestNo, NamespaceId};
@@ -278,7 +278,7 @@ impl HeadPositions for RegistryShared {
     fn drop_position<'a>(&'a self, namespace_id: &'a NamespaceId) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             if let Some(publisher) = self.live_publisher(namespace_id) {
-                publisher.change_position(PositionChange::Drop).await;
+                publisher.drop_position().await;
             }
         })
     }
@@ -290,9 +290,7 @@ impl HeadPositions for RegistryShared {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             if let Some(publisher) = self.live_publisher(namespace_id) {
-                publisher
-                    .change_position(PositionChange::Move(published))
-                    .await;
+                publisher.move_position(published).await;
             }
         })
     }
@@ -413,9 +411,7 @@ impl PublisherRegistry {
                     .context
                     .runtime_core
                     .invalidate_namespace_read_cache(namespace_id);
-                if let Some(publisher) = self.live_publisher(namespace_id) {
-                    publisher.change_position(PositionChange::Drop).await;
-                }
+                self.shared.drop_position(namespace_id).await;
             }
         }
     }
@@ -482,11 +478,7 @@ impl PublisherRegistry {
             .runtime_core
             .head_and_wal_tail_cache()
             .move_head(namespace_id, &published);
-        if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher
-                .change_position(PositionChange::Move(published))
-                .await;
-        }
+        self.shared.move_position(namespace_id, published).await;
     }
 
     pub(super) fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
@@ -531,20 +523,18 @@ impl PublisherRegistry {
         slot.wal_tail_bytes()
     }
 
-    /// Returns the namespace's writer position while its last check is
-    /// within the revalidation bound (see
-    /// [`NamespacePublisher::current_position`]), or `None` when this runtime
-    /// has no such position for the namespace.
     /// Drops the position of the namespace's writer session in this
     /// runtime, if the runtime has one, once no other task has the session's
     /// engine locked. The session's next unit runs discovery, and a fold
     /// without a position loads the tail from the store.
     pub(crate) async fn drop_session_position(&self, namespace_id: &NamespaceId) {
-        if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher.change_position(PositionChange::Drop).await;
-        }
+        self.shared.drop_position(namespace_id).await;
     }
 
+    /// Returns the namespace's writer position while its last check is
+    /// within the revalidation bound (see
+    /// [`NamespacePublisher::current_position`]), or `None` when this runtime
+    /// has no such position for the namespace.
     pub(crate) fn current_position(&self, namespace_id: &NamespaceId) -> Option<WriterPosition> {
         self.live_publisher(namespace_id)?.current_position()
     }
@@ -663,25 +653,5 @@ impl NamespaceChange {
             .published
             .clone()
             .map_or(Self::Unchanged, Self::Published)
-    }
-}
-
-/// A change to the engine's position that a mutation outside the publisher
-/// asked for.
-#[derive(Debug)]
-pub(super) enum PositionChange {
-    /// Moves the position onto a manifest above it under the session's
-    /// writer epoch, or drops the position when it can't move there.
-    Move(PublishedManifest),
-    /// Drops the position.
-    Drop,
-}
-
-impl PositionChange {
-    pub(super) fn apply(self, engine: &mut NamespaceCommitEngine<SharedObjectStore>) {
-        match self {
-            Self::Move(published) => engine.record_manifest_published(published),
-            Self::Drop => engine.invalidate_projection(),
-        }
     }
 }

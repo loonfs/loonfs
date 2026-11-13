@@ -443,12 +443,7 @@ impl LoonFs<Writable> {
                 self.namespace(source_namespace_id)
                     .ensure_administrator()
                     .await?;
-                if self.find_fork_target(new_namespace_id).await?.is_some() {
-                    return Err(CoreError::NamespaceExists {
-                        namespace_id: new_namespace_id.clone(),
-                    }
-                    .into());
-                }
+                self.ensure_fork_target_free(new_namespace_id).await?;
                 match options.snapshot_id.as_ref() {
                     Some(snapshot_id) => {
                         let result = self
@@ -477,21 +472,24 @@ impl LoonFs<Writable> {
         .await
     }
 
-    /// Returns the metadata of `new_namespace_id` when the namespace exists,
-    /// and `None` when it doesn't. A fork reads its target with this before
-    /// it folds the source, so a fork into an existing namespace folds
-    /// nothing; core's own check before it creates the fork still refuses a
-    /// target that a concurrent caller creates in between.
-    pub(crate) async fn find_fork_target(
+    /// Returns `NamespaceExists` when `new_namespace_id` exists. A fork checks
+    /// its target with this before it folds the source, so a fork into an
+    /// existing namespace folds nothing. Core's own check before it creates
+    /// the fork still refuses a target that a concurrent caller creates in
+    /// between.
+    pub(crate) async fn ensure_fork_target_free(
         &self,
         new_namespace_id: &NamespaceId,
-    ) -> Result<Option<crate::NamespaceMetadata>> {
+    ) -> Result<()> {
         match self.namespace(new_namespace_id).metadata().await {
-            Ok(existing) => Ok(Some(existing)),
+            Ok(_) => Err(CoreError::NamespaceExists {
+                namespace_id: new_namespace_id.clone(),
+            }
+            .into()),
             Err(Error::Core(CoreError::NamespaceNotFound { namespace_id }))
                 if namespace_id == *new_namespace_id =>
             {
-                Ok(None)
+                Ok(())
             }
             Err(error) => Err(error),
         }

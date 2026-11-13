@@ -15,7 +15,7 @@ use loonfs_core::FloorObjectReport;
 use loonfs_core::Phase;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::Commit;
-use loonfs_types::{u64_from_usize, CommitId, MonotonicTimer, NamespaceId};
+use loonfs_types::{u64_from_usize, CommitId};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -149,23 +149,7 @@ impl NamespacePublisher {
         let permit = self.acquire_candidate(&plan.candidate)?;
         let candidate = self.stage_inline_candidate(plan, &permit).await?;
         PublicationAdmission::validate_candidate(&candidate)?;
-        submit_with_admission(
-            &self.namespace_id,
-            candidate,
-            self.context.runtime_core.timer().as_ref(),
-            |commit_id, candidate, semantic_identity, waiter, enqueued_at| {
-                let admitted = self.admit(
-                    commit_id,
-                    candidate,
-                    semantic_identity,
-                    AdmittedWaiter::new(waiter, &permit),
-                    enqueued_at,
-                )?;
-                self.trace_enqueue(admitted.queue_depth, admitted.reason);
-                Ok(admitted.admission)
-            },
-        )
-        .await
+        self.submit_admitted(candidate, &permit).await
     }
 
     /// Admits the request before awaiting its result.
@@ -178,23 +162,7 @@ impl NamespacePublisher {
     pub(super) async fn submit(&self, candidate: CommitCandidate) -> Result<Commit> {
         let candidate = PreparedCandidate::new(candidate);
         let permit = self.acquire_candidate(&candidate)?;
-        submit_with_admission(
-            &self.namespace_id,
-            candidate,
-            self.context.runtime_core.timer().as_ref(),
-            |commit_id, candidate, semantic_identity, waiter, enqueued_at| {
-                let admitted = self.admit(
-                    commit_id,
-                    candidate,
-                    semantic_identity,
-                    AdmittedWaiter::new(waiter, &permit),
-                    enqueued_at,
-                )?;
-                self.trace_enqueue(admitted.queue_depth, admitted.reason);
-                Ok(admitted.admission)
-            },
-        )
-        .await
+        self.submit_admitted(candidate, &permit).await
     }
 
     fn acquire_candidate(
@@ -232,23 +200,61 @@ impl NamespacePublisher {
             candidate.wal_record_bytes_upper_bound,
             permit,
         )?;
-        submit_with_admission(
-            &self.namespace_id,
-            candidate,
-            self.context.runtime_core.timer().as_ref(),
-            |commit_id, candidate, semantic_identity, waiter, enqueued_at| {
-                let admitted = self.admit(
-                    commit_id,
-                    candidate,
-                    semantic_identity,
-                    AdmittedWaiter::new(waiter, permit),
-                    enqueued_at,
-                )?;
-                self.trace_enqueue(admitted.queue_depth, admitted.reason);
-                Ok(admitted.admission)
-            },
-        )
-        .await
+        self.submit_admitted(candidate, permit).await
+    }
+
+    async fn submit_admitted(
+        &self,
+        mut candidate: PreparedCandidate,
+        permit: &Arc<AdmissionPermit>,
+    ) -> Result<Commit> {
+        let commit_id = candidate.candidate.commit_id().clone();
+        let enqueued_at = self.context.runtime_core.timer().monotonic_now_ms();
+        let mut semantic_identity = candidate.candidate.semantic_identity(&self.namespace_id);
+        for _ in 0..MAX_CONTENTION_ATTEMPTS {
+            let (sender, receiver) = oneshot::channel();
+            let admitted = self.admit(
+                commit_id.clone(),
+                candidate,
+                semantic_identity,
+                AdmittedWaiter::new(sender, permit),
+                enqueued_at,
+            )?;
+            self.trace_enqueue(admitted.queue_depth, admitted.reason);
+            let result = receiver.await.map_err(|_| {
+                CoreError::WalPublish(WalPublishError::OutcomeUnknown(
+                    "publisher task stopped before reporting an outcome".to_owned(),
+                ))
+            })?;
+            match admitted.admission {
+                SubmissionAdmission::OwnOutcome => return result,
+                SubmissionAdmission::Contended {
+                    primary_identity,
+                    candidate: returned_candidate,
+                    semantic_identity: returned_identity,
+                } => match result {
+                    Ok(response) => {
+                        return Err(CoreError::CommitIdReuseConflict {
+                            commit_id: commit_id.to_string(),
+                            committed: Some(loonfs_types::CommittedReceipt {
+                                committed_seq: response.committed_seq,
+                                committed_fingerprint: primary_identity,
+                            }),
+                        }
+                        .into())
+                    }
+                    Err(_) => {
+                        candidate = *returned_candidate;
+                        semantic_identity = returned_identity;
+                    }
+                },
+            }
+        }
+        Err(CoreError::CommitIdReuseConflict {
+            commit_id: commit_id.to_string(),
+            committed: None,
+        }
+        .into())
     }
 
     pub(super) fn admit(
@@ -450,70 +456,6 @@ impl NamespacePublisher {
             reason
         );
     }
-}
-
-async fn submit_with_admission<F>(
-    namespace_id: &NamespaceId,
-    candidate: PreparedCandidate,
-    timer: &dyn MonotonicTimer,
-    mut admit: F,
-) -> Result<Commit>
-where
-    F: FnMut(
-        CommitId,
-        PreparedCandidate,
-        CommitFingerprint,
-        oneshot::Sender<Result<Commit>>,
-        u64,
-    ) -> std::result::Result<SubmissionAdmission, CoreError>,
-{
-    let commit_id = candidate.candidate.commit_id().clone();
-    let enqueued_at = timer.monotonic_now_ms();
-    let mut candidate = candidate;
-    let mut semantic_identity = candidate.candidate.semantic_identity(namespace_id);
-    for _ in 0..MAX_CONTENTION_ATTEMPTS {
-        let (sender, receiver) = oneshot::channel();
-        let admission = admit(
-            commit_id.clone(),
-            candidate,
-            semantic_identity,
-            sender,
-            enqueued_at,
-        )?;
-        let result = receiver.await.map_err(|_| {
-            CoreError::WalPublish(WalPublishError::OutcomeUnknown(
-                "publisher task stopped before reporting an outcome".to_owned(),
-            ))
-        })?;
-        match admission {
-            SubmissionAdmission::OwnOutcome => return result,
-            SubmissionAdmission::Contended {
-                primary_identity,
-                candidate: returned_candidate,
-                semantic_identity: returned_identity,
-            } => match result {
-                Ok(response) => {
-                    return Err(CoreError::CommitIdReuseConflict {
-                        commit_id: commit_id.to_string(),
-                        committed: Some(loonfs_types::CommittedReceipt {
-                            committed_seq: response.committed_seq,
-                            committed_fingerprint: primary_identity,
-                        }),
-                    }
-                    .into())
-                }
-                Err(_) => {
-                    candidate = *returned_candidate;
-                    semantic_identity = returned_identity;
-                }
-            },
-        }
-    }
-    Err(CoreError::CommitIdReuseConflict {
-        commit_id: commit_id.to_string(),
-        committed: None,
-    }
-    .into())
 }
 
 async fn receive_delete(

@@ -6,8 +6,8 @@ use super::merges::{MergeOutcome, PlannedMerge};
 use crate::publisher::MergeReservation;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, CommitId, Consistency, CoreError, Error, LoonFs, MergeConflict, MergeForkOptions,
-    Namespace, NamespaceId, NamespaceMetadata, ReplayForkResponse, Result, Writable,
+    ActorId, CommitId, Consistency, Error, LoonFs, MergeConflict, MergeForkOptions, Namespace,
+    NamespaceId, NamespaceMetadata, ReplayForkResponse, Result, Writable,
 };
 use loonfs_core::MergeRequest;
 
@@ -37,12 +37,7 @@ impl LoonFs<Writable> {
             async {
                 self.core.ensure_merges_enabled()?;
                 self.namespace(namespace_id).ensure_administrator().await?;
-                if self.find_fork_target(new_namespace_id).await?.is_some() {
-                    return Err(CoreError::NamespaceExists {
-                        namespace_id: new_namespace_id.clone(),
-                    }
-                    .into());
-                }
+                self.ensure_fork_target_free(new_namespace_id).await?;
                 let main = self
                     .core
                     .pinned_read(namespace_id, Consistency::Strong)
