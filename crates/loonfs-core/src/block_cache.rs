@@ -836,6 +836,7 @@ mod tests {
             drop(waiter);
             assert_eq!(cache.in_flight_len(), 1);
 
+            let misses = cache.stats().misses;
             let mut waiter = Box::pin(load());
             assert!(poll!(waiter.as_mut()).is_pending());
             drop(driver);
@@ -849,6 +850,8 @@ mod tests {
             assert_eq!(waiter.expect("remaining waiter should finish").0, 5);
             assert_eq!(newcomer.expect("new waiter should finish").0, 5);
             assert_eq!(store.counts().gets, 1);
+            let waiter_misses = usize::from(max_decoded_bytes > 0);
+            assert_eq!(cache.stats().misses - misses, waiter_misses);
             assert_eq!(cache.in_flight_len(), 0);
         }
     }

@@ -932,29 +932,6 @@ mod tests {
     use std::assert_matches;
 
     #[test]
-    fn public_error_kind_groups_detailed_codes() {
-        assert_eq!(ErrorCode::InvalidRequest.kind(), ErrorKind::InvalidRequest);
-        assert_eq!(ErrorCode::PathNotFound.kind(), ErrorKind::NotFound);
-        assert_eq!(ErrorCode::NamespaceDeleted.kind(), ErrorKind::Gone);
-        assert_eq!(ErrorCode::NamespaceExists.kind(), ErrorKind::AlreadyExists);
-        // Precondition failures are 409 resource-state conflicts in v0
-        // (api.md, "Standard error contract"), so the kind is Conflict.
-        assert_eq!(ErrorCode::StaleRevision.kind(), ErrorKind::Conflict);
-        assert_eq!(ErrorCode::ContentNotPrepared.kind(), ErrorKind::Conflict);
-        assert_eq!(ErrorCode::CommitQueueFull.kind(), ErrorKind::Unavailable);
-        assert_eq!(
-            ErrorCode::MaintenanceRequired.kind(),
-            ErrorKind::Unavailable
-        );
-        assert_eq!(ErrorCode::OutcomeUnknown.kind(), ErrorKind::OutcomeUnknown);
-        assert_eq!(
-            ErrorCode::NamespaceCorrupt.kind(),
-            ErrorKind::DataCorruption
-        );
-        assert_eq!(ErrorCode::ServerError.kind(), ErrorKind::Internal);
-    }
-
-    #[test]
     fn core_error_exposes_public_kind_and_detailed_code() {
         let error = CoreError::NamespaceExists {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),

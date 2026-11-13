@@ -170,6 +170,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             self.committed_at_ms,
         );
         let mut deltas = Vec::new();
+        let mut operation_indexes = Vec::new();
         let mut appended: Vec<AppendedContent> = Vec::new();
         let mut pieces = CommitPieces::new(self);
         let mut next_create_no = NonZeroU32::MIN;
@@ -245,6 +246,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 })
                 .await
                 .map_err(|error| error.at_operation(index))?;
+            operation_indexes.extend(std::iter::repeat_n(index, operation_deltas.len()));
             deltas.extend(operation_deltas);
         }
 
@@ -266,8 +268,15 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 .collect(),
             inline_content: candidate.inline_content().to_vec(),
         };
-        self.carry_revision_layouts(&validation.view(), pre_state, &pieces, candidate, &mut plan)
-            .await?;
+        self.carry_revision_layouts(
+            &validation.view(),
+            pre_state,
+            &pieces,
+            candidate,
+            &operation_indexes,
+            &mut plan,
+        )
+        .await?;
         Ok(plan)
     }
 
@@ -277,10 +286,11 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         before: &MetadataView<'_, '_, S>,
         pieces: &CommitPieces<'_, S>,
         candidate: &CommitCandidate,
+        operation_indexes: &[usize],
         plan: &mut CommitPlan,
     ) -> Result<()> {
         let mut revision_content_ids = BTreeSet::new();
-        for delta in &mut plan.deltas {
+        for (delta, &index) in plan.deltas.iter_mut().zip(operation_indexes) {
             let WalDelta::AppendFileRevision {
                 content_ref,
                 layout,
@@ -335,7 +345,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                         &prefix,
                     )
                     .await
-                    .map_err(|error| error.at_operation(delta.semantic_operation_index as usize))?,
+                    .map_err(|error| error.at_operation(index))?,
                 );
             }
         }

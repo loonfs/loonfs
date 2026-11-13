@@ -99,6 +99,42 @@ async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission()
     state.runtime.shutdown().await.expect("shutdown writer");
 }
 
+#[tokio::test]
+async fn every_contract_route_requires_a_token() {
+    use super::super::router::{MAINTENANCE_ROUTES, ROUTES};
+
+    let directory = tempfile::tempdir().expect("store");
+    let (router, state) = test_app(
+        test_options(directory.path(), "routes-need-a-token"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    for route in ROUTES.iter().chain(MAINTENANCE_ROUTES) {
+        // Authentication runs before path parsing, so any placeholder will do.
+        let uri = route
+            .path
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "x"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let request = Request::builder()
+            .method(route.method.clone())
+            .uri(&uri)
+            .body(Body::empty())
+            .expect("request");
+        let (status, _, _) = fixtures::send(&router, request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{} {uri}", route.method);
+    }
+    state.runtime.shutdown().await.expect("shutdown writer");
+}
+
 async fn post(router: &axum::Router, uri: &str, body: Body) -> (StatusCode, serde_json::Value) {
     let mut request = fixtures::request("POST", uri, None, &[("content-type", "application/json")]);
     *request.body_mut() = body;

@@ -549,46 +549,11 @@ fn concurrent_embedded_puts_commit_or_report_the_fence() {
 }
 
 #[test]
-fn commit_messages_ride_the_feed_and_bind_identity() {
+fn a_commit_id_replays_identical_requests_and_conflicts_on_changed_ones() {
     let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"v1").expect("write payload");
-    assert_success(&harness.run(&[
-        "put",
-        payload.to_str().expect("utf-8 path"),
-        "/doc.txt",
-        "-m",
-        "initial import",
-    ]));
-    // The audit's motivating case: a restore is indistinguishable from an
-    // edit in the feed without a message.
-    fs::write(&payload, b"v2").expect("write payload");
-    assert_success(&harness.run(&[
-        "put",
-        payload.to_str().expect("utf-8 path"),
-        "/doc.txt",
-        "--force",
-    ]));
-    assert_success(&harness.run(&[
-        "--json",
-        "restore",
-        "--revision",
-        "1",
-        "/doc.txt",
-        "-m",
-        "roll back to the imported copy",
-    ]));
-
-    let changes = harness.run(&["--json", "changes"]);
-    assert_success(&changes);
-    let rows = json_data(&changes)["changes"]
-        .as_array()
-        .expect("changes array")
-        .clone();
-    assert_eq!(rows[0]["message"], "initial import");
-    assert!(rows[1].get("message").is_none());
-    assert_eq!(rows[2]["message"], "roll back to the imported copy");
 
     // The message is part of the commit's identity: the same commit id with
     // a different message conflicts instead of silently replaying.
@@ -943,6 +908,12 @@ fn every_mutating_command_records_its_message() {
     fs::write(&payload, b"body").expect("write payload");
     let local = payload.to_str().expect("utf-8 path");
 
+    assert_success(&harness.run(&["put", local, "/plain.txt"]));
+    assert!(
+        json_data(&harness.run(&["--json", "changes"]))["changes"][0]
+            .get("message")
+            .is_none()
+    );
     assert_success(&harness.run(&["mkdir", "/dir", "-m", "mkdir message"]));
     assert_success(&harness.run(&["put", local, "/dir/doc.txt", "-m", "put message"]));
     assert_success(&harness.run(&["cp", "/dir/doc.txt", "/dir/copy.txt", "-m", "cp message"]));

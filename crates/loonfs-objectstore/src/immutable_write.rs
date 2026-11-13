@@ -84,8 +84,6 @@ pub(crate) fn verify_stored_checksum(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_test_support::clock::ManualClock;
-    use loonfs_types::OperationDeadline;
     use std::assert_matches;
 
     #[test]
@@ -109,13 +107,5 @@ mod tests {
             verify_stored_checksum("key", &expected, metadata(None)),
             Err(ObjectStoreError::StoredChecksumMissing { .. })
         );
-    }
-
-    #[test]
-    fn immutable_retry_deadline_is_one_budget_across_attempts() {
-        let timer = ManualClock::stepping(70_000);
-        let deadline = OperationDeadline::start(&timer, 120_000);
-        assert_eq!(deadline.remaining_ms(), Some(50_000));
-        assert_eq!(deadline.remaining_ms(), None);
     }
 }

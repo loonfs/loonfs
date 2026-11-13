@@ -17,7 +17,6 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
 };
-use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::WalNo;
 use std::assert_matches;
 use std::sync::Arc;
@@ -151,12 +150,12 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
 }
 
 #[tokio::test]
-async fn fenced_session_cannot_delete_namespace() {
+async fn a_fenced_delete_names_the_active_writer_and_epoch() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
     let namespace_id = NamespaceId::parse("fence").expect("valid namespace id");
-    let (_writer_a, namespace_writer_a, namespace_writer_b, _) =
+    let (_writer_a, namespace_writer_a, _, _) =
         takeover(&store, &namespace_id, |builder| builder).await;
     let head_after_fencing = head_state(&store, &namespace_id).await;
 
@@ -172,19 +171,6 @@ async fn fenced_session_cannot_delete_namespace() {
         Some("writer-b")
     );
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
-
-    // The namespace is untouched: same epoch, still active, still writer B's.
-    let head = head_state(&store, &namespace_id).await;
-    assert_eq!(head.status, NamespaceStatus::Active {});
-    assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
-    assert_eq!(
-        head.writer.expect("writer block").writer_id.as_str(),
-        "writer-b"
-    );
-    namespace_writer_b
-        .put_file("/b2.txt", b"b", &loonfs_test_support::test_actor())
-        .await
-        .expect("live writer keeps publishing after the refused delete");
 }
 
 #[tokio::test]

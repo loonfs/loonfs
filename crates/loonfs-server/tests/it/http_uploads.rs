@@ -333,8 +333,8 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         }],
     };
     let send_put = |request: &CommitRequest| {
-        let response =
-            send_commit(&harness.server_url, &namespace, request).expect("commit uploaded file");
+        let response = send_commit_json(&harness.server_url, &namespace, request)
+            .expect("commit uploaded file");
         serde_json::from_reader::<_, Commit>(response.into_reader())
             .expect("decode operation response")
     };
@@ -471,9 +471,31 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .expect_err("an aborted session cannot complete");
     assert_eq!(completion.code(), Some(ErrorCode::UploadNotFound));
 
-    // A client can recover a lost completion response by reading the session and using its new token.
+    // Completing a completed session again reports the same completion.
     let (upload_id, content_ref, completed_at_ms) =
         complete_upload_session(&harness, &namespace, b"status re-mint").await;
+    let repeated = harness
+        .client
+        .complete_upload(
+            &namespace,
+            &upload_id,
+            &CompleteUploadBody::ServiceProxied {},
+        )
+        .await
+        .expect("repeat complete upload");
+    assert_eq!(repeated.namespace_id, namespace);
+    assert_eq!(repeated.upload_id, upload_id);
+    assert_eq!(repeated.mode, UploadMode::ServiceProxied);
+    assert_matches!(
+        repeated.status,
+        UploadSessionStatus::Completed {
+            completed_at_ms: repeated_at_ms,
+            content_ref: ref repeated_ref,
+            content_token: Some(_),
+        } if repeated_at_ms == completed_at_ms && *repeated_ref == content_ref
+    );
+
+    // A client can recover a lost completion response by reading the session and using its new token.
     let status = get_upload(&harness.server_url, &upload_id);
     assert_eq!(status.mode, UploadMode::ServiceProxied);
     let UploadSessionStatus::Completed {
@@ -487,7 +509,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     assert_eq!(reported_completed_at_ms, completed_at_ms);
     assert_eq!(reported_ref, content_ref);
     let re_minted = content_token.expect("a completed session re-mints");
-    let commit = send_commit(
+    let commit = send_commit_json(
         &harness.server_url,
         &namespace,
         &CommitRequest {

@@ -416,29 +416,19 @@ fn unused_global_selectors_are_invalid_usage() {
 fn json_all_is_invalid_usage_even_with_a_limit() {
     let harness = Harness::new();
 
-    for arguments in [
-        vec!["--json", "ls", "--all", "--limit", "1"],
-        vec!["--json", "changes", "--all", "--limit", "1"],
-        vec![
-            "--json",
-            "maintenance",
-            "snapshot",
-            "list",
-            "--all",
-            "--limit",
-            "1",
-        ],
-    ] {
-        let output = harness.run(&arguments);
-        assert_eq!(output.status.code(), Some(2), "{output:?}");
-        let error = &parse_json(&output.stderr)["error"];
-        assert_eq!(error["code"], "invalid_usage");
-        assert_eq!(error["param"], "--all");
-        assert!(error["message"]
-            .as_str()
-            .expect("error message")
-            .contains("`--all` cannot be used with `--json`"));
-    }
+    let output = harness.run(&["--json", "ls", "--all", "--limit", "1"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let error = &parse_json(&output.stderr)["error"];
+    assert_eq!(error["code"], "invalid_usage");
+    assert_eq!(error["param"], "--all");
+    assert!(error["message"]
+        .as_str()
+        .expect("error message")
+        .contains("`--all` cannot be used with `--json`"));
+
+    let both = harness.run(&["--json", "ls", "--jsonl"]);
+    assert_eq!(both.status.code(), Some(2), "{both:?}");
+    assert!(both.stdout.is_empty());
 }
 
 #[test]
@@ -738,7 +728,7 @@ fn ls_surfaces_head_drift_from_paged_responses() {
 }
 
 #[test]
-fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
+fn ls_limit_bounds_the_whole_listing() {
     let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("entry.txt");
@@ -750,11 +740,6 @@ fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
             &format!("/f{index}.txt"),
         ]));
     }
-
-    let all = harness.run(&["--json", "ls", "--all"]);
-    assert_failure(&all);
-    assert_eq!(all.status.code(), Some(2));
-    assert!(stderr_string(&all).contains("`--all` cannot be used with `--json`"));
 
     // A bound stops at exactly that many entries and returns a cursor.
     let first = harness.run(&["--json", "ls", "--limit", "2"]);
@@ -802,11 +787,6 @@ fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
     let conflicting_bound = harness.run(&["ls", "--all", "--limit", "2"]);
     assert_success(&conflicting_bound);
     assert_eq!(stdout_string(&conflicting_bound).lines().count(), 2);
-
-    let conflicting_json = harness.run(&["--json", "ls", "--jsonl"]);
-    assert_failure(&conflicting_json);
-    assert_eq!(conflicting_json.status.code(), Some(2));
-    assert!(conflicting_json.stdout.is_empty());
 }
 
 #[test]

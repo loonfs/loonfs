@@ -234,131 +234,84 @@ async fn reuploading_identical_bytes_above_the_inline_threshold_conflicts() {
     );
 }
 
+/// A rerun under a used commit ID that changes one part of a put is a
+/// different commit: it conflicts and leaves the first commit standing.
 #[tokio::test]
-async fn the_same_bytes_at_a_different_path_still_conflict() {
+async fn a_changed_put_under_a_used_commit_id_still_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
-    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
-
-    let first = runtime
-        .put_file_with_options(
-            &namespace_id,
-            "/a.txt",
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect("first put");
-    let error = runtime
-        .put_file_with_options(
-            &namespace_id,
-            "/b.txt",
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect_err("the same bytes at another path are a different commit");
-
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    assert_eq!(
-        runtime
-            .stat(&namespace_id, "/b.txt")
+    let actor = loonfs_test_support::test_actor();
+    let cases = [
+        "path",
+        "bytes",
+        "behavior",
+        "expected-revision",
+        "message",
+        "empty-message",
+    ];
+    for case in cases {
+        let path = format!("/{case}.txt");
+        let commit_id = CommitId::parse(format!("pinned-{case}")).expect("valid commit id");
+        let first_message = (case == "message").then_some("import batch");
+        let first_options = options_with_message(&commit_id, first_message);
+        let first = runtime
+            .put_file_with_options(
+                &namespace_id,
+                &path,
+                b"stable bytes\n",
+                &actor,
+                &first_options,
+            )
             .await
-            .expect_err("the refused rerun wrote nothing")
-            .code(),
-        ErrorCode::PathNotFound
-    );
-    let entry = runtime
-        .stat(&namespace_id, "/a.txt")
-        .await
-        .expect("stat path");
-    assert_eq!(
-        entry.head_seq, first.committed_seq,
-        "the refused rerun published no revision"
-    );
-}
+            .expect("first put");
+        let observed = runtime.stat(&namespace_id, &path).await.expect("stat path");
 
-#[tokio::test]
-async fn a_changed_behavior_under_a_used_commit_id_still_conflicts() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace_id = namespace(&runtime).await;
-    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+        // The rerun changes one part of the first run.
+        let mut rerun_path = path.clone();
+        let mut rerun_bytes: &[u8] = b"stable bytes\n";
+        let mut rerun = first_options.clone();
+        match case {
+            "path" => rerun_path = "/path-rerun.txt".to_owned(),
+            "bytes" => rerun_bytes = b"stable bytez\n",
+            "behavior" => rerun.behavior = DestinationBehavior::NoReplace,
+            "expected-revision" => {
+                rerun.expected_inode_id = Some(observed.inode_id);
+                rerun.expected_revision_no = Some(RevisionNo(1));
+            }
+            "message" => rerun.commit.message = Some("second thoughts".to_owned()),
+            "empty-message" => rerun.commit.message = Some(String::new()),
+            other => panic!("no rerun change for {other}"),
+        }
+        let Err(error) = runtime
+            .put_file_with_options(&namespace_id, &rerun_path, rerun_bytes, &actor, &rerun)
+            .await
+        else {
+            panic!("{case}: the changed rerun replayed");
+        };
 
-    let first = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect("first put with replace behavior");
-    let error = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &PutFileOptions {
-                behavior: DestinationBehavior::NoReplace,
-                ..options(&commit_id)
-            },
-        )
-        .await
-        .expect_err("a changed behavior is a different commit");
-
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
-    assert_eq!(
-        entry.head_seq, first.committed_seq,
-        "the refused rerun published no revision"
-    );
-}
-
-#[tokio::test]
-async fn a_changed_expected_revision_under_a_used_commit_id_still_conflicts() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace_id = namespace(&runtime).await;
-    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
-
-    let first = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect("first put without preconditions");
-    let observed = runtime.stat(&namespace_id, PATH).await.expect("stat path");
-    let error = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &PutFileOptions {
-                expected_inode_id: Some(observed.inode_id),
-                expected_revision_no: Some(RevisionNo(1)),
-                ..options(&commit_id)
-            },
-        )
-        .await
-        .expect_err("a precondition the original never carried is a different commit");
-
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
-    assert_eq!(
-        entry.head_seq, first.committed_seq,
-        "the refused rerun published no revision"
-    );
+        assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict, "{case}");
+        if rerun_path != path {
+            let missing = runtime.stat(&namespace_id, &rerun_path).await;
+            assert_eq!(
+                missing.map_err(|error| error.code()).err(),
+                Some(ErrorCode::PathNotFound),
+                "{case}: the refused rerun wrote nothing"
+            );
+        }
+        let entry = runtime.stat(&namespace_id, &path).await.expect("stat path");
+        assert_eq!(
+            entry.head_seq, first.committed_seq,
+            "{case}: the refused rerun published no revision"
+        );
+        assert_eq!(
+            feed_message(&runtime, &namespace_id, first.committed_seq)
+                .await
+                .as_deref(),
+            first_message,
+            "{case}: the refused rerun did not rewrite the committed message"
+        );
+    }
 }
 
 #[tokio::test]
@@ -424,43 +377,6 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
 }
 
 #[tokio::test]
-async fn same_length_different_bytes_conflict() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace_id = namespace(&runtime).await;
-    let namespace = runtime.reader.namespace(&namespace_id);
-    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
-
-    runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"aaaaaaaaaaaa\n",
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect("first put");
-    let error = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"bbbbbbbbbbbb\n",
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect_err("same length is not the same content");
-
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    assert_eq!(
-        namespace.read_file(PATH).await.expect("read file").bytes,
-        b"aaaaaaaaaaaa\n",
-        "the refused rerun changed nothing"
-    );
-}
-
-#[tokio::test]
 async fn prepared_content_replays_after_restart_with_the_same_message() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
@@ -505,82 +421,6 @@ async fn prepared_content_replays_after_restart_with_the_same_message() {
     assert_eq!(
         feed_message(&runtime, &namespace_id, first.committed_seq).await,
         Some("import batch".to_owned())
-    );
-}
-
-#[tokio::test]
-async fn a_changed_message_under_a_used_commit_id_still_conflicts() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace_id = namespace(&runtime).await;
-    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
-
-    let first = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options_with_message(&commit_id, Some("import batch")),
-        )
-        .await
-        .expect("first put");
-    let error = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options_with_message(&commit_id, Some("second thoughts")),
-        )
-        .await
-        .expect_err("a changed message is a different commit");
-
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    assert_eq!(
-        feed_message(&runtime, &namespace_id, first.committed_seq).await,
-        Some("import batch".to_owned()),
-        "the refused rerun did not rewrite the annotation that was committed"
-    );
-    let entry = runtime.stat(&namespace_id, PATH).await.expect("stat path");
-    assert_eq!(
-        entry.head_seq, first.committed_seq,
-        "the refused rerun published no revision"
-    );
-}
-
-#[tokio::test]
-async fn an_empty_message_does_not_replay_an_absent_one() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace_id = namespace(&runtime).await;
-    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
-
-    let first = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options_with_message(&commit_id, None),
-        )
-        .await
-        .expect("first put");
-    let error = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options_with_message(&commit_id, Some("")),
-        )
-        .await
-        .expect_err("an empty message is not the absent message");
-
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    assert_eq!(
-        feed_message(&runtime, &namespace_id, first.committed_seq).await,
-        None
     );
 }
 

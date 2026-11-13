@@ -278,7 +278,6 @@ fn openapi_documents_current_server_paths() {
     }
 
     assert!(!paths.contains_key("/openapi.json"));
-    assert!(!paths.contains_key("/v0/maintenance/namespaces/{namespace_id}/grep/index/gc"));
     assert_query_params(
         paths,
         "/v0/namespaces/{namespace_id}/filesystem/entries",
