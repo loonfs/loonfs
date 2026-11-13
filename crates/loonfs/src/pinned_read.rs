@@ -1,19 +1,20 @@
-//! A reader engine pinned to one read context, and the reads that a live
+//! A reader engine and the read context that one read is pinned to. A live
 //! [`Namespace`](crate::Namespace) read and a [`ReadView`](crate::ReadView)
-//! both make through it.
+//! both read through one.
+//!
+//! A read calls the engine and passes the pinned context, as in
+//! `pinned.engine.read_file(path, &pinned.context, Some(max_bytes))`. The
+//! methods here are the reads that do more than that one call: the change
+//! feed and the diff check that the reader is an administrator, and the
+//! directory listings build the response and its next cursor.
 
-use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::pagers::encode_next_list_cursor;
 use crate::{
-    CommitSeq, ContentRef, CoreError, CurrentFileState, DiffOptions, DownloadOptions, Error,
-    FileBytes, FileContentStream, InodeId, ListChangesResponse, ListInodeChildrenResponse,
-    ListOptions, ListPathEntriesResponse, NamespaceId, PathEntry, ReadFileStreamOptions, Result,
-    RevisionNo, SharedObjectStore, SnapshotId, StatOptions,
+    CommitSeq, CoreError, DiffOptions, Error, InodeId, ListChangesResponse,
+    ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, NamespaceId, Result,
+    SharedObjectStore, SnapshotId,
 };
-use loonfs_core::{
-    DiffPage, NamespaceReaderEngine, RetainedRevisionsPage, RetainedRevisionsPageCursor,
-    RuntimeReadContext,
-};
+use loonfs_core::{DiffPage, NamespaceReaderEngine, RuntimeReadContext};
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest};
 
@@ -70,28 +71,6 @@ impl PinnedRead {
             .await?)
     }
 
-    pub(crate) async fn stat(
-        &self,
-        absolute_path: &str,
-        options: &StatOptions,
-    ) -> Result<PathEntry> {
-        Ok(self
-            .engine
-            .resolve_path(absolute_path, options.clone(), &self.context)
-            .await?)
-    }
-
-    pub(crate) async fn stat_by_inode(
-        &self,
-        inode_id: InodeId,
-        options: &StatOptions,
-    ) -> Result<PathEntry> {
-        Ok(self
-            .engine
-            .stat_inode(inode_id, options.clone(), &self.context)
-            .await?)
-    }
-
     /// Lists one page of the directory at `listed_path`, and marks the next
     /// cursor with `snapshot_id`, the snapshot that the read reads.
     pub(crate) async fn path_entries_page(
@@ -140,138 +119,5 @@ impl PinnedRead {
             entries: page.items,
             next_cursor: encode_next_list_cursor(page.next_cursor.as_ref())?,
         })
-    }
-
-    /// Lists one page of every retained file revision. A read with a subject
-    /// requires an administrator, as the change feed does.
-    pub(crate) async fn retained_revisions_page(
-        &self,
-        request: PageRequest<RetainedRevisionsPageCursor>,
-    ) -> Result<RetainedRevisionsPage> {
-        Ok(self
-            .engine
-            .retained_revisions_page(request, &self.context)
-            .await?)
-    }
-
-    pub(crate) async fn stat_current_files_by_inode(
-        &self,
-        inode_ids: &[InodeId],
-    ) -> Result<Vec<CurrentFileState>> {
-        Ok(self
-            .engine
-            .stat_current_files_by_inode(inode_ids, &self.context)
-            .await?)
-    }
-
-    pub(crate) async fn read_content(
-        &self,
-        content_ref: &ContentRef,
-        max_bytes: u64,
-    ) -> Result<Vec<u8>> {
-        Ok(self
-            .engine
-            .read_content_ref(content_ref, max_bytes, &self.context)
-            .await?)
-    }
-
-    pub(crate) async fn read_file(&self, absolute_path: &str, max_bytes: u64) -> Result<FileBytes> {
-        Ok(self
-            .engine
-            .read_file(absolute_path, &self.context, Some(max_bytes))
-            .await?)
-    }
-
-    pub(crate) async fn read_file_by_inode(
-        &self,
-        inode_id: InodeId,
-        max_bytes: u64,
-    ) -> Result<FileBytes> {
-        Ok(self
-            .engine
-            .read_file_by_inode(inode_id, &self.context, Some(max_bytes))
-            .await?)
-    }
-
-    pub(crate) async fn read_file_revision_by_inode(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        max_bytes: u64,
-    ) -> Result<Vec<u8>> {
-        Ok(self
-            .engine
-            .read_file_revision_by_inode(inode_id, revision_no, &self.context, Some(max_bytes))
-            .await?)
-    }
-
-    pub(crate) async fn read_file_stream(
-        &self,
-        absolute_path: &str,
-        revision_no: Option<RevisionNo>,
-        options: &ReadFileStreamOptions,
-    ) -> Result<FileContentStream<SharedObjectStore>> {
-        Ok(self
-            .engine
-            .read_file_stream(
-                absolute_path,
-                &self.context,
-                revision_no,
-                options.chunk_bytes,
-                options.range,
-            )
-            .await?)
-    }
-
-    pub(crate) async fn read_file_stream_by_inode(
-        &self,
-        inode_id: InodeId,
-        revision_no: Option<RevisionNo>,
-        options: &ReadFileStreamOptions,
-    ) -> Result<FileContentStream<SharedObjectStore>> {
-        Ok(self
-            .engine
-            .read_file_stream_by_inode(
-                inode_id,
-                revision_no,
-                &self.context,
-                options.chunk_bytes,
-                options.range,
-            )
-            .await?)
-    }
-
-    pub(crate) async fn create_download(
-        &self,
-        absolute_path: &str,
-        revision_no: Option<RevisionNo>,
-        options: &DownloadOptions,
-    ) -> Result<DirectDownloadTarget> {
-        Ok(self
-            .engine
-            .direct_download_target(
-                absolute_path,
-                revision_no,
-                options.start_offset,
-                &self.context,
-            )
-            .await?)
-    }
-
-    pub(crate) async fn create_download_by_inode(
-        &self,
-        inode_id: InodeId,
-        revision_no: Option<RevisionNo>,
-        options: &DownloadOptions,
-    ) -> Result<DirectDownloadByInodeTarget> {
-        Ok(self
-            .engine
-            .direct_download_target_by_inode(
-                inode_id,
-                revision_no,
-                options.start_offset,
-                &self.context,
-            )
-            .await?)
     }
 }
