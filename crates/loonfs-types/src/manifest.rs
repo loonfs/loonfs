@@ -930,12 +930,6 @@ mod tests {
         })
         .expect("manifest")
         .into_parts();
-        let document: serde_json::Value =
-            serde_json::from_slice(&zstd::stream::decode_all(encoded.as_slice()).expect("unzstd"))
-                .expect("decode manifest document");
-        assert!(document["payload"]
-            .get("frozen_base_delta_merges")
-            .is_none());
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);

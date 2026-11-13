@@ -982,12 +982,16 @@ mod tests {
     }
 
     fn fingerprint(operation: FilesystemOperation) -> String {
+        operations_fingerprint(&[operation])
+    }
+
+    fn operations_fingerprint(operations: &[FilesystemOperation]) -> String {
         CommitFingerprintInput {
             namespace_id: &NamespaceId::parse("demo").expect("valid namespace id"),
             actor_id: &test_actor(),
             subject_id: None,
             message: None,
-            operations: &[operation],
+            operations,
             preconditions: &[],
             inline_content_identities: &BTreeMap::new(),
         }
@@ -1016,7 +1020,6 @@ mod tests {
 
     #[test]
     fn json_map_order_does_not_change_attribute_update_identity() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let forward: FilesystemOperation = serde_json::from_str(
             r#"{"kind":"update_attributes","path":"/docs/report.txt",
                 "set":{"a":"1","b":"2"}}"#,
@@ -1028,56 +1031,16 @@ mod tests {
         )
         .expect("reversed operation");
 
-        assert_eq!(
-            CommitFingerprintInput {
-                namespace_id: &namespace_id,
-                actor_id: &test_actor(),
-                subject_id: None,
-                message: None,
-                operations: &[forward],
-                preconditions: &[],
-                inline_content_identities: &BTreeMap::new(),
-            }
-            .fingerprint(),
-            CommitFingerprintInput {
-                namespace_id: &namespace_id,
-                actor_id: &test_actor(),
-                subject_id: None,
-                message: None,
-                operations: &[reversed],
-                preconditions: &[],
-                inline_content_identities: &BTreeMap::new(),
-            }
-            .fingerprint()
-        );
+        assert_eq!(fingerprint(forward), fingerprint(reversed));
     }
 
     #[test]
     fn remove_order_and_repeats_do_not_change_attribute_update_identity() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let baseline = CommitFingerprintInput {
-            namespace_id: &namespace_id,
-            actor_id: &test_actor(),
-            subject_id: None,
-            message: None,
-            operations: &[update_attributes([], ["a", "b"], None, None)],
-            preconditions: &[],
-            inline_content_identities: &BTreeMap::new(),
-        }
-        .fingerprint();
+        let baseline = fingerprint(update_attributes([], ["a", "b"], None, None));
 
         for spelling in [vec!["b", "a"], vec!["a", "b", "a"]] {
             assert_eq!(
-                CommitFingerprintInput {
-                    namespace_id: &namespace_id,
-                    actor_id: &test_actor(),
-                    subject_id: None,
-                    message: None,
-                    operations: &[update_attributes([], spelling, None, None)],
-                    preconditions: &[],
-                    inline_content_identities: &BTreeMap::new(),
-                }
-                .fingerprint(),
+                fingerprint(update_attributes([], spelling, None, None)),
                 baseline
             );
         }
@@ -1085,22 +1048,12 @@ mod tests {
 
     #[test]
     fn attribute_update_fingerprint_changes_with_every_request_field() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let baseline = CommitFingerprintInput {
-            namespace_id: &namespace_id,
-            actor_id: &test_actor(),
-            subject_id: None,
-            message: None,
-            operations: &[update_attributes(
-                [("owner", text("ada"))],
-                ["draft"],
-                None,
-                None,
-            )],
-            preconditions: &[],
-            inline_content_identities: &BTreeMap::new(),
-        }
-        .fingerprint();
+        let baseline = fingerprint(update_attributes(
+            [("owner", text("ada"))],
+            ["draft"],
+            None,
+            None,
+        ));
 
         for (label, variant) in [
             (
@@ -1127,16 +1080,7 @@ mod tests {
         ] {
             assert_ne!(
                 baseline,
-                CommitFingerprintInput {
-                    namespace_id: &namespace_id,
-                    actor_id: &test_actor(),
-                    subject_id: None,
-                    message: None,
-                    operations: &[variant],
-                    preconditions: &[],
-                    inline_content_identities: &BTreeMap::new(),
-                }
-                .fingerprint(),
+                fingerprint(variant),
                 "a changed {label} must change the fingerprint"
             );
         }
@@ -1297,7 +1241,6 @@ mod tests {
 
     #[test]
     fn binding_version_changes_inode_mutation_identity() {
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let operation = |expected_binding_version: &str| FilesystemOperation::MoveByInode {
             inode_id: InodeId(42),
             expected_binding_version: crate::BindingVersion::parse(expected_binding_version)
@@ -1311,20 +1254,10 @@ mod tests {
             },
         };
 
-        let fingerprint = |version| {
-            CommitFingerprintInput {
-                namespace_id: &namespace_id,
-                actor_id: &test_actor(),
-                subject_id: None,
-                message: None,
-                operations: &[operation(version)],
-                preconditions: &[],
-                inline_content_identities: &BTreeMap::new(),
-            }
-            .fingerprint()
-        };
-
-        assert_ne!(fingerprint("aaaa"), fingerprint("bbbb"));
+        assert_ne!(
+            fingerprint(operation("aaaa")),
+            fingerprint(operation("bbbb"))
+        );
     }
 
     #[test]
@@ -1447,7 +1380,6 @@ mod tests {
 
     #[test]
     fn a_put_has_the_pinned_fingerprint_under_every_checksum_algorithm() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let content_id = ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id");
         let bytes = b"pinned put bytes";
 
@@ -1465,17 +1397,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                CommitFingerprintInput {
-                    namespace_id: &namespace_id,
-                    actor_id: &test_actor(),
-                    subject_id: None,
-                    message: None,
-                    operations: &[put("/docs/report.txt", content_ref)],
-                    preconditions: &[],
-                    inline_content_identities: &BTreeMap::new(),
-                }
-                .fingerprint()
-                .as_str(),
+                fingerprint(put("/docs/report.txt", content_ref)),
                 "v1:sha256:9355b7faba7360d50aad432c2035de5fb34d6106333821f1eedadc6d396b54e3"
             );
         }
@@ -1500,7 +1422,6 @@ mod tests {
 
     #[test]
     fn a_different_content_object_changes_mutation_identity() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let bytes = b"identical bytes, two uploads";
         let first = ContentRef::blob_v1(
             ContentId::generate(),
@@ -1514,84 +1435,16 @@ mod tests {
         );
 
         assert_ne!(
-            CommitFingerprintInput {
-                namespace_id: &namespace_id,
-                actor_id: &test_actor(),
-                subject_id: None,
-                message: None,
-                operations: &[put("/docs/report.txt", first)],
-                preconditions: &[],
-                inline_content_identities: &BTreeMap::new(),
-            }
-            .fingerprint(),
-            CommitFingerprintInput {
-                namespace_id: &namespace_id,
-                actor_id: &test_actor(),
-                subject_id: None,
-                message: None,
-                operations: &[put("/docs/report.txt", second)],
-                preconditions: &[],
-                inline_content_identities: &BTreeMap::new(),
-            }
-            .fingerprint()
+            fingerprint(put("/docs/report.txt", first)),
+            fingerprint(put("/docs/report.txt", second))
         );
     }
 
     #[test]
-    fn a_message_changes_mutation_identity() {
-        // The annotation is part of what the caller asked for: replaying a
-        // commit id with a different message must conflict, so the message
-        // joins the preimage.
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let without = CommitFingerprintInput {
-            namespace_id: &namespace_id,
-            actor_id: &test_actor(),
-            subject_id: None,
-            message: None,
-            operations: &[create_dir("/docs")],
-            preconditions: &[],
-            inline_content_identities: &BTreeMap::new(),
-        }
-        .fingerprint();
-        let with = CommitFingerprintInput {
-            namespace_id: &namespace_id,
-            actor_id: &test_actor(),
-            subject_id: None,
-            message: Some("import batch"),
-            operations: &[create_dir("/docs")],
-            preconditions: &[],
-            inline_content_identities: &BTreeMap::new(),
-        }
-        .fingerprint();
-
-        assert_ne!(without, with);
-    }
-
-    #[test]
     fn operation_order_changes_mutation_identity() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-
         assert_ne!(
-            CommitFingerprintInput {
-                namespace_id: &namespace_id,
-                actor_id: &test_actor(),
-                subject_id: None,
-                message: None,
-                operations: &[create_dir("/a"), create_dir("/b")],
-                preconditions: &[],
-                inline_content_identities: &BTreeMap::new(),
-            }
-            .fingerprint(),
-            CommitFingerprintInput {
-                namespace_id: &namespace_id,
-                actor_id: &test_actor(),
-                subject_id: None,
-                message: None,
-                operations: &[create_dir("/b"), create_dir("/a")],
-                preconditions: &[],
-                inline_content_identities: &BTreeMap::new(),
-            }
-            .fingerprint()
+            operations_fingerprint(&[create_dir("/a"), create_dir("/b")]),
+            operations_fingerprint(&[create_dir("/b"), create_dir("/a")])
         );
     }
 
@@ -1636,6 +1489,8 @@ mod tests {
         let mut changed_revision = options.clone();
         changed_revision.expected_inode_id = Some(InodeId(2));
         changed_revision.expected_revision_no = Some(RevisionNo(2));
+        // Replaying a commit id with a different message must conflict, so the
+        // message joins the preimage.
         let mut changed_message = options.clone();
         changed_message.commit.message = Some(String::new());
 

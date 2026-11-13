@@ -486,11 +486,7 @@ struct WalObjectDocument {
 pub(crate) fn encode_wal_payload_cbor(
     payload: &WalObjectPayload,
 ) -> Result<Vec<u8>, WalCodecError> {
-    validate_wal_inline_content(payload)?;
-    validate_wal_revision_layouts(payload)?;
-    validate_wal_bind_revisions(payload)?;
-    validate_wal_merges(payload)?;
-    validate_wal_floor_object(payload)?;
+    validate_wal_payload(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -554,16 +550,20 @@ fn decode_wal_object_envelope_zstd_with_limit(
     envelope::verify_payload_checksum(&document.payload_checksum, &document.payload)?;
     let payload: WalObjectPayload = from_reader(document.payload.as_slice())
         .map_err(|err| EnvelopeCodecError::PayloadDecode(err.to_string()))?;
-    validate_wal_inline_content(&payload)?;
-    validate_wal_revision_layouts(&payload)?;
-    validate_wal_bind_revisions(&payload)?;
-    validate_wal_merges(&payload)?;
-    validate_wal_floor_object(&payload)?;
+    validate_wal_payload(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
         payload,
     })
+}
+
+fn validate_wal_payload(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
+    validate_wal_inline_content(payload)?;
+    validate_wal_revision_layouts(payload)?;
+    validate_wal_bind_revisions(payload)?;
+    validate_wal_merges(payload)?;
+    validate_wal_floor_object(payload)
 }
 
 fn validate_wal_inline_content(payload: &WalObjectPayload) -> Result<(), WalCodecError> {

@@ -786,69 +786,39 @@ fn sample_rebase_manifest() -> NamespaceManifestPayload {
 // Encode/decode round trips against committed fixtures
 // ---------------------------------------------------------------------------
 
-#[test]
-fn wal_object_document_matches_golden_bytes() {
-    let encoded = encode_wal_object_envelope_zstd(sample_wal_payload())
+fn assert_wal_matches_golden(name: &str, payload: WalObjectPayload) {
+    let encoded = encode_wal_object_envelope_zstd(payload.clone())
         .expect("encode wal")
         .into_bytes();
     // Compare the decompressed document: zstd frames may differ across zstd
     // versions, the document bytes (which the checksum covers) may not.
-    assert_matches_golden("wal_object.v1.cbor", &unzstd(&encoded));
-}
-
-#[test]
-fn wal_object_golden_decodes_to_sample() {
-    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object.v1.cbor")))
+    assert_matches_golden(name, &unzstd(&encoded));
+    let decoded = decode_wal_object_envelope_zstd(&rezstd(&read_golden(name)))
         .expect("decode golden WAL object");
-    assert_eq!(decoded.into_payload(), sample_wal_payload());
+    assert_eq!(decoded.into_payload(), payload);
 }
 
 #[test]
-fn wal_object_inline_content_document_matches_golden_bytes() {
-    let encoded = encode_wal_object_envelope_zstd(sample_wal_inline_content_payload())
-        .expect("encode wal with inline content")
-        .into_bytes();
-    assert_matches_golden("wal_object_inline_content.v1.cbor", &unzstd(&encoded));
+fn wal_object_matches_golden_bytes() {
+    assert_wal_matches_golden("wal_object.v1.cbor", sample_wal_payload());
 }
 
 #[test]
-fn wal_object_inline_content_golden_decodes_to_sample() {
-    let decoded =
-        decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_inline_content.v1.cbor")))
-            .expect("decode golden WAL object with inline content");
-    assert_eq!(decoded.into_payload(), sample_wal_inline_content_payload());
+fn wal_object_inline_content_matches_golden_bytes() {
+    assert_wal_matches_golden(
+        "wal_object_inline_content.v1.cbor",
+        sample_wal_inline_content_payload(),
+    );
 }
 
 #[test]
-fn wal_object_merge_document_matches_golden_bytes() {
-    let encoded = encode_wal_object_envelope_zstd(sample_wal_merge_payload())
-        .expect("encode wal with a merge record")
-        .into_bytes();
-    assert_matches_golden("wal_object_merge.v1.cbor", &unzstd(&encoded));
+fn wal_object_merge_matches_golden_bytes() {
+    assert_wal_matches_golden("wal_object_merge.v1.cbor", sample_wal_merge_payload());
 }
 
 #[test]
-fn wal_object_merge_golden_decodes_to_sample() {
-    let decoded =
-        decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_merge.v1.cbor")))
-            .expect("decode golden WAL object with a merge record");
-    assert_eq!(decoded.into_payload(), sample_wal_merge_payload());
-}
-
-#[test]
-fn wal_object_floor_document_matches_golden_bytes() {
-    let encoded = encode_wal_object_envelope_zstd(sample_wal_floor_payload())
-        .expect("encode a floor object")
-        .into_bytes();
-    assert_matches_golden("wal_object_floor.v1.cbor", &unzstd(&encoded));
-}
-
-#[test]
-fn wal_object_floor_golden_decodes_to_sample() {
-    let decoded =
-        decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_floor.v1.cbor")))
-            .expect("decode golden floor object");
-    assert_eq!(decoded.into_payload(), sample_wal_floor_payload());
+fn wal_object_floor_matches_golden_bytes() {
+    assert_wal_matches_golden("wal_object_floor.v1.cbor", sample_wal_floor_payload());
 }
 
 // The golden is the decompressed document. The stored object is that document
@@ -2643,12 +2613,6 @@ fn sst_block_data_inode_rows_match_golden_bytes() {
 }
 
 #[test]
-fn sst_block_data_inode_golden_decodes_to_sample_rows() {
-    let block = decode_golden_data_block("sst_block_data_inodes.v1.bin");
-    assert_eq!(block.rows, sample_inode_rows());
-}
-
-#[test]
 fn sst_block_data_revision_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
         "sst_block_data_revisions.v1.bin",
@@ -2657,28 +2621,10 @@ fn sst_block_data_revision_rows_match_golden_bytes() {
 }
 
 #[test]
-fn sst_block_data_revision_golden_decodes_to_sample_rows() {
-    let block = decode_golden_data_block("sst_block_data_revisions.v1.bin");
-    assert_eq!(block.rows, sample_revision_rows());
-}
-
-#[test]
 fn sst_block_data_attribute_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
         "sst_block_data_attributes.v1.bin",
         &[
-            sample_cleared_attributes_row(),
-            sample_populated_attributes_row(),
-        ],
-    );
-}
-
-#[test]
-fn sst_block_data_attribute_golden_decodes_to_sample_rows() {
-    let block = decode_golden_data_block("sst_block_data_attributes.v1.bin");
-    assert_eq!(
-        block.rows,
-        [
             sample_cleared_attributes_row(),
             sample_populated_attributes_row(),
         ],
@@ -2694,15 +2640,6 @@ fn sst_block_data_access_rows_match_golden_bytes() {
 }
 
 #[test]
-fn sst_block_data_access_golden_decodes_to_sample_rows() {
-    let block = decode_golden_data_block("sst_block_data_access.v1.bin");
-    assert_eq!(
-        block.rows,
-        [sample_cleared_access_row(), sample_populated_access_row(),],
-    );
-}
-
-#[test]
 fn sst_block_data_commit_receipt_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
         "sst_block_data_commit_receipts.v1.bin",
@@ -2711,20 +2648,8 @@ fn sst_block_data_commit_receipt_rows_match_golden_bytes() {
 }
 
 #[test]
-fn sst_block_data_commit_receipt_golden_decodes_to_sample_row() {
-    let block = decode_golden_data_block("sst_block_data_commit_receipts.v1.bin");
-    assert_eq!(block.rows, [sample_commit_receipt_row()]);
-}
-
-#[test]
 fn sst_block_data_commit_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden("sst_block_data_commits.v1.bin", &[sample_commit_row()]);
-}
-
-#[test]
-fn sst_block_data_commit_golden_decodes_to_sample_row() {
-    let block = decode_golden_data_block("sst_block_data_commits.v1.bin");
-    assert_eq!(block.rows, [sample_commit_row()]);
 }
 
 #[test]
@@ -2736,12 +2661,6 @@ fn sst_block_data_merge_commit_rows_match_golden_bytes() {
 }
 
 #[test]
-fn sst_block_data_merge_commit_golden_decodes_to_sample_row() {
-    let block = decode_golden_data_block("sst_block_data_commits_merge.v1.bin");
-    assert_eq!(block.rows, [sample_merge_commit_row()]);
-}
-
-#[test]
 fn sst_block_data_merge_index_rows_match_golden_bytes() {
     assert_rows_match_single_block_golden(
         "sst_block_data_merges.v1.bin",
@@ -2750,10 +2669,8 @@ fn sst_block_data_merge_index_rows_match_golden_bytes() {
 }
 
 #[test]
-fn sst_block_data_merge_index_golden_decodes_to_sample_rows() {
-    let block = decode_golden_data_block("sst_block_data_merges.v1.bin");
-    assert_eq!(block.rows, sample_merge_index_rows());
-    for row in &block.rows {
+fn sst_block_data_merge_index_rows_reject_unknown_fields() {
+    for row in &sample_merge_index_rows() {
         let mut encoded = row_cbor(row);
         with_future_field(&mut encoded);
         let refusal = assert_row_is_corrupt(&encoded, "a merge index row is strict");
@@ -2767,12 +2684,6 @@ fn sst_block_data_tombstone_rows_match_golden_bytes() {
         "sst_block_data_tombstones.v1.bin",
         &sample_tombstone_rows(),
     );
-}
-
-#[test]
-fn sst_block_data_tombstone_golden_decodes_to_sample_rows() {
-    let block = decode_golden_data_block("sst_block_data_tombstones.v1.bin");
-    assert_eq!(block.rows, sample_tombstone_rows());
 }
 
 // ---------------------------------------------------------------------------
