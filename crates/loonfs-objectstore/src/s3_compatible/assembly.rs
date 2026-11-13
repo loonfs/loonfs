@@ -118,7 +118,7 @@ impl S3RequestSigner {
             verify_expected(key, expected, &crc)?;
         }
         let etag = self
-            .complete_started_upload(key, &upload_id, &parts, Some(expected))
+            .complete_started_upload(key, &upload_id, &parts, expected)
             .await?;
         abort_on_drop.disarm();
         if self.kind.completion_checked_by_head() {

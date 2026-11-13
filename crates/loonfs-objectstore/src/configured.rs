@@ -6,10 +6,7 @@ use crate::aws_credentials::{aws_credentials_source, cloudflare_r2_credentials_s
 use crate::gcs::{gcp_gcs_with_issuers, GcpGcsStoreConfig};
 use crate::local_fs_store::{LocalFsStore, LocalFsStoreConfig};
 use crate::object_store::{Result, SharedObjectStore};
-use crate::presign::{
-    DirectTransferIssuers, AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
-    GCP_GCS_MAX_DIRECT_PUT_BYTES,
-};
+use crate::presign::DirectTransferIssuers;
 use crate::provider_object_store::{CompareToken, CreatePath};
 use crate::s3_compatible::{
     aws_s3_with_credentials, cloudflare_r2_with_credentials, AwsS3StoreConfig,
@@ -81,17 +78,6 @@ impl ConfiguredObjectStoreKind {
         match self {
             Self::GcpGcs => CreatePath::Signer,
             Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 => CreatePath::ProviderClient,
-        }
-    }
-
-    /// Returns the largest object that one presigned PUT to this store
-    /// creates, or `None` for a store that signs no direct transfers.
-    pub(crate) const fn direct_put_max_content_bytes(self) -> Option<u64> {
-        match self {
-            Self::LocalFs => None,
-            Self::AwsS3 => Some(AWS_S3_MAX_DIRECT_PUT_BYTES),
-            Self::CloudflareR2 => Some(CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES),
-            Self::GcpGcs => Some(GCP_GCS_MAX_DIRECT_PUT_BYTES),
         }
     }
 

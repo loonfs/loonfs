@@ -63,60 +63,33 @@ pub(crate) async fn send(
     })
 }
 
-/// The object length and ETag that a signed `HEAD` reports.
-#[derive(Debug, PartialEq, Eq)]
-struct HeadLength {
-    size_bytes: u64,
-    etag: String,
-}
-
-/// The object length and ETag a signed `HEAD` reports, or `None` when the
-/// object is absent.
-fn object_length_from_signed_head(
-    key: &str,
-    response: &SignedResponse,
-) -> Result<Option<HeadLength>> {
-    if !response.status.is_success() {
-        return match request_error(key, response.status, None) {
-            ObjectStoreError::NotFound { .. } => Ok(None),
-            error => Err(error),
-        };
-    }
-    let header = |name: http::header::HeaderName| {
-        response
-            .headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-    };
-    let size_bytes = header(http::header::CONTENT_LENGTH)
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| ObjectStoreError::transport(key, "head reported no content length"))?;
-    let etag = header(http::header::ETAG)
-        .ok_or_else(|| ObjectStoreError::transport(key, "head reported no etag"))?;
-    Ok(Some(HeadLength { size_bytes, etag }))
-}
-
 pub(crate) fn metadata_from_signed_head(
     key: &str,
     response: &SignedResponse,
     version_header: &str,
     stored_checksum: impl FnOnce(&http::HeaderMap) -> Option<Checksum>,
 ) -> Result<Option<crate::ObjectMetadata>> {
-    let Some(HeadLength { size_bytes, etag }) = object_length_from_signed_head(key, response)?
-    else {
-        return Ok(None);
-    };
+    if !response.status.is_success() {
+        return match request_error(key, response.status, None) {
+            ObjectStoreError::NotFound { .. } => Ok(None),
+            error => Err(error),
+        };
+    }
     let header = |name: &str| {
         response
             .headers
             .get(name)
             .and_then(|value| value.to_str().ok())
     };
+    let size_bytes = header("content-length")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| ObjectStoreError::transport(key, "head reported no content length"))?;
+    let etag =
+        header("etag").ok_or_else(|| ObjectStoreError::transport(key, "head reported no etag"))?;
     let checksum = stored_checksum(&response.headers);
     Ok(Some(crate::ObjectMetadata {
         size_bytes,
-        etag: Some(etag),
+        etag: Some(etag.to_owned()),
         version: header(version_header).map(str::to_owned),
         last_modified_at_ms: header("last-modified")
             .and_then(|value| httpdate::parse_http_date(value).ok())
@@ -249,27 +222,21 @@ mod tests {
     #[test]
     fn a_signed_head_reports_the_length_and_etag_or_absence() {
         let key = "namespaces/demo/content/con_1";
-        assert_eq!(
-            object_length_from_signed_head(
-                key,
-                &head(200, &[("content-length", "12"), ("etag", "\"v1\"")]),
-            )
-            .expect("present"),
-            Some(HeadLength {
-                size_bytes: 12,
-                etag: "\"v1\"".to_owned()
-            })
-        );
-        assert_eq!(
-            object_length_from_signed_head(key, &head(404, &[])).expect("absent"),
-            None
-        );
+        let read = |response: &SignedResponse| {
+            metadata_from_signed_head(key, response, "x-amz-version-id", |_| None)
+        };
+        let metadata = read(&head(200, &[("content-length", "12"), ("etag", "\"v1\"")]))
+            .expect("present")
+            .expect("object");
+        assert_eq!(metadata.size_bytes, 12);
+        assert_eq!(metadata.etag.as_deref(), Some("\"v1\""));
+        assert_matches!(read(&head(404, &[])), Ok(None));
         assert_matches!(
-            object_length_from_signed_head(key, &head(200, &[("etag", "\"v1\"")])),
+            read(&head(200, &[("etag", "\"v1\"")])),
             Err(ObjectStoreError::Transport { .. })
         );
         assert_matches!(
-            object_length_from_signed_head(key, &head(403, &[])),
+            read(&head(403, &[])),
             Err(ObjectStoreError::PermissionDenied { .. })
         );
     }

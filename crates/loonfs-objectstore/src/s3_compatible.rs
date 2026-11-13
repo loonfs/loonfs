@@ -20,7 +20,8 @@ use crate::object_store::{invalid_request, Result};
 use crate::presign::{
     base64_crc64nvme, DirectGetIssuer, DirectMultipartIssuer, DirectTransferIssuers,
     PresignedCopyPartRequest, PresignedGetRequest, PresignedPartRequest, PresignedUrl,
-    S3CompatiblePresigner, S3PresignerConfig, INTERNAL_REQUEST_TTL, S3_CRC64NVME_CHECKSUM_HEADER,
+    S3CompatiblePresigner, S3PresignerConfig, AWS_S3_MAX_DIRECT_PUT_BYTES,
+    CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES, INTERNAL_REQUEST_TTL, S3_CRC64NVME_CHECKSUM_HEADER,
     S3_IF_MATCH_HEADER,
 };
 use crate::provider_limits::{provider_client_options, PROVIDER_MAX_MULTIPART_PARTS};
@@ -108,6 +109,7 @@ struct S3CompatibleConfig {
     credentials: SharedAwsCredentialsSource,
     key_prefix: Option<String>,
     force_path_style: bool,
+    direct_put_max_content_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -138,6 +140,7 @@ pub(crate) fn aws_s3_with_credentials(
         credentials,
         key_prefix: config.key_prefix,
         force_path_style: config.force_path_style,
+        direct_put_max_content_bytes: AWS_S3_MAX_DIRECT_PUT_BYTES,
     })
 }
 
@@ -163,6 +166,7 @@ pub(crate) fn cloudflare_r2_with_credentials(
         // style makes the client append the bucket. Virtual hosting would
         // use the endpoint verbatim and address keys as buckets.
         force_path_style: true,
+        direct_put_max_content_bytes: CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
     })
 }
 
@@ -186,10 +190,7 @@ fn new(config: S3CompatibleConfig) -> Result<ConfiguredProvider> {
             endpoint_url: config.endpoint_url.clone(),
             key_prefix: config.key_prefix,
             force_path_style: config.force_path_style,
-            direct_put_max_content_bytes: config
-                .kind
-                .direct_put_max_content_bytes()
-                .expect("an S3-compatible store signs direct puts"),
+            direct_put_max_content_bytes: config.direct_put_max_content_bytes,
         },
         key_scope.clone(),
         Arc::clone(&config.credentials),
@@ -396,7 +397,7 @@ impl ProviderSigner for S3RequestSigner {
         parts.sort_unstable_by_key(|part| part.part_number);
         let crc = crc.finish();
         let etag = self
-            .complete_started_upload(key, &upload_id, &parts, Some(&crc))
+            .complete_started_upload(key, &upload_id, &parts, &crc)
             .await?;
         abort_on_drop.disarm();
         Ok(ObjectMetadata {
@@ -436,7 +437,7 @@ impl ClientMultipart for S3RequestSigner {
     ) -> Result<()> {
         let parts: Vec<_> = parts.iter().map(UploadedPart::from).collect();
         match self
-            .complete_upload(key, provider_upload_id, &parts, Some(checksum))
+            .complete_upload(key, provider_upload_id, &parts, checksum)
             .await
         {
             Ok(_) => Ok(()),
@@ -616,7 +617,7 @@ impl S3RequestSigner {
         key: &str,
         upload_id: &str,
         parts: &[UploadedPart],
-        checksum: Option<&Checksum>,
+        checksum: &Checksum,
     ) -> Result<Option<SignedResponse>> {
         let signed = self
             .request_signer
@@ -643,7 +644,7 @@ impl S3RequestSigner {
         key: &str,
         upload_id: &str,
         parts: &[UploadedPart],
-        checksum: Option<&Checksum>,
+        checksum: &Checksum,
     ) -> Result<String> {
         let response = self
             .complete_upload(key, upload_id, parts, checksum)

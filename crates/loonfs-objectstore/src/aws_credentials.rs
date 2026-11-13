@@ -69,14 +69,11 @@ pub(crate) fn aws_credentials_source(
             access_key_id,
             secret_access_key,
             session_token,
-        } => Ok(Arc::new(StaticAwsCredentialsSource::new(
-            AwsSigningCredentials {
-                access_key_id: access_key_id.clone(),
-                secret_access_key: secret_access_key.clone(),
-                session_token: session_token.clone(),
-                expires_at: None,
-            },
-        ))),
+        } => Ok(static_aws_credentials_source(
+            access_key_id.clone(),
+            secret_access_key.clone(),
+            session_token.clone(),
+        )),
     }
 }
 
@@ -147,23 +144,19 @@ pub(crate) fn static_aws_credentials_source(
     secret_access_key: SecretString,
     session_token: Option<SecretString>,
 ) -> SharedAwsCredentialsSource {
-    Arc::new(StaticAwsCredentialsSource::new(AwsSigningCredentials {
-        access_key_id,
-        secret_access_key,
-        session_token,
-        expires_at: None,
-    }))
+    Arc::new(StaticAwsCredentialsSource {
+        credentials: AwsSigningCredentials {
+            access_key_id,
+            secret_access_key,
+            session_token,
+            expires_at: None,
+        },
+    })
 }
 
 #[derive(Clone)]
 struct StaticAwsCredentialsSource {
     credentials: AwsSigningCredentials,
-}
-
-impl StaticAwsCredentialsSource {
-    fn new(credentials: AwsSigningCredentials) -> Self {
-        Self { credentials }
-    }
 }
 
 impl fmt::Debug for StaticAwsCredentialsSource {
