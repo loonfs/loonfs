@@ -4,7 +4,7 @@ use crate::metrics::labels::{LabeledCounters, MetricLabel};
 use crate::metrics::{
     seconds_from_ms, CounterHandle, HistogramHandle, MetricsRecorder, LATENCY_SECONDS_BOUNDARIES,
 };
-use crate::{GcResponse, PoolGcResponse};
+use crate::{GcResponse, GcSkippedWork, PoolGcResponse};
 use loonfs_core::CompactionUnitOutcome;
 use std::sync::Arc;
 
@@ -34,6 +34,22 @@ impl MetricLabel for CompactionOutcome {
             Self::Abandoned => "abandoned",
             Self::Cancelled => "cancelled",
             Self::Fenced => "fenced",
+        }
+    }
+}
+
+impl MetricLabel for GcSkippedWork {
+    const VALUES: &'static [Self] = &[
+        Self::ContentDeletionPoolBudget,
+        Self::ContentDeletionUnreadableMember,
+        Self::Unknown,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ContentDeletionPoolBudget => "content_deletion_pool_budget",
+            Self::ContentDeletionUnreadableMember => "content_deletion_unreadable_member",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -159,6 +175,7 @@ pub(crate) struct GcInstruments {
     reclaimed: Vec<Arc<dyn CounterHandle>>,
     pool_reclaimed: Vec<Arc<dyn CounterHandle>>,
     retained: Arc<dyn CounterHandle>,
+    skipped: LabeledCounters<GcSkippedWork>,
 }
 
 impl GcInstruments {
@@ -184,6 +201,13 @@ impl GcInstruments {
                 "Candidates a collection retained rather than deleting",
                 &[],
             ),
+            skipped: LabeledCounters::register(
+                recorder,
+                "loonfs.gc.skipped",
+                "Work a pool's collection skipped, by reason",
+                "reason",
+                &[],
+            ),
         }
     }
 
@@ -196,13 +220,16 @@ impl GcInstruments {
         self.retained.increment(gc.retained.total());
     }
 
-    /// Reports what one collection of a pool reclaimed and retained.
+    /// Reports what one collection of a pool reclaimed, retained and skipped.
     ///
     /// Every runtime collection path records its counts here before its
     /// caller can drop the response.
     pub(crate) fn record_pool_collection(&self, gc: &PoolGcResponse) {
         add_reclaimed(&self.pool_reclaimed, &POOL_GC_CATEGORIES, gc);
         self.retained.increment(gc.retained.total());
+        for reason in &gc.skipped {
+            self.skipped.get(*reason).increment(1);
+        }
     }
 }
 

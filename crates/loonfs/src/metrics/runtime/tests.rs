@@ -395,6 +395,7 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
             temporary_objects: 11,
             upload_sessions: 13,
         },
+        skipped: vec![crate::GcSkippedWork::ContentDeletionPoolBudget],
         ..crate::PoolGcResponse::empty(loonfs_types::PoolId::generate())
     };
 
@@ -433,6 +434,15 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
     ] {
         assert_eq!(
             counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)]),
+            expected
+        );
+    }
+    for (reason, expected) in [
+        ("content_deletion_pool_budget", 2),
+        ("content_deletion_unreadable_member", 0),
+    ] {
+        assert_eq!(
+            counter(&snapshot, "loonfs.gc.skipped", &[("reason", reason)]),
             expected
         );
     }
