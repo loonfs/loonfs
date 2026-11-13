@@ -14,8 +14,8 @@ use crate::scheduler::MAX_GREP_STEPS_PER_INDEX_STEP;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
-    AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, GcOptions, MetadataMaintenanceOutcome,
-    NamespaceId, PoolId, RetentionTarget,
+    AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, MetadataMaintenanceOutcome, NamespaceId,
+    PoolId, RetentionTarget,
 };
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepProgress, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
@@ -211,11 +211,10 @@ impl Scheduler {
         if inner.stop.is_cancelled() {
             return false;
         }
-        let options = GcOptions::default();
         let result = contain(
             inner
                 .maintenance
-                .gc_with_options(namespace_id, &options)
+                .gc(namespace_id)
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
@@ -244,7 +243,7 @@ impl Scheduler {
         let result = contain(
             inner
                 .maintenance
-                .gc_pool_with_options(pool_id, &GcOptions::default())
+                .gc_pool(pool_id)
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;

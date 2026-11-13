@@ -108,7 +108,6 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .await
         .expect("snapshots")
         .is_empty());
-    let options = crate::gc::GcOptions::default();
     // The replaced segments report an ancient age, and the collection runs
     // after the selected manifest has aged past the collector's grace window,
     // so the collection deletes the segments that only the selected manifest
@@ -121,15 +120,12 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .last_modified_at_ms
         .expect("test store provides a timestamp");
     let collection = crate::test_support::namespace_store(store, namespace_id)
-        .gc(
-            &options,
-            &writer_at(
-                "collector",
-                (selected_modified_ms + options.grace_window_ms + 1)
-                    .max(crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
-            )
-            .clock(),
+        .gc(&writer_at(
+            "collector",
+            (selected_modified_ms + crate::limits::GC_GRACE_WINDOW_MS + 1)
+                .max(crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
         )
+        .clock())
         .await
         .expect("collect before snapshot write");
     assert!(collection.deleted.metadata_segments >= replaced.len() as u64);

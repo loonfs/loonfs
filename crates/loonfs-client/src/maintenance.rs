@@ -4,7 +4,6 @@
 use crate::operations;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, Result};
-use loonfs_types::options::GcOptions;
 use loonfs_types::{
     headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, GcRequest, GcResponse,
     ListSnapshotRecordsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
@@ -155,10 +154,9 @@ impl Client {
         job_response!(response, RunMaintenanceJobResponse::Metadata)
     }
 
-    /// Runs one garbage collection of a namespace with the server's
-    /// default grace window.
+    /// Runs one garbage collection of a namespace.
     ///
-    /// See [`Self::gc_with_options`].
+    /// Retrying this request starts a distinct attempt.
     pub async fn gc(&self, namespace_id: &NamespaceId) -> Result<GcResponse> {
         let response = self
             .run_maintenance_job(
@@ -169,56 +167,15 @@ impl Client {
         job_response!(response, RunMaintenanceJobResponse::Gc)
     }
 
-    /// Runs one garbage collection of a namespace with the grace
-    /// window that `options` sets.
+    /// Runs one garbage collection of a pool.
     ///
-    /// Retrying this request starts a distinct attempt.
-    pub async fn gc_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        options: &GcOptions,
-    ) -> Result<GcResponse> {
-        let response = self
-            .run_maintenance_job(
-                namespace_id,
-                &RunMaintenanceJobRequest::Gc(GcRequest {
-                    grace_window_ms: Some(options.grace_window_ms),
-                }),
-            )
-            .await?;
-        job_response!(response, RunMaintenanceJobResponse::Gc)
-    }
-
-    /// Runs one garbage collection of a pool with the server's default grace
-    /// window.
-    ///
-    /// See [`Self::gc_pool_with_options`].
+    /// A pool with no pool record returns `pool_not_found`. Retrying this
+    /// request starts a distinct attempt.
     pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<PoolGcResponse> {
         let response = self
             .run_pool_maintenance_job(
                 pool_id,
                 &RunPoolMaintenanceJobRequest::Gc(GcRequest::default()),
-            )
-            .await?;
-        job_response!(response, RunPoolMaintenanceJobResponse::Gc)
-    }
-
-    /// Runs one garbage collection of a pool with the grace window that
-    /// `options` sets.
-    ///
-    /// A pool with no pool record returns `pool_not_found`. Retrying this
-    /// request starts a distinct attempt.
-    pub async fn gc_pool_with_options(
-        &self,
-        pool_id: &PoolId,
-        options: &GcOptions,
-    ) -> Result<PoolGcResponse> {
-        let response = self
-            .run_pool_maintenance_job(
-                pool_id,
-                &RunPoolMaintenanceJobRequest::Gc(GcRequest {
-                    grace_window_ms: Some(options.grace_window_ms),
-                }),
             )
             .await?;
         job_response!(response, RunPoolMaintenanceJobResponse::Gc)

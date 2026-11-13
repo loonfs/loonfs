@@ -124,7 +124,8 @@ async fn publish_layout<S: ObjectStore>(
 async fn aged_context<S: ObjectStore>(store: &S, members: &[NamespaceId]) -> WriterAt {
     let mut now_ms = 0;
     for namespace_id in members {
-        now_ms = now_ms.max(now_after_newest_object(store, namespace_id, GRACE_MS + 1).await);
+        now_ms =
+            now_ms.max(now_after_newest_object(store, namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     }
     context(now_ms)
 }
@@ -136,7 +137,7 @@ async fn exists<S: ObjectStore>(store: &S, key: &str) -> bool {
 /// Runs the collection of `namespace_id` at `now_ms`.
 async fn collect<S: ObjectStore>(store: &S, namespace_id: &NamespaceId, now_ms: u64) -> GcResponse {
     crate::test_support::namespace_store(store, namespace_id)
-        .gc(&options(), &context(now_ms).clock())
+        .gc(&context(now_ms).clock())
         .await
         .expect("collection")
 }
@@ -204,7 +205,7 @@ async fn gc_within<S: ObjectStore>(
         segment_cache: Arc::new(root_scan_cache(Arc::clone(&memory))),
         ..crate::test_support::pool_store(store, pool_id)
     }
-    .gc(None, &options(), clock)
+    .gc(None, clock)
     .await;
     assert_eq!(memory.in_use(), 0, "the collection released what it held");
     report
@@ -282,7 +283,7 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_reti
     assert_eq!(report.deleted.content_objects, 0);
     assert!(exists(&store, &referenced).await);
     let retired = crate::test_support::namespace_store(&store, fork)
-        .gc(&options(), &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("the fork's retirement");
     assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
@@ -365,7 +366,7 @@ async fn a_collection_past_the_pool_roots_budget_skips_the_content_sweep() {
     let late = OperationClock::start(aged.now_ms, timer.clone());
     timer.advance_ms(POOL_ROOTS_READ_BUDGET_MS + 1);
     let report = crate::test_support::pool_store(&store, &pool_id)
-        .gc(None, &options(), &late)
+        .gc(None, &late)
         .await
         .expect("the late collection");
     assert_eq!(report.deleted.content_objects, 0);
@@ -559,7 +560,7 @@ async fn a_deleted_first_members_pool_sweeps_a_live_forks_sessions_by_the_forks_
 
     // The fork's snapshot keeps the first member from retirement, so its own
     // sessions stay, and the fork's sessions follow the fork's rules.
-    collect_pool_at(&store, &pool_id, base_ms + GRACE_MS).await;
+    collect_pool_at(&store, &pool_id, base_ms + GC_GRACE_WINDOW_MS).await;
     assert!(exists(&store, &upload_outcome(&pool_id, &fork_open.upload_id)).await);
     assert!(!exists(&store, &upload_outcome(&pool_id, &first_open.upload_id)).await);
     let later_ms = base_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS;
@@ -706,7 +707,7 @@ async fn a_cached_completed_session_follows_its_members_status() {
         let session = plant_session(&store, &pool_id, fork, now_ms, Some(completed(now_ms))).await;
         let cache = CompletedUploadSessionCache::unshared(1024 * 1024);
         crate::test_support::pool_store(&store, &pool_id)
-            .gc(Some(&cache), &options(), &context(now_ms).clock())
+            .gc(Some(&cache), &context(now_ms).clock())
             .await
             .expect("the collection that caches the session");
         assert!(cache.get(&session.upload_id).is_some());
@@ -723,7 +724,7 @@ async fn a_cached_completed_session_follows_its_members_status() {
         };
         store.reset();
         let report = crate::test_support::pool_store(&store, &pool_id)
-            .gc(Some(&cache), &options(), &context(later_ms).clock())
+            .gc(Some(&cache), &context(later_ms).clock())
             .await
             .expect("the collection that decides the session");
         assert_eq!(

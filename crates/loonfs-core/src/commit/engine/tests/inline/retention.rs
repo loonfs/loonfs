@@ -3,7 +3,6 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::compaction::CompactionUnitOutcome;
-use crate::gc::GcOptions;
 use crate::test_support::WriterAt;
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::SnapshotOwner;
@@ -214,14 +213,11 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .expect("fold reused ID");
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     crate::test_support::namespace_store(&aged, &namespace_id)
-        .gc(
-            &GcOptions::default(),
-            &WriterAt {
-                now_ms: crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
-                ..context.clone()
-            }
-            .clock(),
-        )
+        .gc(&WriterAt {
+            now_ms: crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
+            ..context.clone()
+        }
+        .clock())
         .await
         .expect("collect old WAL and segments that no snapshot keeps");
     assert!(store

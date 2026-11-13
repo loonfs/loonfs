@@ -243,8 +243,6 @@ pub enum CoreError {
         document_bytes: usize,
         max_bytes: usize,
     },
-    #[error("invalid gc configuration: {0}")]
-    InvalidGcOptions(String),
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]
@@ -484,7 +482,6 @@ impl CoreError {
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
             | CoreError::InvalidSnapshotRequest(_)
-            | CoreError::InvalidGcOptions(_)
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
             | CoreError::InvalidEventIndex(_)
@@ -639,7 +636,6 @@ impl CoreError {
             | CoreError::InvalidSnapshotRequest(_)
             | CoreError::SnapshotNotFound { .. }
             | CoreError::MetadataPublicationBudgetExceeded { .. }
-            | CoreError::InvalidGcOptions(_)
             | CoreError::UploadNotFound { .. }
             | CoreError::UploadAlreadyCompleted { .. }
             | CoreError::UploadContentConflict { .. }

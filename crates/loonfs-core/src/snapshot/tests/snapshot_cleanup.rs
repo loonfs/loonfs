@@ -92,20 +92,17 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
 
         // A missing basis is still an error while the record must be retained.
         let young = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(&crate::gc::GcOptions::default(), &setup.clock())
+            .gc(&setup.clock())
             .await
             .expect_err("young snapshot remains protected");
         assert_eq!(young.code(), ErrorCode::NamespaceCorrupt);
 
         let collected = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(
-                &crate::gc::GcOptions::default(),
-                &writer_at(
-                    "collector",
-                    crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_001,
-                )
-                .clock(),
+            .gc(&writer_at(
+                "collector",
+                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_001,
             )
+            .clock())
             .await
             .expect("reap abandoned snapshot once owner rules permit deletion");
         assert_eq!(
@@ -114,14 +111,11 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
         );
         assert!(store.head(&snapshots[0]).await.expect("snapshot").is_none());
         crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(
-                &crate::gc::GcOptions::default(),
-                &writer_at(
-                    "collector",
-                    crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_002,
-                )
-                .clock(),
+            .gc(&writer_at(
+                "collector",
+                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 2_002,
             )
+            .clock())
             .await
             .expect("next collection also succeeds");
         crate::test_support::namespace_store(&store, &namespace_id)
@@ -168,11 +162,10 @@ async fn snapshot_removed_after_listing_does_not_make_a_collected_basis_corrupti
         "collector",
         crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     );
-    let options = crate::gc::GcOptions::default();
     store.block_next();
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = aged.clock();
-    let (collection, ()) = tokio::join!(namespace.gc(&options, &clock), async {
+    let (collection, ()) = tokio::join!(namespace.gc(&clock), async {
         store.wait_until_blocked().await;
         store
             .inner()
@@ -180,7 +173,7 @@ async fn snapshot_removed_after_listing_does_not_make_a_collected_basis_corrupti
             .await
             .expect("release snapshot");
         crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .gc(&options, &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("other collector");
         assert!(store
@@ -258,16 +251,15 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
         "collector",
         crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     );
-    let options = crate::gc::GcOptions::default();
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect_err("second snapshot still requires the missing basis");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(error.to_string().contains(ids[1].as_str()));
     store.fail_all();
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect_err("unreadable snapshot is not absent");
     assert_eq!(error.code(), ErrorCode::ServerError);
@@ -277,7 +269,7 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
         .await
         .expect("malformed snapshot");
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect_err("malformed snapshot is not deletable");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);

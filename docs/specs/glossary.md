@@ -377,7 +377,7 @@ One garbage collection call over a namespace or a [pool](#pool). A collection re
 
 ### Grace window
 
-How old an unreferenced manifest, WAL object, content object, or temporary object has to be before garbage collection deletes it (`grace_window_ms`). The grace window is configurable (one hour by default), but it can't be lower than `GC_MIN_GRACE_WINDOW_MS`. That minimum makes sure every write planned against an older state has finished or failed before garbage collection deletes an object the write might reference. Garbage collection doesn't wait for reads, so a read that must outlive the current manifest takes a [snapshot](#snapshot). Two other windows have names of their own: the "retirement grace", which a deleted namespace waits before it can be retired, and the "completed-content grace", which keeps a completed upload's records. See [Candidate and age rules](format.md#113-candidate-and-age-rules).
+How old an unreferenced manifest, WAL object, content object, or temporary object has to be before garbage collection deletes it (`GC_GRACE_WINDOW_MS`). The grace window is one hour, the same for every collection, and it isn't lower than `GC_MIN_GRACE_WINDOW_MS`. That minimum makes sure every write planned against an older state has finished or failed before garbage collection deletes an object the write might reference. Garbage collection doesn't wait for reads, so a read that must outlive the current manifest takes a [snapshot](#snapshot). Two other windows have names of their own: the "retirement grace", which a deleted namespace waits before it can be retired, and the "completed-content grace", which keeps a completed upload's records. See [Candidate and age rules](format.md#113-candidate-and-age-rules).
 
 ### Namespace retirement
 

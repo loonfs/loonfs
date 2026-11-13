@@ -92,7 +92,7 @@ async fn collect_at<S: ObjectStore>(
     now_ms: u64,
 ) -> crate::error::Result<PoolGcResponse> {
     crate::test_support::pool_store(store, pool_id)
-        .gc(None, &options(), &context(now_ms).clock())
+        .gc(None, &context(now_ms).clock())
         .await
 }
 
@@ -235,7 +235,7 @@ async fn a_completion_stalled_across_a_collection_that_deleted_an_aborted_sessio
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
     let content_key = content_blob(&pool_id, &content_ref.content_id);
     let aborted_at_ms = 3_000;
-    let past_abort_grace = aborted_at_ms + GRACE_MS + 1;
+    let past_abort_grace = aborted_at_ms + GC_GRACE_WINDOW_MS + 1;
 
     let (completion, ()) = tokio::join!(
         complete_proxied(&store, &namespace_id, &upload_id, 2_000),
@@ -276,7 +276,7 @@ async fn a_completion_stalled_across_a_collection_that_deleted_an_aborted_sessio
         assert_matches!(result, Err(CoreError::UploadNotFound { .. }));
     }
     // The leftover outcome is deleted once it's older than the grace window.
-    let outcome_aged = now_after_newest_object(&store, &namespace_id, GRACE_MS).await;
+    let outcome_aged = now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS).await;
     let report = collect_at(&store, &pool_id, outcome_aged)
         .await
         .expect("the next collection");
@@ -323,13 +323,13 @@ async fn an_outcome_without_its_session_record_is_deleted_only_once_older_than_t
         .last_modified_at_ms
         .expect("the local store reports modification times");
 
-    let young = collect_at(&store, &pool_id, written_at_ms + GRACE_MS - 1)
+    let young = collect_at(&store, &pool_id, written_at_ms + GC_GRACE_WINDOW_MS - 1)
         .await
         .expect("a collection inside the grace window");
     assert_eq!(young.deleted.upload_sessions, 0);
     assert_eq!(upload_keys(&store, &namespace_id).await, [outcome_key]);
 
-    let aged = collect_at(&store, &pool_id, written_at_ms + GRACE_MS)
+    let aged = collect_at(&store, &pool_id, written_at_ms + GC_GRACE_WINDOW_MS)
         .await
         .expect("a collection at the grace window");
     assert_eq!(aged.deleted.upload_sessions, 1);
@@ -408,13 +408,12 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
         .pool_id;
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
     let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
-    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
     let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
     let store = blocking_outcome_store(store, BlockedOutcome::Aborted);
-    let gc_options = options();
     let pool = crate::test_support::pool_store(&store, &pool_id);
     let clock = aged.clock();
-    let gc = pool.gc(None, &gc_options, &clock);
+    let gc = pool.gc(None, &clock);
     let complete = async {
         store.wait_until_blocked().await;
         let result = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside)
@@ -454,7 +453,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
         .pool_id;
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
     let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
-    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
     let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
     let store = blocking_outcome_store(store, BlockedOutcome::Completed);
     let engine =
@@ -466,7 +465,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let abort = async {
         store.wait_until_blocked().await;
         let report = crate::test_support::pool_store(&store, &pool_id)
-            .gc(None, &options(), &aged.clock())
+            .gc(None, &aged.clock())
             .await;
         store.release();
         report

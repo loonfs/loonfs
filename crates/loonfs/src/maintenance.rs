@@ -358,27 +358,17 @@ impl Maintenance {
         .await
     }
 
-    /// Runs [`Self::gc_with_options`] with the default grace window.
-    pub async fn gc(&self, namespace_id: &NamespaceId) -> Result<crate::GcResponse> {
-        self.gc_with_options(namespace_id, &crate::GcOptions::default())
-            .await
-    }
-
     /// Runs one complete garbage collection of one namespace.
     ///
     /// Every call rebuilds the current live roots and keeps no cursor. A
     /// collection runs only when asked. A deleted namespace is collected, which is how
     /// it is retired; a namespace that does not exist returns
     /// `namespace_not_found`.
-    pub async fn gc_with_options(
-        &self,
-        namespace_id: &NamespaceId,
-        options: &crate::GcOptions,
-    ) -> Result<crate::GcResponse> {
+    pub async fn gc(&self, namespace_id: &NamespaceId) -> Result<crate::GcResponse> {
         trace::in_operation(operation_span!(self.core, "gc", namespace_id), async {
             let namespace = self.core.namespace_store(namespace_id);
             let report = namespace
-                .gc(options, &namespace.start_clock())
+                .gc(&namespace.start_clock())
                 .await
                 .map_err(Error::from)?;
             // A caller may drop the response, so its counts survive only when
@@ -392,23 +382,13 @@ impl Maintenance {
         .await
     }
 
-    /// Runs [`Self::gc_pool_with_options`] with the default grace window.
-    pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<crate::PoolGcResponse> {
-        self.gc_pool_with_options(pool_id, &crate::GcOptions::default())
-            .await
-    }
-
     /// Runs one complete garbage collection of one pool: its content objects,
     /// upload records, and temporary objects, with roots that it reads from
     /// every member of the pool.
     ///
     /// Every call rebuilds the members' roots and keeps no cursor. A pool
     /// without a pool record returns `pool_not_found`.
-    pub async fn gc_pool_with_options(
-        &self,
-        pool_id: &PoolId,
-        options: &crate::GcOptions,
-    ) -> Result<crate::PoolGcResponse> {
+    pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<crate::PoolGcResponse> {
         trace::in_operation(
             operation_span!(self.core, "gc_pool", pool_id = pool_id),
             async {
@@ -416,7 +396,6 @@ impl Maintenance {
                 let report = pool
                     .gc(
                         Some(self.core.completed_upload_sessions()),
-                        options,
                         &pool.start_clock(),
                     )
                     .await

@@ -1324,7 +1324,7 @@ The fork copies no file bytes or metadata segments. Its first commit is one sequ
 
 A rebase creates its new fork from the head of the namespace that the replayed fork was forked from, so that namespace is the new fork's source namespace. The new fork's fork basis records `rebased_from`: the rebase's source, which is the fork whose commits the rebase replays into the new fork (`source_namespace_id`), and the fork sequence that the replayed fork's next merge into the new fork's source namespace would start after (`resume_after_seq`). LoonFS reads `resume_after_seq` from the snapshot's manifest, under the range rule in [Merges](#merges), so it describes exactly the history that the new fork inherits. If the replayed fork's fork point is below the retention floor of the snapshot's manifest, LoonFS deletes the new fork's fork snapshot and fails with `below_retention_floor`, before it installs the new fork. `rebased_from` is part of the fork basis, so it can't change after creation.
 
-The fork snapshot's creation grace protects the installation. Garbage collection keeps a fork snapshot for at least the grace window `T` of the collection (see [Candidate and age rules](#113-candidate-and-age-rules)) after its `created_at_ms`, which the fork call takes from its request clock (see [Snapshot cleanup](#117-snapshot-cleanup)). The metadata publication budget (see [Publishing a manifest](#72-publishing-a-manifest)) starts at the beginning of the fork call, before fork snapshot creation, and the rest of the grace window covers provider operations and the clock allowance.
+The fork snapshot's creation grace protects the installation. Garbage collection keeps a fork snapshot for at least the grace window `T` (see [Candidate and age rules](#113-candidate-and-age-rules)) after its `created_at_ms`, which the fork call takes from its request clock (see [Snapshot cleanup](#117-snapshot-cleanup)). The metadata publication budget (see [Publishing a manifest](#72-publishing-a-manifest)) starts at the beginning of the fork call, before fork snapshot creation, and the rest of the grace window covers provider operations and the clock allowance.
 
 ### 9.3 Conflicting and unknown installations
 
@@ -1353,7 +1353,7 @@ An ordinary operation that finds the namespace deleted returns `namespace_delete
 
 ```text
 deadline(T) = T.deleted_at_ms
-              + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
+              + max(GC_GRACE_WINDOW_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
 ```
 
 A tombstone is eligible for retirement when the collection's clock reaches its retirement deadline and the complete snapshot listing contains no snapshot on the namespace. Snapshots deleted later in the same collection still count, and any unrecognized key under the snapshot prefix also blocks retirement.
@@ -1450,7 +1450,7 @@ In a second example, another process advances the floor. A server with no sessio
 
 In a third example, the same race goes the other way, and the writer's restore is written at 31 first. The advancing process's put at 31 collides, so the process runs discovery, finds tip 31, and creates the floor object at 32. Any fold that covers 32 also covers 31, so the manifest that records floor 20 also contains the restore's `revoke` event.
 
-Why does the floor stop at a commit that's at least an hour old? A reader that opened a file revision can keep reading that revision after a newer revision of the file is committed. If the floor could reach the replacing commit right away, a base compaction could remove the replaced revision's row within minutes of the replacement, so a read of the revision, or a request for a presigned URL for it, would return `revision_not_found`, and garbage collection could delete the revision's content while a presigned URL for it is still valid (see [Content roots](#119-content-roots)). With this rule, the floor reaches the replacing commit only once that commit is at least `RETENTION_ADVANCE_MIN_COMMIT_AGE_MS` old, so the reader has at least that long to finish. The minimum commit age is a constant, and not a collection's grace window, because each collection can set its own grace window. The grace window of a later collection isn't known when the floor advances.
+Why does the floor stop at a commit that's at least an hour old? A reader that opened a file revision can keep reading that revision after a newer revision of the file is committed. If the floor could reach the replacing commit right away, a base compaction could remove the replaced revision's row within minutes of the replacement, so a read of the revision, or a request for a presigned URL for it, would return `revision_not_found`, and garbage collection could delete the revision's content while a presigned URL for it is still valid (see [Content roots](#119-content-roots)). With this rule, the floor reaches the replacing commit only once that commit is at least `RETENTION_ADVANCE_MIN_COMMIT_AGE_MS` old, so the reader has at least that long to finish.
 
 Why does the walk stop at a commit dated after the cutoff, even when a later commit is older? Stopping there means that the floor passes a commit only when that commit's own timestamp is at or before the cutoff, so a commit from a writer whose clock runs behind can't move the floor past the commits below it that are dated later. The cost is that a writer whose clock runs ahead delays the floor. For example, if a writer's clock runs a day ahead, the floor doesn't pass that writer's commits until about a day and an hour after they were committed.
 
@@ -1646,7 +1646,7 @@ Why isn't a replaced manifest a root? A reader or writer can still be using a ma
 
 ### 11.3 Candidate and age rules
 
-Being unreferenced makes an object a candidate for deletion, but it doesn't make it deletable right away. Provider age uses the modification time that the listing reports, and a candidate listed without a time is kept. Let `T` be the configured grace window, which MUST be at least `GC_MIN_GRACE_WINDOW_MS`.
+Being unreferenced makes an object a candidate for deletion, but it doesn't make it deletable right away. Provider age uses the modification time that the listing reports, and a candidate listed without a time is kept. Let `T` be the grace window (`GC_GRACE_WINDOW_MS`), which is the same for every collection and MUST be at least `GC_MIN_GRACE_WINDOW_MS`.
 
 | Family | Conditions for deletion |
 | --- | --- |
@@ -2581,7 +2581,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `GC_SAFETY_MARGIN_MS` | 300,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
 | `GC_MIN_GRACE_WINDOW_MS` | 1,500,000 | The derived minimum grace window. |
 | `READ_REVALIDATION_BOUND_MS` | 1,200,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, a writer position, or a manifest publication's basis. |
-| `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | The default grace window. |
+| `GC_GRACE_WINDOW_MS` | 3,600,000 | The grace window that every collection uses. |
 | `RETENTION_ADVANCE_MIN_COMMIT_AGE_MS` | 3,600,000 | The minimum commit age of a retention advance. An advance doesn't move the floor past a younger commit. |
 | `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
 | `METADATA_COMPACTION_BUDGET_MS` | 84,900,000 | The longest time before a compaction starts its publication. |
@@ -2611,7 +2611,7 @@ NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
       + GC_MIN_GRACE_WINDOW_MS
 ```
 
-The configured grace window `T` can't be lower than the minimum, and retirement uses the greater of `T` and the retirement minimum. Segment age and the completed-content grace use their own constants. Changing a publication bound, or its safety relationship, changes the protocol, not just a scheduling preference.
+The grace window `T` can't be lower than the minimum, and retirement uses the greater of `T` and the retirement minimum. Segment age and the completed-content grace use their own constants. Changing a publication bound, or its safety relationship, changes the protocol, not just a scheduling preference.
 
 ### C.2 Upload admission
 

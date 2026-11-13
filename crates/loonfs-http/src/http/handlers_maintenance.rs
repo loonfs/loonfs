@@ -6,13 +6,13 @@ use super::extractors::{missing_actor, OptionalActorHeader};
 use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{AdvanceRetentionFloorOptions, GcOptions, MaintainMetadataOptions};
+use loonfs::{AdvanceRetentionFloorOptions, MaintainMetadataOptions};
 
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    PoolId, RunMaintenanceJobRequest, RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest,
-    RunPoolMaintenanceJobResponse,
+    GcRequest, PoolId, RunMaintenanceJobRequest, RunMaintenanceJobResponse,
+    RunPoolMaintenanceJobRequest, RunPoolMaintenanceJobResponse,
 };
 use std::sync::Arc;
 
@@ -65,8 +65,8 @@ pub(super) async fn run_maintenance_job(
                 .await
                 .map(|report| RunMaintenanceJobResponse::Metadata(report.response))
         }
-        RunMaintenanceJobRequest::Gc(request) => maintenance
-            .gc_with_options(&namespace_id, &GcOptions::from_request(request))
+        RunMaintenanceJobRequest::Gc(GcRequest {}) => maintenance
+            .gc(&namespace_id)
             .await
             .map(RunMaintenanceJobResponse::Gc),
         RunMaintenanceJobRequest::Retention(request) => {
@@ -134,10 +134,10 @@ pub(super) async fn run_pool_maintenance_job(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunPoolMaintenanceJobRequest>,
 ) -> Result<Json<RunPoolMaintenanceJobResponse>, ApiResponseError> {
-    let RunPoolMaintenanceJobRequest::Gc(request) = request;
+    let RunPoolMaintenanceJobRequest::Gc(GcRequest {}) = request;
     state
         .maintenance
-        .gc_pool_with_options(&pool_id, &GcOptions::from_request(request))
+        .gc_pool(&pool_id)
         .await
         .map(|report| Json(RunPoolMaintenanceJobResponse::Gc(report)))
         .map_err(ApiResponseError::runtime)

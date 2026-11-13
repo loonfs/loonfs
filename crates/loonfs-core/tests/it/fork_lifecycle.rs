@@ -128,7 +128,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 4;
     let collected = namespace_store(&store, &source)
-        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("collect source before fork");
     assert!(collected.deleted.metadata_segments > 0);
@@ -161,7 +161,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .expect("release snapshot");
     aged.now_ms = u64::MAX / 2;
     namespace_store(&store, &source)
-        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("collect source past grace window");
     assert_eq!(listed_names(&store, &target).await, ["shared.txt"]);
@@ -987,7 +987,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     namespace_store(&store, &ancestor)
-        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("collect ancestor");
 
@@ -998,7 +998,6 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
             .bytes,
         b"base"
     );
-    let options = loonfs_core::GcOptions::default();
     let parent_deadline = namespace_store(&store, &parent)
         .load_read_state()
         .await
@@ -1006,16 +1005,15 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .status
         .deleted_at_ms()
         .expect("deletion stamp")
-        + options
-            .grace_window_ms
+        + loonfs_core::limits::GC_GRACE_WINDOW_MS
             .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
     let parent_waiting = namespace_store(&store, &parent)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("parent waits");
     assert_eq!(parent_waiting.retires_at_ms, Some(parent_deadline));
     let ancestor_waiting = namespace_store(&store, &ancestor)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("ancestor waits");
     assert_eq!(ancestor_waiting.deleted_snapshots_by_owner.fork, 0);
@@ -1031,30 +1029,30 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .deleted_at_ms()
         .expect("deletion stamp");
     let retired = namespace_store(&store, &descendant)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("retire descendant");
     let descendant_deadline = retired
         .retires_at_ms
         .expect("descendant retired despite compaction");
     let waiting = namespace_store(&store, &parent)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("wait for descendant grace");
     assert_eq!(waiting.deleted_snapshots_by_owner.fork, 0);
     aged.now_ms = descendant_deadline;
     namespace_store(&store, &descendant)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("descendant releases its fork snapshot");
     let released = namespace_store(&store, &parent)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("parent releases its fork snapshot");
     assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
     assert_eq!(released.retires_at_ms, Some(parent_deadline));
     let released = namespace_store(&store, &ancestor)
-        .gc(&options, &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("collect ancestor after parent releases its snapshot");
     assert_eq!(released.deleted_snapshots_by_owner.fork, 0);
@@ -1070,11 +1068,10 @@ async fn a_fork_survives_a_concurrent_collection() {
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
     seed_source_namespace_for_fork(store.as_ref(), &source, &context).await;
 
-    let gc_options = loonfs_core::GcOptions::default();
     let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
     let source_store = namespace_store(store.as_ref(), &source);
     let clock = context.clock();
-    let collecting = source_store.gc(&gc_options, &clock);
+    let collecting = source_store.gc(&clock);
     let (forked, collected) = tokio::join!(forking, collecting);
     forked.expect("creation grace protects the fork");
     collected.expect("the collection finishes");
@@ -1335,7 +1332,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 2;
     let report = namespace_store(&store, &namespace_id)
-        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("gc a namespace with no root");
     assert_eq!(report.deleted.wal_objects, 0, "{report:?}");
@@ -1363,12 +1360,12 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .await
         .expect("raise the hint");
     let report = namespace_store(&store, &namespace_id)
-        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("gc the tombstone");
     assert!(report.deleted.wal_objects >= 1, "{report:?}");
     namespace_store(&store, &namespace_id)
-        .gc(&loonfs_core::GcOptions::default(), &aged.clock())
+        .gc(&aged.clock())
         .await
         .expect("collect obsolete tombstone version");
     let current = namespace_store(&store, &namespace_id)
@@ -1642,7 +1639,7 @@ async fn a_create_after_the_collection_of_manifest_one_reports_the_id_as_taken()
     aged.now_ms = u64::MAX / 2;
     for _ in 0..2 {
         namespace
-            .gc(&loonfs_core::GcOptions::default(), &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("collect manifest 1");
     }
@@ -1768,7 +1765,6 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .expect("sibling");
     let sibling_ref = sibling_file.entry.content_ref().expect("sibling content");
     let sibling_key = content_blob(&pool_id, &sibling_ref.content_id);
-    let options = loonfs_core::GcOptions::default();
     let mut aged = setup.clone();
     aged.now_ms = u64::MAX / 4;
     for number in 0..4 {
@@ -1807,7 +1803,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .expect("delete leaf");
         store.reset();
         let report = namespace_store(&store, &leaf)
-            .gc(&options, &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("retire leaf");
         assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
@@ -1820,7 +1816,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         );
         assert!(store.head(&leaf_key).await.expect("leaf content").is_some());
         let report = pool_store(&store, &pool_id)
-            .gc(None, &options, &aged.clock())
+            .gc(None, &aged.clock())
             .await
             .expect("collect the pool's content");
         assert_eq!(report.deleted.content_objects, 1);
@@ -1861,13 +1857,12 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .status
         .deleted_at_ms()
         .expect("deletion stamp")
-        + options
-            .grace_window_ms
+        + loonfs_core::limits::GC_GRACE_WINDOW_MS
             .max(loonfs_core::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS);
     for _ in 0..3 {
-        aged.now_ms += options.grace_window_ms;
+        aged.now_ms += loonfs_core::limits::GC_GRACE_WINDOW_MS;
         let report = namespace_store(&store, &source)
-            .gc(&options, &aged.clock())
+            .gc(&aged.clock())
             .await
             .expect("collect deleted source");
         assert_eq!(report.retires_at_ms, Some(source_deadline));

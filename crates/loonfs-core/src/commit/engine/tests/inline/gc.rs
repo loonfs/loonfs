@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::gc::GcOptions;
 use crate::test_support::WriterAt;
 use loonfs_test_support::stores::{BlockingStore, MetadataMapStore, OperationSelector};
 
@@ -11,20 +10,16 @@ async fn collect_aged_wal(
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) {
-    let options = GcOptions::default();
     let aged = MetadataMapStore::aged(
         store.clone(),
         KeyPredicate::prefix(wal_prefix(namespace_id)),
     );
     crate::test_support::namespace_store(&aged, namespace_id)
-        .gc(
-            &options,
-            &WriterAt {
-                now_ms: options.grace_window_ms + 1,
-                ..context.clone()
-            }
-            .clock(),
-        )
+        .gc(&WriterAt {
+            now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+            ..context.clone()
+        }
+        .clock())
         .await
         .expect("collect aged WAL");
 }

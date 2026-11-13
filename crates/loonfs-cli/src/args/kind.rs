@@ -174,7 +174,7 @@ impl Command {
                         CommandKind::MaintenanceRetentionWindow
                     }
                 },
-                MaintenanceCommand::Gc(_) => CommandKind::MaintenanceGc,
+                MaintenanceCommand::Gc => CommandKind::MaintenanceGc,
                 MaintenanceCommand::Pool { command } => match command {
                     MaintenancePoolCommand::Gc(_) => CommandKind::MaintenancePoolGc,
                 },

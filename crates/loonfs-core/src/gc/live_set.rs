@@ -6,7 +6,7 @@ use super::deletes::Decision;
 use super::families::CandidateFamily;
 use super::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
 use crate::error::Result;
-use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
+use crate::limits::{GC_GRACE_WINDOW_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::read_working_memory;
@@ -36,13 +36,12 @@ impl RetirementStatus {
     pub(super) fn of(
         tombstone: Option<&NamespaceManifestPayload>,
         has_snapshots: bool,
-        retirement_grace_window_ms: u64,
         now_ms: u64,
     ) -> Self {
         let Some(tombstone) = tombstone else {
             return Self::Active;
         };
-        let deadline_ms = retirement_deadline_ms(tombstone, retirement_grace_window_ms);
+        let deadline_ms = retirement_deadline_ms(tombstone);
         if now_ms < deadline_ms {
             Self::Retained {
                 retires_at_ms: Some(deadline_ms),
@@ -71,8 +70,6 @@ pub(super) struct LiveSet {
     /// Whether the snapshot listing returned any key, recognized or not, which
     /// keeps a tombstone from retirement.
     has_snapshots: bool,
-    /// The configured grace, or the retirement grace when that's longer.
-    pub(super) retirement_grace_window_ms: u64,
     pub(super) now_ms: u64,
     live_folded_wal_no: Option<WalNo>,
 }
@@ -87,7 +84,6 @@ impl LiveSet {
     /// arrive.
     pub(super) async fn load<S: ObjectStore>(
         namespace: &NamespaceStore<S>,
-        grace_window_ms: u64,
         clock: &OperationClock,
     ) -> Result<Self> {
         let namespace_id = &namespace.namespace_id;
@@ -109,13 +105,12 @@ impl LiveSet {
             snapshot_listed_bytes: 0,
             memory,
             has_snapshots: false,
-            retirement_grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
             now_ms: clock.request_at_ms(),
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
         let outcome = async {
             live.protect_manifest(&anchor.manifest)?;
-            live.load_snapshots(namespace, head.manifest_no, grace_window_ms, clock)
+            live.load_snapshots(namespace, head.manifest_no, clock)
                 .await
         }
         .await;
@@ -139,7 +134,6 @@ impl LiveSet {
         &mut self,
         namespace: &NamespaceStore<S>,
         current_manifest_no: ManifestNo,
-        grace_window_ms: u64,
         clock: &OperationClock,
     ) -> Result<()> {
         let mut snapshots = namespace.list_snapshot_manifests(current_manifest_no);
@@ -170,9 +164,7 @@ impl LiveSet {
                 // snapshot was deletable. The snapshot's record is read again, because
                 // the snapshot can have been released after the listing read it.
                 (SnapshotManifest::Missing(manifest_no), _) => {
-                    let decision = namespace
-                        .sweep_snapshot(&snapshot.key, grace_window_ms, self, clock)
-                        .await?;
+                    let decision = namespace.sweep_snapshot(&snapshot.key, self, clock).await?;
                     if let Decision::Retain { .. } = decision {
                         return Err(missing_root_manifest(
                             &namespace.namespace_id,
@@ -184,7 +176,7 @@ impl LiveSet {
                 }
                 (_, Some(record)) => {
                     namespace
-                        .sweep_snapshot_record(&snapshot.key, record, grace_window_ms, self, clock)
+                        .sweep_snapshot_record(&snapshot.key, record, self, clock)
                         .await?
                 }
                 (_, None) => Decision::Gone,
@@ -225,7 +217,7 @@ impl LiveSet {
     }
 
     pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {
-        retirement_deadline_ms(tombstone, self.retirement_grace_window_ms)
+        retirement_deadline_ms(tombstone)
     }
 
     /// Returns the retirement status of the collected namespace.
@@ -233,21 +225,18 @@ impl LiveSet {
         RetirementStatus::of(
             self.current_tombstone.as_ref(),
             self.has_snapshots,
-            self.retirement_grace_window_ms,
             self.now_ms,
         )
     }
 }
 
 /// Returns the earliest time at which the namespace of `tombstone` can be
-/// retired.
-fn retirement_deadline_ms(
-    tombstone: &NamespaceManifestPayload,
-    retirement_grace_window_ms: u64,
-) -> u64 {
+/// retired: the grace window or the retirement grace after its deletion,
+/// whichever is longer.
+fn retirement_deadline_ms(tombstone: &NamespaceManifestPayload) -> u64 {
     tombstone
         .status
         .deleted_at_ms()
         .expect("a tombstone should carry its deletion stamp")
-        .saturating_add(retirement_grace_window_ms)
+        .saturating_add(GC_GRACE_WINDOW_MS.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS))
 }

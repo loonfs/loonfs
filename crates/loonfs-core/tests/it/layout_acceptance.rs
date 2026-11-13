@@ -12,7 +12,6 @@ use loonfs_core::test_support::namespace_store;
 use loonfs_core::test_support::writer_at;
 use loonfs_core::test_support::WriterAt;
 use loonfs_core::CreateNamespaceOptions;
-use loonfs_core::GcOptions;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -205,7 +204,7 @@ async fn maintenance_preserves_the_logical_head() {
         .await
         .expect("advance floor");
     namespace_store(&store, &namespace_id)
-        .gc(&GcOptions::default(), &context.clock())
+        .gc(&context.clock())
         .await
         .expect("collection");
     let staged = engine.begin_upload().await.expect("second upload");

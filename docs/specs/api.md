@@ -71,7 +71,6 @@ The example below is the reference deployment's document, with the server's defa
     "commit.max_request_body_bytes": 2097152,
     "download.service_proxied.max_concurrent_requests": 16,
     "download.service_proxied.max_content_bytes": 268435456,
-    "maintenance.gc.min_grace_window_ms": 1500000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
     "query.grep.scan_budget_files": 4096,
@@ -117,7 +116,6 @@ Registered limit keys:
 | `commit.max_content_tokens` | The largest number of content tokens that one commit can include. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_external_content_refs` | The largest number of distinct external content references that one commit's operations can refer to. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_message_bytes` | The largest commit `message` accepted, in bytes. A longer message returns `invalid_request` before planning. |
-| `maintenance.gc.min_grace_window_ms` | The smallest `grace_window_ms` accepted on a `gc` request. A smaller value returns `invalid_request`. The value is derived from the publication budgets, rather than tuned. |
 | `query.grep.scan_budget_files` | The number of files that an `allow_scan` grep without a plan scans before the request fails with `query_unindexable`. |
 | `query.grep.tail_budget_files` | The number of revisions in the unindexed tail that one grep scans exhaustively before it fails with `index_lagging`. |
 
@@ -810,7 +808,7 @@ A maintenance request body identifies exactly one job with `kind`:
 | `kind` | Fields | Result |
 | --- | --- | --- |
 | `metadata` | Optional `max_wal_tail_objects` | `outcome` and `compaction_units` |
-| `gc` | Optional `grace_window_ms` | The collection result |
+| `gc` | None | The collection result |
 | `retention` | Optional `to_seq` or `cutoff_at_ms` | `retention_floor_seq` |
 | `retention_window` | Optional `retention_window_ms` | `retention_window_ms`, when the namespace has a window. The job sets the namespace's retention window, or clears it when the request doesn't include `retention_window_ms`. |
 | `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. The job grants `admin` on the root row to the principal and keeps every other root grant. It makes the grant through a commit that doesn't check a subject and is attributed to the request's `Loonfs-Actor`. The job is meant for an ACL namespace that has lost every administrator. |
@@ -827,7 +825,7 @@ A job that loses a race with another process, or whose work is superseded, repor
 
 A deleted namespace accepts only `gc` jobs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
 
-A [pool](glossary.md#pool) has its own route, `POST /v0/maintenance/pools/{pool_id}/jobs`, which accepts one job, `gc`, with the optional `grace_window_ms`. A namespace's `gc` job collects the objects under the namespace's prefix, and a pool's `gc` job collects the content objects, upload records, and temporary objects under the pool's prefix (see [Garbage collection jobs](#garbage-collection-jobs)). The response includes the same `kind`, the addressed `pool_id`, and the collection result. A pool ID without a pool record returns `pool_not_found`. The pool's route has the same retry class as `run_maintenance_job`, and the reference server exempts it from its request deadline in the same way. For example, `POST /v0/maintenance/pools/pool_3s0drmj8em84yb4mnetqkz2j0x/jobs` with the body `{"kind":"gc"}` runs one collection of that pool.
+A [pool](glossary.md#pool) has its own route, `POST /v0/maintenance/pools/{pool_id}/jobs`, which accepts one job, `gc`. A namespace's `gc` job collects the objects under the namespace's prefix, and a pool's `gc` job collects the content objects, upload records, and temporary objects under the pool's prefix (see [Garbage collection jobs](#garbage-collection-jobs)). The response includes the same `kind`, the addressed `pool_id`, and the collection result. A pool ID without a pool record returns `pool_not_found`. The pool's route has the same retry class as `run_maintenance_job`, and the reference server exempts it from its request deadline in the same way. For example, `POST /v0/maintenance/pools/pool_3s0drmj8em84yb4mnetqkz2j0x/jobs` with the body `{"kind":"gc"}` runs one collection of that pool.
 
 A `metadata` job [folds](glossary.md#fold) the WAL tail when a fold is due, and then [compacts](glossary.md#compaction) the namespace's metadata until nothing is due. It compacts in units. A unit compacts a window of at most eight runs of one [family group](glossary.md#family-group), chosen by size tier (see [Compaction windows](format.md#102-compaction-windows)), and publishes the next manifest. If its manifest put loses to another publication, the unit tries again over the manifest that won, as long as its input runs are unchanged. The job stops early after it publishes 16 units, after three units in a row are abandoned, or when a newer runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch). A unit is abandoned when an input run changed, the elapsed-time bound was exceeded, or every publication attempt lost. An abandoned unit leaves the segments it wrote unreferenced, and a later collection can delete them. The server runs at most one fold of a namespace at a time, and at most one compaction unit of it at a time. If a fold or a unit of the namespace is already running (for example, one that the namespace's writer session started), the job waits for the running fold or unit to finish instead of doing the same work again.
 
@@ -887,7 +885,7 @@ The response includes the namespace's window after the job. It leaves out `reten
 
 #### Garbage collection jobs
 
-In a `gc` job on a namespace or on a pool, `grace_window_ms` overrides the grace window. A grace window below the derived minimum grace window returns `invalid_request`. In a pool's job, upload sessions still keep their leases, and completed content still keeps its derived completed-content grace (see [Upload-session cleanup](format.md#116-upload-session-cleanup)).
+A `gc` job on a namespace or on a pool deletes an unreferenced object once the object is older than the [grace window](glossary.md#grace-window), which is the same for every collection, and no request field sets the window. In a pool's job, upload sessions keep their leases, and completed content keeps its derived completed-content grace (see [Upload-session cleanup](format.md#116-upload-session-cleanup)).
 
 A namespace's job and a pool's job collect different objects:
 
@@ -898,7 +896,7 @@ A namespace's job and a pool's job collect different objects:
 
 A GC response contains counts for that call. Concurrent calls can overlap their deletion attempts, so these counts are operational summaries. No collection state is saved between calls.
 
-Each GC request runs one complete, stateless collection. `GcRequest` accepts `grace_window_ms`, and it has no cursor. No collection runs unless `gc` is present.
+Each GC request runs one complete, stateless collection. `GcRequest` has no fields, so a request can't include a cursor. No collection runs unless `gc` is present.
 
 Every GC call uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end.
 
@@ -942,7 +940,7 @@ Every core GC response also includes `retained`, which counts the candidates the
 | Reason | Means |
 | --- | --- |
 | `referenced` | Protected by current roots, including an extent filter of a rooted layout segment that matches the object (a false match keeps the object until no rooted view lists that segment), or needed for forward manifest discovery. |
-| `within_grace_window` | Unreferenced, but younger than `grace_window_ms` by the object's own provider timestamp. |
+| `within_grace_window` | Unreferenced, but younger than the grace window by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreferenced, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
 | `unrecognized_key` | A key under a listed family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
 | `snapshot_not_deletable` | A snapshot that's kept by its owner or by its grace window. |

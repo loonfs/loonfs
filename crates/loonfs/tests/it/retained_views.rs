@@ -6,8 +6,8 @@ use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
     CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, FoldWalOutcome,
-    FoldWalResponse, GcOptions, InlineContentPolicy, LoonFs, MetadataCompactionOutcome,
-    PutFileOptions, GC_DEFAULT_GRACE_WINDOW_MS,
+    FoldWalResponse, InlineContentPolicy, LoonFs, MetadataCompactionOutcome, PutFileOptions,
+    GC_GRACE_WINDOW_MS,
 };
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -281,21 +281,16 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 // roots for the pre-rebuild file set.
                 let now_ms = loonfs_core::time::current_time_ms()
                     + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
-                    + GC_DEFAULT_GRACE_WINDOW_MS
+                    + GC_GRACE_WINDOW_MS
                     + 1;
                 let collected =
                     loonfs_core::test_support::namespace_store(object_store.as_ref(), &source)
-                        .gc(
-                            &GcOptions {
-                                grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-                            },
-                            &WriterAt {
-                                writer_id: loonfs_types::WriterId::parse("retained-views-gc")
-                                    .expect("writer id"),
-                                now_ms,
-                            }
-                            .clock(),
-                        )
+                        .gc(&WriterAt {
+                            writer_id: loonfs_types::WriterId::parse("retained-views-gc")
+                                .expect("writer id"),
+                            now_ms,
+                        }
+                        .clock())
                         .await
                         .expect("collect aged objects");
                 assert!(collected.deleted.wal_objects > 0, "{collected:?}");
@@ -305,9 +300,6 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 loonfs_core::test_support::pool_store(object_store.as_ref(), &pool_id)
                     .gc(
                         None,
-                        &GcOptions {
-                            grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-                        },
                         &WriterAt {
                             writer_id: loonfs_types::WriterId::parse("retained-views-gc")
                                 .expect("writer id"),

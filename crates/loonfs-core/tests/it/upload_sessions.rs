@@ -30,12 +30,11 @@ use tempfile::tempdir;
 async fn collect_pool<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
-    options: &loonfs_core::GcOptions,
     clock: &loonfs_core::time::OperationClock,
 ) -> loonfs_core::Result<loonfs_types::PoolGcResponse> {
     let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
     loonfs_core::test_support::pool_store(store, &pool_id)
-        .gc(None, options, clock)
+        .gc(None, clock)
         .await
 }
 
@@ -452,15 +451,14 @@ mod streamed_content {
             let UploadSessionStatus::Aborted { aborted_at_ms } = aborted.status else {
                 panic!("expected aborted");
             };
-            let options = loonfs_core::GcOptions::default();
             // Model the body staying open across the post-abort grace interval.
             // No provider operation is suspended; the caller has not supplied its bytes.
             let aged = WriterAt {
-                now_ms: aborted_at_ms + options.grace_window_ms + 1,
+                now_ms: aborted_at_ms + loonfs_core::limits::GC_GRACE_WINDOW_MS + 1,
                 ..context.clone()
             };
             if forget_before_resume {
-                collect_pool(&store, &namespace_id, &options, &aged.clock())
+                collect_pool(&store, &namespace_id, &aged.clock())
                     .await
                     .expect("collect aborted session");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -474,14 +472,9 @@ mod streamed_content {
             result.expect_err("aborted session cannot stage").code(),
             ErrorCode::UploadNotFound
         );
-        collect_pool(
-            &store,
-            &namespace_id,
-            &loonfs_core::GcOptions::default(),
-            &aged.clock(),
-        )
-        .await
-        .expect("repeat GC after late content write");
+        collect_pool(&store, &namespace_id, &aged.clock())
+            .await
+            .expect("repeat GC after late content write");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
@@ -546,14 +539,13 @@ mod streamed_content {
             .into_payload();
             let expires_at_ms = session.expires_at_ms;
             let content_key = content_blob(&pool_id, &session.content_id);
-            let options = loonfs_core::GcOptions::default();
             // Model a source stalled past its lease and both collection graces.
             // GC, not a caller's explicit abort, moves the implicit session terminal.
             let expired = WriterAt {
-                now_ms: expires_at_ms + options.grace_window_ms + 1,
+                now_ms: expires_at_ms + loonfs_core::limits::GC_GRACE_WINDOW_MS + 1,
                 ..context.clone()
             };
-            collect_pool(&store, &namespace_id, &options, &expired.clock())
+            collect_pool(&store, &namespace_id, &expired.clock())
                 .await
                 .expect("GC aborts expired implicit session");
             let (_, aborted) = read_upload_records(&store, &namespace_id, &session.upload_id).await;
@@ -565,11 +557,11 @@ mod streamed_content {
                 "the first collection keeps the aborted session"
             );
             let aged = WriterAt {
-                now_ms: expired.now_ms + options.grace_window_ms + 1,
+                now_ms: expired.now_ms + loonfs_core::limits::GC_GRACE_WINDOW_MS + 1,
                 ..context.clone()
             };
             if forget_before_resume {
-                collect_pool(&store, &namespace_id, &options, &aged.clock())
+                collect_pool(&store, &namespace_id, &aged.clock())
                     .await
                     .expect("forget expired implicit owner");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -583,14 +575,9 @@ mod streamed_content {
             result.expect_err("expired owner cannot complete").code(),
             ErrorCode::UploadNotFound
         );
-        collect_pool(
-            &store,
-            &namespace_id,
-            &loonfs_core::GcOptions::default(),
-            &aged.clock(),
-        )
-        .await
-        .expect("GC after failed late completion");
+        collect_pool(&store, &namespace_id, &aged.clock())
+            .await
+            .expect("GC after failed late completion");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
@@ -829,7 +816,6 @@ mod streamed_content {
 /// providers' actual multipart behaviour.
 mod direct_multipart {
     use super::*;
-    use loonfs_core::GcOptions;
     use loonfs_objectstore::keys::content_blob;
     use loonfs_test_support::stores::{FakeMultipartStore, MultipartChecksumEnforcement};
     use loonfs_types::options::DirectMultipartUploadOptions;
@@ -1418,12 +1404,11 @@ mod direct_multipart {
         let expires_at_ms = session_state(&store, &session.namespace_id, &session.upload_id)
             .await
             .expires_at_ms;
-        let options = GcOptions::default();
         let expired = WriterAt {
             writer_id: context.writer_id.clone(),
-            now_ms: expires_at_ms + options.grace_window_ms + 1,
+            now_ms: expires_at_ms + loonfs_core::limits::GC_GRACE_WINDOW_MS + 1,
         };
-        collect_pool(&store, &session.namespace_id, &options, &expired.clock())
+        collect_pool(&store, &session.namespace_id, &expired.clock())
             .await
             .expect("garbage collection");
 

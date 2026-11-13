@@ -35,7 +35,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
 
     // Past the lease plus a grace the session is aborted and the object it
     // was writing is deleted — in that order.
-    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
     let report = collect_pool(&store, &pool_id, &expired).await;
     assert_eq!(
         report.deleted.upload_sessions, 0,
@@ -51,7 +51,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     );
 
     // The aborted record is reaped a grace window after its own stamp.
-    let reaped = context(expired.now_ms + GRACE_MS + 1);
+    let reaped = context(expired.now_ms + GC_GRACE_WINDOW_MS + 1);
     let report = collect_pool(&store, &pool_id, &reaped).await;
     assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(
@@ -60,7 +60,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     );
     assert!(store.head(&session_key).await.expect("head").is_none());
 
-    let again = context(reaped.now_ms + GRACE_MS);
+    let again = context(reaped.now_ms + GC_GRACE_WINDOW_MS);
     let report = collect_pool(&store, &pool_id, &again).await;
     assert_eq!(report.deleted.upload_sessions, 0);
 }
@@ -83,11 +83,11 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
         .pool_id;
     let (upload_id, _) = stage_upload(&store, &namespace_id, &setup).await;
 
-    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
     collect_pool(&store, &pool_id, &expired).await;
 
     store.fail_next(1);
-    let reaped = context(expired.now_ms + GRACE_MS + 1);
+    let reaped = context(expired.now_ms + GC_GRACE_WINDOW_MS + 1);
     let report = collect_pool(&store, &pool_id, &reaped).await;
     assert_eq!(report.deleted.upload_sessions, 0);
     assert_matches!(
@@ -127,7 +127,7 @@ async fn a_collection_reports_the_soonest_deadline_it_retained() {
     assert_eq!(report.retained.total(), 2);
     assert_eq!(
         report.next_reclamation_at_ms,
-        Some(expires_at_ms + GRACE_MS),
+        Some(expires_at_ms + GC_GRACE_WINDOW_MS),
         "an open session's reclamation waits for its lease and then the grace window"
     );
 
@@ -159,13 +159,13 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_collection_report
 
     // The collection that aborts the session is the only thing that knows the
     // record now ages out a grace window from this instant.
-    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
     let report = collect_pool(&store, &pool_id, &expired).await;
     assert_eq!(report.deleted.upload_sessions, 0);
     let reclaim_at_ms = report
         .next_reclamation_at_ms
         .expect("the abort this collection performed is a deadline it created");
-    assert_eq!(reclaim_at_ms, expired.now_ms + GRACE_MS);
+    assert_eq!(reclaim_at_ms, expired.now_ms + GC_GRACE_WINDOW_MS);
 
     // Nothing between the two collections says anything about this namespace:
     // the time the first collection reported is the whole trigger.
@@ -192,9 +192,9 @@ async fn upload_gc_reaps_a_session_that_never_staged_anything() {
         .pool_id;
     let session_key = write_upload_session(&store, &namespace_id).await;
 
-    let expired = context(1_000 + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let expired = context(1_000 + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
     collect_pool(&store, &pool_id, &expired).await;
-    let reaped = context(expired.now_ms + GRACE_MS + 1);
+    let reaped = context(expired.now_ms + GC_GRACE_WINDOW_MS + 1);
     let report = collect_pool(&store, &pool_id, &reaped).await;
 
     assert_eq!(report.deleted.upload_sessions, 1);
@@ -226,7 +226,7 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
         segment_cache: Arc::clone(&cache),
         ..crate::test_support::pool_store(&store, &pool_id)
     }
-    .gc(None, &options(), &setup.clock())
+    .gc(None, &setup.clock())
     .await
     .expect_err("the first session's content id does not fit the budget");
 
@@ -266,7 +266,7 @@ async fn a_collection_reads_each_completed_session_record_once() {
     );
     let setup = store.inner().inner();
     let early = context(1_000);
-    let late = context(early.now_ms + GRACE_MS);
+    let late = context(early.now_ms + GC_GRACE_WINDOW_MS);
     let pool_id = crate::test_support::NamespaceFixture::new(setup, &namespace_id, &early)
         .create()
         .await

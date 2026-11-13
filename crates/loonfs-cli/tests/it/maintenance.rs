@@ -126,14 +126,7 @@ fn maintenance_pool_gc_collects_a_given_pool_or_the_selected_namespace_pool() {
         .to_owned();
 
     // No namespace is selected yet, so this run reads only the given pool.
-    let given = harness.run(&[
-        "maintenance",
-        "pool",
-        "gc",
-        &pool_id,
-        "--grace-window-ms",
-        "86400000",
-    ]);
+    let given = harness.run(&["maintenance", "pool", "gc", &pool_id]);
     assert_success(&given);
     let human = stdout_string(&given);
     let mut lines = human.lines();

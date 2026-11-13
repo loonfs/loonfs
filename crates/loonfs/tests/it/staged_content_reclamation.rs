@@ -14,10 +14,10 @@
 //! puts left behind.
 
 use crate::common::{namespace, open_runtime_with_async, store, TestRuntime};
-use loonfs::{
-    ContentRef, GcOptions, NamespaceId, PoolGcResponse, PutFileOptions, SharedObjectStore,
+use loonfs::{ContentRef, NamespaceId, PoolGcResponse, PutFileOptions, SharedObjectStore};
+use loonfs_core::limits::{
+    CONTENT_RECLAMATION_GRACE_WINDOW_MS, GC_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS,
 };
-use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS};
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::layout::{upload_id_of, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -28,10 +28,6 @@ use loonfs_test_support::stores::{
 };
 use std::sync::Arc;
 use tempfile::tempdir;
-
-/// The grace a pass is configured with, well above the enforced floor so
-/// the derived content grace is what decides these tests.
-const GRACE_MS: u64 = 60 * 60 * 1000;
 
 async fn open_staged_runtime(store: SharedObjectStore, writer_id: &str) -> TestRuntime {
     open_runtime_with_async(store, writer_id, |builder| {
@@ -46,12 +42,6 @@ async fn open_staged_runtime(store: SharedObjectStore, writer_id: &str) -> TestR
     .await
 }
 
-fn gc_options() -> GcOptions {
-    GcOptions {
-        grace_window_ms: GRACE_MS,
-    }
-}
-
 /// Runs one pass of the pool of `namespace_id` at a fabricated clock. The
 /// runtime stamped its sessions from the real clock, so every deadline here
 /// is measured from that.
@@ -64,7 +54,6 @@ async fn collect(
     loonfs_core::test_support::pool_store(store.as_ref(), &pool_id)
         .gc(
             None,
-            &gc_options(),
             &WriterAt {
                 writer_id: loonfs_types::WriterId::parse("reclamation-test").expect("writer id"),
                 now_ms,
@@ -337,9 +326,14 @@ async fn staging_that_fails_leaves_a_session_the_expiry_sweep_reclaims() {
 
     // Past the lease and its grace the session aborts; a grace after that
     // stamp the record itself is reaped.
-    let aborted_at_ms = staged_at_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1;
+    let aborted_at_ms = staged_at_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1;
     collect(&store, &namespace_id, aborted_at_ms).await;
-    let reaped = collect(&store, &namespace_id, aborted_at_ms + GRACE_MS + 1).await;
+    let reaped = collect(
+        &store,
+        &namespace_id,
+        aborted_at_ms + GC_GRACE_WINDOW_MS + 1,
+    )
+    .await;
     assert_eq!(reaped.deleted.upload_sessions, 1);
     assert!(session_keys(&store, &namespace_id).await.is_empty());
 }

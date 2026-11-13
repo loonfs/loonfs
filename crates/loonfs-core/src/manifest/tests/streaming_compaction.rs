@@ -3174,15 +3174,12 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     assert!(!orphans.is_empty());
     failing.clear();
     let store = MetadataMapStore::aged(failing, KeyPredicate::any());
-    let options = crate::gc::GcOptions {
-        grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
-    };
     for age_ms in [
         UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
         UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     ] {
         crate::test_support::namespace_store(&store, &namespace)
-            .gc(&options, &writer_at("collector", age_ms).clock())
+            .gc(&writer_at("collector", age_ms).clock())
             .await
             .expect("collect");
         for key in &orphans {

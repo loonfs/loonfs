@@ -12,7 +12,7 @@ use loonfs_types::MetadataFamilyGroup;
 
 /// A time past both the collection grace and the unreferenced segment grace
 /// for every object that reports an ancient age.
-const NOW_MS: u64 = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GRACE_MS + 1;
+const NOW_MS: u64 = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GC_GRACE_WINDOW_MS + 1;
 
 /// Writes and folds two files over `store`, whose objects all report an
 /// ancient age, then collects every manifest before the current one, and
@@ -38,7 +38,7 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     namespace.raise_hint_to_current_manifest().await;
     namespace
-        .gc(&options(), &context(NOW_MS).clock())
+        .gc(&context(NOW_MS).clock())
         .await
         .expect("collect the earlier manifests");
     let previous = namespace
@@ -141,7 +141,7 @@ async fn a_replaced_manifest_and_its_own_segments_go_at_the_first_pass_once_old_
         },
     );
     let report = crate::test_support::namespace_store(&recent, &namespace_id)
-        .gc(&options(), &context(NOW_MS).clock())
+        .gc(&context(NOW_MS).clock())
         .await
         .expect("collection");
     assert!(!exists(&store, &previous.object_key).await);
@@ -170,72 +170,68 @@ async fn a_replaced_manifest_and_its_own_segments_go_at_the_first_pass_once_old_
 /// Checks that a collection keeps a replaced manifest while it is younger
 /// than the collection grace, and the segments that only it lists while they
 /// are younger than the unreferenced segment grace, and that each goes at the
-/// first collection after its own window, at the exact collection grace even
-/// below the namespace retirement grace.
+/// first collection after its own window.
 #[tokio::test]
 async fn a_replaced_manifest_and_its_segments_stay_within_their_grace_windows() {
-    for grace_window_ms in [GRACE_MS, GC_MIN_GRACE_WINDOW_MS] {
-        let directory = tempdir().expect("directory");
-        let namespace_id = NamespaceId::parse("replaced-grace").expect("namespace");
-        let store = MetadataMapStore::aged(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any(),
-        );
-        let previous = seed_segments(&store, &namespace_id).await;
-        let current = compact_bindings(&store, &namespace_id).await;
-        let dropped = dropped_segments(&previous, &current);
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("replaced-grace").expect("namespace");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let previous = seed_segments(&store, &namespace_id).await;
+    let current = compact_bindings(&store, &namespace_id).await;
+    let dropped = dropped_segments(&previous, &current);
 
-        // The replaced manifest and its dropped segments report the time of
-        // the compaction, and every other object reports an ancient age.
-        let replaced_at_ms = NOW_MS;
-        let young_keys = dropped
-            .iter()
-            .cloned()
-            .chain([previous.object_key.clone()])
-            .collect::<BTreeSet<_>>();
-        let young = MetadataMapStore::new(
-            &store,
-            KeyPredicate::new(move |key| young_keys.contains(key)),
-            move |mut metadata| {
-                metadata.last_modified_at_ms = Some(replaced_at_ms);
-                metadata
-            },
-        );
-        let options = GcOptions { grace_window_ms };
-        let collect = async |at_ms| {
-            crate::test_support::namespace_store(&young, &namespace_id)
-                .gc(&options, &context(at_ms).clock())
-                .await
-                .expect("collection")
-        };
+    // The replaced manifest and its dropped segments report the time of
+    // the compaction, and every other object reports an ancient age.
+    let replaced_at_ms = NOW_MS;
+    let young_keys = dropped
+        .iter()
+        .cloned()
+        .chain([previous.object_key.clone()])
+        .collect::<BTreeSet<_>>();
+    let young = MetadataMapStore::new(
+        &store,
+        KeyPredicate::new(move |key| young_keys.contains(key)),
+        move |mut metadata| {
+            metadata.last_modified_at_ms = Some(replaced_at_ms);
+            metadata
+        },
+    );
+    let collect = async |at_ms| {
+        crate::test_support::namespace_store(&young, &namespace_id)
+            .gc(&context(at_ms).clock())
+            .await
+            .expect("collection")
+    };
 
-        let report = collect(replaced_at_ms + grace_window_ms - 1).await;
-        assert!(exists(&store, &previous.object_key).await);
-        assert_objects_exist(&store, &dropped, true).await;
-        assert_eq!(report.deleted.manifests, 0);
-        assert_eq!(report.deleted.metadata_segments, 0);
-        assert_eq!(
-            report.retained.within_grace_window,
-            1 + dropped.len() as u64
-        );
+    let report = collect(replaced_at_ms + GC_GRACE_WINDOW_MS - 1).await;
+    assert!(exists(&store, &previous.object_key).await);
+    assert_objects_exist(&store, &dropped, true).await;
+    assert_eq!(report.deleted.manifests, 0);
+    assert_eq!(report.deleted.metadata_segments, 0);
+    assert_eq!(
+        report.retained.within_grace_window,
+        1 + dropped.len() as u64
+    );
 
-        // The collection grace applies to the manifest, and the segments
-        // keep their own longer window.
-        let report = collect(replaced_at_ms + grace_window_ms).await;
-        assert!(!exists(&store, &previous.object_key).await);
-        assert_objects_exist(&store, &dropped, true).await;
-        assert_eq!(report.deleted.manifests, 1);
-        assert_eq!(report.deleted.metadata_segments, 0);
-        assert_eq!(report.retained.within_grace_window, dropped.len() as u64);
+    // The collection grace applies to the manifest, and the segments
+    // keep their own longer window.
+    let report = collect(replaced_at_ms + GC_GRACE_WINDOW_MS).await;
+    assert!(!exists(&store, &previous.object_key).await);
+    assert_objects_exist(&store, &dropped, true).await;
+    assert_eq!(report.deleted.manifests, 1);
+    assert_eq!(report.deleted.metadata_segments, 0);
+    assert_eq!(report.retained.within_grace_window, dropped.len() as u64);
 
-        // A segment must be strictly older than its window before it goes.
-        let report = collect(replaced_at_ms + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).await;
-        assert_objects_exist(&store, &dropped, false).await;
-        assert_eq!(report.deleted.metadata_segments, dropped.len() as u64);
-        assert_eq!(report.retained.within_grace_window, 0);
-        assert!(exists(&store, &current.object_key).await);
-        assert_objects_exist(&store, &segment_keys(&current), true).await;
-    }
+    // A segment must be strictly older than its window before it goes.
+    let report = collect(replaced_at_ms + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).await;
+    assert_objects_exist(&store, &dropped, false).await;
+    assert_eq!(report.deleted.metadata_segments, dropped.len() as u64);
+    assert_eq!(report.retained.within_grace_window, 0);
+    assert!(exists(&store, &current.object_key).await);
+    assert_objects_exist(&store, &segment_keys(&current), true).await;
 }
 
 /// Checks that a user snapshot on a replaced manifest keeps the manifest and
@@ -259,7 +255,7 @@ async fn a_replaced_manifest_kept_by_a_snapshot_keeps_its_segments_until_the_sna
     let dropped = dropped_segments(&previous, &current);
 
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &context(NOW_MS).clock())
+        .gc(&context(NOW_MS).clock())
         .await
         .expect("collection with the snapshot");
     assert!(exists(&store, &previous.object_key).await);
@@ -272,7 +268,7 @@ async fn a_replaced_manifest_kept_by_a_snapshot_keeps_its_segments_until_the_sna
         .await
         .expect("release the snapshot");
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &context(NOW_MS).clock())
+        .gc(&context(NOW_MS).clock())
         .await
         .expect("collection after the release");
     assert!(!exists(&store, &previous.object_key).await);
@@ -331,7 +327,7 @@ async fn a_pass_reads_no_replaced_manifest() {
     // Every manifest is younger than the grace.
     let now_ms = now_after_newest_object(&store, &namespace_id, 1).await;
     let report = crate::test_support::namespace_store(&recorded, &namespace_id)
-        .gc(&options(), &context(now_ms).clock())
+        .gc(&context(now_ms).clock())
         .await
         .expect("collection");
     let read: BTreeSet<_> = recorded

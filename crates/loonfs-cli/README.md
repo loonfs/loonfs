@@ -440,7 +440,7 @@ Maintenance
     the sweep's next full pass, and the command doesn't move the floor
     itself.
 
-  loonfs maintenance gc [--grace-window-ms <ms>]
+  loonfs maintenance gc
     Run one collection of the namespace and print its report. Each
     call reads the current manifest and hint, lists the snapshots, then lists
     every family under the namespace's prefix from the beginning and
@@ -450,13 +450,12 @@ Maintenance
     and temporary objects are stored in its pool, and this command doesn't
     delete them. `loonfs maintenance pool gc` collects them, and a
     server's sweep runs a collection of each pool.
-    --grace-window-ms protects objects younger than the window.
     --json includes every retention reason.
     deleted.extension_segments counts the gram content index's segments
     that no retained manifest lists. Like metadata segments, they're
     deleted once they're more than 24 hours old, whatever the window.
 
-  loonfs maintenance pool gc [<pool-id>] [--grace-window-ms <ms>]
+  loonfs maintenance pool gc [<pool-id>]
     Run one collection of a pool and print its report. A pool stores the
     content objects, upload records, and temporary objects of a namespace
     and its forks. This command deletes the pool's unreferenced content
@@ -464,8 +463,8 @@ Maintenance
     `loonfs maintenance gc` doesn't. Without <pool-id>, the command
     collects the pool of the selected namespace, which
     `loonfs namespace show` prints as `pool`. With <pool-id>, the command
-    doesn't read a namespace. --grace-window-ms protects objects younger
-    than the window. --json includes every retention reason. For example:
+    doesn't read a namespace. --json includes every retention reason. For
+    example:
 
       gc for pool_3s0drmj8em84yb4mnetqkz2j0x: gc deleted 12 content objects, 1 upload sessions, 0 temporary objects (240 retained); mostly referenced: 236
       listed 734003200 bytes under the pool
