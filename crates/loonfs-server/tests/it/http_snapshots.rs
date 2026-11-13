@@ -130,7 +130,7 @@ async fn http_snapshots_are_listed_extended_and_deleted_idempotently() {
     .expect("create snapshot");
     let after_create = loonfs_core::time::current_time_ms();
     assert_eq!(created.namespace_id, namespace);
-    assert_eq!(created.name, "report");
+    assert_eq!(created.name.as_deref(), Some("report"));
     assert_eq!(created.captured_seq, CommitSeq(0));
     assert!(created.created_at_ms >= before_create);
     assert!(created.created_at_ms <= after_create);
@@ -208,7 +208,8 @@ async fn http_snapshots_are_listed_extended_and_deleted_idempotently() {
 }
 
 /// Checks that snapshot routes reject a zero TTL, an empty name, and a
-/// malformed ID, that extending an unknown snapshot returns
+/// malformed ID, that a snapshot created without a name is returned and listed
+/// without one, that extending an unknown snapshot returns
 /// `snapshot_not_found`, and that deleting it succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_snapshots_validate_names_ttls_and_ids() {
@@ -240,6 +241,28 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
         .expect_err("empty name must fail");
     assert_eq!(status, 400);
     assert_eq!(error.code, "invalid_request");
+    let unnamed: serde_json::Value = post_json_body(
+        &format!(
+            "{}/v0/namespaces/{}/snapshots",
+            harness.server_url,
+            namespace.as_str()
+        ),
+        serde_json::json!({}),
+    )
+    .expect("a snapshot without a name");
+    assert!(unnamed.get("name").is_none(), "{unnamed}");
+    let listed = list_snapshots(&harness.server_url, namespace.as_str()).expect("list snapshots");
+    assert_eq!(
+        listed
+            .snapshots
+            .iter()
+            .map(|snapshot| (snapshot.snapshot_id.as_str(), snapshot.name.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![(
+            unnamed["snapshot_id"].as_str().expect("a snapshot ID"),
+            None
+        )],
+    );
 
     let (status, error) =
         extend_snapshot(&harness.server_url, namespace.as_str(), "malformed", 500)
@@ -371,15 +394,15 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
         .client
         .create_snapshot_with_options(
             &namespace,
-            "first",
             &loonfs_client::CreateSnapshotOptions {
+                name: Some("first".to_owned()),
                 ttl_ms: std::num::NonZeroU64::new(5_000),
             },
         )
         .await
         .expect("create snapshot");
     assert_eq!(created.namespace_id, namespace);
-    assert_eq!(created.name, "first");
+    assert_eq!(created.name.as_deref(), Some("first"));
     assert_eq!(created.captured_seq, CommitSeq(0));
 
     let mut pager = harness.client.list_snapshots(&namespace);
@@ -438,8 +461,8 @@ async fn user_and_maintenance_snapshot_listings_reject_each_others_cursors() {
             .client
             .create_snapshot_with_options(
                 &namespace,
-                name,
                 &loonfs_client::CreateSnapshotOptions {
+                    name: Some(name.to_owned()),
                     ttl_ms: std::num::NonZeroU64::new(5_000),
                 },
             )
@@ -527,8 +550,8 @@ async fn user_and_maintenance_snapshot_retrieves_return_their_listed_rows() {
         .client
         .create_snapshot_with_options(
             &namespace,
-            "first",
             &loonfs_client::CreateSnapshotOptions {
+                name: Some("first".to_owned()),
                 ttl_ms: std::num::NonZeroU64::new(5_000),
             },
         )

@@ -1023,7 +1023,22 @@ fn control_objects_match_golden_bytes() {
             payload_checksum: (sample_manifest_ref(2)).payload_checksum.clone(),
             created_at_ms: 3_000,
             owner: SnapshotOwner::User {
-                name: "nightly".to_owned(),
+                name: Some("nightly".to_owned()),
+                expires_at_ms: None,
+            },
+        },
+    );
+    check_control_golden(
+        "control_snapshot_unnamed.v1.json",
+        ControlObjectKind::Snapshot,
+        SnapshotPayload {
+            snapshot_id: snapshot_id("snp_00000000000000000003-00000000000000000000000003"),
+            namespace_id: namespace_id(),
+            head_seq: (sample_manifest_ref(3)).head_seq,
+            payload_checksum: (sample_manifest_ref(3)).payload_checksum.clone(),
+            created_at_ms: 3_000,
+            owner: SnapshotOwner::User {
+                name: None,
                 expires_at_ms: None,
             },
         },
@@ -1412,7 +1427,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
                 payload_checksum: sha256_digest(b"manifest"),
                 created_at_ms: 3_000,
                 owner: SnapshotOwner::User {
-                    name: "nightly".to_owned(),
+                    name: Some("nightly".to_owned()),
                     expires_at_ms: None,
                 },
             })

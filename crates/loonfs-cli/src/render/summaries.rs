@@ -131,11 +131,11 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
 
 /// Formats a snapshot owner for the table view.
 ///
-/// User snapshots show their label. Fork snapshots show their target namespace
-/// because users can't delete them.
+/// User snapshots show their label, or `-` without one. Fork snapshots show
+/// their target namespace because users can't delete them.
 pub(super) fn snapshot_record_owner_label(owner: &SnapshotRecordOwner) -> String {
     match owner {
-        SnapshotRecordOwner::User { name } => name.clone(),
+        SnapshotRecordOwner::User { name } => name.as_deref().unwrap_or("-").to_owned(),
         SnapshotRecordOwner::Fork {
             target_namespace_id,
         } => format!("fork -> {target_namespace_id}"),

@@ -948,7 +948,7 @@ func runReadConsistency(t *testing.T, h *harness, testCase conformanceCase) {
 
 	snapshot, err := h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
 		NamespaceID: request.NamespaceID,
-		Name:        request.SnapshotName,
+		Name:        &request.SnapshotName,
 	})
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
@@ -2214,7 +2214,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 
 	snapshot, err := h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
 		NamespaceID: request.NamespaceID,
-		Name:        request.SnapshotName,
+		Name:        &request.SnapshotName,
 		TTLMs:       &request.CreateTTLMs,
 	})
 	if err != nil {
@@ -2223,8 +2223,8 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if string(snapshot.NamespaceID) != request.NamespaceID {
 		t.Errorf("snapshot namespace_id = %q, want %q", snapshot.NamespaceID, request.NamespaceID)
 	}
-	if snapshot.Name != request.SnapshotName {
-		t.Errorf("snapshot name = %q, want %q", snapshot.Name, request.SnapshotName)
+	if optionalString(snapshot.Name) != request.SnapshotName {
+		t.Errorf("snapshot name = %q, want %q", optionalString(snapshot.Name), request.SnapshotName)
 	}
 	if int64(snapshot.CapturedSeq) != expected.SnapshotHeadSeq {
 		t.Errorf("snapshot captured_seq = %d, want %d", snapshot.CapturedSeq, expected.SnapshotHeadSeq)
@@ -2354,7 +2354,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if err != nil {
 		t.Fatalf("extend snapshot: %v", err)
 	}
-	if extended.SnapshotID != snapshotID || int64(extended.CapturedSeq) != expected.SnapshotHeadSeq || extended.Name != request.SnapshotName {
+	if extended.SnapshotID != snapshotID || int64(extended.CapturedSeq) != expected.SnapshotHeadSeq || optionalString(extended.Name) != request.SnapshotName {
 		t.Errorf("extended snapshot = %#v, want the created snapshot", extended)
 	}
 	if extended.ExpiresAtMs == nil || *extended.ExpiresAtMs <= *snapshot.ExpiresAtMs {
@@ -2456,19 +2456,19 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	zeroTTL := int64(0)
 	_, err = h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
 		NamespaceID: request.NamespaceID,
-		Name:        request.SnapshotName,
+		Name:        &request.SnapshotName,
 		TTLMs:       &zeroTTL,
 	})
 	assertBadRequestError(t, err, expected.ZeroTtl)
 
 	unexpiring, err := h.client.Snapshots.Create(ctx, &loonfs.CreateSnapshotRequest{
 		NamespaceID: request.NamespaceID,
-		Name:        request.UnexpiringName,
+		Name:        &request.UnexpiringName,
 	})
 	if err != nil {
 		t.Fatalf("create snapshot without a ttl: %v", err)
 	}
-	if unexpiring.Name != request.UnexpiringName || unexpiring.ExpiresAtMs != nil {
+	if optionalString(unexpiring.Name) != request.UnexpiringName || unexpiring.ExpiresAtMs != nil {
 		t.Errorf("snapshot without a ttl = %#v, want no expiry", unexpiring)
 	}
 	unexpiringExtended, err := h.client.Snapshots.Extend(ctx, &loonfs.ExtendSnapshotRequest{

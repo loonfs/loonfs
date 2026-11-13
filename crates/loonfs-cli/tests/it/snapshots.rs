@@ -85,4 +85,17 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
     assert_failure(&gone);
     let error = json_error(&gone);
     assert_eq!(error["code"], "snapshot_not_found");
+
+    let unnamed = harness.run(&["--json", "snapshot", "create", "demo"]);
+    assert_success(&unnamed);
+    let unnamed_data = json_data(&unnamed);
+    assert_eq!(unnamed_data["kind"], "snapshot_created");
+    assert!(unnamed_data.get("name").is_none(), "{unnamed_data}");
+    let listed = harness.run(&["snapshot", "list", "demo"]);
+    assert_success(&listed);
+    let unnamed_id = unnamed_data["snapshot_id"].as_str().expect("snapshot id");
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains(&format!("{unnamed_id}\t-\t")),
+        "{listed:?}"
+    );
 }

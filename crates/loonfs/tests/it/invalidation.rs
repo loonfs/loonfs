@@ -701,7 +701,10 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
             .expect("warmup put");
     }
     let snapshot = namespace_writer
-        .create_snapshot("pinned")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("pinned".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("create snapshot");
     namespace

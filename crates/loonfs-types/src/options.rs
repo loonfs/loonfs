@@ -627,6 +627,9 @@ pub struct DeleteNamespaceOptions {
 /// Options for creating a snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreateSnapshotOptions {
+    /// The snapshot's label, which doesn't need to be unique. Without it, the
+    /// snapshot has no label.
+    pub name: Option<String>,
     /// The snapshot's lifetime in milliseconds, counted from the clock of the
     /// runtime or server that creates the snapshot. Without it, the snapshot
     /// doesn't expire.

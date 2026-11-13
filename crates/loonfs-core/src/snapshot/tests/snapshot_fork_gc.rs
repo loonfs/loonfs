@@ -48,7 +48,7 @@ impl Fixture {
         let snapshot = namespace
             .create_snapshot_record(
                 SnapshotOwner::User {
-                    name: "historical".into(),
+                    name: Some("historical".into()),
                     expires_at_ms: Some(u64::MAX),
                 },
                 crate::test_support::folded_manifest(&namespace)
@@ -332,7 +332,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     let snapshot = namespace
         .create_snapshot_record(
             SnapshotOwner::User {
-                name: "short".into(),
+                name: Some("short".into()),
                 expires_at_ms: Some(context.now_ms + 10),
             },
             crate::test_support::folded_manifest(&namespace)

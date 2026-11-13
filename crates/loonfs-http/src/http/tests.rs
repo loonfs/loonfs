@@ -3241,7 +3241,13 @@ mod direct_download {
             .expect("put file");
         let inode_id = client.stat(&path).await.expect("stat").inode_id;
         let snapshot_id = client
-            .create_snapshot(&namespace, "pinned")
+            .create_snapshot_with_options(
+                &namespace,
+                &loonfs_client::CreateSnapshotOptions {
+                    name: Some("pinned".to_owned()),
+                    ..loonfs_client::CreateSnapshotOptions::default()
+                },
+            )
             .await
             .expect("snapshot")
             .snapshot_id;

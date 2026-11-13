@@ -10,7 +10,7 @@ use loonfs_types::format::control::SnapshotOwner;
 async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cleanup() {
     for owner in [
         SnapshotOwner::User {
-            name: "abandoned".to_owned(),
+            name: Some("abandoned".to_owned()),
             expires_at_ms: Some(2_000),
         },
         SnapshotOwner::Fork {
@@ -226,7 +226,7 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
                 payload_checksum: manifest.manifest().payload_checksum.clone(),
                 created_at_ms: setup.now_ms,
                 owner: SnapshotOwner::User {
-                    name: format!("snapshot-{index}"),
+                    name: Some(format!("snapshot-{index}")),
                     expires_at_ms: (index == 0).then_some(2_000),
                 },
             },

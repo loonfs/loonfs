@@ -766,7 +766,13 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     // Take a snapshot of the head, then give up incremental replay below it.
     harness
         .client
-        .create_snapshot(&namespace, "trimmed")
+        .create_snapshot_with_options(
+            &namespace,
+            &loonfs_client::CreateSnapshotOptions {
+                name: Some("trimmed".to_owned()),
+                ..loonfs_client::CreateSnapshotOptions::default()
+            },
+        )
         .await
         .expect("create snapshot");
     let advanced = maintenance_past_the_grace_window(harness.store.clone())

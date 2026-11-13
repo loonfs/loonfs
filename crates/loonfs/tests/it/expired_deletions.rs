@@ -342,7 +342,10 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
         .expect("stat")
         .inode_id;
     let snapshot_id = namespace
-        .create_snapshot("before")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("before".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("create snapshot")
         .snapshot_id;

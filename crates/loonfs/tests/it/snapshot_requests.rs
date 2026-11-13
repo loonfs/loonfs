@@ -104,11 +104,13 @@ async fn snapshot_calls_after_a_fold_cost_a_snapshot_record_and_its_verification
         let mut snapshots = Vec::new();
         for index in 0..3 {
             fixture.recording.reset();
-            let name = format!("admin-{index}");
-            let options = CreateSnapshotOptions::default();
+            let options = CreateSnapshotOptions {
+                name: Some(format!("admin-{index}")),
+                ..CreateSnapshotOptions::default()
+            };
             let created = fixture
                 .namespace
-                .create_snapshot_with_options(&name, &options)
+                .create_snapshot_with_options(&options)
                 .await;
             snapshots.push(created.expect("create").snapshot_id);
             fixture.namespace.wait_for_fold().await.expect("settle");
@@ -152,10 +154,13 @@ async fn a_snapshot_of_a_namespace_with_32_fork_snapshots_costs_11_requests() {
         }
         fixture.namespace.wait_for_fold().await.expect("settle");
         fixture.recording.reset();
-        let options = CreateSnapshotOptions::default();
+        let options = CreateSnapshotOptions {
+            name: Some("forked".to_owned()),
+            ..CreateSnapshotOptions::default()
+        };
         let created = fixture
             .namespace
-            .create_snapshot_with_options("forked", &options)
+            .create_snapshot_with_options(&options)
             .await;
         created.expect("create");
         fixture.namespace.wait_for_fold().await.expect("settle");

@@ -49,7 +49,7 @@ async fn snapshot_named<S: ObjectStore + ?Sized>(
     namespace
         .create_snapshot_record(
             SnapshotOwner::User {
-                name: name.to_owned(),
+                name: Some(name.to_owned()),
                 expires_at_ms,
             },
             crate::test_support::folded_manifest(&namespace)
@@ -91,7 +91,7 @@ async fn two_snapshots_under_one_label_list_as_two_records() {
         assert_eq!(
             snapshot.owner,
             SnapshotRecordOwner::User {
-                name: "nightly".to_owned()
+                name: Some("nightly".to_owned())
             }
         );
         assert_eq!(snapshot.created_at_ms, context.now_ms);
@@ -558,15 +558,15 @@ async fn a_refused_owner_writes_no_record_to_find() {
 
     let refused = [
         SnapshotOwner::User {
-            name: String::new(),
+            name: Some(String::new()),
             expires_at_ms: None,
         },
         SnapshotOwner::User {
-            name: String::new(),
+            name: Some(String::new()),
             expires_at_ms: Some(context.now_ms + 60_000),
         },
         SnapshotOwner::User {
-            name: "report-run".to_owned(),
+            name: Some("report-run".to_owned()),
             expires_at_ms: Some(0),
         },
     ];

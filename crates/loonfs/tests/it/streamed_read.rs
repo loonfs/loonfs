@@ -225,7 +225,10 @@ async fn historical_and_snapshot_reads_stream_the_selected_revision() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let snapshot = namespace_writer
-        .create_snapshot("before-replace")
+        .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+            name: Some("before-replace".to_owned()),
+            ..loonfs::CreateSnapshotOptions::default()
+        })
         .await
         .expect("snapshot");
     namespace_writer

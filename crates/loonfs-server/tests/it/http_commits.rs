@@ -380,7 +380,13 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
     // Take a snapshot of the head, then give up incremental replay below it.
     harness
         .client
-        .create_snapshot(&namespace, "retired")
+        .create_snapshot_with_options(
+            &namespace,
+            &loonfs_client::CreateSnapshotOptions {
+                name: Some("retired".to_owned()),
+                ..loonfs_client::CreateSnapshotOptions::default()
+            },
+        )
         .await
         .expect("create snapshot");
     let advanced = maintenance_past_the_grace_window(harness.store.clone())

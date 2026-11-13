@@ -275,9 +275,16 @@ async fn commits_folds_and_snapshot_folds_complete_while_a_read_holds_the_only_s
     )
     .await
     .expect("commit before snapshot");
-    finish(fixture.namespace.create_snapshot("snapshot"))
-        .await
-        .expect("snapshot fold");
+    finish(
+        fixture
+            .namespace
+            .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+                name: Some("snapshot".to_owned()),
+                ..crate::CreateSnapshotOptions::default()
+            }),
+    )
+    .await
+    .expect("snapshot fold");
     finish(maintenance.compact_metadata(
         fixture.namespace.id(),
         &crate::MaintenanceCancellation::new(),
@@ -403,7 +410,10 @@ async fn snapshot_delegation_takes_exactly_one_slot_per_stat_or_page() {
     let fixture = Fixture::new(KeyPredicate::any()).await;
     let snapshot = fixture
         .namespace
-        .create_snapshot("snapshot")
+        .create_snapshot_with_options(&crate::CreateSnapshotOptions {
+            name: Some("snapshot".to_owned()),
+            ..crate::CreateSnapshotOptions::default()
+        })
         .await
         .expect("snapshot");
     let stat = StatOptions {

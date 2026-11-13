@@ -86,7 +86,10 @@ async fn namespace_diagnostics_count_unexpired_snapshots_only() {
         std::num::NonZeroU64::new(60_000),
     ] {
         namespace
-            .create_snapshot_with_options("counted", &CreateSnapshotOptions { ttl_ms })
+            .create_snapshot_with_options(&CreateSnapshotOptions {
+                name: Some("counted".to_owned()),
+                ttl_ms,
+            })
             .await
             .expect("create snapshot");
     }

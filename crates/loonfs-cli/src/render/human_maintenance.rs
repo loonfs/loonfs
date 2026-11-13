@@ -70,7 +70,7 @@ pub(super) fn human_snapshot_created(snapshot: &Snapshot) -> String {
         snapshot.snapshot_id,
         snapshot.namespace_id,
         snapshot.captured_seq.0,
-        snapshot.name,
+        snapshot.name.as_deref().unwrap_or("-"),
         snapshot_expiry(snapshot)
     )
 }
@@ -84,7 +84,7 @@ pub(super) fn human_snapshots_listed(response: &ListSnapshotsResponse) -> String
         lines.push(format!(
             "{}\t{}\t{}\t{}\t{}",
             snapshot.snapshot_id,
-            snapshot.name,
+            snapshot.name.as_deref().unwrap_or("-"),
             snapshot.captured_seq.0,
             format_utc_ms(snapshot.created_at_ms),
             snapshot_expiry(snapshot),

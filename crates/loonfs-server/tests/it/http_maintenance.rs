@@ -287,7 +287,7 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
     assert_eq!(
         first.owner,
         SnapshotRecordOwner::User {
-            name: "nightly".to_owned()
+            name: Some("nightly".to_owned())
         }
     );
     assert_eq!(first.captured_seq, CommitSeq(1));

@@ -222,7 +222,7 @@ mod tests {
             payload_checksum: loonfs_types::sha256_digest(b"test"),
             created_at_ms: 1,
             owner: SnapshotOwner::User {
-                name: "test".to_owned(),
+                name: Some("test".to_owned()),
                 expires_at_ms: None,
             },
         }

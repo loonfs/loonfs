@@ -110,8 +110,10 @@ pub enum SnapshotOwner {
     /// deleted by its ID, or by garbage collection after its expiry. The name
     /// is a label, not a key, so several records can have the same name.
     User {
-        /// The label that the creator recorded. Labels don't need to be unique.
-        name: String,
+        /// The label that the creator recorded, if any. Labels don't need to be
+        /// unique.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         /// When the snapshot expires. A snapshot without an expiry doesn't expire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at_ms: Option<u64>,

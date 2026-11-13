@@ -163,7 +163,10 @@ impl Family {
             }
             Operation::Snapshot => {
                 self.fork
-                    .create_snapshot("beside")
+                    .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+                        name: Some("beside".to_owned()),
+                        ..loonfs::CreateSnapshotOptions::default()
+                    })
                     .await
                     .expect("the snapshot");
             }
@@ -403,7 +406,10 @@ async fn fold_beside_a_parked_snapshot(head_snapshot: HeadSnapshot) {
     let created = async {
         match head_snapshot {
             HeadSnapshot::Snapshot => namespace
-                .create_snapshot("parked")
+                .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+                    name: Some("parked".to_owned()),
+                    ..loonfs::CreateSnapshotOptions::default()
+                })
                 .await
                 .expect("the snapshot")
                 .snapshot_id

@@ -42,7 +42,7 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             ))
             .expect("snapshot id"),
             owner: SnapshotOwner::User {
-                name: "expired".to_owned(),
+                name: Some("expired".to_owned()),
                 expires_at_ms: Some(2_000),
             },
             ..basis.clone()

@@ -225,9 +225,10 @@ Namespace management
     Show the selected profile and namespace
 
 Snapshot management
-  loonfs snapshot create <namespace> --name <label> [--ttl-ms <ms>]
+  loonfs snapshot create <namespace> [--name <label>] [--ttl-ms <ms>]
     Save the namespace's current state as a new snapshot. Every call
-    creates a new snapshot. The name is a label, not a key. --ttl-ms sets
+    creates a new snapshot. The name is an optional label, not a key, and
+    a snapshot created without --name has no label. --ttl-ms sets
     an expiry. Without it, the snapshot lasts until it's deleted. An
     expired snapshot can't be read or forked
 
