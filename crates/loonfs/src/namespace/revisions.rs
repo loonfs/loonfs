@@ -330,9 +330,15 @@ impl<M: crate::Mode> Namespace<M> {
                 let max_bytes = self.core.max_read_content_bytes();
                 self.core
                     .read(&self.namespace_id, None, |pinned| async move {
-                        pinned
-                            .read_file_revision_by_inode(inode_id, revision_no, max_bytes)
-                            .await
+                        Ok(pinned
+                            .engine
+                            .read_file_revision_by_inode(
+                                inode_id,
+                                revision_no,
+                                &pinned.context,
+                                Some(max_bytes),
+                            )
+                            .await?)
                     })
                     .await
             },

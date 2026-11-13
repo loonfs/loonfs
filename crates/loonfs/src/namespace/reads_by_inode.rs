@@ -34,7 +34,10 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 self.read_at(&options.at, |pinned, _| async move {
-                    pinned.stat_by_inode(inode_id, options).await
+                    Ok(pinned
+                        .engine
+                        .stat_inode(inode_id, options.clone(), &pinned.context)
+                        .await?)
                 })
                 .await
             },
@@ -135,9 +138,15 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.read_permit().await;
         ensure_revision_read_at(&options.at, revision_no)?;
         self.read_at(&options.at, |pinned, _| async move {
-            pinned
-                .create_download_by_inode(inode_id, revision_no, options)
-                .await
+            Ok(pinned
+                .engine
+                .direct_download_target_by_inode(
+                    inode_id,
+                    revision_no,
+                    options.start_offset,
+                    &pinned.context,
+                )
+                .await?)
         })
         .await
     }
@@ -160,7 +169,10 @@ impl<M: crate::Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 self.core
                     .read(&self.namespace_id, None, |pinned| async move {
-                        pinned.stat_current_files_by_inode(inode_ids).await
+                        Ok(pinned
+                            .engine
+                            .stat_current_files_by_inode(inode_ids, &pinned.context)
+                            .await?)
                     })
                     .await
             },
@@ -188,7 +200,10 @@ impl<M: crate::Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
                 self.read_at(&options.at, |pinned, _| async move {
-                    pinned.read_file_by_inode(inode_id, max_bytes).await
+                    Ok(pinned
+                        .engine
+                        .read_file_by_inode(inode_id, &pinned.context, Some(max_bytes))
+                        .await?)
                 })
                 .await
             },
@@ -229,9 +244,16 @@ impl<M: crate::Mode> Namespace<M> {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.read_permit().await;
         self.read_at(&options.at, |pinned, _| async move {
-            pinned
-                .read_file_stream_by_inode(inode_id, revision_no, options)
-                .await
+            Ok(pinned
+                .engine
+                .read_file_stream_by_inode(
+                    inode_id,
+                    revision_no,
+                    &pinned.context,
+                    options.chunk_bytes,
+                    options.range,
+                )
+                .await?)
         })
         .await
     }

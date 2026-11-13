@@ -186,7 +186,10 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 self.read_at(&options.at, |pinned, _| async move {
-                    pinned.stat(absolute_path, options).await
+                    Ok(pinned
+                        .engine
+                        .resolve_path(absolute_path, options.clone(), &pinned.context)
+                        .await?)
                 })
                 .await
             },
@@ -276,7 +279,10 @@ impl<M: crate::Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
                 self.read_at(&options.at, |pinned, _| async move {
-                    pinned.read_file(absolute_path, max_bytes).await
+                    Ok(pinned
+                        .engine
+                        .read_file(absolute_path, &pinned.context, Some(max_bytes))
+                        .await?)
                 })
                 .await
             },
@@ -328,9 +334,16 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.read_permit().await;
         ensure_revision_read_at(&options.at, revision_no)?;
         self.read_at(&options.at, |pinned, _| async move {
-            pinned
-                .read_file_stream(absolute_path, revision_no, options)
-                .await
+            Ok(pinned
+                .engine
+                .read_file_stream(
+                    absolute_path,
+                    &pinned.context,
+                    revision_no,
+                    options.chunk_bytes,
+                    options.range,
+                )
+                .await?)
         })
         .await
     }
@@ -368,9 +381,15 @@ impl<M: crate::Mode> Namespace<M> {
         let _permit = self.core.read_permit().await;
         ensure_revision_read_at(&options.at, revision_no)?;
         self.read_at(&options.at, |pinned, _| async move {
-            pinned
-                .create_download(absolute_path, revision_no, options)
-                .await
+            Ok(pinned
+                .engine
+                .direct_download_target(
+                    absolute_path,
+                    revision_no,
+                    options.start_offset,
+                    &pinned.context,
+                )
+                .await?)
         })
         .await
     }
@@ -393,7 +412,10 @@ impl<M: crate::Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 self.core
                     .read(&self.namespace_id, None, |pinned| async move {
-                        pinned.read_content(content_ref, max_bytes).await
+                        Ok(pinned
+                            .engine
+                            .read_content_ref(content_ref, max_bytes, &pinned.context)
+                            .await?)
                     })
                     .await
             },

@@ -98,8 +98,15 @@ impl ReadView {
         }
     }
 
-    async fn read<T>(&self, read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-        classify_read_result(&self.core, &self.pinned.context, &self.source, read.await).await
+    async fn read<T, E>(
+        &self,
+        read: impl std::future::Future<Output = std::result::Result<T, E>>,
+    ) -> Result<T>
+    where
+        Error: From<E>,
+    {
+        let result = read.await.map_err(Error::from);
+        classify_read_result(&self.core, &self.pinned.context, &self.source, result).await
     }
 
     fn snapshot_id(&self) -> Option<&SnapshotId> {
@@ -157,7 +164,7 @@ impl ReadView {
             },
         };
         let _permit = self.core.read_permit().await;
-        self.read(async { Ok(pinned.engine.ensure_retained(&pinned.context).await?) })
+        self.read(pinned.engine.ensure_retained(&pinned.context))
             .await?;
         Ok(ReadView::new(self.core.clone(), pinned, ReadSource::Head))
     }
@@ -171,13 +178,11 @@ impl ReadView {
     /// Otherwise it returns `forbidden`.
     pub async fn as_administrator(&self) -> Result<ReadView> {
         let _permit = self.core.read_permit().await;
-        self.read(async {
-            Ok(self
-                .pinned
+        self.read(
+            self.pinned
                 .engine
-                .ensure_administrator(&self.pinned.context)
-                .await?)
-        })
+                .ensure_administrator(&self.pinned.context),
+        )
         .await?;
         let pinned = PinnedRead {
             engine: self
@@ -242,8 +247,12 @@ impl ReadView {
     pub fn list_retained_revisions(&self) -> RetainedRevisionsPager {
         loonfs_types::Pager::with_state(self.clone(), |view, request| async move {
             let _permit = view.core.read_permit().await;
-            view.read(view.pinned.retained_revisions_page(request))
-                .await
+            view.read(
+                view.pinned
+                    .engine
+                    .retained_revisions_page(request, &view.pinned.context),
+            )
+            .await
         })
     }
 
@@ -264,13 +273,11 @@ impl ReadView {
             (self.clone(), *options),
             |(view, options), request| async move {
                 let _permit = view.core.read_permit().await;
-                view.read(async {
-                    Ok(view
-                        .pinned
-                        .engine
-                        .list_files_page(request, options, &view.pinned.context)
-                        .await?)
-                })
+                view.read(view.pinned.engine.list_files_page(
+                    request,
+                    options,
+                    &view.pinned.context,
+                ))
                 .await
             },
         )
@@ -286,13 +293,11 @@ impl ReadView {
         name: &ExtensionName,
     ) -> Result<Option<ExtensionEntry>> {
         let _permit = self.core.read_permit().await;
-        self.read(async {
-            Ok(self
-                .pinned
+        self.read(
+            self.pinned
                 .engine
-                .find_extension_entry(&self.pinned.context, name)
-                .await?)
-        })
+                .find_extension_entry(&self.pinned.context, name),
+        )
         .await
     }
 
@@ -311,7 +316,12 @@ impl ReadView {
     ) -> Result<PathEntry> {
         let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
-        self.read(self.pinned.stat(absolute_path, options)).await
+        self.read(self.pinned.engine.resolve_path(
+            absolute_path,
+            options.clone(),
+            &self.pinned.context,
+        ))
+        .await
     }
 
     /// Lists a directory against this view.
@@ -373,8 +383,12 @@ impl ReadView {
     ) -> Result<PathEntry> {
         let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
-        self.read(self.pinned.stat_by_inode(inode_id, options))
-            .await
+        self.read(
+            self.pinned
+                .engine
+                .stat_inode(inode_id, options.clone(), &self.pinned.context),
+        )
+        .await
     }
 
     /// Lists a directory inode's children against this view.
@@ -428,8 +442,12 @@ impl ReadView {
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
         let _permit = self.core.read_permit().await;
-        self.read(self.pinned.stat_current_files_by_inode(inode_ids))
-            .await
+        self.read(
+            self.pinned
+                .engine
+                .stat_current_files_by_inode(inode_ids, &self.pinned.context),
+        )
+        .await
     }
 
     /// Reads and verifies immutable content selected from this view.
@@ -440,8 +458,12 @@ impl ReadView {
     /// whose object collection reclaimed also returns `path_not_found`.
     pub async fn read_content(&self, content_ref: &ContentRef, max_bytes: u64) -> Result<Vec<u8>> {
         let _permit = self.core.read_permit().await;
-        self.read(self.pinned.read_content(content_ref, max_bytes))
-            .await
+        self.read(
+            self.pinned
+                .engine
+                .read_content_ref(content_ref, max_bytes, &self.pinned.context),
+        )
+        .await
     }
 
     /// Refuses a reader with no subject on an ACL namespace, for callers
@@ -461,20 +483,23 @@ impl ReadView {
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         let _permit = self.core.read_permit().await;
-        self.read(
-            self.pinned
-                .read_file_revision_by_inode(inode_id, revision_no, max_bytes),
-        )
+        self.read(self.pinned.engine.read_file_revision_by_inode(
+            inode_id,
+            revision_no,
+            &self.pinned.context,
+            Some(max_bytes),
+        ))
         .await
     }
 
     /// Reads the file selected by this view.
     pub async fn read_file(&self, absolute_path: &str) -> Result<FileBytes> {
         let _permit = self.core.read_permit().await;
-        self.read(
-            self.pinned
-                .read_file(absolute_path, self.core.max_read_content_bytes()),
-        )
+        self.read(self.pinned.engine.read_file(
+            absolute_path,
+            &self.pinned.context,
+            Some(self.core.max_read_content_bytes()),
+        ))
         .await
     }
 
@@ -497,8 +522,14 @@ impl ReadView {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
-        self.read(self.pinned.read_file_stream(absolute_path, None, options))
-            .await
+        self.read(self.pinned.engine.read_file_stream(
+            absolute_path,
+            &self.pinned.context,
+            None,
+            options.chunk_bytes,
+            options.range,
+        ))
+        .await
     }
 
     /// Resolves the file selected by this view for a direct download.
@@ -516,18 +547,24 @@ impl ReadView {
     ) -> Result<DirectDownloadTarget> {
         let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
-        self.read(self.pinned.create_download(absolute_path, None, options))
-            .await
+        self.read(self.pinned.engine.direct_download_target(
+            absolute_path,
+            None,
+            options.start_offset,
+            &self.pinned.context,
+        ))
+        .await
     }
 
     /// Reads the revision of a file inode that this view selects, wherever
     /// the view binds it, plus the entry it came from.
     pub async fn read_file_by_inode(&self, inode_id: InodeId) -> Result<FileBytes> {
         let _permit = self.core.read_permit().await;
-        self.read(
-            self.pinned
-                .read_file_by_inode(inode_id, self.core.max_read_content_bytes()),
-        )
+        self.read(self.pinned.engine.read_file_by_inode(
+            inode_id,
+            &self.pinned.context,
+            Some(self.core.max_read_content_bytes()),
+        ))
         .await
     }
 
@@ -552,10 +589,13 @@ impl ReadView {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
-        self.read(
-            self.pinned
-                .read_file_stream_by_inode(inode_id, None, options),
-        )
+        self.read(self.pinned.engine.read_file_stream_by_inode(
+            inode_id,
+            None,
+            &self.pinned.context,
+            options.chunk_bytes,
+            options.range,
+        ))
         .await
     }
 
@@ -578,10 +618,12 @@ impl ReadView {
     ) -> Result<DirectDownloadByInodeTarget> {
         let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
-        self.read(
-            self.pinned
-                .create_download_by_inode(inode_id, None, options),
-        )
+        self.read(self.pinned.engine.direct_download_target_by_inode(
+            inode_id,
+            None,
+            options.start_offset,
+            &self.pinned.context,
+        ))
         .await
     }
 }
