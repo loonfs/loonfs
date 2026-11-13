@@ -107,7 +107,12 @@ pub(super) struct UploadPathParams {
     utoipa::path(
         post,
         operation_id = "create_upload",
-        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["uploads"])),
+            ("x-fern-sdk-method-name" = json!("create")),
+            ("x-fern-request-name" = json!("CreateUploadRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
@@ -249,7 +254,11 @@ async fn begin_direct_multipart_upload(
     utoipa::path(
         post,
         operation_id = "sign_upload_parts",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["uploads"])),
+            ("x-fern-sdk-method-name" = json!("signParts")),
+        ),
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
         tag = "uploads",
         summary = "Sign multipart parts",
@@ -445,7 +454,11 @@ fn with_content_token(
     utoipa::path(
         put,
         operation_id = "put_upload_content",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["uploads"])),
+            ("x-fern-sdk-method-name" = json!("putContent")),
+        ),
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
         tag = "uploads",
         summary = "Upload content",
@@ -493,7 +506,12 @@ pub(super) async fn put_upload_content(
     utoipa::path(
         post,
         operation_id = "complete_upload",
-        extensions(("x-loonfs-retry" = json!("replayable"))),
+        extensions(
+            ("x-loonfs-retry" = json!("replayable")),
+            ("x-fern-sdk-group-name" = json!(["uploads"])),
+            ("x-fern-sdk-method-name" = json!("complete")),
+            ("x-fern-request-name" = json!("CompleteUploadRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
         tag = "uploads",
         summary = "Complete upload",
@@ -544,7 +562,12 @@ pub(super) async fn complete_upload(
     utoipa::path(
         get,
         operation_id = "get_upload",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["uploads"])),
+            ("x-fern-sdk-method-name" = json!("retrieve")),
+            ("x-fern-request-name" = json!("GetUploadRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Get upload session",
@@ -601,7 +624,12 @@ pub(super) async fn get_upload(
     utoipa::path(
         post,
         operation_id = "abort_upload",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["uploads"])),
+            ("x-fern-sdk-method-name" = json!("abort")),
+            ("x-fern-request-name" = json!("AbortUploadRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
         tag = "uploads",
         summary = "Abort upload",

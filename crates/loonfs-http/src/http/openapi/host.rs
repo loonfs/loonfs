@@ -3,7 +3,10 @@
 #[utoipa::path(
         get,
         operation_id = "get_health",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-ignore" = json!(true)),
+        ),
         path = "/health",
         tag = "system",
         summary = "Check health",
@@ -23,7 +26,10 @@ fn get_health() {}
 #[utoipa::path(
         get,
         operation_id = "get_readiness",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-ignore" = json!(true)),
+        ),
         path = "/readiness",
         tag = "system",
         summary = "Check readiness",
@@ -43,7 +49,10 @@ fn get_readiness() {}
 #[utoipa::path(
         get,
         operation_id = "get_metrics",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-ignore" = json!(true)),
+        ),
         path = "/metrics",
         tag = "system",
         summary = "Scrape metrics",

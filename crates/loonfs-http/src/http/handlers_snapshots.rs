@@ -22,7 +22,11 @@ use std::sync::Arc;
     utoipa::path(
         post,
         operation_id = "create_snapshot",
-        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["snapshots"])),
+            ("x-fern-sdk-method-name" = json!("create")),
+        ),
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "Create snapshot",
@@ -63,7 +67,12 @@ pub(super) async fn create_snapshot(
     utoipa::path(
         get,
         operation_id = "list_snapshots",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["snapshots"])),
+            ("x-fern-sdk-method-name" = json!("list")),
+            ("x-fern-request-name" = json!("ListSnapshotsRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
@@ -104,7 +113,11 @@ pub(super) async fn list_snapshots(
     utoipa::path(
         post,
         operation_id = "extend_snapshot",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["snapshots"])),
+            ("x-fern-sdk-method-name" = json!("extend")),
+        ),
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend",
         tag = "namespaces",
         summary = "Extend snapshot",
@@ -145,7 +158,12 @@ pub(super) async fn extend_snapshot(
     utoipa::path(
         get,
         operation_id = "get_snapshot",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["snapshots"])),
+            ("x-fern-sdk-method-name" = json!("retrieve")),
+            ("x-fern-request-name" = json!("GetSnapshotRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Retrieve snapshot",
@@ -184,7 +202,12 @@ pub(super) async fn get_snapshot(
     utoipa::path(
         delete,
         operation_id = "delete_snapshot",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["snapshots"])),
+            ("x-fern-sdk-method-name" = json!("delete")),
+            ("x-fern-request-name" = json!("DeleteSnapshotRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Delete snapshot",
@@ -239,7 +262,12 @@ pub(super) struct SnapshotPathParams {
     utoipa::path(
         get,
         operation_id = "list_snapshot_records",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["maintenance", "snapshots"])),
+            ("x-fern-sdk-method-name" = json!("list")),
+            ("x-fern-request-name" = json!("ListSnapshotRecordsRequest")),
+        ),
         path = "/v0/maintenance/namespaces/{namespace_id}/snapshots",
         tag = "maintenance",
         summary = "List snapshot records",
@@ -278,7 +306,12 @@ pub(super) async fn list_snapshot_records(
     utoipa::path(
         get,
         operation_id = "get_snapshot_record",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["maintenance", "snapshots"])),
+            ("x-fern-sdk-method-name" = json!("retrieve")),
+            ("x-fern-request-name" = json!("GetSnapshotRecordRequest")),
+        ),
         path = "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "maintenance",
         summary = "Retrieve snapshot record",

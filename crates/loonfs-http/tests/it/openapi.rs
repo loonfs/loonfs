@@ -6,10 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "../../src/bin/loonfs-openapi/openapi_postprocess/mod.rs"]
 mod openapi_postprocess;
 
-use openapi_postprocess::operations::{
-    add_pagination_metadata, add_retry_metadata, add_sdk_names, OPERATION_SDK_NAMES,
-    SDK_EXCLUDED_OPERATIONS,
-};
+use openapi_postprocess::operations::{add_pagination_metadata, add_retry_metadata};
 use openapi_postprocess::OpenapiPostprocessError;
 use std::assert_matches;
 
@@ -48,54 +45,23 @@ fn missing_retry_classification_returns_a_named_error() {
 }
 
 #[test]
-fn missing_sdk_name_returns_a_named_error() {
-    let mut document = serde_json::json!({
-        "paths": {
-            "/future": {
-                "post": {"operationId": "future_operation"}
-            }
-        }
-    });
-
-    let error = add_sdk_names(&mut document).expect_err("unknown operation should fail generation");
-    assert_matches!(
-        error,
-        OpenapiPostprocessError::MissingSdkName { operation_id }
-            if operation_id == "future_operation"
-    );
-}
-
-#[test]
-fn sdk_name_tables_are_sorted_and_disjoint() {
-    let named = OPERATION_SDK_NAMES
-        .iter()
-        .map(|(operation_id, _)| *operation_id)
-        .collect::<Vec<_>>();
-    let excluded = SDK_EXCLUDED_OPERATIONS.to_vec();
-
-    let mut sorted_named = named.clone();
-    sorted_named.sort_unstable();
-    assert_eq!(named, sorted_named, "SDK name table must stay sorted");
-
-    let mut sorted_excluded = excluded.clone();
-    sorted_excluded.sort_unstable();
-    assert_eq!(
-        excluded, sorted_excluded,
-        "SDK exclusion table must stay sorted"
-    );
-
-    let named_set = named.iter().copied().collect::<BTreeSet<_>>();
-    let excluded_set = excluded.iter().copied().collect::<BTreeSet<_>>();
-    assert!(named_set.is_disjoint(&excluded_set));
-}
-
-#[test]
 fn sdk_method_names_are_unique_within_each_group() {
-    let methods = OPERATION_SDK_NAMES
-        .iter()
-        .map(|(_, sdk_name)| (sdk_name.group, sdk_name.method))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(methods.len(), OPERATION_SDK_NAMES.len());
+    let generated =
+        openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())
+            .expect("generate openapi json");
+    let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
+
+    let mut methods = BTreeSet::new();
+    for (operation_id, operation) in operations_by_id(&spec) {
+        let Some(method) = operation.get("x-fern-sdk-method-name") else {
+            continue;
+        };
+        let group = operation.get("x-fern-sdk-group-name");
+        assert!(
+            methods.insert((group.map(Value::to_string), method.to_string())),
+            "SDK method of `{operation_id}` is not unique within its group"
+        );
+    }
 }
 
 #[test]
@@ -652,9 +618,7 @@ fn openapi_documents_current_server_paths() {
 }
 
 #[test]
-fn openapi_operation_ids_match_the_public_registry() {
-    const REGISTRY_MESSAGE: &str = "operation IDs are the wire registry; add or rename an operation in OPERATION_SDK_NAMES or SDK_EXCLUDED_OPERATIONS";
-
+fn openapi_operation_ids_are_explicit_and_unique() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
     )
@@ -663,7 +627,7 @@ fn openapi_operation_ids_match_the_public_registry() {
         .get("paths")
         .and_then(Value::as_object)
         .expect("openapi paths object");
-    let mut operation_ids = paths
+    let operation_ids = paths
         .values()
         .filter_map(Value::as_object)
         .flat_map(|path_item| {
@@ -699,15 +663,7 @@ fn openapi_operation_ids_match_the_public_registry() {
     assert_eq!(
         unique_operation_ids.len(),
         operation_ids.len(),
-        "duplicate operationIds found; {REGISTRY_MESSAGE}"
-    );
-
-    let registered = registered_operation_ids();
-    operation_ids.sort_unstable();
-    assert_eq!(
-        operation_ids.into_iter().collect::<BTreeSet<_>>(),
-        registered,
-        "operationIds changed; {REGISTRY_MESSAGE}"
+        "duplicate operationIds found"
     );
 }
 
@@ -721,15 +677,14 @@ fn openapi_document_generation_is_byte_stable() {
 }
 
 #[test]
-fn every_registered_operation_publishes_its_sdk_name() {
+fn every_operation_publishes_its_sdk_name_unless_ignored() {
     let generated =
         openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())
             .expect("generate openapi json");
     let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
 
     for (operation_id, operation) in operations_by_id(&spec) {
-        if SDK_EXCLUDED_OPERATIONS.contains(&operation_id) {
-            assert_eq!(operation.get("x-fern-ignore"), Some(&json!(true)));
+        if operation.get("x-fern-ignore") == Some(&json!(true)) {
             for extension in [
                 "x-fern-sdk-group-name",
                 "x-fern-sdk-method-name",
@@ -737,35 +692,25 @@ fn every_registered_operation_publishes_its_sdk_name() {
             ] {
                 assert!(
                     operation.get(extension).is_none(),
-                    "excluded operation `{operation_id}` has `{extension}`"
+                    "ignored operation `{operation_id}` has `{extension}`"
                 );
             }
             continue;
         }
 
-        let sdk_name = OPERATION_SDK_NAMES
-            .iter()
-            .find_map(|(candidate, sdk_name)| (*candidate == operation_id).then_some(sdk_name))
-            .unwrap_or_else(|| panic!("operation `{operation_id}` has no SDK name"));
-        assert_eq!(
-            operation.get("x-fern-sdk-group-name"),
-            Some(&json!(sdk_name.group)),
+        let group = operation
+            .get("x-fern-sdk-group-name")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("operation `{operation_id}` has no SDK group"));
+        assert!(
+            !group.is_empty() && group.iter().all(Value::is_string),
             "unexpected SDK group for `{operation_id}`"
         );
-        assert_eq!(
-            operation.get("x-fern-sdk-method-name"),
-            Some(&json!(sdk_name.method)),
-            "unexpected SDK method for `{operation_id}`"
-        );
-        let expected_request = sdk_name.request.map(|request| json!(request));
-        assert_eq!(
-            operation.get("x-fern-request-name"),
-            expected_request.as_ref(),
-            "unexpected SDK request name for `{operation_id}`"
-        );
         assert!(
-            operation.get("x-fern-ignore").is_none(),
-            "named operation `{operation_id}` is ignored"
+            operation
+                .get("x-fern-sdk-method-name")
+                .is_some_and(Value::is_string),
+            "operation `{operation_id}` has no SDK method"
         );
     }
 }
@@ -2059,14 +2004,6 @@ fn operations_by_id(spec: &Value) -> BTreeMap<&str, &Value> {
     }
 
     operations
-}
-
-fn registered_operation_ids() -> BTreeSet<&'static str> {
-    OPERATION_SDK_NAMES
-        .iter()
-        .map(|(operation_id, _)| *operation_id)
-        .chain(SDK_EXCLUDED_OPERATIONS.iter().copied())
-        .collect()
 }
 
 fn component_schema_for_ref<'a>(

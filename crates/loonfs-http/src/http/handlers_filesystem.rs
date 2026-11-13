@@ -272,7 +272,12 @@ pub(super) struct DiffQuery {
     utoipa::path(
         get,
         operation_id = "list_path_entries",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["files"])),
+            ("x-fern-sdk-method-name" = json!("list")),
+            ("x-fern-request-name" = json!("ListPathEntriesRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/entries",
         tag = "filesystem",
         summary = "List directory",
@@ -326,7 +331,12 @@ pub(super) async fn list_path_entries(
     utoipa::path(
         get,
         operation_id = "get_path_entry",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["files"])),
+            ("x-fern-sdk-method-name" = json!("retrieve")),
+            ("x-fern-request-name" = json!("GetPathEntryRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/entry",
         tag = "filesystem",
         summary = "Stat path",
@@ -373,7 +383,12 @@ pub(super) async fn get_path_entry(
     utoipa::path(
         get,
         operation_id = "get_file_content",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["files"])),
+            ("x-fern-sdk-method-name" = json!("content")),
+            ("x-fern-request-name" = json!("GetFileContentRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/content",
         tag = "filesystem",
         summary = "Read file",
@@ -434,7 +449,12 @@ pub(super) async fn get_file_content(
     utoipa::path(
         get,
         operation_id = "list_trash",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["trash"])),
+            ("x-fern-sdk-method-name" = json!("list")),
+            ("x-fern-request-name" = json!("ListTrashRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List the trash",
@@ -479,7 +499,12 @@ pub(super) async fn list_trash(
     utoipa::path(
         get,
         operation_id = "list_file_revisions",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["files"])),
+            ("x-fern-sdk-method-name" = json!("listRevisions")),
+            ("x-fern-request-name" = json!("ListFileRevisionsRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/revisions",
         tag = "filesystem",
         summary = "List file revisions",
@@ -526,7 +551,12 @@ pub(super) async fn list_file_revisions(
     utoipa::path(
         post,
         operation_id = "create_commit",
-        extensions(("x-loonfs-actor" = json!("required")), ("x-loonfs-retry" = json!("replayable"))),
+        extensions(
+            ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-retry" = json!("replayable")),
+            ("x-fern-sdk-group-name" = json!(["commits"])),
+            ("x-fern-sdk-method-name" = json!("create")),
+        ),
         path = "/v0/namespaces/{namespace_id}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
@@ -639,7 +669,12 @@ pub(super) async fn create_commit(
     utoipa::path(
         get,
         operation_id = "list_changes",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["changes"])),
+            ("x-fern-sdk-method-name" = json!("list")),
+            ("x-fern-request-name" = json!("ListChangesRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/changes",
         tag = "filesystem",
         summary = "List changes after a sequence",
@@ -688,7 +723,12 @@ pub(super) async fn list_changes(
     utoipa::path(
         get,
         operation_id = "list_diff",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["diff"])),
+            ("x-fern-sdk-method-name" = json!("list")),
+            ("x-fern-request-name" = json!("ListDiffRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/diff",
         tag = "filesystem",
         summary = "List the differences between two sequences",
