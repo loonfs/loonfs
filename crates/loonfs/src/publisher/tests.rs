@@ -3583,23 +3583,6 @@ impl ObjectStore for HeldFoldAnswer {
     }
 }
 
-/// Returns the manifest number that the namespace's hint records.
-async fn hint_manifest_no(
-    store: &dyn ObjectStore,
-    namespace_id: &NamespaceId,
-) -> loonfs_types::ManifestNo {
-    use loonfs_types::format::control::{decode_control_object, ControlObjectKind, HintPayload};
-    let bytes = store
-        .get(&loonfs_objectstore::keys::hint(namespace_id), None)
-        .await
-        .expect("read the hint")
-        .expect("the hint exists");
-    decode_control_object::<HintPayload>(&bytes, ControlObjectKind::Hint)
-        .expect("decode the hint")
-        .payload()
-        .manifest_no
-}
-
 async fn current_manifest_no(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
@@ -3612,26 +3595,9 @@ async fn current_manifest_no(
         .manifest_no
 }
 
-/// Drains the writer, so the hint raises of its sessions' publications have
-/// finished, and checks that the namespace's hint records the namespace's
-/// current manifest.
-async fn assert_hint_at_current_manifest(
-    writer: &crate::LoonFs<crate::Writable>,
-    store: &dyn ObjectStore,
-    namespace_id: &NamespaceId,
-) {
-    writer.drain().await.expect("drain");
-    assert_eq!(
-        hint_manifest_no(store, namespace_id).await,
-        current_manifest_no(store, namespace_id).await,
-        "the hint of `{namespace_id}` records its current manifest"
-    );
-}
-
 mod basis_publications;
 mod fenced_session;
 mod head_positions;
-mod hints;
 mod inline_writer;
 mod merges;
 mod publication_clock;

@@ -9,7 +9,7 @@ use crate::gc::live_set::RetirementStatus;
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::gc::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
 use crate::limits::POOL_ROOTS_READ_BUDGET_MS;
-use crate::namespace::control::{LoadedHint, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::project_anchor_tail;
 use crate::namespace::store::NamespaceStore;
 use crate::pool_store::PoolStore;
@@ -107,7 +107,7 @@ impl PoolRoots {
     pub(super) async fn load<S: ObjectStore>(
         pool: &PoolStore<S>,
         first_member_namespace_id: &NamespaceId,
-        first_current: Result<(LoadedManifest, LoadedHint)>,
+        first_current: Result<LoadedManifest>,
         observed: Observation,
         session_cache: Option<&CompletedUploadSessionCache>,
         clock: &OperationClock,
@@ -190,7 +190,7 @@ impl PoolRoots {
         &mut self,
         pool: &PoolStore<S>,
         first_member_namespace_id: &NamespaceId,
-        first_current: Result<(LoadedManifest, LoadedHint)>,
+        first_current: Result<LoadedManifest>,
         observed: Observation,
         clock: &OperationClock,
     ) -> Result<()> {
@@ -258,12 +258,12 @@ impl PoolRoots {
         pool_id: &PoolId,
     ) -> Result<MemberState> {
         let observed = Observation::now(Arc::clone(&member.timer));
-        let current = match member.load_current_manifest_with_hint().await {
+        let current = match member.load_current_manifest().await {
             Ok(current) => current,
             Err(CoreError::NamespaceNotFound { .. }) => return Ok(MemberState::Absent),
             Err(error) => return Err(error),
         };
-        let recorded = &current.0.payload().pool_id;
+        let recorded = &current.payload().pool_id;
         if recorded != pool_id {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "fork `{}` of pool `{pool_id}` records pool `{recorded}`",
@@ -287,11 +287,11 @@ impl PoolRoots {
     async fn read_member<S: ObjectStore>(
         &mut self,
         member: &NamespaceStore<S>,
-        (manifest, hint): (LoadedManifest, LoadedHint),
+        manifest: LoadedManifest,
         observed: Observation,
     ) -> Result<MemberRead> {
         let anchor = member
-            .load_read_anchor_from_manifest(manifest, hint, observed)
+            .load_read_anchor_from_manifest(manifest, observed)
             .await?;
         let head = anchor.manifest.payload();
         // A tombstone's runs cover its whole WAL, so it has no tail.

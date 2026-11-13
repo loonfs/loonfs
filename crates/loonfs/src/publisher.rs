@@ -40,7 +40,7 @@ pub(crate) use folds::{FoldWhen, NamespaceFold};
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
 use loonfs_core::time::Observation;
 use loonfs_core::{MetadataCompactionCancellation, PublishedManifest};
-use loonfs_types::{CommitId, CommitSeq, ManifestNo, NamespaceId};
+use loonfs_types::{CommitId, CommitSeq, NamespaceId};
 use queue::{InFlightRequest, WorkItem};
 use registry::RegistryShared;
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
@@ -207,9 +207,6 @@ struct NamespacePublisherState {
     /// immediately.
     last_publish: Option<Observation>,
     last_published: Option<LastPublish>,
-    /// The newest manifest that the engine published itself (a claim or a
-    /// tombstone) and that the worker hasn't raised the hint to yet.
-    unraised_manifest_no: Option<ManifestNo>,
 }
 
 /// The newest commit this session published, and when it published it.
@@ -260,7 +257,6 @@ impl NamespacePublisher {
                 next_task_id: 0,
                 last_publish: None,
                 last_published: None,
-                unraised_manifest_no: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot { engine: None })),
             read_position,
@@ -422,13 +418,8 @@ impl NamespacePublisher {
         }
     }
 
-    /// Stores the engine's position for reads, records a manifest that the
-    /// engine published for the worker to raise the hint to, and releases
-    /// the engine.
-    ///
-    /// The engine publishes a manifest when it acquires the session's writer
-    /// epoch and when it deletes the namespace.
-    pub(super) fn release_engine(&self, mut slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
+    /// Stores the engine's position for reads, and releases the engine.
+    pub(super) fn release_engine(&self, slot: tokio::sync::MutexGuard<'_, EngineSlot>) {
         if std::thread::panicking() {
             // The engine may be partway through a unit of work. Reads start
             // from the namespace's cached head until the next release.
@@ -453,25 +444,7 @@ impl NamespacePublisher {
                 }
             }
         }
-        let published = slot
-            .engine
-            .as_mut()
-            .and_then(NamespaceCommitEngine::take_published_manifest_no);
         drop(slot);
-        if published.is_some() {
-            let mut state = self.lock_state();
-            state.unraised_manifest_no = state.unraised_manifest_no.max(published);
-        }
-    }
-
-    /// Raises the namespace's hint to the newest manifest that the engine
-    /// published itself since the last call, after the unit of work that
-    /// published it has delivered its results.
-    pub(super) async fn raise_hint_to_engine_publication(&self) {
-        let published = self.lock_state().unraised_manifest_no.take();
-        if let Some((manifest_no, shared)) = published.zip(self.shared.upgrade()) {
-            shared.raise_hint(&self.namespace_id, manifest_no).await;
-        }
     }
 
     /// Returns when this session last published, on the runtime's monotonic

@@ -152,10 +152,10 @@ This section lists the design's costs.
 
 | Call | Object writes in LoonFS | Object writes in this design |
 | --- | --- | --- |
-| Create without a source | 3: hint, pool record, manifest 1 | 3: manifest 1, member entry, manifest 2 |
-| Fork | 3: hint, fork snapshot, manifest 1 | 5: temporary snapshot, manifest 1, fork snapshot, member entry, manifest 2, in 4 steps |
+| Create without a source | 2: pool record, manifest 1 | 3: manifest 1, member entry, manifest 2 |
+| Fork | 2: fork snapshot, manifest 1 | 5: temporary snapshot, manifest 1, fork snapshot, member entry, manifest 2, in 4 steps |
 
-- The [manifest boundary](manifest-boundary.md) design removes the hint, so with that design alone, a create and a fork each write two objects. Each manifest publication also reads the boundary, and each snapshot creation makes the checks in [Creating and verifying a snapshot](../specs/format.md#82-creating-and-verifying-a-snapshot).
+- With the [manifest boundary](manifest-boundary.md), each manifest publication also reads the boundary, and each snapshot creation makes the checks in [Creating and verifying a snapshot](../specs/format.md#82-creating-and-verifying-a-snapshot).
 - A fork call has 5 minutes from its temporary snapshot to its verified fork snapshot.
 - A fork from the source's head leaves the record of its temporary snapshot on the source until garbage collection deletes the record, the grace window after the snapshot expires. Until then, the source's snapshot listing has two records for the fork: the temporary snapshot and the fork snapshot.
 - A call that's abandoned before manifest 2 uses up its namespace ID, including an ID that the caller chose. A caller that comes back after the collection deleted the namespace gets `namespace_deleted` for a namespace that it never used. A fork whose snapshot ended uses up its ID in the same way.

@@ -32,9 +32,6 @@ impl NamespacePublisher {
             .as_ref()
             .err()
             .is_none_or(|error| error.code() == ErrorCode::NamespaceDeleted);
-        // The raise runs while the session is in the table, so a drain that
-        // finds the session waits for the raise.
-        self.raise_hint_to_engine_publication().await;
         if deleted {
             // Tombstone first, then fail everything that queued behind
             // the delete; admissions from here on fail fast.

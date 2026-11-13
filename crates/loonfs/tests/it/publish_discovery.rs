@@ -3,10 +3,9 @@
 use loonfs::{CreateNamespaceOptions, LoonFs, NamespaceId};
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_objectstore::keys::{
-    hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
+    boundary, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::PutMode;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
@@ -53,35 +52,22 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .await
         .expect("first publish");
     writer.drain().await.expect("drain");
-    let mut requests = store.take();
-    // The runtime raises the hint to the claim after the publish, so the
-    // raise's load and swap of the hint follow the commit's WAL put.
-    let commit_put = requests
-        .iter()
-        .rposition(|request| request.key().starts_with(&wal_prefix(&namespace_id)))
-        .expect("the commit's WAL put");
-    let raise = requests.split_off(commit_put + 1);
+    let requests = store.take();
+    // The commit's WAL put is the last request.
     assert!(
-        matches!(
-            raise.as_slice(),
-            [
-                RecordedOperation::GetWithMetadata { key: loaded, .. },
-                RecordedOperation::Put {
-                    key: swapped,
-                    mode: PutMode::CompareAndSwap { .. },
-                    ..
-                },
-            ] if *loaded == hint(&namespace_id) && *swapped == hint(&namespace_id)
-        ),
-        "{raise:?}"
+        requests
+            .last()
+            .is_some_and(|request| request.key().starts_with(&wal_prefix(&namespace_id))),
+        "{requests:?}"
     );
-    let hint_gets = requests
+    let boundary_gets = requests
         .iter()
-        .filter(|request| is_get(request, &hint(&namespace_id)))
+        .filter(|request| is_get(request, &boundary(&namespace_id)))
         .count();
     assert_eq!(
-        hint_gets, 2,
-        "one discovery: initial hint and the required GC recheck; {requests:?}"
+        boundary_gets, 3,
+        "one search for the newest manifest reads the manifest boundary twice, and the \
+         claim's publication reads it once after its put; {requests:?}"
     );
     for number in 1..=3 {
         let key = metadata_manifest_object(&namespace_id, &loonfs::ManifestNo(number));
@@ -96,7 +82,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     }
     assert_eq!(
         requests.len(),
-        9,
+        10,
         "one claim, one fence, and one semantic publish share discovery; {requests:?}"
     );
 
@@ -125,7 +111,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     assert_eq!(
         before_put
             .iter()
-            .filter(|request| is_get(request, &hint(&namespace_id)))
+            .filter(|request| is_get(request, &boundary(&namespace_id)))
             .count(),
         0,
         "{requests:?}"
@@ -215,7 +201,6 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     store.inner().release();
     namespace_writer.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");
-    // The fold raised the hint to its manifest.
     store.reset();
 
     namespace_writer
@@ -234,10 +219,10 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     assert_eq!(
         before_put
             .iter()
-            .filter(|request| is_get(request, &hint(&namespace_id)))
+            .filter(|request| is_get(request, &boundary(&namespace_id)))
             .count(),
         2,
-        "discovery and its GC recheck read the hint; {requests:?}"
+        "the search for the newest manifest reads the manifest boundary twice; {requests:?}"
     );
     assert_eq!(
         before_put
@@ -255,8 +240,8 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
             .iter()
             .filter(|request| matches!(request, RecordedOperation::Head { .. }))
             .count(),
-        2,
-        "discovery's probe after the fold's manifest and one successor check; {requests:?}"
+        1,
+        "one successor check; {requests:?}"
     );
     assert!(
         before_put

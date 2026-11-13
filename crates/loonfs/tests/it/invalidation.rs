@@ -179,7 +179,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
     let namespace_id = NamespaceId::parse("nocache").expect("valid namespace id");
     let counting = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::hint(&namespace_id),
+        KeyPredicate::manifest(&namespace_id),
     ));
     let store: SharedObjectStore = counting.clone();
 
@@ -196,7 +196,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         })
         .await;
 
-    let swaps_after_fencing = counting.count(OperationSelector::CompareAndSwap);
+    let puts_after_fencing = counting.count(OperationSelector::Put);
     expect_writer_fenced(
         namespace_writer_a
             .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
@@ -204,9 +204,9 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         "fenced session stays fenced with caches disabled",
     );
     assert_eq!(
-        counting.count(OperationSelector::CompareAndSwap),
-        swaps_after_fencing,
-        "a fenced session must not raise the namespace's hint"
+        counting.count(OperationSelector::Put),
+        puts_after_fencing,
+        "a fenced session publishes no manifest"
     );
     namespace_writer_b
         .put_file("/b2.txt", b"b", &loonfs_test_support::test_actor())
@@ -248,7 +248,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
         .put_file("/file.txt", b"file", &loonfs_test_support::test_actor())
         .await
         .expect("commit file");
-    writer.drain().await.expect("finish hints");
+    writer.drain().await.expect("drain");
     namespace
         .stat("/file.txt")
         .await
@@ -264,7 +264,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     assert_matches!(
         operations.first(),
         Some(RecordedOperation::GetWithMetadata { key, .. })
-            if key == &loonfs_objectstore::keys::hint(&namespace_id)
+            if key == &loonfs_objectstore::keys::boundary(&namespace_id)
     );
 
     timer.advance_ms(interval_ms);
@@ -344,7 +344,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .put_file("/file.txt", b"file", &loonfs_test_support::test_actor())
         .await
         .expect("commit file");
-    writer.drain().await.expect("finish hints");
+    writer.drain().await.expect("drain");
     namespace.stat("/file.txt").await.expect("cache a view");
     let manifest_no = loonfs_core::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
@@ -394,7 +394,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     assert_matches!(
         operations.get(2),
         Some(RecordedOperation::GetWithMetadata { key, .. })
-            if key == &loonfs_objectstore::keys::hint(&namespace_id),
+            if key == &loonfs_objectstore::keys::boundary(&namespace_id),
         "the late answer was trusted: {operations:?}"
     );
 }
@@ -432,7 +432,7 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
     let actor = loonfs_test_support::test_actor();
     let put = |path: &'static str| namespace_writer.put_file(path, b"file", &actor);
     put("/cached.txt").await.expect("first put");
-    writer.drain().await.expect("finish hints");
+    writer.drain().await.expect("drain");
     namespace.stat("/cached.txt").await.expect("cache a view");
     let tip = head_state(&store, &namespace_id).await.wal_no.0;
 
@@ -447,7 +447,7 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
         .await
         .expect("fold the WAL");
     put("/four.txt").await.expect("put after the fold");
-    writer.drain().await.expect("finish hints");
+    writer.drain().await.expect("drain");
     let state = head_state(&store, &namespace_id).await;
     assert_eq!(
         (state.folded_wal_no, state.wal_no),
@@ -515,13 +515,13 @@ async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
         .put_file("/cached.txt", b"file", &actor)
         .await
         .expect("first put");
-    writer.drain().await.expect("finish hints");
+    writer.drain().await.expect("drain");
     namespace.stat("/cached.txt").await.expect("cache a view");
     namespace_writer
         .put_file("/next.txt", b"file", &actor)
         .await
         .expect("put after the cached view");
-    writer.drain().await.expect("finish hints");
+    writer.drain().await.expect("drain");
 
     // Park the probe's first GET until the view is past the bound, and then
     // fail it.
@@ -554,7 +554,7 @@ async fn fill_other(store: &SharedObjectStore, other_id: &NamespaceId) {
         )
         .await
         .expect("put large file");
-    setup.drain().await.expect("finish hints");
+    setup.drain().await.expect("drain");
 }
 
 /// What a cold read of the root of `other_id` caches as its WAL tail once
@@ -642,7 +642,7 @@ async fn a_read_after_a_write_sends_no_request_and_replays_nothing() {
         )
         .await
         .expect("steady-state put");
-    writer.drain().await.expect("finish background hints");
+    writer.drain().await.expect("drain");
     let _view = namespace
         .read_view_at_snapshot(&snapshot.snapshot_id)
         .await
@@ -712,7 +712,7 @@ async fn reads_after_maintenance_are_current_and_reuse_their_tail() {
         .expect("read after maintenance");
     assert_eq!(file.bytes, b"file");
 
-    writer.drain().await.expect("finish hints");
+    writer.drain().await.expect("drain");
     recording.reset();
     let before_read = reader.metadata_cache().stats();
     namespace.stat("/file.txt").await.expect("next read");

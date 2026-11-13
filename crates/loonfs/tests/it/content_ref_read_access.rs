@@ -44,11 +44,9 @@ async fn open_writer() -> (
     LoonFs<Writable>,
 ) {
     let directory = tempfile::tempdir().expect("directory");
-    // The runtime raises the hint in the background after each publication,
-    // so the recording leaves the hint out.
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any().except_hints(),
+        KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
     let writer = writer(store, "content-ref-read-access").await;

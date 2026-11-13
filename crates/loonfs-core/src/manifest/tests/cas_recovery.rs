@@ -1,10 +1,6 @@
-//! Numbered publication, discovery, and retention contracts.
+//! Numbered publication and retention contracts.
 
 use super::*;
-use crate::manifest::publish::ManifestUpdate;
-use loonfs_objectstore::ListedObject;
-use loonfs_test_support::stores::replace_object;
-use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
 use std::assert_matches;
 
 #[tokio::test]
@@ -164,7 +160,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             let outcome = if fork {
                 let namespace = crate::test_support::namespace_store(&store, &payload.namespace_id);
                 async {
-                    namespace.publish_first_hint().await?;
+                    namespace.ensure_namespace_absent().await?;
                     namespace.publish_first_manifest(payload, &deadline).await
                 }
                 .await
@@ -193,11 +189,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                 );
             }
             assert_eq!(store.remaining(), 0);
-            // A creation also writes the hint.
-            assert_eq!(
-                store.inner().inner().counts().create_if_absent_puts,
-                1 + usize::from(fork)
-            );
+            assert_eq!(store.inner().inner().counts().create_if_absent_puts, 1);
             assert_eq!(store.inner().inner().counts().compare_and_swaps, 0);
             assert!(store
                 .inner()
@@ -363,8 +355,11 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let losing = losing.expect("loser loads winner");
         assert_eq!(store.counts().create_if_absent_puts, 2);
         assert_eq!(store.counts().compare_and_swaps, 0);
-        assert_eq!(store.counts().lists, 0);
-        assert!(store.counts().gets >= 4);
+        // Each publisher finds the newest manifest with one listing first.
+        assert_eq!(store.counts().lists, 2);
+        // Each publisher loads the current manifest, and the loser loads the
+        // winner.
+        assert!(store.counts().gets >= 3);
         let keys = store
             .inner()
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
@@ -385,145 +380,6 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             assert_matches!(losing, ManifestPublicationOutcome::CoveredByCurrent(_));
         }
     }
-}
-
-/// Points the namespace's hint at `manifest_no`, discovers the current
-/// manifest, and returns it with the discovery's requests for the hint and
-/// the manifests.
-async fn discover_from_hint(
-    store: &RecordingStore<LocalFsStore>,
-    namespace_id: &NamespaceId,
-    manifest_no: u64,
-) -> (ManifestNo, Vec<(&'static str, String)>) {
-    let bytes = encode_control_state(
-        ControlObjectKind::Hint,
-        &HintPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_no: ManifestNo(manifest_no),
-        },
-    )
-    .expect("hint");
-    replace_object(store, &hint(namespace_id), Bytes::from(bytes))
-        .await
-        .expect("rewind hint");
-    store.reset();
-    let current = crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("discover");
-    (
-        current.manifest().manifest_no,
-        control_requests(namespace_id, &store.take()),
-    )
-}
-
-/// Checks that discovery loads the hinted manifest and sends a HEAD request
-/// for the number after it, which ends discovery when the number is missing.
-/// When it exists, discovery probes the numbers above it a window at a time
-/// with HEAD requests, loads only the newest manifest found, and reads the
-/// hint again. A tombstone that the probe finds ends discovery, and a
-/// missing hint reads as an absent namespace.
-#[tokio::test]
-async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_absent() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
-        .create()
-        .await
-        .expect("bootstrap");
-    for _ in 2..=11 {
-        crate::test_support::NamespaceFixture::new(
-            &store,
-            &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        )
-        .engine()
-        .claim_compactor()
-        .await
-        .expect("publish a claim");
-    }
-    let window = u64::try_from(crate::limits::MANIFEST_PROBE_WINDOW).expect("a small window");
-    let hint = hint(&namespace_id);
-    let get = |number| {
-        (
-            "get",
-            metadata_manifest_object(&namespace_id, &ManifestNo(number)),
-        )
-    };
-    let heads = |first: u64, last: u64| {
-        (first..=last)
-            .map(|number| {
-                (
-                    "head",
-                    metadata_manifest_object(&namespace_id, &ManifestNo(number)),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    // A current hint costs one HEAD request. A hint 1 or 3 manifests behind
-    // costs that HEAD request and one window above it, and a hint 9
-    // manifests behind costs two windows, because the first one ends at a
-    // manifest that exists.
-    for (hinted, probed_through) in [
-        (11, 12),
-        (10, 11 + window),
-        (8, 9 + window),
-        (2, 3 + 2 * window),
-    ] {
-        let mut expected = vec![("get", hint.clone()), get(hinted)];
-        expected.extend(heads(hinted + 1, probed_through));
-        if hinted != 11 {
-            expected.push(get(11));
-        }
-        expected.push(("get", hint.clone()));
-        assert_eq!(
-            discover_from_hint(&store, &namespace_id, hinted).await,
-            (ManifestNo(11), expected),
-            "a hint at manifest {hinted}"
-        );
-    }
-
-    let ManifestUpdate {
-        current: tombstone, ..
-    } = crate::test_support::namespace_store(&store, &namespace_id)
-        .update_manifest(
-            None,
-            &OperationClock::start(0, crate::test_support::std_timer()),
-            |current: crate::namespace::control::LoadedManifest| async move {
-                let mut payload = current.payload().clone();
-                payload.status =
-                    loonfs_types::format::control::NamespaceStatus::Deleted { deleted_at_ms: 1 };
-                Ok(super::super::publish::ManifestChange::Next(
-                    Box::new(payload),
-                    (),
-                ))
-            },
-        )
-        .await
-        .expect("publish a tombstone");
-    assert_eq!(tombstone.manifest().manifest_no, ManifestNo(12));
-    let mut expected = vec![("get", hint.clone()), get(8)];
-    expected.extend(heads(9, 9 + window));
-    expected.push(get(12));
-    assert_eq!(
-        discover_from_hint(&store, &namespace_id, 8).await,
-        (ManifestNo(12), expected),
-        "the tombstone ends discovery without another read of the hint"
-    );
-
-    store.delete(&hint).await.expect("delete hint");
-    store.reset();
-    let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_metadata_view()
-        .await
-        .err()
-        .expect("missing hint");
-    assert_eq!(error.code(), ErrorCode::NamespaceNotFound);
-    assert_eq!(store.counts().puts, 0);
 }
 
 /// Checks that an advance without a writer session creates a floor object
@@ -570,8 +426,7 @@ async fn an_advance_without_a_session_creates_a_floor_object_and_folds_it() {
     .await
     .expect("advance")
     .response;
-    // The floor object and the fold, and the advance leaves the hint for
-    // the runtime to raise.
+    // The floor object and the fold.
     assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -602,6 +457,53 @@ async fn an_advance_without_a_session_creates_a_floor_object_and_folds_it() {
     .await
     .expect("already advanced");
     assert_eq!(store.counts().puts, 0);
+}
+
+/// Checks that a manifest put that succeeds, followed by a read of the
+/// manifest boundary that fails, returns `outcome_unknown` for the
+/// manifest's key.
+#[tokio::test]
+async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = FailStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(boundary(&namespace_id)),
+        OperationSelector::Read,
+        InjectedError::Transport("boundary read failed".to_owned()),
+    );
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
+        .await
+        .expect("bootstrap");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let current = namespace.load_current_manifest().await.expect("current");
+    let mut payload = current.payload().clone();
+    payload.manifest_no = ManifestNo(2);
+    let basis = crate::namespace::PublicationBasis {
+        manifest: current,
+        checked: crate::test_support::observed_now(),
+    };
+    store.fail_next(1);
+    let outcome = namespace
+        .publish_manifest_from(
+            encode_manifest(payload),
+            &OperationClock::start(0, crate::test_support::std_timer()),
+            Some(&basis),
+        )
+        .await;
+    let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    assert_matches!(
+        outcome,
+        Err(CoreError::OutcomeUnknown { object_key: actual, .. }) if actual == object_key
+    );
+    assert_eq!(store.remaining(), 0);
+    assert!(store
+        .inner()
+        .head(&object_key)
+        .await
+        .expect("the put")
+        .is_some());
 }
 
 #[tokio::test]
@@ -642,55 +544,6 @@ async fn manifest_publication_recovers_an_ambiguous_put() {
             .manifest()
             .manifest_no,
         candidate_manifest_no
-    );
-}
-
-#[tokio::test]
-async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::hint(&namespace_id),
-    );
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
-        .create()
-        .await
-        .expect("bootstrap");
-    let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_hint()
-        .await
-        .expect("stored hint");
-    store.reset();
-    let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
-    let ManifestUpdate {
-        current: published,
-        hint,
-        ..
-    } = crate::test_support::namespace_store(&store, &namespace_id)
-        .update_manifest(
-            None,
-            &deadline,
-            |current: crate::namespace::control::LoadedManifest| async move {
-                Ok(super::super::publish::ManifestChange::Next(
-                    Box::new(current.payload().clone()),
-                    (),
-                ))
-            },
-        )
-        .await
-        .expect("publish");
-    assert_eq!(published.manifest().manifest_no, ManifestNo(2));
-    assert_eq!(hint.as_ref(), Some(&before));
-    assert_eq!(store.counts().compare_and_swaps, 0);
-    assert_eq!(
-        hint,
-        Some(
-            crate::test_support::namespace_store(&store, &namespace_id)
-                .load_hint()
-                .await
-                .expect("stored hint")
-        )
     );
 }
 
@@ -839,79 +692,10 @@ async fn a_snapshot_losing_manifest_publication_keeps_the_winner() {
     );
 }
 
-#[derive(Debug)]
-struct StaleObjectOnceStore {
-    inner: LocalFsStore,
-    key: String,
-    stale: std::sync::Mutex<Option<ObjectBody>>,
-}
-
-#[async_trait]
-impl ObjectStore for StaleObjectOnceStore {
-    loonfs_test_support::delegate_object_store!(self; buffered);
-
-    fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
-        self.inner.checksum_algorithm()
-    }
-
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        if key == self.key {
-            if let Some(stale) = self.stale.lock().expect("stale object lock").take() {
-                return Ok(Some(stale));
-            }
-        }
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_entries_from_stream(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-    ) -> BoxStream<'static, Result<ListedObject, ObjectStoreError>> {
-        self.inner.list_entries_from_stream(prefix, start_after)
-    }
-
-    async fn list_child_prefixes(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        limit: loonfs_types::EffectiveLimit,
-    ) -> Result<loonfs_types::Page<String, String>, ObjectStoreError> {
-        self.inner
-            .list_child_prefixes(prefix, start_after, limit)
-            .await
-    }
-}
-
 #[tokio::test]
-async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
-    // Retention publishes the floor independently of the head. A reader that
-    // straddles those writes must not report a floor newer than its head.
+async fn namespace_status_and_change_feed_report_the_floor_at_the_head_after_an_advance() {
+    // Retention publishes the floor independently of the head. A reader must
+    // not report a floor newer than its head.
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -920,12 +704,6 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .create()
         .await
         .expect("bootstrap");
-    let stale_head = inner
-        .get_with_metadata(&hint(&namespace_id))
-        .await
-        .expect("read bootstrap head")
-        .expect("bootstrap head exists");
-
     crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
@@ -946,24 +724,14 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
     .await
     .expect("advance retention");
 
-    let status_store = StaleObjectOnceStore {
-        inner: LocalFsStore::new(temp_dir.path()).expect("status store"),
-        key: hint(&namespace_id),
-        stale: std::sync::Mutex::new(Some(stale_head.clone())),
-    };
-    let namespace = crate::test_support::namespace_store(&status_store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&inner, &namespace_id)
         .load_metadata()
         .await
-        .expect("status reloads the stale head");
+        .expect("status");
     assert_eq!(namespace.head_seq, CommitSeq(1));
     assert_eq!(namespace.retention_floor_seq, CommitSeq(1));
 
-    let feed_store = StaleObjectOnceStore {
-        inner: LocalFsStore::new(temp_dir.path()).expect("change-feed store"),
-        key: hint(&namespace_id),
-        stale: std::sync::Mutex::new(Some(stale_head)),
-    };
-    let namespace = crate::test_support::namespace_store(&feed_store, &namespace_id);
+    let namespace = crate::test_support::namespace_store(&inner, &namespace_id);
     let view = namespace
         .load_current_metadata_view()
         .await
@@ -975,7 +743,7 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         loonfs_types::options::CommitSplitting::Whole,
     )
     .await
-    .expect("change feed reloads the stale head");
+    .expect("change feed");
     assert_eq!(changes.head_seq, CommitSeq(1));
     assert!(changes.changes.is_empty());
 }

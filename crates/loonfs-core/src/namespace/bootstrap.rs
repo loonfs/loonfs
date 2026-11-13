@@ -16,10 +16,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates the namespace if it does not already exist.
     ///
     /// Use this before normal reads and writes for a new namespace. Returns
-    /// the namespace's status after manifest 1 is installed. The call writes
-    /// the pool record of a generated pool after the hint and before manifest
-    /// 1, and deletes the record again when another creation's manifest 1
-    /// wins (format spec, "Creating a namespace").
+    /// the namespace's status after manifest 1 is installed. The call looks
+    /// for the namespace first and writes nothing when the namespace exists.
+    /// It writes the pool record of a generated pool before manifest 1, and
+    /// deletes the record again when another creation's manifest 1 wins
+    /// (format spec, "Creating a namespace").
     pub async fn bootstrap_namespace(
         &self,
         actor_id: &loonfs_types::ActorId,
@@ -50,7 +51,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             )
         };
         let created = async {
-            self.namespace.publish_first_hint().await?;
+            self.namespace.ensure_namespace_absent().await?;
             self.namespace.write_pool_record(&pool).await?;
             let published = self
                 .namespace

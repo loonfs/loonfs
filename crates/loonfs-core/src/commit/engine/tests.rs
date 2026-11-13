@@ -394,7 +394,7 @@ async fn a_successful_put_refreshes_the_observation_the_next_budget_runs_from() 
     assert!(
         !operations
             .iter()
-            .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+            .any(|operation| operation.key() == loonfs_objectstore::keys::boundary(&namespace_id)),
         "the third publish rediscovered the namespace: {operations:?}"
     );
     let heads: Vec<_> = operations
@@ -465,7 +465,7 @@ async fn a_basis_check_answered_outside_the_bound_of_the_last_confirmation_reloa
     assert!(
         operations[head + 1..]
             .iter()
-            .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+            .any(|operation| operation.key() == loonfs_objectstore::keys::boundary(&namespace_id)),
         "the late check was trusted: {operations:?}"
     );
     // The retry plans against the reloaded view.
@@ -649,7 +649,7 @@ async fn a_quiet_writer_confirms_its_tip_with_a_wal_head_and_then_a_manifest_hea
     );
     assert!(
         matches!(&operations[0], RecordedOperation::Head { key } if *key == floor_object)
-            && operations[1].key() == loonfs_objectstore::keys::hint(&namespace_id),
+            && operations[1].key() == loonfs_objectstore::keys::boundary(&namespace_id),
         "the writer runs discovery after it finds the floor object: {operations:?}"
     );
     let position = engine.writer_position().expect("a position");
@@ -686,7 +686,7 @@ async fn a_steady_writer_checks_its_basis_once_a_budget_and_never_replays_its_ta
             tail_reads += operations
                 .iter()
                 .filter(|operation| {
-                    operation.key() == loonfs_objectstore::keys::hint(&namespace_id)
+                    operation.key() == loonfs_objectstore::keys::boundary(&namespace_id)
                         || (operation.key().starts_with(&wal_prefix(&namespace_id))
                             && !matches!(
                                 operation,
@@ -751,7 +751,7 @@ async fn a_quiet_writer_finds_a_takeover_claim_and_is_fenced() {
     let operations = store.take();
     assert!(
         is_head_under(&operations[0], &wal_prefix(&namespace_id))
-            && operations[1].key() == loonfs_objectstore::keys::hint(&namespace_id),
+            && operations[1].key() == loonfs_objectstore::keys::boundary(&namespace_id),
         "{operations:?}"
     );
     assert_eq!(store.count(OperationSelector::Put), 0, "{operations:?}");
@@ -869,7 +869,8 @@ async fn a_quiet_writer_finds_a_fold_and_commits_on_the_new_basis() {
         starts_with_tip_confirmation(&operations, &namespace_id)
             && operations[2..]
                 .iter()
-                .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+                .any(|operation| operation.key()
+                    == loonfs_objectstore::keys::boundary(&namespace_id)),
         "{operations:?}"
     );
 }
@@ -1077,7 +1078,7 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
     assert!(starts_with_tip_confirmation(&operations, &namespace_id));
     assert!(operations[2..]
         .iter()
-        .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)));
+        .any(|operation| operation.key() == loonfs_objectstore::keys::boundary(&namespace_id)));
 }
 
 /// Checks that a compaction unit publishes a manifest with the same
@@ -1113,7 +1114,8 @@ async fn a_compaction_copies_the_read_state_of_the_manifest_it_replaces() {
 }
 
 /// Checks that a writer moved to its own compaction's manifest publishes on
-/// that manifest without reading the WAL tail or the hint again.
+/// that manifest without reading the WAL tail or the manifest boundary
+/// again.
 #[tokio::test]
 async fn a_writer_moved_after_its_own_compaction_keeps_its_tail() {
     let directory = tempdir().expect("tempdir");
@@ -1140,17 +1142,17 @@ async fn a_writer_moved_after_its_own_compaction_keeps_its_tail() {
     let operations = store.take();
     assert!(
         operations.iter().all(|operation| {
-            operation.key() != loonfs_objectstore::keys::hint(&namespace_id)
+            operation.key() != loonfs_objectstore::keys::boundary(&namespace_id)
                 && !(operation.key().starts_with(&wal_prefix(&namespace_id))
                     && matches!(operation, RecordedOperation::Get { .. }))
         }),
-        "the publish reads neither the WAL tail nor the hint: {operations:?}"
+        "the publish reads neither the WAL tail nor the manifest boundary: {operations:?}"
     );
 }
 
 /// Checks that a writer moved to a fold that missed its newest commit keeps
 /// that commit as its tail, and publishes on the fold's manifest without
-/// reading the WAL tail or the hint again.
+/// reading the WAL tail or the manifest boundary again.
 #[tokio::test]
 async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commit() {
     let directory = tempdir().expect("tempdir");
@@ -1186,11 +1188,11 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     let operations = store.take();
     assert!(
         operations.iter().all(|operation| {
-            operation.key() != loonfs_objectstore::keys::hint(&namespace_id)
+            operation.key() != loonfs_objectstore::keys::boundary(&namespace_id)
                 && !(operation.key().starts_with(&wal_prefix(&namespace_id))
                     && matches!(operation, RecordedOperation::Get { .. }))
         }),
-        "the publish reads neither the WAL tail nor the hint: {operations:?}"
+        "the publish reads neither the WAL tail nor the manifest boundary: {operations:?}"
     );
     let loaded = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_state()
@@ -1356,7 +1358,7 @@ async fn a_writer_quiet_for_the_revalidation_bound_rediscovers_without_probing()
     let operations = store.take();
     assert_eq!(
         operations.first().map(RecordedOperation::key),
-        Some(loonfs_objectstore::keys::hint(&namespace_id).as_str()),
+        Some(loonfs_objectstore::keys::boundary(&namespace_id).as_str()),
         "{operations:?}"
     );
 }
@@ -1395,7 +1397,8 @@ async fn a_probe_answered_at_the_bound_after_the_last_confirmation_is_not_truste
             && starts_with_tip_confirmation(&operations, &namespace_id)
             && operations[successor + 1..]
                 .iter()
-                .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+                .any(|operation| operation.key()
+                    == loonfs_objectstore::keys::boundary(&namespace_id)),
         "the late answer was trusted: {operations:?}"
     );
 }

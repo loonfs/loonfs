@@ -1,7 +1,7 @@
 //! What a namespace listing and a pool listing cost at the store.
 
 use bytes::Bytes;
-use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pool_record};
+use loonfs_objectstore::keys::{boundary, content_blob, metadata_manifest_object, pool_record};
 use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -21,7 +21,7 @@ async fn namespace_listing_costs_one_request_per_page() {
         .collect();
     for namespace_id in &namespace_ids {
         for key in [
-            hint(namespace_id),
+            boundary(namespace_id),
             metadata_manifest_object(namespace_id, &ManifestNo(1)),
             metadata_manifest_object(namespace_id, &ManifestNo(2)),
         ] {

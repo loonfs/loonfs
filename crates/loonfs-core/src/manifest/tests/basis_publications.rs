@@ -12,11 +12,9 @@ use loonfs_test_support::clock::ManualClock;
 const MANIFEST_PROBE_WINDOW_U64: u64 = MANIFEST_PROBE_WINDOW as u64;
 
 /// Creates a namespace whose current manifest is a writer claim at
-/// manifest 2, with the hint left at manifest 1 when `hint_lags` and raised
-/// to the claim otherwise.
+/// manifest 2.
 async fn claimed_namespace(
     directory: &std::path::Path,
-    hint_lags: bool,
 ) -> (RecordingStore<LocalFsStore>, NamespaceId) {
     let namespace_id = NamespaceId::parse("basis-publication").expect("namespace");
     let store = RecordingStore::new(
@@ -32,11 +30,6 @@ async fn claimed_namespace(
         .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("claim manifest 2");
-    if !hint_lags {
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .raise_hint_to_current_manifest()
-            .await;
-    }
     store.reset();
     (store, namespace_id)
 }
@@ -86,46 +79,46 @@ fn manifests(namespace_id: &NamespaceId, first: u64, last: u64) -> Vec<String> {
 }
 
 /// Checks that a publication from a basis checked just now sends its
-/// manifest put and no request before it, whether the hint points to the
-/// basis or lags below it.
+/// manifest put with no request before it, and one read of the manifest
+/// boundary after it.
 #[tokio::test]
-async fn a_publication_from_a_fresh_basis_sends_only_its_put() {
-    for hint_lags in [false, true] {
-        let directory = tempdir().expect("directory");
-        let (store, namespace_id) = claimed_namespace(directory.path(), hint_lags).await;
-        let basis = basis_checked_at(
-            store.inner(),
-            &namespace_id,
-            crate::test_support::observed_now(),
-        )
-        .await;
-        let deadline = OperationClock::start(0, crate::test_support::std_timer());
-        let published = republish(&store, &namespace_id, Some(basis), &deadline).await;
-        assert_eq!(published.manifest().manifest_no, ManifestNo(3));
-        assert_eq!(
-            control_requests(&namespace_id, &store.take()),
-            vec![(
+async fn a_publication_from_a_fresh_basis_puts_with_no_request_first() {
+    let directory = tempdir().expect("directory");
+    let (store, namespace_id) = claimed_namespace(directory.path()).await;
+    let basis = basis_checked_at(
+        store.inner(),
+        &namespace_id,
+        crate::test_support::observed_now(),
+    )
+    .await;
+    let deadline = OperationClock::start(0, crate::test_support::std_timer());
+    let published = republish(&store, &namespace_id, Some(basis), &deadline).await;
+    assert_eq!(published.manifest().manifest_no, ManifestNo(3));
+    assert_eq!(
+        control_requests(&namespace_id, &store.take()),
+        vec![
+            (
                 "put",
                 metadata_manifest_object(&namespace_id, &ManifestNo(3))
-            )],
-            "the hint lags: {hint_lags}"
-        );
-    }
+            ),
+            ("get", boundary(&namespace_id)),
+        ]
+    );
 }
 
 /// Checks that a publication from a basis checked less than the revalidation
-/// bound ago sends only its put, and that a basis checked the bound ago or
-/// longer makes the publication discover the current manifest through the
-/// hint: the hint, the hinted manifest, a HEAD request for the missing
-/// manifest after it, and the hint again.
+/// bound ago puts with no request first, and that a basis checked the bound
+/// ago or longer makes the publication find the newest manifest from the
+/// manifest boundary first: the boundary, a listing of the manifests, the
+/// newest manifest, and the boundary again.
 #[tokio::test]
-async fn a_basis_at_the_revalidation_bound_discovers_through_the_hint() {
+async fn a_basis_at_the_revalidation_bound_finds_the_newest_manifest_from_the_boundary() {
     for (age_ms, discovers) in [
         (READ_REVALIDATION_BOUND_MS - 1, false),
         (READ_REVALIDATION_BOUND_MS, true),
     ] {
         let directory = tempdir().expect("directory");
-        let (store, namespace_id) = claimed_namespace(directory.path(), false).await;
+        let (store, namespace_id) = claimed_namespace(directory.path()).await;
         let clock = Arc::new(ManualClock::new(0));
         let basis = basis_checked_at(
             store.inner(),
@@ -142,18 +135,18 @@ async fn a_basis_at_the_revalidation_bound_discovers_through_the_hint() {
         )
         .await;
         assert_eq!(published.manifest().manifest_no, ManifestNo(3));
-        let hint = hint(&namespace_id);
+        let boundary = boundary(&namespace_id);
         let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
         let mut expected = Vec::new();
         if discovers {
             expected.extend([
-                ("get", hint.clone()),
+                ("get", boundary.clone()),
+                ("list", metadata_manifest_prefix(&namespace_id)),
                 ("get", manifest(2)),
-                ("head", manifest(3)),
-                ("get", hint),
+                ("get", boundary.clone()),
             ]);
         }
-        expected.push(("put", manifest(3)));
+        expected.extend([("put", manifest(3)), ("get", boundary)]);
         assert_eq!(
             control_requests(&namespace_id, &store.take()),
             expected,
@@ -165,12 +158,12 @@ async fn a_basis_at_the_revalidation_bound_discovers_through_the_hint() {
 /// Checks that a publication whose put loses to two manifests that another
 /// process published probes above its basis (one HEAD request for the next
 /// number, which exists, and then one window of numbers above that), loads
-/// only the newest manifest, publishes on it, and never reads the hint,
-/// which still points below the basis.
+/// only the newest manifest, and publishes on it. Only the put that
+/// succeeds is followed by a read of the manifest boundary.
 #[tokio::test]
 async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest() {
     let directory = tempdir().expect("directory");
-    let (store, namespace_id) = claimed_namespace(directory.path(), true).await;
+    let (store, namespace_id) = claimed_namespace(directory.path()).await;
     let basis = basis_checked_at(
         store.inner(),
         &namespace_id,
@@ -220,7 +213,7 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
     );
     expected.push(("get", manifest(4)));
     // The next attempt builds on that manifest without a request first.
-    expected.push(("put", manifest(5)));
+    expected.extend([("put", manifest(5)), ("get", boundary(&namespace_id))]);
     assert_eq!(
         control_requests(&namespace_id, &gate.inner().take()),
         expected

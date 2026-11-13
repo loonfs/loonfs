@@ -15,7 +15,7 @@ use loonfs_core::control::LoadedManifest;
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::{FloorObjectReport, Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
-use loonfs_types::{CommitSeq, ManifestNo, NamespaceId};
+use loonfs_types::{CommitSeq, NamespaceId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -241,30 +241,6 @@ impl RegistryShared {
             .get(namespace_id)
             .map(|live| live.publisher.clone())
     }
-
-    /// Raises the namespace's hint to `manifest_no`, a manifest that this
-    /// runtime published, with one read of the hint and one compare-and-swap
-    /// (format spec, "The current manifest and WAL tip").
-    ///
-    /// A failed raise, or one that loses its compare-and-swap, is logged and
-    /// ignored. The hint can then stay behind the newest manifest until the
-    /// next publication raises it, and discovery probes past a hint that lags.
-    pub(super) async fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
-        if let Err(error) = self
-            .context
-            .runtime_core
-            .namespace_store(namespace_id)
-            .raise_hint(manifest_no, None)
-            .await
-        {
-            tracing::debug!(
-                namespace_id = %namespace_id,
-                manifest_no = %manifest_no,
-                error = %error,
-                "the namespace hint raise failed, and a later publication raises the hint"
-            );
-        }
-    }
 }
 
 impl HeadPositions for RegistryShared {
@@ -446,20 +422,13 @@ impl PublisherRegistry {
     }
 
     /// Moves this runtime's views of the namespace onto a manifest that this
-    /// runtime published (see [`Self::move_views`]), and then raises the
-    /// namespace's hint to the manifest (see [`Self::raise_hint`]).
-    ///
-    /// The hint of a namespace without a live session is raised too, because
-    /// a maintenance call or a deletion can publish a manifest in that
-    /// namespace.
+    /// runtime published (see [`Self::move_views`]).
     pub(crate) async fn record_manifest_published(
         &self,
         namespace_id: &NamespaceId,
         published: PublishedManifest,
     ) {
-        let manifest_no = published.manifest.manifest_no;
         self.move_views(namespace_id, published).await;
-        self.raise_hint(namespace_id, manifest_no).await;
     }
 
     /// Moves the namespace's cached head and its publisher's position onto
@@ -565,7 +534,7 @@ impl PublisherRegistry {
     }
 
     /// Waits for all current publisher workers, folds, and compactions to
-    /// finish, and with them the hint raises that their publications started.
+    /// finish.
     ///
     /// Folds are waited for before compactions, because a fold starts its
     /// session's compaction.
@@ -604,12 +573,6 @@ impl PublisherRegistry {
             return Err(error);
         }
         Ok(())
-    }
-
-    /// Raises the namespace's hint to `manifest_no`, a manifest that this
-    /// runtime published, after the publication has returned.
-    pub(crate) async fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
-        self.shared.raise_hint(namespace_id, manifest_no).await;
     }
 }
 

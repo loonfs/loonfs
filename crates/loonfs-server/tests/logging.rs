@@ -388,9 +388,9 @@ async fn store_fault_has_one_error_from_the_boundary() {
 
     let failing = Arc::new(FailStore::new(
         LocalFsStore::with_key_prefix(&store_root, Some(key_prefix)).expect("build local store"),
-        KeyPredicate::hint(
+        KeyPredicate::exact(loonfs_objectstore::keys::boundary(
             &loonfs_types::NamespaceId::parse("faulty").expect("valid namespace id"),
-        ),
+        )),
         OperationSelector::Read,
         InjectedError::Transport("injected WAL-head read failure".to_owned()),
     ));

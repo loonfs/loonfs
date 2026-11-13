@@ -16,8 +16,9 @@ use crate::store_io_runtime::StoreIoRuntime;
 use crate::transfer_timeouts::is_transfer_timeout;
 use crate::ListedObject;
 use crate::{
-    AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, StoreIdentity,
+    AssemblySource, ByteRange, ByteStream, ConfiguredObjectStoreKind, GetIfChangedOutcome,
+    MultipartPart, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoreIdentity,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -383,6 +384,44 @@ impl ObjectStore for ProviderObjectStore {
                     .await
                     .map_err(|err| map_provider_error(key, err, ProviderClient::Retrying))?;
                 Ok(Some(ObjectBody { metadata, bytes }))
+            }
+            Err(err) if provider_not_found(&err) => Ok(None),
+            Err(err) => Err(map_provider_error(key, err, ProviderClient::Retrying)),
+        }
+    }
+
+    async fn get_if_changed(&self, key: &str, etag: &str) -> Result<Option<GetIfChangedOutcome>> {
+        // S3 and R2 compare the ETag, so they send it as `If-None-Match`.
+        // LoonFS keeps the object generation as the compare token on GCS,
+        // because GCS conditional writes compare the generation. The
+        // provider client's read options have no condition on a generation,
+        // and a generation never equals a GCS ETag, so a GCS read is a full
+        // read and a compare.
+        if self.kind.compare_token() == CompareToken::Generation {
+            return Ok(self
+                .get_with_metadata(key)
+                .await?
+                .map(|body| GetIfChangedOutcome::from_body(body, etag)));
+        }
+        let path = self.to_path(key)?;
+        let options = GetOptions {
+            if_none_match: Some(etag.to_owned()),
+            ..Default::default()
+        };
+        match self.inner.get_opts(&path, options).await {
+            Ok(result) => {
+                let metadata = self.metadata_from_provider(result.meta.clone());
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(|err| map_provider_error(key, err, ProviderClient::Retrying))?;
+                Ok(Some(GetIfChangedOutcome::Changed(ObjectBody {
+                    metadata,
+                    bytes,
+                })))
+            }
+            Err(provider_store::Error::NotModified { .. }) => {
+                Ok(Some(GetIfChangedOutcome::Unchanged))
             }
             Err(err) if provider_not_found(&err) => Ok(None),
             Err(err) => Err(map_provider_error(key, err, ProviderClient::Retrying)),
@@ -981,9 +1020,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_etag_store_sends_the_etag_as_if_none_match() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let key = "namespaces/demo/boundary.json";
+        let last_header = || flaky.if_none_match.lock().expect("read options").pop();
+        assert_eq!(
+            store.get_if_changed(key, "\"0\"").await.expect("read"),
+            None
+        );
+        assert_eq!(last_header(), Some(Some("\"0\"".to_owned())));
+
+        let first = store
+            .put_if_absent(key, Bytes::from_static(b"one"))
+            .await
+            .expect("create");
+        let first_etag = first.etag.expect("etag");
+        assert_eq!(
+            store.get_if_changed(key, &first_etag).await.expect("read"),
+            Some(GetIfChangedOutcome::Unchanged)
+        );
+        assert_eq!(last_header(), Some(Some(first_etag.clone())));
+
+        let second = store
+            .compare_and_swap(key, &first_etag, Bytes::from_static(b"two"))
+            .await
+            .expect("replace");
+        let Some(GetIfChangedOutcome::Changed(body)) =
+            store.get_if_changed(key, &first_etag).await.expect("read")
+        else {
+            panic!("a replaced object returns its body");
+        };
+        assert_eq!(last_header(), Some(Some(first_etag)));
+        assert_eq!(body.bytes, Bytes::from_static(b"two"));
+        assert_eq!(body.metadata.etag, second.etag);
+    }
+
+    #[tokio::test]
+    async fn a_generation_store_reads_in_full_and_compares_the_generation() {
+        let flaky = Arc::new(FlakyStore {
+            versions_from_etags: true,
+            ..Default::default()
+        });
+        let store = provider_store(
+            Arc::clone(&flaky),
+            Arc::clone(&flaky),
+            ConfiguredObjectStoreKind::GcpGcs,
+            None,
+        );
+        let key = "namespaces/demo/boundary.json";
+        store
+            .put_if_absent(key, Bytes::from_static(b"one"))
+            .await
+            .expect("create");
+        let first = store.get_with_metadata(key).await.expect("read");
+        let first_generation = first.expect("object").metadata.etag.expect("generation");
+        assert_eq!(
+            store
+                .get_if_changed(key, &first_generation)
+                .await
+                .expect("read"),
+            Some(GetIfChangedOutcome::Unchanged)
+        );
+
+        store.delete(key).await.expect("delete");
+        store
+            .put_if_absent(key, Bytes::from_static(b"two"))
+            .await
+            .expect("create again");
+        let Some(GetIfChangedOutcome::Changed(body)) = store
+            .get_if_changed(key, &first_generation)
+            .await
+            .expect("read")
+        else {
+            panic!("a replaced object returns its body");
+        };
+        assert_eq!(body.bytes, Bytes::from_static(b"two"));
+        assert_ne!(body.metadata.etag, Some(first_generation));
+        let headers = flaky.if_none_match.lock().expect("read options").clone();
+        assert!(!headers.is_empty());
+        assert!(headers.iter().all(Option::is_none), "{headers:?}");
+    }
+
+    #[tokio::test]
     async fn provider_store_preserves_put_get_head_and_prefix_scoping() {
         let store = memory_store();
-        let key = "namespaces/demo/hint.json";
+        let key = "namespaces/demo/boundary.json";
 
         let metadata = store
             .put_if_absent(key, Bytes::from_static(b"head"))
@@ -1048,12 +1170,12 @@ mod tests {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
         for key in [
-            "namespaces/a/hint.json",
+            "namespaces/a/boundary.json",
             "namespaces/a1",
-            "namespaces/b/hint.json",
+            "namespaces/b/boundary.json",
             "namespaces/b/wal/00000000000000000001.wal.zst",
-            "namespaces/b0/hint.json",
-            "namespaces/c/hint.json",
+            "namespaces/b0/boundary.json",
+            "namespaces/c/boundary.json",
         ] {
             store
                 .put_if_absent(key, Bytes::from_static(b"listed"))
@@ -1062,7 +1184,7 @@ mod tests {
         }
         provider_store::ObjectStoreExt::put(
             &flaky.inner,
-            &Path::from("tenant-b/namespaces/z/hint.json"),
+            &Path::from("tenant-b/namespaces/z/boundary.json"),
             PutPayload::from_static(b"outside"),
         )
         .await
@@ -1163,7 +1285,7 @@ mod tests {
     #[tokio::test]
     async fn provider_store_enforces_create_and_cas_preconditions() {
         let store = memory_store();
-        let key = "namespaces/demo/hint.json";
+        let key = "namespaces/demo/boundary.json";
         let first = store
             .put_if_absent(key, Bytes::from_static(b"one"))
             .await
@@ -1182,7 +1304,7 @@ mod tests {
         assert_matches!(
             store
                 .compare_and_swap(
-                    "namespaces/missing/hint.json",
+                    "namespaces/missing/boundary.json",
                     "missing",
                     Bytes::from_static(b"two")
                 )
@@ -1237,6 +1359,11 @@ mod tests {
         heads: AtomicUsize,
         deletes: Arc<AtomicUsize>,
         missing_checksum: Mutex<Option<String>>,
+        /// The `If-None-Match` value of every read, in order.
+        if_none_match: Mutex<Vec<Option<String>>>,
+        /// Reports each read's ETag as its version too, as GCS reports a
+        /// generation, because the in-memory store reports no version.
+        versions_from_etags: bool,
     }
 
     impl fmt::Debug for FlakyStore {
@@ -1291,7 +1418,15 @@ mod tests {
                 &self.gets
             };
             reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.get_opts(location, options).await
+            self.if_none_match
+                .lock()
+                .expect("read options")
+                .push(options.if_none_match.clone());
+            let mut result = self.inner.get_opts(location, options).await?;
+            if self.versions_from_etags {
+                result.meta.version = result.meta.e_tag.clone();
+            }
+            Ok(result)
         }
 
         fn delete_stream(
@@ -1518,7 +1653,7 @@ mod tests {
     async fn compare_and_swap_never_retries_transport_failures() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
-        let key = "namespaces/demo/hint.json";
+        let key = "namespaces/demo/boundary.json";
         let seeded = store
             .put_if_absent(key, Bytes::from_static(b"one"))
             .await

@@ -67,8 +67,6 @@ async fn fixture(fold: Fold) -> Fixture {
         let folded = maintenance.fold_wal(&namespace_id).await.expect("fold");
         assert_eq!(folded.outcome, FoldWalOutcome::Published);
     }
-    // Each publication raised the hint, so the hint records the current
-    // manifest before the tests count requests.
     writer.drain().await.expect("the fold settles");
     Fixture {
         recording,

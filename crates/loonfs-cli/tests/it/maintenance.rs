@@ -173,64 +173,6 @@ fn maintenance_pool_gc_collects_a_given_pool_or_the_selected_namespace_pool() {
     assert_eq!(json_error(&missing)["code"], "pool_not_found");
 }
 
-/// Returns the hint's manifest number and the current manifest number of
-/// the namespace `demo` in the harness's default profile.
-async fn hint_and_current(harness: &Harness) -> (u64, u64) {
-    use loonfs_types::format::control::{decode_control_object, ControlObjectKind, HintPayload};
-
-    let store =
-        loonfs_objectstore::local_fs_store::LocalFsStore::new(harness.store_root("default"))
-            .expect("store");
-    let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
-    let current = loonfs_core::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest")
-        .manifest()
-        .manifest_no;
-    let hint = loonfs_objectstore::ObjectStore::get(
-        &store,
-        &loonfs_objectstore::keys::hint(&namespace_id),
-        None,
-    )
-    .await
-    .expect("read the hint")
-    .expect("the hint exists");
-    let hint = decode_control_object::<HintPayload>(&hint, ControlObjectKind::Hint)
-        .expect("decode the hint")
-        .payload()
-        .manifest_no;
-    (hint.0, current.0)
-}
-
-/// Checks that each one-shot command that publishes raises the namespace's
-/// hint past the manifest that was current before the command, so the hint
-/// of a namespace that only one-shot commands write keeps moving, and
-/// garbage collection can delete the manifests below it.
-///
-/// A runtime raises the hint after its first publication in a namespace,
-/// and each request drains the runtime before the command exits.
-#[tokio::test]
-async fn each_one_shot_command_that_publishes_raises_the_hint() {
-    let harness = Harness::with_demo_namespace();
-    let payload = harness.temp_dir.path().join("payload.txt");
-    fs::write(&payload, b"body").expect("write payload");
-    for index in 0..4 {
-        let remote_path = format!("/file-{index}.txt");
-        let put = ["put", payload.to_str().expect("utf-8 path"), &remote_path];
-        for command in [&put[..], &["maintenance", "fold"][..]] {
-            let (_, before) = hint_and_current(&harness).await;
-            assert_success(&harness.run(command));
-            let (hint, current) = hint_and_current(&harness).await;
-            assert!(
-                before < hint && hint <= current,
-                "{command:?} raises the hint past manifest {before}: the hint is at {hint}, \
-                 and manifest {current} is current"
-            );
-        }
-    }
-}
-
 #[test]
 fn retention_window_sets_and_clears_the_window_that_namespace_show_reports() {
     let harness = Harness::new();

@@ -93,6 +93,7 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
     assert_eq!(
         listings,
         vec![
+            metadata_manifest_prefix(&namespace_id),
             snapshot_prefix(&namespace_id),
             metadata_manifest_prefix(&namespace_id),
             wal_prefix(&namespace_id),
@@ -116,7 +117,9 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
     assert_eq!(
         listings,
         vec![
-            // Root content before reading the WAL tail, and sweep the sessions.
+            // Find the member's newest manifest, root content before reading
+            // the WAL tail, and sweep the sessions.
+            metadata_manifest_prefix(&namespace_id),
             upload_session_prefix(&pool_id),
             snapshot_prefix(&namespace_id),
             content_prefix(&pool_id),

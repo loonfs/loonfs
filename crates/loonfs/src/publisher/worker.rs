@@ -90,7 +90,6 @@ impl NamespacePublisher {
                     } = batch;
                     let waiting = self.publish_batch(candidates).await;
                     drop(publication);
-                    self.raise_hint_to_engine_publication().await;
                     if !waiting.is_empty() {
                         let waiting = OpenBatch {
                             candidates: waiting,
@@ -567,9 +566,8 @@ pub(super) fn elapsed_ms_from(start: u64, end: u64) -> u64 {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "the publication pacing, the write-stop wait, and the trailing hint raise decide \
-              when a request publishes or returns or the hint is raised, not whether a \
-              publication is valid"
+    reason = "the publication pacing and the write-stop wait decide when a request publishes \
+              or returns, not whether a publication is valid"
 )]
 pub(crate) async fn sleep_ms(delay_ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;

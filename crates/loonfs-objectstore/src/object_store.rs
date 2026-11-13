@@ -113,6 +113,32 @@ pub struct ObjectBody {
     pub bytes: Bytes,
 }
 
+/// How a read with a compare token ended for an object that exists.
+///
+/// The compare token is an [`ObjectMetadata::etag`], which is the provider's
+/// ETag, or the object generation on GCS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetIfChangedOutcome {
+    /// The object's compare token is the one the caller gave, so the read
+    /// returned no bytes.
+    Unchanged,
+    /// The object's compare token differs from the one the caller gave, and
+    /// the read returned the object's bytes and metadata.
+    Changed(ObjectBody),
+}
+
+impl GetIfChangedOutcome {
+    /// Compares the compare token of `body` with `etag`, and keeps the body
+    /// only when the two differ.
+    pub(crate) fn from_body(body: ObjectBody, etag: &str) -> Self {
+        if body.metadata.etag.as_deref() == Some(etag) {
+            Self::Unchanged
+        } else {
+            Self::Changed(body)
+        }
+    }
+}
+
 /// Controls the write semantics of a `put` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PutMode {
@@ -520,6 +546,23 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// failures are returned as [`ObjectStoreError`].
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>>;
 
+    /// Reads an object as [`Self::get_with_metadata`] does, unless the
+    /// object's compare token is `etag`.
+    ///
+    /// `etag` is the compare token that an earlier call returned for `key` in
+    /// [`ObjectMetadata::etag`], which is the provider's ETag, or the object
+    /// generation on GCS. Returns `None` when the object is absent, and
+    /// [`GetIfChangedOutcome::Unchanged`] without the object's bytes when its
+    /// compare token is still `etag`. The default reads the object and
+    /// compares the compare tokens. Errors are returned as
+    /// [`Self::get_with_metadata`] returns them.
+    async fn get_if_changed(&self, key: &str, etag: &str) -> Result<Option<GetIfChangedOutcome>> {
+        Ok(self
+            .get_with_metadata(key)
+            .await?
+            .map(|body| GetIfChangedOutcome::from_body(body, etag)))
+    }
+
     /// Reads a full object or one half-open byte range, returning `None` when absent.
     ///
     /// A range ending beyond the object is truncated; a descending range or
@@ -778,6 +821,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().get_with_metadata(key).await
     }
 
+    async fn get_if_changed(&self, key: &str, etag: &str) -> Result<Option<GetIfChangedOutcome>> {
+        self.as_ref().get_if_changed(key, etag).await
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         self.as_ref().get(key, range).await
     }
@@ -868,6 +915,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
         (*self).get_with_metadata(key).await
     }
 
+    async fn get_if_changed(&self, key: &str, etag: &str) -> Result<Option<GetIfChangedOutcome>> {
+        (*self).get_if_changed(key, etag).await
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         (*self).get(key, range).await
     }
@@ -926,13 +977,13 @@ mod tests {
 
     const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
         arn:aws:iam::123456789012:role/private-role private-bucket \
-        namespaces/customer-a/hint.json x-amz-request-id=provider-request \
+        namespaces/customer-a/boundary.json x-amz-request-id=provider-request \
         x-amz-id-2=provider-host-id AKIAEXAMPLE";
 
     #[test]
     fn public_permission_message_drops_every_provider_marker() {
         let error = ObjectStoreError::PermissionDenied {
-            object_key: "namespaces/customer-a/hint.json".to_owned(),
+            object_key: "namespaces/customer-a/boundary.json".to_owned(),
             message: POISON_PROVIDER_DETAIL.to_owned(),
         };
 
@@ -945,7 +996,7 @@ mod tests {
             "<Error>AccessDenied</Error>",
             "arn:aws:iam::123456789012:role/private-role",
             "private-bucket",
-            "namespaces/customer-a/hint.json",
+            "namespaces/customer-a/boundary.json",
             "x-amz-request-id=provider-request",
             "x-amz-id-2=provider-host-id",
             "AKIAEXAMPLE",

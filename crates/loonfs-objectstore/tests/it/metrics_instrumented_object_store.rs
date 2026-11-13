@@ -5,7 +5,7 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use futures::TryStreamExt;
 use loonfs_objectstore::keys::{
-    hint, metadata_manifest_object, metadata_segment, snapshot_record, wal_object,
+    boundary, metadata_manifest_object, metadata_segment, snapshot_record, wal_object,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
@@ -89,8 +89,8 @@ async fn records_put_success() {
 
     store
         .put(
-            &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
-            bytes(b"hint"),
+            &boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            bytes(b"body"),
             PutMode::CreateIfAbsent,
         )
         .await
@@ -148,14 +148,14 @@ async fn convenience_writes_funnel_through_put_with_distinct_modes() {
 
     store
         .put_if_absent(
-            &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"create"),
         )
         .await
         .expect("put if absent");
     store
         .compare_and_swap(
-            &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
             "etag-old",
             bytes(b"swap"),
         )
@@ -287,7 +287,7 @@ async fn records_list_count() {
         .expect("put object");
     store
         .put_if_absent(
-            &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"head"),
         )
         .await
@@ -410,7 +410,7 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
 
     store
         .put_if_absent(
-            &hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
+            &boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id")),
             bytes(b"head"),
         )
         .await

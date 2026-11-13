@@ -17,18 +17,15 @@ use tempfile::tempdir;
 async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("one-claim");
-    // The runtime raises the hint in the background after each publication,
-    // so neither the gate nor the recording selects the hint.
     let store = Arc::new(BlockingStore::new(
         RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any().except_hints(),
+            KeyPredicate::any(),
         ),
         KeyPredicate::new({
             let namespace_prefix = loonfs_objectstore::keys::namespace_prefix(&namespace_id);
             move |key| key.starts_with(&namespace_prefix) || key.starts_with("pools/")
-        })
-        .except_hints(),
+        }),
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
@@ -80,12 +77,12 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
             let operations = store.inner().take();
             assert_matches!(&operations[0], RecordedOperation::List { .. });
             assert_eq!(operations[0].key(), "namespaces/");
-            // The sweep's collection of the pool reads the namespace's roots
-            // and lists its snapshots. A collection of the namespace would list
-            // these four prefixes, and the sweep runs none of the namespace's
+            // The sweep's collection of the pool reads the namespace's roots,
+            // which lists its manifests to find the newest one, and lists its
+            // snapshots. A collection of the namespace would also list these
+            // three prefixes, and the sweep runs none of the namespace's
             // steps.
             let own_prefixes = [
-                loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id),
                 loonfs_objectstore::keys::wal_prefix(&namespace_id),
                 loonfs_objectstore::keys::metadata_segment_prefix(&namespace_id),
                 loonfs_objectstore::keys::extensions_prefix(&namespace_id),
@@ -113,15 +110,12 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
 async fn a_publish_during_a_metadata_step_is_folded_by_the_next_run() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("concurrent-publish");
-    // The runtime raises the hint in the background after each publication,
-    // so neither the gate nor the recording selects the hint.
     let store = Arc::new(BlockingStore::new(
         RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any().except_hints(),
+            KeyPredicate::any(),
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
-            .except_hints(),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
@@ -313,15 +307,12 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
 async fn a_collection_finishing_after_close_does_not_update_the_replacement_entry() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("replacement-during-collection");
-    // The runtime raises the hint in the background after each publication,
-    // so neither the gate nor the recording selects the hint.
     let store = Arc::new(BlockingStore::new(
         RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any().except_hints(),
+            KeyPredicate::any(),
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
-            .except_hints(),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
@@ -381,11 +372,9 @@ async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the
     let directory = tempdir().expect("tempdir");
     let parked = namespace_id("a-parked");
     let folded = namespace_id("b-folded");
-    // The runtime raises the hint in the background after each publication,
-    // so the gate doesn't select the hint.
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)).except_hints(),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);

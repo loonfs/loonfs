@@ -149,7 +149,7 @@ impl PublisherRegistry {
     /// and the cached head onto the manifest that covers the tail, whether
     /// it published that manifest or found it current (see
     /// [`Self::move_views`]). A fold that publishes then wakes the
-    /// commits that wait at the write stop, and raises the namespace's hint.
+    /// commits that wait at the write stop.
     pub(crate) async fn fold_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -218,8 +218,6 @@ impl PublisherRegistry {
             if let Some(publisher) = self.live_publisher(namespace_id) {
                 publisher.fold_published.send_replace(());
             }
-            self.raise_hint(namespace_id, folded.response.manifest_no)
-                .await;
         }
         Ok(folded)
     }

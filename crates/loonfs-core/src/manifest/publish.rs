@@ -4,7 +4,8 @@ use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::published::{PublicationReport, PublishedManifest};
 use crate::namespace::basis::PublicationBasis;
-use crate::namespace::control::{ensure_namespace_live, LoadedHint, LoadedManifest};
+use crate::namespace::boundary::boundary_manifest_no;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::store::NamespaceStore;
 use crate::phase::Phase;
 use crate::segment::runs::runs_newest_first;
@@ -13,9 +14,7 @@ use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-use loonfs_types::format::control::{
-    encode_control_state, ControlObjectKind, HintPayload, ManifestRef,
-};
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
     encode_namespace_manifest_json, ExtensionEntry, NamespaceManifestEnvelope,
@@ -60,9 +59,6 @@ pub(crate) struct ManifestUpdate<T> {
     pub(crate) current: LoadedManifest,
     /// Whether the call published `current`.
     pub(crate) published: bool,
-    /// The hint that the last attempt to load the current manifest through
-    /// the hint read, or `None` when no attempt did.
-    pub(crate) hint: Option<LoadedHint>,
     /// When the caller started the call's clock.
     started: Observation,
 }
@@ -99,15 +95,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// Each attempt passes the manifest that it builds on to `change`. The first
     /// attempt builds on `basis` without a request while `basis` was checked
-    /// less than the revalidation bound ago, and otherwise loads the current
-    /// manifest through the hint. A `Next` payload is published at the next
-    /// manifest number with put-if-absent. After a lost put, the attempt finds
-    /// the manifest that won by probing above the manifest that the attempt
-    /// built on (see [`publish_manifest_from`]), and the next attempt builds on
-    /// the winner with the lost attempt's check. After `Again`, the next attempt
-    /// builds on the newest manifest above the one that the attempt built on.
-    /// An attempt whose check is at the revalidation bound loads the current
-    /// manifest through the hint instead. The call returns `store_contention`
+    /// less than the revalidation bound ago, and otherwise finds the newest
+    /// manifest from the manifest boundary. A `Next` payload is published at
+    /// the next manifest number with put-if-absent. After a lost put, the
+    /// attempt finds the manifest that won (see [`publish_manifest_from`]),
+    /// and the next attempt builds on the winner with the lost attempt's
+    /// check. After `Again`, the next attempt builds on the newest manifest
+    /// above the one that the attempt built on. An attempt whose check is at
+    /// the revalidation bound finds the newest manifest from the manifest
+    /// boundary instead. The call returns `store_contention`
     /// once [`MAX_CONTENTION_ATTEMPTS`] attempts have each lost their put or
     /// returned `Again`.
     /// The caller starts `clock` before the call, so
@@ -120,10 +116,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// within the bound a put that succeeds proves that the basis had no
     /// successor, and a put that loses proves that it had one (format spec,
     /// "Publishing a manifest").
-    ///
-    /// The call doesn't raise the hint. The runtime that published the manifest
-    /// raises the hint afterward with
-    /// [`NamespaceStore::raise_hint`].
     pub(crate) async fn update_manifest<T, F, Fut>(
         &self,
         basis: Option<PublicationBasis>,
@@ -135,13 +127,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
     {
         let mut next = basis.map(NextAttempt::BuildOn);
-        let mut hint = None;
         let mut attempt = 0;
-        let update = |response, current, published, hint| ManifestUpdate {
+        let update = |response, current, published| ManifestUpdate {
             response,
             current,
             published,
-            hint,
             started: clock.origin(),
         };
         loop {
@@ -165,8 +155,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Some(current) => current,
                 None => {
                     let checked = clock.observe();
-                    let (manifest, loaded) = self.load_current_manifest_with_hint().await?;
-                    hint = Some(loaded);
+                    let manifest = self.load_current_manifest().await?;
                     PublicationBasis { manifest, checked }
                 }
             };
@@ -182,7 +171,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         .await?;
                     let (lost_to, winner) = match outcome {
                         ManifestPublicationOutcome::Published(published) => {
-                            return Ok(update(result, published, true, hint));
+                            return Ok(update(result, published, true));
                         }
                         ManifestPublicationOutcome::CoveredByCurrent(winner) => {
                             ("covered_by_current", winner)
@@ -207,7 +196,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     }));
                 }
                 ManifestChange::Finished(result) => {
-                    return Ok(update(result, current.manifest, false, hint));
+                    return Ok(update(result, current.manifest, false));
                 }
                 ManifestChange::Again => next = Some(NextAttempt::BuildAbove(current)),
             }
@@ -248,7 +237,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// Returns `None` when `basis` was checked the revalidation bound ago or
     /// longer, before the probe or when its response arrives, and the caller then
-    /// loads the current manifest through the hint. The basis had no successor
+    /// finds the newest manifest from the manifest boundary. The basis had no successor
     /// when it was checked, so every manifest above it was published after the
     /// check. Within the bound, such a manifest is younger than the grace
     /// window, so garbage collection hasn't deleted any of them. The probe
@@ -268,47 +257,20 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .then(|| newest.unwrap_or_else(|| basis.manifest.clone())))
     }
 
-    /// Publishes the hint of a new namespace, which points to manifest 1.
-    ///
-    /// The put of the hint decides whether the ID is new (format spec,
-    /// "Creating a namespace"). Manifest 1 can't, because garbage collection
-    /// deletes it once a successor is old enough. When the hint exists, the
-    /// call reads the current manifest through it, and returns
-    /// `namespace_exists`, or `namespace_deleted` when that manifest is a
-    /// tombstone. A hint without a manifest belongs to a creation that failed
-    /// before it wrote manifest 1, and the call then returns `Ok`, so the
-    /// caller writes manifest 1 with [`Self::publish_first_manifest`].
-    pub(crate) async fn publish_first_hint(&self) -> Result<()> {
-        let first = HintPayload {
-            namespace_id: self.namespace_id.clone(),
-            manifest_no: ManifestNo(1),
-        };
-        let object_key = loonfs_objectstore::keys::hint(&self.namespace_id);
-        let bytes = encode_control_state(ControlObjectKind::Hint, &first)
-            .expect("a namespace hint should encode");
-        match self
-            .store
-            .put_if_absent(&object_key, Bytes::from(bytes))
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(ObjectStoreError::PreconditionFailed { .. }) => {
-                match self
-                    .load_current_manifest_if_present()
-                    .await
-                    .map_err(CoreError::ControlObjectLoad)?
-                {
-                    Some(current) => Err(existing_namespace(self.namespace_id.clone(), &current)),
-                    None => Ok(()),
-                }
-            }
-            Err(error) => Err(CoreError::store(&object_key, &error)),
+    /// Returns `namespace_exists`, or `namespace_deleted` for a tombstone,
+    /// when the namespace's newest manifest exists, so that a create or fork
+    /// for a taken ID writes nothing (format spec, "Creating a namespace").
+    pub(crate) async fn ensure_namespace_absent(&self) -> Result<()> {
+        match self.load_current_manifest_if_present().await? {
+            Some(current) => Err(existing_namespace(self.namespace_id.clone(), &current)),
+            None => Ok(()),
         }
     }
 
     /// Publishes manifest 1 of a new namespace with put-if-absent, after
-    /// [`Self::publish_first_hint`], and returns `namespace_exists` or
-    /// `namespace_deleted` when another creation's manifest 1 won the put.
+    /// [`Self::ensure_namespace_absent`], and returns `namespace_exists` or
+    /// `namespace_deleted` when another creation's manifest 1 won the put, or
+    /// when manifest 1 is at or below the manifest boundary.
     pub(crate) async fn publish_first_manifest(
         &self,
         payload: NamespaceManifestPayload,
@@ -330,9 +292,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `current`, or as manifest 1 when `current` is `None`.
     ///
     /// After a put that loses, the call finds the current manifest by probing
-    /// above `current` (see [`find_current_above`]). It loads the current
-    /// manifest through the hint instead when `current` is `None` or was checked
-    /// the revalidation bound ago or longer.
+    /// above `current` (see [`find_current_above`]). It finds the newest
+    /// manifest from the manifest boundary instead when `current` is `None` or
+    /// was checked the revalidation bound ago or longer.
+    ///
+    /// After a put that succeeds, the call reads the manifest boundary (see
+    /// [`Self::settle_against_boundary`]).
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -403,14 +368,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
         {
             Ok(_) => {
                 ensure_publication_in_budget(&object_key, clock)?;
-                // This process's next read of the namespace starts from the
-                // published manifest.
-                super::load::cache_manifest(
-                    &self.segment_cache,
-                    &candidate,
-                    &Arc::new(runs_newest_first(candidate.payload())),
-                );
-                ManifestPublicationOutcome::Published(candidate.clone())
+                let outcome = self
+                    .settle_against_boundary(&candidate, expected_predecessor)
+                    .await?;
+                if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
+                    // This process's next read of the namespace starts from the
+                    // published manifest.
+                    super::load::cache_manifest(
+                        &self.segment_cache,
+                        &candidate,
+                        &Arc::new(runs_newest_first(candidate.payload())),
+                    );
+                }
+                outcome
             }
             Err(ObjectStoreError::PreconditionFailed { .. }) => self
                 .classify_current_manifest(current, &candidate, expected_predecessor, false)
@@ -495,14 +465,57 @@ impl<S: ObjectStore> NamespaceStore<S> {
         ) {
             ensure_publication_in_budget(object_key, clock)?;
         }
+        if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
+            return self
+                .settle_against_boundary(candidate, expected_predecessor)
+                .await;
+        }
         Ok(outcome)
+    }
+
+    /// Reads the manifest boundary after a put of `candidate` that succeeded,
+    /// and returns `Published` when the candidate is above the boundary or the
+    /// boundary object is missing (format spec, "Publishing a manifest").
+    ///
+    /// A candidate at or below the boundary is at a number that a collection
+    /// emptied, so the put counts as lost. The call then finds the newest
+    /// manifest from the boundary and classifies the candidate against that
+    /// manifest, without a probe above the caller's basis, which is at or below
+    /// the boundary too. A boundary read that fails returns `outcome_unknown`,
+    /// because the call can't tell whether the manifest counts.
+    async fn settle_against_boundary(
+        &self,
+        candidate: &LoadedManifest,
+        expected_predecessor: Option<ManifestNo>,
+    ) -> Result<ManifestPublicationOutcome> {
+        let boundary = match self.load_boundary().await {
+            Ok(boundary) => boundary,
+            Err(error) => {
+                tracing::error!(
+                    namespace_id = %self.namespace_id,
+                    object_key = %candidate.object_key,
+                    error = %error,
+                    "the outcome of a manifest publication is unknown"
+                );
+                return Err(CoreError::OutcomeUnknown {
+                    object_key: candidate.object_key.clone(),
+                    message: error.to_string(),
+                });
+            }
+        };
+        if candidate.payload().manifest_no > boundary_manifest_no(boundary.as_ref()) {
+            return Ok(ManifestPublicationOutcome::Published(candidate.clone()));
+        }
+        self.classify_current_manifest(None, candidate, expected_predecessor, false)
+            .await?
+            .settled_after_conflict(&self.namespace_id)
     }
 
     /// Classifies `candidate` against the manifest that's current after the
     /// candidate's put.
     ///
     /// The function finds that manifest by probing above `basis` (see
-    /// [`find_current_above`]), or loads it through the hint when `basis` is
+    /// [`find_current_above`]), or from the manifest boundary when `basis` is
     /// `None` or the probe returns `None`.
     async fn classify_current_manifest(
         &self,
@@ -517,10 +530,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
         let current = match found {
             Some(found) => Some(found),
-            None => self
-                .load_current_manifest_if_present()
-                .await
-                .map_err(CoreError::ControlObjectLoad)?,
+            None => self.load_current_manifest_if_present().await?,
         };
         Ok(current.map_or(ManifestKind::Installable, |current| {
             classify_current(

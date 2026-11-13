@@ -7,7 +7,7 @@ use loonfs::{
     CommitId, CommitSeq, CompleteUploadBody, DestinationBehavior, ErrorCode, MetadataCache,
     NamespaceId, PutFileOptions, SharedObjectStore, UploadMode,
 };
-use loonfs_objectstore::keys::hint;
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::Checksum;
 use loonfs_types::{UploadContentClaim, UploadSessionStatus};
@@ -680,7 +680,11 @@ fn begin_upload_rejects_missing_and_unreadable_namespaces() {
     fs.begin_upload_blocking(&namespace_id)
         .expect("a live namespace admits uploads");
 
-    block_on(raw_store.delete(&hint(&namespace_id))).expect("delete hint");
+    for key in block_on(raw_store.list_prefix(&metadata_manifest_prefix(&namespace_id)))
+        .expect("list manifests")
+    {
+        block_on(raw_store.delete(&key)).expect("delete a manifest");
+    }
     assert_core_error_kind(
         fs.begin_upload_blocking(&namespace_id),
         ErrorCode::NamespaceNotFound,
@@ -712,7 +716,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
         .expect("create head-bad namespace");
     block_on(replace_object(
         &raw_store,
-        &hint(&head_bad),
+        &metadata_manifest_object(&head_bad, &loonfs_types::ManifestNo(1)),
         Bytes::from_static(br#"{"not":"a head"}"#),
     ))
     .expect("corrupt head");

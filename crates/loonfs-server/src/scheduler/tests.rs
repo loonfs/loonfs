@@ -19,8 +19,7 @@ use loonfs_test_support::stores::{
     RecordedOperation, RecordingStore,
 };
 use loonfs_test_support::test_actor;
-use loonfs_types::format::control::{decode_control_object, ControlObjectKind, HintPayload};
-use loonfs_types::{EffectiveLimit, ManifestNo};
+use loonfs_types::EffectiveLimit;
 use std::assert_matches;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -277,12 +276,6 @@ async fn seed_writer(store: &SharedObjectStore) -> (LoonFs<Writable>, u64) {
 }
 
 /// Creates a namespace whose WAL tail holds one unfolded commit.
-///
-/// The commit returns before the writer raises the hint to the manifest that
-/// claimed the writer epoch, so the seed waits for the writer to finish that
-/// raise. A later publication's raise would otherwise sometimes lose its
-/// compare-and-swap to the commit's raise and leave the hint one manifest
-/// behind.
 async fn seed_unfolded_tail(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) {
     writer
         .create_namespace(namespace_id, &test_actor())
@@ -294,35 +287,7 @@ async fn seed_unfolded_tail(writer: &LoonFs<Writable>, namespace_id: &NamespaceI
         .put_file("/tail.txt", b"unfolded", &test_actor())
         .await
         .expect("write the tail");
-    writer.drain().await.expect("raise the hint");
-}
-
-/// Returns the manifest number that the namespace's hint records.
-async fn hint_manifest_no(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> ManifestNo {
-    let bytes = store
-        .get(&loonfs_objectstore::keys::hint(namespace_id), None)
-        .await
-        .expect("read the hint")
-        .expect("the hint exists");
-    decode_control_object::<HintPayload>(&bytes, ControlObjectKind::Hint)
-        .expect("decode the hint")
-        .payload()
-        .manifest_no
-}
-
-/// Checks that the namespace's hint records the current manifest.
-async fn assert_hint_at_current_manifest(store: &dyn ObjectStore, namespace_id: &NamespaceId) {
-    let current = loonfs_core::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the current manifest")
-        .manifest()
-        .manifest_no;
-    assert_eq!(
-        hint_manifest_no(store, namespace_id).await,
-        current,
-        "the runtime raises the hint to the current manifest"
-    );
+    writer.drain().await.expect("drain");
 }
 
 async fn keys_under(store: &dyn ObjectStore, prefix: &str) -> Vec<String> {
@@ -1093,14 +1058,16 @@ enum Grep {
 }
 
 /// Requests one idle namespace costs in a sweep, and how many of them are
-/// lists. The sweep includes the collection of the namespace's pool. The
-/// retention advance plans from the view, so its share includes a GET of the
-/// WAL number after the manifest and a second manifest HEAD. The docs quote
-/// these numbers.
+/// lists. The sweep includes the collection of the namespace's pool. Each
+/// call finds the namespace's newest manifest with a read of the manifest
+/// boundary, a listing of the manifests, a GET of the newest manifest, and a
+/// second read of the boundary. The retention advance plans from the view,
+/// so its share also includes a GET of the WAL number after the manifest and
+/// a HEAD of the manifest number after it. The docs quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
-    (Grep::NotMaintained, 34, 9),
-    (Grep::Maintained, 38, 9),
-    (Grep::Enabled, 39, 9),
+    (Grep::NotMaintained, 34, 13),
+    (Grep::Maintained, 38, 14),
+    (Grep::Enabled, 39, 14),
 ];
 
 #[tokio::test(start_paused = true)]
@@ -1141,12 +1108,6 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
         // The first sweep collects what the seed left behind, so the sweeps
         // below find nothing to collect and nothing inside its grace.
         scheduler.run_sweep().await.expect("list namespaces");
-        // The seed's publications, the publications that enabled each index,
-        // and the first sweep's index builds each raised their namespace's
-        // hint, so the sweeps below start from hints at the current manifests.
-        for namespace_id in &names {
-            assert_hint_at_current_manifest(base.as_ref(), namespace_id).await;
-        }
         // An index's publication drops the runtime's cached head, so this
         // sweep loads each head again, and the sweep below finds it cached,
         // as an idle namespace's sweeps do.
@@ -1236,8 +1197,10 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_call() {
         .filter(|operation| operation.key().starts_with("namespaces/stray/"))
         .collect();
     // The metadata call, the grep build, the retention advance, and
-    // collection each read the hint once.
-    assert_eq!(stray.len(), 4, "{stray:?}");
+    // collection each look for the newest manifest: a read of the manifest
+    // boundary, a listing of the manifests, and a second read of the
+    // boundary.
+    assert_eq!(stray.len(), 12, "{stray:?}");
     for call in ["metadata", "grep_index", "retention", "gc"] {
         assert_eq!(
             server.counter("loonfs.maintenance.sweep_failures", &[("call", call)]),

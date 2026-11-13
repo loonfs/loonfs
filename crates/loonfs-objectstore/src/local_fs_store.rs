@@ -910,8 +910,8 @@ mod tests {
 
     use super::LocalFsStore;
     use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
-    use crate::keys::{hint, upload_session};
-    use crate::ObjectStoreExtension;
+    use crate::keys::{boundary, upload_session};
+    use crate::{GetIfChangedOutcome, ObjectStoreExtension};
     use bytes::Bytes;
     use futures::{stream, StreamExt};
     use std::assert_matches;
@@ -937,6 +937,39 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             crate::assembly::READ_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn a_read_with_an_etag_returns_the_body_only_after_the_object_changes() {
+        let temp_dir = test_dir("get-if-changed");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        let key = "control/object";
+        assert_eq!(
+            store.get_if_changed(key, "absent").await.expect("read"),
+            None
+        );
+
+        let first = store
+            .put_if_absent(key, Bytes::from_static(b"one"))
+            .await
+            .expect("create");
+        let first_etag = first.etag.expect("etag");
+        assert_eq!(
+            store.get_if_changed(key, &first_etag).await.expect("read"),
+            Some(GetIfChangedOutcome::Unchanged)
+        );
+
+        let second = store
+            .compare_and_swap(key, &first_etag, Bytes::from_static(b"two"))
+            .await
+            .expect("replace");
+        let Some(GetIfChangedOutcome::Changed(body)) =
+            store.get_if_changed(key, &first_etag).await.expect("read")
+        else {
+            panic!("a replaced object returns its body");
+        };
+        assert_eq!(body.bytes, Bytes::from_static(b"two"));
+        assert_eq!(body.metadata.etag, second.etag);
     }
 
     #[tokio::test]
@@ -974,7 +1007,7 @@ mod tests {
     async fn listing_tolerates_entries_that_vanish_mid_walk() {
         let temp_dir = test_dir("listing-races");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let key = boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::CreateIfAbsent)
             .await
@@ -986,7 +1019,7 @@ mod tests {
         // listed the entry but the stat answers NotFound. Broken symlinks
         // reproduce that window deterministically.
         let dir = temp_dir.path().join("namespaces/ns-1");
-        std::os::unix::fs::symlink(dir.join("missing"), dir.join(".hint.json.tmp-1-2"))
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join(".boundary.json.tmp-1-2"))
             .expect("dangling scratch entry");
         std::os::unix::fs::symlink(dir.join("missing"), dir.join("vanished.json"))
             .expect("dangling plain entry");
@@ -1009,7 +1042,7 @@ mod tests {
         let vanished = temp_dir.path().join("vanished.json");
 
         let answer = LocalFsStore::file_checksum(
-            "namespaces/ns-1/hint.json",
+            "namespaces/ns-1/boundary.json",
             &vanished,
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         )
@@ -1025,7 +1058,7 @@ mod tests {
         fs::create_dir(&directory).expect("create directory");
 
         let error = LocalFsStore::file_checksum(
-            "namespaces/ns-1/hint.json",
+            "namespaces/ns-1/boundary.json",
             &directory,
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         )
@@ -1038,7 +1071,7 @@ mod tests {
     async fn ranged_reads_answer_their_range_and_refuse_impossible_ones() {
         let temp_dir = test_dir("ranged-reads");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let key = boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
         let payload = Bytes::from_static(b"0123456789");
         store
             .put(&key, payload.clone(), PutMode::CreateIfAbsent)
@@ -1083,7 +1116,9 @@ mod tests {
         );
         assert!(store
             .get(
-                &hint(&loonfs_types::NamespaceId::parse("ns-missing").expect("valid namespace id")),
+                &boundary(
+                    &loonfs_types::NamespaceId::parse("ns-missing").expect("valid namespace id")
+                ),
                 range(0, 4)
             )
             .await
@@ -1099,7 +1134,7 @@ mod tests {
 
         let temp_dir = test_dir("atomic-replacement");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local fs store"));
-        let key = hint(
+        let key = boundary(
             &loonfs_types::NamespaceId::parse("ns-atomic-replacement").expect("valid namespace id"),
         );
         let mut etag = store
@@ -1200,7 +1235,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compare_and_swap_is_safe_across_store_instances() {
         let temp_dir = test_dir("cross-instance-cas");
-        let key = hint(&loonfs_types::NamespaceId::parse("ns-cas").expect("valid namespace id"));
+        let key =
+            boundary(&loonfs_types::NamespaceId::parse("ns-cas").expect("valid namespace id"));
         let seed = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         seed.put(&key, Bytes::from_static(b"0"), PutMode::CreateIfAbsent)
             .await
@@ -1259,7 +1295,7 @@ mod tests {
         let temp_dir = test_dir("scratch");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key =
-            hint(&loonfs_types::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
+            boundary(&loonfs_types::NamespaceId::parse("ns-scratch").expect("valid namespace id"));
         store
             .put(&key, Bytes::from_static(b"{}"), PutMode::CreateIfAbsent)
             .await
@@ -1269,7 +1305,7 @@ mod tests {
         // write next to the real object as well.
         assert!(temp_dir.path().join(super::STORE_LOCK_FILE_NAME).exists());
         let namespace_dir = temp_dir.path().join("namespaces/ns-scratch");
-        fs::write(namespace_dir.join(".hint.json.tmp-123-456"), b"partial")
+        fs::write(namespace_dir.join(".boundary.json.tmp-123-456"), b"partial")
             .expect("write fake temp file");
 
         let keys = store.list_prefix("").await.expect("list all");
@@ -1283,7 +1319,7 @@ mod tests {
         );
         let temp_shaped = store
             .put(
-                "namespaces/ns-scratch/.hint.json.tmp-9-9",
+                "namespaces/ns-scratch/.boundary.json.tmp-9-9",
                 Bytes::from_static(b"x"),
                 PutMode::CreateIfAbsent,
             )

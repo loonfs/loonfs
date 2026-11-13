@@ -245,7 +245,7 @@ pub(crate) fn endpoint_host_is_proven(uri: &Uri, domain_families: &[&str]) -> bo
 mod tests {
     use super::ConfiguredObjectStore;
     use crate::gcs::GcpGcsStoreConfig;
-    use crate::keys::hint;
+    use crate::keys::boundary;
     use crate::local_fs_store::{LocalFsStore, LocalFsStoreConfig};
     use crate::presign::{
         PresignedPutRequest, AWS_S3_MAX_DIRECT_PUT_BYTES, CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES,
@@ -269,16 +269,17 @@ mod tests {
         let store = ConfiguredObjectStore::local_fs(local_fs_config(&temp_dir, Some("tenant-a")))
             .expect("construct configured local fs store")
             .into_shared();
-        let hint_key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let boundary_key =
+            boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
 
         store
-            .put_if_absent(&hint_key, Bytes::from_static(br#"{"ok":true}"#))
+            .put_if_absent(&boundary_key, Bytes::from_static(br#"{"ok":true}"#))
             .await
             .expect("write scoped object");
 
         let raw_store = LocalFsStore::new(temp_dir.path()).expect("open raw store");
         assert!(raw_store
-            .head(&format!("tenant-a/{hint_key}"))
+            .head(&format!("tenant-a/{boundary_key}"))
             .await
             .expect("head raw scoped object")
             .is_some());
@@ -287,7 +288,7 @@ mod tests {
                 .list_prefix("namespaces/ns-1/")
                 .await
                 .expect("list scoped prefix"),
-            vec![hint_key]
+            vec![boundary_key]
         );
     }
 
@@ -524,12 +525,12 @@ mod tests {
             .into_shared();
 
         let error = store
-            .put_if_absent("../hint.json", Bytes::from_static(br#"{"ok":true}"#))
+            .put_if_absent("../boundary.json", Bytes::from_static(br#"{"ok":true}"#))
             .await
             .expect_err("traversal key should be rejected");
         assert_matches!(
             error,
-            ObjectStoreError::InvalidKey { object_key, .. } if object_key == "../hint.json"
+            ObjectStoreError::InvalidKey { object_key, .. } if object_key == "../boundary.json"
         );
     }
 

@@ -12,11 +12,12 @@ use loonfs_core::test_support::{
 };
 use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::keys::{
-    boundary, content_blob, hint, metadata_manifest_object, pool_record, snapshot_record,
+    boundary, content_blob, metadata_manifest_object, metadata_manifest_prefix, pool_record,
+    snapshot_prefix, snapshot_record,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::{commit_id, namespace_id, numbered_content_id};
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore,
@@ -396,10 +397,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     assert_eq!(created.retention_floor_seq, CommitSeq(0));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![
-            hint(&namespace_id),
-            metadata_manifest_object(&namespace_id, &ManifestNo(1))
-        ],
+        vec![metadata_manifest_object(&namespace_id, &ManifestNo(1))],
         "creation installs manifest one"
     );
 
@@ -429,8 +427,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     let content_key = content_blob(&created.pool_id, &content_ref.content_id);
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
-        keys.iter().all(|key| key == &hint(&namespace_id)
-            || key == &content_key
+        keys.iter().all(|key| key == &content_key
             || key.starts_with(&format!("namespaces/{namespace_id}/manifests/"))
             || key.starts_with(&format!("namespaces/{}/wal/", namespace_id.as_str()))),
         "only control, WAL, and the uploaded content exist before the first fold: {keys:?}"
@@ -603,10 +600,10 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
 
     assert_eq!(
         namespace_keys(&store, &clone_namespace_id).await,
-        vec![
-            hint(&clone_namespace_id),
-            metadata_manifest_object(&clone_namespace_id, &ManifestNo(1))
-        ],
+        vec![metadata_manifest_object(
+            &clone_namespace_id,
+            &ManifestNo(1)
+        )],
         "a fork target installs its own manifest"
     );
 
@@ -659,11 +656,11 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .expect("clone stat");
     assert_eq!(source_entry.content_ref(), clone_entry.content_ref());
     let inherited_ref = source_entry.content_ref().expect("file content").clone();
-    let source_hint = hint(&source_namespace_id);
-    let source_manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&source_namespace_id);
+    let source_boundary = boundary(&source_namespace_id);
+    let source_manifests = metadata_manifest_prefix(&source_namespace_id);
     let guarded = FailStore::new(
         store.clone(),
-        KeyPredicate::new(move |key| key == source_hint || key.starts_with(&source_manifests)),
+        KeyPredicate::new(move |key| key == source_boundary || key.starts_with(&source_manifests)),
         OperationSelector::Read,
         InjectedError::Transport("source head must not be read".to_owned()),
     );
@@ -1177,11 +1174,10 @@ async fn fork_source_snapshot_failure_leaves_target_namespace_absent() {
         "the target must not be installed before the fork snapshot keeps the source basis"
     );
     assert!(
-        store
-            .head(&hint(&source_namespace_id))
+        namespace_store(&store, &source_namespace_id)
+            .load_current_manifest()
             .await
-            .expect("head source head")
-            .is_some(),
+            .is_ok(),
         "the source is untouched"
     );
 }
@@ -1347,17 +1343,6 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
         .await
         .expect("delete");
-    // The runtime that deleted the namespace raises its hint to the tombstone.
-    let tombstone = namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("tombstone")
-        .manifest()
-        .manifest_no;
-    namespace_store(&store, &namespace_id)
-        .raise_hint(tombstone, None)
-        .await
-        .expect("raise the hint");
     let report = namespace_store(&store, &namespace_id)
         .gc(&aged.clock())
         .await
@@ -1372,11 +1357,7 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .await
         .expect("current tombstone");
     // The collections deleted manifests, so they raised the manifest boundary.
-    let mut expected = vec![
-        boundary(&namespace_id),
-        hint(&namespace_id),
-        current.object_key.clone(),
-    ];
+    let mut expected = vec![boundary(&namespace_id), current.object_key.clone()];
     expected.extend(
         current
             .payload()
@@ -1387,15 +1368,39 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
     );
     expected.sort();
     assert_eq!(namespace_keys(&store, &namespace_id).await, expected);
-    assert!(store
-        .head(&hint(&namespace_id))
-        .await
-        .expect("probe hint")
-        .is_some());
 }
 
+/// Returns the kind and key of each request in `operations` whose key is one
+/// of `keys`, and `snapshot` for each put under `snapshots`.
+fn request_order(
+    operations: Vec<RecordedOperation>,
+    keys: &[String],
+    snapshots: &str,
+) -> Vec<(&'static str, String)> {
+    operations
+        .into_iter()
+        .filter_map(|operation| {
+            let kind = match &operation {
+                RecordedOperation::Put { key, .. } if key.starts_with(snapshots) => {
+                    return Some(("put", "snapshot".to_owned()));
+                }
+                RecordedOperation::Put { .. } => "put",
+                RecordedOperation::List { .. } => "list",
+                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
+                _ => return None,
+            };
+            keys.contains(&operation.key().to_owned())
+                .then(|| (kind, operation.key().to_owned()))
+        })
+        .collect()
+}
+
+/// Checks that a create and a fork each look for the new namespace before
+/// their first write, then write the pool record or the fork snapshot, and
+/// then publish manifest 1 with its put and one read of the manifest
+/// boundary. A create or fork of a taken ID writes nothing.
 #[tokio::test]
-async fn creation_and_fork_install_hint_and_manifest_in_order() {
+async fn creation_and_fork_look_up_the_id_before_their_first_write() {
     let directory = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -1407,48 +1412,61 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         .create()
         .await
         .expect("bootstrap");
-    let puts: Vec<_> = store
-        .take()
-        .into_iter()
-        .filter_map(|operation| match operation {
-            RecordedOperation::Put { key, mode, .. } => Some((key, mode)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        puts,
+    let first_manifest = |namespace_id: &NamespaceId| {
         vec![
-            (hint(&source), PutMode::CreateIfAbsent),
-            (pool_record(&created.pool_id), PutMode::CreateIfAbsent),
-            (
-                metadata_manifest_object(&source, &ManifestNo(1)),
-                PutMode::CreateIfAbsent
-            ),
+            ("get", boundary(namespace_id)),
+            ("list", metadata_manifest_prefix(namespace_id)),
+            ("get", boundary(namespace_id)),
         ]
+    };
+    let pool = pool_record(&created.pool_id);
+    let source_manifest = metadata_manifest_object(&source, &ManifestNo(1));
+    assert_eq!(
+        request_order(
+            store.take(),
+            &[
+                boundary(&source),
+                metadata_manifest_prefix(&source),
+                pool.clone(),
+                source_manifest.clone(),
+            ],
+            &snapshot_prefix(&source),
+        ),
+        [
+            first_manifest(&source),
+            vec![
+                ("put", pool),
+                ("put", source_manifest),
+                ("get", boundary(&source)),
+            ],
+        ]
+        .concat()
     );
     store.reset();
     let target = namespace_id("target");
     fork_namespace(&store, &source, &target, &context)
         .await
         .expect("fork");
-    let puts: Vec<_> = store
-        .take()
-        .into_iter()
-        .filter_map(|operation| match operation {
-            RecordedOperation::Put {
-                key,
-                mode: PutMode::CreateIfAbsent,
-                ..
-            } if key.starts_with(&format!("namespaces/{target}/")) => Some(key),
-            _ => None,
-        })
-        .collect();
+    let target_manifest = metadata_manifest_object(&target, &ManifestNo(1));
     assert_eq!(
-        puts,
-        vec![
-            hint(&target),
-            metadata_manifest_object(&target, &ManifestNo(1))
+        request_order(
+            store.take(),
+            &[
+                boundary(&target),
+                metadata_manifest_prefix(&target),
+                target_manifest.clone(),
+            ],
+            &snapshot_prefix(&source),
+        ),
+        [
+            first_manifest(&target),
+            vec![
+                ("put", "snapshot".to_owned()),
+                ("put", target_manifest),
+                ("get", boundary(&target)),
+            ],
         ]
+        .concat()
     );
 
     store.reset();
@@ -1456,11 +1474,11 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         .await
         .expect_err("target exists");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    // The fork writes its fork snapshot, has the target's hint put refused, and
-    // deletes the snapshot.
-    assert_eq!(store.counts().create_if_absent_puts, 2);
+    // The fork finds the target before its first write, so it writes and
+    // deletes nothing.
+    assert_eq!(store.counts().create_if_absent_puts, 0);
     assert_eq!(store.counts().compare_and_swaps, 0);
-    assert_eq!(store.counts().deletes, 1);
+    assert_eq!(store.counts().deletes, 0);
 
     for allow_existing in [false, true] {
         store.reset();
@@ -1484,8 +1502,8 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
                 ErrorCode::NamespaceExists
             );
         }
-        // The hint put is refused, and the create makes no request under
-        // `pools/` and deletes nothing.
+        // The create finds the namespace before its first write, so it
+        // writes and deletes nothing and makes no request under `pools/`.
         let counts = store.counts();
         assert_eq!(
             (
@@ -1493,7 +1511,7 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
                 counts.compare_and_swaps,
                 counts.deletes
             ),
-            (1, 0, 0)
+            (0, 0, 0)
         );
         assert!(store
             .take()
@@ -1502,180 +1520,77 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
     }
 }
 
-/// A create whose hint put is refused reads the existing namespace through
-/// the hint, and a failed read is an error, not absence.
-#[tokio::test]
-async fn a_losing_create_reports_a_failed_hint_read() {
-    for injected in [
-        InjectedError::Transport("hint read failed".to_owned()),
-        InjectedError::PermissionDenied("hint read denied".to_owned()),
-    ] {
-        let directory = tempdir().expect("tempdir");
-        let namespace_id = namespace_id("demo");
-        let failing = FailStore::new(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::exact(hint(&namespace_id)),
-            OperationSelector::Read,
-            injected,
-        );
-        let store = RecordingStore::new(failing, KeyPredicate::any());
-        NamespaceFixture::new(&store, &namespace_id, &default_writer())
-            .create()
-            .await
-            .expect("create");
-        store.inner().fail_all();
-        store.reset();
-        for allow_existing in [false, true] {
-            let error = (if allow_existing {
-                NamespaceFixture::new(&store, &namespace_id, &default_writer())
-                    .create_with_options(&loonfs_core::CreateNamespaceOptions {
-                        allow_existing: true,
-                        ..Default::default()
-                    })
-                    .await
-            } else {
-                NamespaceFixture::new(&store, &namespace_id, &default_writer())
-                    .create()
-                    .await
-            })
-            .expect_err("hint read failed");
-            assert_matches!(error, CoreError::ControlObjectLoad(_));
-        }
-        // Each attempt's hint put is refused, and nothing is deleted.
-        let counts = store.counts();
-        assert_eq!(
-            (
-                counts.create_if_absent_puts,
-                counts.compare_and_swaps,
-                counts.deletes
-            ),
-            (2, 0, 0)
-        );
-    }
-}
-
-/// A create whose hint put is refused reads the existing namespace through
-/// the hint, and a corrupt hint is corruption, not absence.
-#[tokio::test]
-async fn a_losing_create_reports_a_corrupt_hint() {
-    let directory = tempdir().expect("tempdir");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = namespace_id("demo");
-    NamespaceFixture::new(&store, &namespace_id, &default_writer())
-        .create()
-        .await
-        .expect("create");
-    replace_object(
-        &store,
-        &hint(&namespace_id),
-        Bytes::from_static(b"invalid hint"),
-    )
-    .await
-    .expect("corrupt hint");
-    store.reset();
-    for allow_existing in [false, true] {
-        let error = (if allow_existing {
-            NamespaceFixture::new(&store, &namespace_id, &default_writer())
-                .create_with_options(&loonfs_core::CreateNamespaceOptions {
-                    allow_existing: true,
-                    ..Default::default()
-                })
-                .await
-        } else {
-            NamespaceFixture::new(&store, &namespace_id, &default_writer())
-                .create()
-                .await
-        })
-        .expect_err("corrupt hint");
-        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
-    }
-    // Each attempt's hint put is refused, and nothing is deleted.
-    let counts = store.counts();
-    assert_eq!(
-        (
-            counts.create_if_absent_puts,
-            counts.compare_and_swaps,
-            counts.deletes
-        ),
-        (2, 0, 0)
-    );
-}
-
-/// A create of an ID that already has a namespace reports `namespace_exists`
-/// after garbage collection has deleted that namespace's manifest 1, and
-/// writes nothing: the hint decides whether the ID is new, not manifest 1.
+/// Checks that a create whose put of manifest 1 lands after another create's
+/// namespace published a newer manifest and a collection deleted manifest 1
+/// reports `namespace_exists`: the put succeeds, and the read of the manifest
+/// boundary after it counts the put as lost. The namespace's newest manifest
+/// stays the same, and a create that starts afterward writes nothing.
 #[tokio::test]
 async fn a_create_after_the_collection_of_manifest_one_reports_the_id_as_taken() {
     let directory = tempdir().expect("tempdir");
-    let store = RecordingStore::new(
+    let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
-    );
+    ));
     let context = default_writer();
     let namespace_id = namespace_id("demo");
-    let fixture = NamespaceFixture::new(&store, &namespace_id, &context);
-    fixture.create().await.expect("create");
-    fixture
-        .write_file_bytes("/keep.txt", b"keep me", Some(&commit_id("keep")))
-        .await
-        .expect("write");
-    // A fold publishes manifest 2, the runtime raises the hint to it, and a
-    // collection after the grace window deletes manifest 1.
-    loonfs_core::test_support::folded_manifest(&fixture.namespace)
-        .await
-        .expect("fold the WAL tail");
+    let manifest_one = metadata_manifest_object(&namespace_id, &ManifestNo(1));
+    let blocked = BlockingStore::new(
+        Arc::clone(&store),
+        KeyPredicate::exact(&manifest_one),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    blocked.block_next();
+    let late_fixture = NamespaceFixture::new(&blocked, &namespace_id, &context);
+    let late = late_fixture.create();
+    let other = async {
+        blocked.wait_until_blocked().await;
+        let fixture = NamespaceFixture::new(&store, &namespace_id, &context);
+        fixture.create().await.expect("create");
+        fixture
+            .write_file_bytes("/keep.txt", b"keep me", Some(&commit_id("keep")))
+            .await
+            .expect("write");
+        // A fold publishes a newer manifest, and a collection after the grace
+        // window deletes manifest 1.
+        loonfs_core::test_support::folded_manifest(&fixture.namespace)
+            .await
+            .expect("fold the WAL tail");
+        let mut aged = context.clone();
+        aged.now_ms = u64::MAX / 2;
+        for _ in 0..2 {
+            namespace_store(&store, &namespace_id)
+                .gc(&aged.clock())
+                .await
+                .expect("collect manifest 1");
+        }
+        assert!(store
+            .head(&manifest_one)
+            .await
+            .expect("probe manifest 1")
+            .is_none());
+        blocked.release();
+    };
     let namespace = namespace_store(&store, &namespace_id);
+    let (late, ()) = tokio::join!(late, other);
     let current = namespace
         .load_current_manifest()
         .await
         .expect("current manifest")
         .manifest()
         .manifest_no;
-    assert!(current > ManifestNo(1), "the fold published {current:?}");
-    namespace
-        .raise_hint(current, None)
-        .await
-        .expect("raise the hint");
-    let mut aged = context.clone();
-    aged.now_ms = u64::MAX / 2;
-    for _ in 0..2 {
-        namespace
-            .gc(&aged.clock())
-            .await
-            .expect("collect manifest 1");
-    }
-    let manifest_one = metadata_manifest_object(&namespace_id, &ManifestNo(1));
-    assert!(store
-        .head(&manifest_one)
-        .await
-        .expect("probe manifest 1")
-        .is_none());
-
-    store.reset();
-    let error = NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect_err("the ID has a namespace");
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    // The hint put is refused, and the create reads the namespace through
-    // the hint instead of recreating manifest 1.
-    let counts = store.counts();
     assert_eq!(
-        (
-            counts.create_if_absent_puts,
-            counts.compare_and_swaps,
-            counts.deletes
-        ),
-        (1, 0, 0)
+        late.expect_err("the ID has a namespace").code(),
+        ErrorCode::NamespaceExists
     );
+    // The late put created manifest 1 at the emptied number, below the
+    // boundary.
     assert!(store
         .head(&manifest_one)
         .await
         .expect("probe manifest 1")
-        .is_none());
+        .is_some());
+    assert!(current > ManifestNo(1), "the fold published {current:?}");
     assert_eq!(
         namespace
             .load_current_manifest()
@@ -1692,14 +1607,34 @@ async fn a_create_after_the_collection_of_manifest_one_reports_the_id_as_taken()
             .bytes,
         b"keep me"
     );
+
+    store.reset();
+    let error = NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
+        .await
+        .expect_err("the ID has a namespace");
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+    // The create finds the namespace before its first write.
+    let counts = store.counts();
+    assert_eq!(
+        (
+            counts.create_if_absent_puts,
+            counts.compare_and_swaps,
+            counts.deletes
+        ),
+        (0, 0, 0)
+    );
 }
 
 #[tokio::test]
-async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
+async fn a_creator_losing_manifest_one_leaves_no_extra_objects() {
     let directory = tempdir().expect("tempdir");
     let store = loonfs_test_support::stores::BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(hint(&namespace_id("demo"))),
+        KeyPredicate::exact(metadata_manifest_object(
+            &namespace_id("demo"),
+            &ManifestNo(1),
+        )),
         OperationSelector::PutCreateIfAbsent,
     );
     let namespace_id = namespace_id("demo");
@@ -1723,10 +1658,18 @@ async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
     assert_eq!(winner.namespace_id, namespace_id);
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![
-            hint(&namespace_id),
-            metadata_manifest_object(&namespace_id, &ManifestNo(1))
-        ]
+        vec![metadata_manifest_object(&namespace_id, &ManifestNo(1))]
+    );
+    assert_eq!(
+        store
+            .list_prefix("pools/")
+            .await
+            .expect("pool records")
+            .into_iter()
+            .filter(|key| key.ends_with("/pool.json"))
+            .count(),
+        1,
+        "the losing create deletes its pool record"
     );
 }
 

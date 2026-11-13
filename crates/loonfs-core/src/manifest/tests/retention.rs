@@ -1749,7 +1749,7 @@ async fn snapshot_basis_verification_store_failure_deletes_the_record() {
         .expect("initial manifest");
     let store = loonfs_test_support::stores::FailStore::new(
         store,
-        loonfs_test_support::stores::KeyPredicate::exact(loonfs_objectstore::keys::hint(
+        loonfs_test_support::stores::KeyPredicate::exact(loonfs_objectstore::keys::boundary(
             &namespace_id,
         )),
         loonfs_test_support::stores::OperationSelector::Read,
@@ -1789,11 +1789,11 @@ async fn wal_object_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
 async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let hint_key = hint(&namespace_id);
+    let boundary_key = boundary(&namespace_id);
     let wal_prefix = wal_prefix(&namespace_id);
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::new(move |key| key == hint_key || key.starts_with(&wal_prefix)),
+        KeyPredicate::new(move |key| key == boundary_key || key.starts_with(&wal_prefix)),
     );
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context)
@@ -3170,10 +3170,6 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
     .expect("advance floor")
     .response;
     assert!(floor.retention_floor_seq > snapshot.captured_seq);
-    // The runtime that published the advance raises the hint.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
     let aged = writer_at("gc", u64::MAX / 2);
     crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&aged.clock())

@@ -691,7 +691,6 @@ pub(crate) struct RuntimeStoreProbe {
     pub(crate) fail_wal_publish: Arc<FailStore<SharedObjectStore>>,
     pub(crate) wal_gets: Arc<RecordingStore<SharedObjectStore>>,
     pub(crate) manifest_gets: Arc<RecordingStore<SharedObjectStore>>,
-    pub(crate) hint_gets: Arc<RecordingStore<SharedObjectStore>>,
 }
 
 impl RuntimeStoreProbe {
@@ -706,12 +705,8 @@ impl RuntimeStoreProbe {
             wal_gets.clone() as SharedObjectStore,
             KeyPredicate::manifest(namespace_id),
         ));
-        let hint_gets = Arc::new(RecordingStore::new(
-            manifest_gets.clone() as SharedObjectStore,
-            KeyPredicate::hint(namespace_id),
-        ));
         let fail_wal_publish = Arc::new(FailStore::new(
-            hint_gets.clone() as SharedObjectStore,
+            manifest_gets.clone() as SharedObjectStore,
             KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(namespace_id)),
             OperationSelector::PutCreateIfAbsent,
             InjectedError::PreconditionFailed,
@@ -721,7 +716,6 @@ impl RuntimeStoreProbe {
             fail_wal_publish,
             wal_gets,
             manifest_gets,
-            hint_gets,
         }
     }
 
@@ -743,7 +737,6 @@ impl RuntimeStoreProbe {
 
     pub(crate) fn reset_control_get_counts(&self) {
         self.manifest_gets.reset();
-        self.hint_gets.reset();
         self.reset_wal_get_count();
     }
 
@@ -753,10 +746,6 @@ impl RuntimeStoreProbe {
 
     pub(crate) fn manifest_get_count(&self) -> usize {
         self.manifest_gets.count(OperationSelector::Read)
-    }
-
-    pub(crate) fn hint_get_count(&self) -> usize {
-        self.hint_gets.count(OperationSelector::Read)
     }
 }
 
