@@ -825,7 +825,7 @@ mod tests {
             .engine()
             .bootstrap_namespace(
                 &loonfs_test_support::test_actor(),
-                &crate::options::CreateNamespaceOptions {
+                &loonfs_types::options::CreateNamespaceOptions {
                     access: NamespaceAccess::Acl {
                         principal_scope: principal_scope.clone(),
                         root_grants: AccessGrants::new(BTreeMap::from([(

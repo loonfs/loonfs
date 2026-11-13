@@ -31,7 +31,6 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PutMode;
@@ -41,6 +40,7 @@ use loonfs_test_support::stores::{
     MetadataMapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
 };
 use loonfs_types::options::AttributeInclusion;
+use loonfs_types::options::DeleteNamespaceOptions;
 use std::assert_matches;
 use tempfile::tempdir;
 
@@ -2584,7 +2584,7 @@ async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
                     .engine()
                     .bootstrap_namespace(
                         &loonfs_test_support::test_actor(),
-                        &crate::options::CreateNamespaceOptions {
+                        &loonfs_types::options::CreateNamespaceOptions {
                             allow_existing,
                             ..Default::default()
                         },

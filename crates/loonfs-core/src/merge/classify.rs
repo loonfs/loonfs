@@ -14,6 +14,7 @@ use super::state::{Edge, InodeState, StateReader};
 use crate::authorize::{require, Absence, Authorizer};
 use crate::commit::wal_size::merge_operation_bytes;
 use crate::error::{CoreError, Result};
+use crate::path::mutation_path::name_keys;
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
@@ -35,15 +36,6 @@ pub(super) struct SubtreeCheck {
     pub(super) path: AbsolutePath,
     ours: InodeState,
     theirs: Option<MergeConflictVersion>,
-}
-
-/// Returns the name keys of `path`'s components, which compare names as
-/// path lookups do.
-fn name_keys(path: &AbsolutePath) -> Vec<NameKey> {
-    path.components()
-        .iter()
-        .map(|component| NameKey::for_display_name(&component.to_display_name()))
-        .collect()
 }
 
 /// The reads and the results of one merge's classification.

@@ -11,6 +11,7 @@ use super::{
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::children_page::VisibleChildEntry;
+use crate::path::mutation_path::name_keys;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AbsolutePath, AttributesProjection, CommitSeq, InodeId, NameKey, ROOT_INODE_ID,
@@ -261,11 +262,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         absolute_path: &AbsolutePath,
         preload_leaf_revision: LeafRevisionPreload,
     ) -> Result<()> {
-        let component_name_keys: Vec<NameKey> = absolute_path
-            .components()
-            .iter()
-            .map(|component| NameKey::for_display_name(&component.to_display_name()))
-            .collect();
+        let component_name_keys = name_keys(absolute_path);
 
         let is_root_path = absolute_path.is_root();
         let mut current_inode_id = ROOT_INODE_ID;

@@ -95,7 +95,6 @@ mod manifest;
 mod merge;
 mod namespace;
 mod object_cache;
-mod options;
 mod permits;
 mod phase;
 mod pool_store;
@@ -214,6 +213,7 @@ pub use error::{
     MetadataProjectionLoadError, Result, WriterFence,
 };
 pub use gc::GcOptions;
+pub use loonfs_types::options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use manifest::{
     ExtensionBasis, ExtensionPublication, FloorObjectReport, FoldWalOutcome, FoldWalResponse,
     FoldedWalTail, ManifestLoadError, PublicationReport, PublishedManifest, RetentionPlan,
@@ -223,7 +223,6 @@ pub use merge::{
     MergeAllowance, MergePlan, MergeRequest, MergeReservation, ReplayPlan, MERGE_COMMITS_PAGE_BYTES,
 };
 pub use namespace::store::NamespaceStore;
-pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
     FileRevisionsPage, ObjectRange, RetainedRevisionsPage, RetainedRevisionsPageCursor,

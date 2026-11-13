@@ -30,14 +30,14 @@ fn test_actor() -> ActorId {
 impl<S: ObjectStore + Clone> NamespaceFixture<S> {
     /// Creates the namespace with the default options.
     pub async fn create(&self) -> Result<NamespaceMetadata> {
-        self.create_with_options(&crate::options::CreateNamespaceOptions::default())
+        self.create_with_options(&loonfs_types::options::CreateNamespaceOptions::default())
             .await
     }
 
     /// Creates the namespace with `options`.
     pub async fn create_with_options(
         &self,
-        options: &crate::options::CreateNamespaceOptions,
+        options: &loonfs_types::options::CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         self.engine()
             .bootstrap_namespace(&test_actor(), options)

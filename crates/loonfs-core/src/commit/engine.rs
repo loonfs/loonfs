@@ -12,10 +12,10 @@ use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
-use crate::options::DeleteNamespaceOptions;
 use crate::time::{Observation, OperationClock};
 use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::options::DeleteNamespaceOptions;
 use loonfs_types::{
     Commit, CommitId, CommitSeq, DeleteNamespaceResponse, ManifestNo, NamespaceId, WalNo, WriterId,
 };

@@ -8,10 +8,10 @@ use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
-use crate::options::DeleteNamespaceOptions;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
+use loonfs_types::options::DeleteNamespaceOptions;
 use loonfs_types::DeleteNamespaceResponse;
 use std::sync::Mutex;
 

@@ -141,6 +141,29 @@ pub(super) enum BindingChange {
 }
 
 impl BindingChange {
+    /// Returns the parent and name that a create, a move or a restore binds
+    /// the inode to, or `None` for a delete.
+    pub(super) fn destination(&self) -> Option<(InodeId, &DisplayName)> {
+        match self {
+            Self::Create {
+                parent_inode_id,
+                display_name,
+                ..
+            }
+            | Self::Move {
+                parent_inode_id,
+                display_name,
+                ..
+            }
+            | Self::RestoreDeleted {
+                parent_inode_id,
+                display_name,
+                ..
+            } => Some((*parent_inode_id, display_name)),
+            Self::Delete { .. } => None,
+        }
+    }
+
     /// Returns the precondition that the change to `inode_id` needs beyond
     /// its operation, which only a file's delete has.
     pub(super) fn precondition(&self, inode_id: InodeId) -> Option<CommitPrecondition> {
