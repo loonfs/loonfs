@@ -45,8 +45,7 @@ impl Client {
         .await
     }
 
-    /// Lists snapshots, including expired snapshots that garbage collection
-    /// hasn't deleted.
+    /// Lists the snapshots that haven't expired or been deleted.
     pub fn list_snapshots(&self, namespace_id: &NamespaceId) -> SnapshotsPager {
         Pager::with_state(
             (self.clone(), namespace_id.clone()),

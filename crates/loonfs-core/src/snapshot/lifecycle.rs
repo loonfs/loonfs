@@ -1,9 +1,8 @@
 //! Snapshot reads, expiry, extension, and deletion.
 //!
-//! The snapshot API reads and changes user snapshots. An unexpired snapshot can be read and forked,
-//! and an expired one can't, but it stays listed until garbage collection
-//! deletes it. A deleted snapshot can't be used or retrieved, and the snapshot
-//! listing leaves it out.
+//! The snapshot API reads and changes user snapshots. An unexpired snapshot can be read and forked.
+//! An expired or deleted snapshot can't be used or retrieved, and the snapshot
+//! listing leaves it out, but its record stays until garbage collection deletes it.
 
 use super::read_basis::load_snapshot_read_basis_from_record;
 use super::record::{encode_snapshot_record, LoadedSnapshotRecord};
@@ -69,13 +68,17 @@ pub(crate) fn ensure_live(
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Loads one snapshot by id, as the snapshot listing returns it,
-    /// including an expired snapshot that garbage collection hasn't deleted.
-    /// A missing id, the id of a deleted snapshot, or the id of a fork snapshot
+    /// Loads one snapshot by id, as the snapshot listing returns it. A missing
+    /// id, the id of a deleted snapshot, the id of a snapshot that expired at or
+    /// before the wall-clock time of the call, or the id of a fork snapshot
     /// returns `snapshot_not_found`.
     pub async fn get_snapshot(&self, snapshot_id: &SnapshotId) -> Result<Snapshot> {
         self.namespace.load_current_manifest().await?;
-        let loaded = self.namespace.load_user_snapshot(snapshot_id).await?;
+        let now_ms = self.now_ms();
+        let loaded = ensure_live(
+            self.namespace.load_user_snapshot(snapshot_id).await?,
+            now_ms,
+        )?;
         Ok(super::snapshot_summary(loaded.state))
     }
 }

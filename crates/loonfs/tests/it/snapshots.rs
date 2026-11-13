@@ -331,11 +331,11 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
     );
 }
 
-/// Checks that an expired snapshot can't be read or forked, and that it
-/// stays in the snapshot listing and the snapshot inventory with its past
-/// expiry.
+/// Checks that an expired snapshot can't be read, forked, or retrieved, that
+/// the snapshot listing leaves it out, and that it stays in the snapshot
+/// inventory with its past expiry.
 #[tokio::test]
-async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed() {
+async fn an_expired_snapshot_is_not_found_and_not_listed_but_stays_in_the_inventory() {
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(
         1_750_000_000_000,
@@ -409,13 +409,10 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
     let listed = list_snapshots(&writer.read_only(), &source)
         .await
         .expect("list snapshots");
-    assert_eq!(listed.snapshots, vec![snapshot.clone()]);
-    assert_eq!(
-        reader
-            .get_snapshot(&snapshot.snapshot_id)
-            .await
-            .expect("retrieve the expired snapshot"),
-        snapshot
+    assert!(listed.snapshots.is_empty());
+    assert_core_error_kind(
+        reader.get_snapshot(&snapshot.snapshot_id).await,
+        ErrorCode::SnapshotNotFound,
     );
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("snapshot-expiry"));
     let snapshots = collect_snapshot_records(&maintenance, &source)

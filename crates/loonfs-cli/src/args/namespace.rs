@@ -126,7 +126,7 @@ pub(crate) enum SnapshotCommand {
     Create(SnapshotCreateArgs),
     /// List snapshots in snapshot ID order.
     ///
-    /// Expired snapshots remain listed until garbage collection deletes them.
+    /// Expired and deleted snapshots are left out.
     List(SnapshotListArgs),
     /// Keep an unexpired snapshot available for longer.
     Extend(SnapshotExtendArgs),

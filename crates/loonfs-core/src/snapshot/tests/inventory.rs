@@ -2,8 +2,9 @@
 //!
 //! The listing exists so a snapshot can be found again once its creation response
 //! is gone, so what it must never do is hide a record that still roots a
-//! basis. These tests pin exactly that: labels do not identify records,
-//! delete removes them from the answer, and a passed expiry does not.
+//! basis. These tests pin exactly that: labels do not identify records, and
+//! a delete or a passed expiry hides a snapshot from the caller's listing but
+//! not from the inventory.
 
 use super::*;
 use loonfs_objectstore::ListedObject;
@@ -486,9 +487,8 @@ async fn snapshot_record_cursor_is_bound_to_its_namespace() {
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
 
-/// Checks that the snapshot listing returns user snapshots, expired ones
-/// included, and leaves out fork snapshots, while the snapshot inventory returns
-/// every snapshot.
+/// Checks that the snapshot listing returns user snapshots and leaves out fork
+/// snapshots, while the snapshot inventory returns every snapshot.
 #[tokio::test]
 async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapshots() {
     let temp_dir = tempdir().expect("tempdir");
@@ -508,7 +508,7 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
                 &store,
                 &namespace_id,
                 &format!("snapshot-{index}"),
-                Some(context.now_ms - 1),
+                None,
                 &context,
             )
             .await,
@@ -540,7 +540,7 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
         .await
         .expect("list snapshots");
         for snapshot in page.items {
-            assert_eq!(snapshot.expires_at_ms, Some(context.now_ms - 1));
+            assert_eq!(snapshot.expires_at_ms, None);
             listed.insert(snapshot.snapshot_id);
         }
         let Some(next_cursor) = page.next_cursor else {
@@ -605,8 +605,9 @@ async fn a_refused_owner_writes_no_record_to_find() {
 }
 
 /// Checks that a snapshot read by ID matches its listed row, that a snapshot
-/// read by ID returns an expired snapshot, and that a read through an
-/// expired snapshot or a fork snapshot returns `snapshot_not_found`.
+/// read by ID and the snapshot listing leave out an expired snapshot that the
+/// inventory still returns, and that a read through an expired snapshot or a
+/// fork snapshot returns `snapshot_not_found`.
 #[tokio::test]
 async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_expiry() {
     let temp_dir = tempdir().expect("tempdir");
@@ -649,12 +650,21 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
         .expect("read snapshot");
         assert_eq!(&read, row);
     }
-    let expired =
-        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .get_snapshot(&expiring)
-            .await
-            .expect("read an expired snapshot by its ID");
-    assert_eq!(expired.expires_at_ms, Some(expires_at_ms));
+    let reader =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
+    assert_eq!(
+        code(reader.get_snapshot(&expiring).await),
+        ErrorCode::SnapshotNotFound
+    );
+    let live = reader
+        .list_snapshots_page(PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        })
+        .await
+        .expect("list snapshots");
+    let live: Vec<_> = live.items.into_iter().map(|row| row.snapshot_id).collect();
+    assert_eq!(live, vec![unexpiring.clone()]);
 
     fn code<T: std::fmt::Debug>(result: crate::error::Result<T>) -> ErrorCode {
         result.expect_err("refused").code()
