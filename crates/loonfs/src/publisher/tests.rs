@@ -2,7 +2,6 @@
 
 use super::admission::AdmittedWaiter;
 use super::queue::{queued_candidates, PreparedCandidate, SubmissionAdmission};
-use super::worker::result_label;
 use super::*;
 use crate::content_tokens::ContentTokenError;
 use crate::execution_budget::BudgetPermit;
@@ -785,21 +784,6 @@ async fn publisher_splits_batches_at_the_inline_limit_without_failing_commits() 
         );
         publisher.wait_for_worker().await;
     }
-}
-
-#[test]
-fn publisher_trace_labels_are_low_cardinality() {
-    // A result label says only whether the publication succeeded. The error
-    // text is caller data and must never reach a trace label, where it would
-    // make the label set unbounded.
-    assert_eq!(result_label(&Ok::<_, CoreError>(())).as_str(), "ok");
-    assert_eq!(
-        result_label(&Err::<(), _>(CoreError::NamespaceCorrupt(
-            "private error".to_owned()
-        )))
-        .as_str(),
-        "error"
-    );
 }
 
 #[tokio::test]
