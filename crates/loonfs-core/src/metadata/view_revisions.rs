@@ -2,7 +2,9 @@
 //! attributes and access revisions, and content layouts.
 
 use super::manifest_index;
-use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
+use super::manifest_tail_combiner::{
+    lowest_tail_rows, ManifestPage, ManifestTailCombiner, TieOrder,
+};
 use crate::error::{CoreError, Result};
 use crate::metadata::view::newest;
 use crate::metadata::view::MetadataView;
@@ -111,17 +113,22 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         limit: usize,
     ) -> Result<Vec<(String, RevisionRecord)>> {
         let visible_seq = self.visible_seq();
-        let mut tail: Vec<(String, RevisionRecord)> = self
-            .row_states()
-            .flat_map(|state| state.revisions())
-            .filter(|revision| {
-                revision.committed_seq <= visible_seq
-                    && inode_id.is_none_or(|inode_id| revision.inode_id == inode_id)
-            })
-            .map(|revision| (revision_row_key(revision), revision.clone()))
-            .filter(|(row_key, _)| row_key.as_str() >= lower_bound)
-            .collect();
-        tail.sort_by(|(left, _), (right, _)| left.cmp(right));
+        // Each tail row at or below the view's sequence that the page reads
+        // is one of the rows that it returns, so the page reads at most the
+        // `limit` lowest of them. A revision's fields sort in row-key order,
+        // but `lower_bound` is a row key, so the rows are chosen by their
+        // formatted keys.
+        let tail = lowest_tail_rows(
+            self.row_states()
+                .flat_map(|state| state.revisions())
+                .filter(|revision| {
+                    revision.committed_seq <= visible_seq
+                        && inode_id.is_none_or(|inode_id| revision.inode_id == inode_id)
+                }),
+            revision_row_key,
+            lower_bound,
+            limit,
+        );
         let segments = self.manifest_segments();
         // A short page is the end of the range.
         let refill = |lower_bound: String| async move {
