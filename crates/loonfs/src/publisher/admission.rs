@@ -425,8 +425,9 @@ impl<T> AdmittedWaiter<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{DefaultMetricsRecorder, MetricValue};
+    use crate::metrics::DefaultMetricsRecorder;
     use crate::publish::CommitCandidate;
+    use crate::test_support::{counter, gauge};
     use crate::ExecutionBudgetStats;
     use std::assert_matches;
     use std::num::NonZeroUsize;
@@ -500,17 +501,6 @@ mod tests {
         ));
         candidate.wal_record_bytes_upper_bound = planned_bytes;
         candidate
-    }
-
-    /// The value of the metric `name` that `recorder` keeps.
-    fn metric(recorder: &DefaultMetricsRecorder, name: &str) -> MetricValue {
-        recorder
-            .snapshot()
-            .by_name(name)
-            .next()
-            .unwrap_or_else(|| panic!("no `{name}` metric registered"))
-            .value
-            .clone()
     }
 
     /// Checks that a merge whose estimated peak is above its namespace's byte
@@ -594,13 +584,18 @@ mod tests {
         let first_runtime = runtime_admission(PublicationPolicy::default(), &budget);
         let second_runtime = runtime_admission(PublicationPolicy::default(), &budget);
         let gauges = |merges: i64, bytes: usize| {
+            let snapshot = recorder.snapshot();
             assert_eq!(
-                metric(&recorder, "loonfs.execution_budget.admitted_merges"),
-                MetricValue::Gauge(merges)
+                gauge(&snapshot, "loonfs.execution_budget.admitted_merges", &[]),
+                merges
             );
             assert_eq!(
-                metric(&recorder, "loonfs.execution_budget.admitted_merge_bytes"),
-                MetricValue::Gauge(i64::try_from(bytes).expect("gauge"))
+                gauge(
+                    &snapshot,
+                    "loonfs.execution_budget.admitted_merge_bytes",
+                    &[]
+                ),
+                i64::try_from(bytes).expect("gauge")
             );
         };
 
@@ -638,8 +633,12 @@ mod tests {
         }
         assert_eq!(budget.stats(), both, "a refused merge charges nothing");
         assert_eq!(
-            metric(&recorder, "loonfs.execution_budget.admission_rejections"),
-            MetricValue::Counter(0)
+            counter(
+                &recorder.snapshot(),
+                "loonfs.execution_budget.admission_rejections",
+                &[]
+            ),
+            0
         );
 
         drop(second);

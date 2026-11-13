@@ -5,7 +5,8 @@
 //! dropped.
 
 use super::{ExecutionBudget, ExecutionBudgetStats};
-use crate::metrics::{DefaultMetricsRecorder, MetricValue};
+use crate::metrics::DefaultMetricsRecorder;
+use crate::test_support::{counter, gauge};
 use crate::{
     CommitId, CreateDirectoryOptions, ErrorCode, LoonFs, LoonFsBuilder, Namespace, NamespaceId,
     PublicationPolicy, Writable,
@@ -227,28 +228,12 @@ fn watch_peak_running(
     (stop, watcher)
 }
 
-pub(super) fn gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name(name)
-        .next()
-        .unwrap_or_else(|| panic!("no `{name}` gauge registered"));
-    match entry.value {
-        MetricValue::Gauge(value) => value,
-        ref other => panic!("expected a gauge, found {other:?}"),
-    }
-}
-
 fn admission_rejections(recorder: &DefaultMetricsRecorder) -> u64 {
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name("loonfs.execution_budget.admission_rejections")
-        .next()
-        .expect("the admission refusal counter is registered");
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
-    }
+    counter(
+        &recorder.snapshot(),
+        "loonfs.execution_budget.admission_rejections",
+        &[],
+    )
 }
 
 /// The estimated bytes one [`create_directory`] request charges, read from a
@@ -505,7 +490,7 @@ async fn a_runtime_without_a_budget_reports_the_default_limits_to_its_recorder()
             "loonfs.execution_budget.compactions_running",
             "loonfs.execution_budget.compactions_waiting",
         ]
-        .map(|name| gauge(&recorder, name))
+        .map(|name| gauge(&recorder.snapshot(), name, &[]))
     };
     assert_eq!(
         gauges(),
@@ -762,7 +747,7 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
             "loonfs.execution_budget.content_writes_running",
             "loonfs.execution_budget.content_writes_waiting",
         ]
-        .map(|name| gauge(&recorder, name))
+        .map(|name| gauge(&recorder.snapshot(), name, &[]))
     };
     let stats = budget.stats();
     assert_eq!(

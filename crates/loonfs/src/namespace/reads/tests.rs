@@ -7,6 +7,7 @@
 //! compaction planning, and the page read — is the shipped path.
 
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
+use crate::test_support::writer;
 use crate::{
     CreateNamespaceOptions, DestinationBehavior, LoonFs, MetadataCompactionOutcome, NamespaceId,
     SharedObjectStore,
@@ -84,15 +85,7 @@ async fn create_compacted_directory(
             .collect(),
     )
     .expect("grants");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("compacted-page-writer"))
-        .config(crate::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..crate::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store.clone(), "compacted-page-writer").await;
     let maintenance = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
             "compacted-page-maintenance",

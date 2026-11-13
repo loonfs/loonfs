@@ -3,7 +3,8 @@
 
 use crate::common::{is_manifest_head, wait_for_operation};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
+use loonfs::metrics::DefaultMetricsRecorder;
+use loonfs::test_support::{counter, writer};
 use loonfs::{
     Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadAt, ReadFileOptions,
     ReadOnly, SharedObjectStore, StatOptions, Writable,
@@ -150,16 +151,7 @@ pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
 
 /// Opens another writer runtime over the fixture's store.
 pub(crate) async fn peer(fixture: &Fixture, name: &str) -> LoonFs<Writable> {
-    let store: SharedObjectStore = fixture.recording.clone();
-    LoonFs::builder_with_store(store)
-        .writer_id(writer_id(name))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("peer")
+    writer(fixture.recording.clone(), name).await
 }
 
 impl Fixture {
@@ -169,22 +161,16 @@ impl Fixture {
             .await
     }
 
-    fn counter(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
-        let snapshot = self.recorder.snapshot();
-        let entry = snapshot
-            .by_name(name)
-            .find(|entry| entry.labels == labels)
-            .unwrap_or_else(|| panic!("no `{name}` registered with labels {labels:?}"));
-        match entry.value {
-            MetricValue::Counter(value) => value,
-            ref other => panic!("expected a counter, found {other:?}"),
-        }
-    }
-
     /// Returns how many reads started from the writer's position and how
     /// many refreshed or loaded the namespace's head.
     fn head_sources(&self) -> (u64, u64) {
-        let source = |label| self.counter("loonfs.read_head.source", &[("source", label)]);
+        let source = |label| {
+            counter(
+                &self.recorder.snapshot(),
+                "loonfs.read_head.source",
+                &[("source", label)],
+            )
+        };
         (source("position"), source("refreshed") + source("loaded"))
     }
 
@@ -196,7 +182,11 @@ impl Fixture {
     }
 
     fn tail_replays(&self) -> u64 {
-        self.counter("loonfs.publisher.tail_replays", &[])
+        counter(
+            &self.recorder.snapshot(),
+            "loonfs.publisher.tail_replays",
+            &[],
+        )
     }
 
     /// Asserts that the requests since the last reset start with a successor

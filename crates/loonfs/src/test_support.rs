@@ -1,6 +1,14 @@
 //! Runtime handles that the test targets of this crate and of the crates
 //! above it build the same way.
+//!
+//! It also holds readers of the metrics that those handles report.
 
+#![allow(
+    clippy::panic,
+    reason = "a metric reader fails the test that calls it when the metric is missing"
+)]
+
+use crate::metrics::{MetricEntry, MetricValue, MetricsSnapshot};
 use crate::{
     LoonFs, Maintenance, ReadOnly, SharedObjectStore, WallClock, Writable, WriterId,
     RETENTION_ADVANCE_MIN_COMMIT_AGE_MS,
@@ -65,4 +73,56 @@ pub async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
 
 fn test_writer_id(value: &str) -> WriterId {
     WriterId::parse(value).expect("a test writer id should parse")
+}
+
+/// Returns the counter `name` with exactly `labels` in `snapshot`.
+pub fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
+    match entry(snapshot, name, labels).value {
+        MetricValue::Counter(value) => value,
+        ref other => panic!("expected `{name}` to be a counter, found {other:?}"),
+    }
+}
+
+/// Returns the sum of the counter `name` over all its label sets in
+/// `snapshot`, or 0 if `name` is not registered.
+pub fn counter_total(snapshot: &MetricsSnapshot, name: &str) -> u64 {
+    snapshot
+        .by_name(name)
+        .map(|entry| match entry.value {
+            MetricValue::Counter(value) => value,
+            ref other => panic!("expected `{name}` to be a counter, found {other:?}"),
+        })
+        .sum()
+}
+
+/// Returns the gauge `name` with exactly `labels` in `snapshot`.
+pub fn gauge(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> i64 {
+    match entry(snapshot, name, labels).value {
+        MetricValue::Gauge(value) => value,
+        ref other => panic!("expected `{name}` to be a gauge, found {other:?}"),
+    }
+}
+
+/// Returns how many observations the histogram `name` holds over all its
+/// label sets in `snapshot`, or 0 if `name` is not registered.
+pub fn histogram_count(snapshot: &MetricsSnapshot, name: &str) -> u64 {
+    snapshot
+        .by_name(name)
+        .map(|entry| match entry.value {
+            MetricValue::Histogram { count, .. } => count,
+            ref other => panic!("expected `{name}` to be a histogram, found {other:?}"),
+        })
+        .sum()
+}
+
+fn entry<'snapshot>(
+    snapshot: &'snapshot MetricsSnapshot,
+    name: &str,
+    labels: &[(&str, &str)],
+) -> &'snapshot MetricEntry {
+    snapshot
+        .all()
+        .iter()
+        .find(|entry| entry.name == name && entry.labels == labels)
+        .unwrap_or_else(|| panic!("no `{name}` registered with labels {labels:?}"))
 }

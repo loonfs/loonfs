@@ -6,7 +6,7 @@ use super::worker::result_label;
 use super::*;
 use crate::content_tokens::ContentTokenError;
 use crate::execution_budget::BudgetPermit;
-use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
+use crate::metrics::{DefaultMetricsRecorder, RuntimeInstruments};
 use crate::publish::{CommitCandidate, CommitIntent, ContentPreparationError, FilesystemOperation};
 use crate::{
     ConfiguredObjectStoreKind, ErrorCode, ExecutionBudget, MetadataCache,
@@ -322,15 +322,7 @@ async fn test_writer_with_cache(
 }
 
 fn counter(recorder: &DefaultMetricsRecorder, name: &str) -> u64 {
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name(name)
-        .next()
-        .unwrap_or_else(|| panic!("no `{name}` counter registered"));
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
-    }
+    crate::test_support::counter(&recorder.snapshot(), name, &[])
 }
 
 /// Bootstraps `namespaces` under `writer` and publishes one directory into

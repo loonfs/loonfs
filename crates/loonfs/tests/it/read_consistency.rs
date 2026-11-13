@@ -5,7 +5,8 @@
 
 use crate::writer_position_reads::{self, Parked};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
+use loonfs::metrics::DefaultMetricsRecorder;
+use loonfs::test_support::{counter, writer};
 use loonfs::{
     CommitSeq, Consistency, DownloadOptions, Error, ListChangesOptions, ListFileRevisionsOptions,
     ListOptions, ListTrashOptions, LoonFs, MetadataCache, Namespace, NamespaceId, ReadAt,
@@ -14,7 +15,7 @@ use loonfs::{
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
-use loonfs_test_support::ids::{namespace_id, page_limit, writer_id};
+use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
@@ -57,15 +58,7 @@ async fn fixture(name: &str) -> Fixture {
         KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id(name))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store.clone(), name).await;
     let actor = loonfs_test_support::test_actor();
     writer
         .create_namespace(&namespace_id, &actor)
@@ -107,15 +100,11 @@ async fn fixture(name: &str) -> Fixture {
 /// Returns how many reads of the runtime with `recorder` took their head
 /// from `source`.
 fn reads_from(recorder: &DefaultMetricsRecorder, source: &str) -> u64 {
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name("loonfs.read_head.source")
-        .find(|entry| entry.labels == [("source", source)])
-        .unwrap_or_else(|| panic!("no `{source}` read head source"));
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
-    }
+    counter(
+        &recorder.snapshot(),
+        "loonfs.read_head.source",
+        &[("source", source)],
+    )
 }
 
 impl Fixture {
@@ -602,15 +591,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
     let namespace_id = namespace_id("eventual-oversized");
     let store: SharedObjectStore = Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme));
     let actor = loonfs_test_support::test_actor();
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id("a"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store.clone(), "a").await;
     writer
         .create_namespace(&namespace_id, &actor)
         .await
@@ -642,15 +623,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .await
         .expect("strong read");
 
-    let peer = LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id(&format!("b{}", "x".repeat(127))))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("peer");
+    let peer = loonfs::test_support::writer(store.clone(), &format!("b{}", "x".repeat(127))).await;
     let commit = peer
         .open_namespace(&namespace_id)
         .expect("open namespace")

@@ -3,10 +3,11 @@
 //! LRU eviction, or running with zero cache limits) erases writer fencing.
 
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
+use loonfs::metrics::DefaultMetricsRecorder;
+use loonfs::test_support::{counter, writer};
 use loonfs::{
-    Error, LoonFs, LoonFsBuilder, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore,
-    Writable, WriterFence,
+    Commit, Error, LoonFs, LoonFsBuilder, MetadataCache, Namespace, NamespaceId, ReadOnly,
+    SharedObjectStore, Writable, WriterFence,
 };
 use loonfs_core::control::NamespaceReadState;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -21,10 +22,6 @@ use loonfs_types::WalNo;
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-async fn writer(store: &SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
-    writer_with_cache(store, writer_id, |builder| builder).await
-}
 
 /// `cache` sets the writer's metadata cache and read policy.
 async fn writer_with_cache(
@@ -45,35 +42,8 @@ async fn writer_with_cache(
     .expect("build writer")
 }
 
-async fn writer_with_cache_and_metrics(
-    store: &SharedObjectStore,
-    writer_id: &str,
-    metadata_cache: MetadataCache,
-    recorder: Arc<DefaultMetricsRecorder>,
-) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .metadata_cache(metadata_cache)
-        .metrics_recorder(recorder)
-        .build()
-        .await
-        .expect("build writer")
-}
-
 fn tail_replays(recorder: &DefaultMetricsRecorder) -> u64 {
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name("loonfs.publisher.tail_replays")
-        .next()
-        .expect("the publisher registers its replay counter");
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("replays are reported as a counter, found {other:?}"),
-    }
+    counter(&recorder.snapshot(), "loonfs.publisher.tail_replays", &[])
 }
 
 /// Asserts a terminal fencing refusal and hands back the fence it carries.
@@ -97,44 +67,58 @@ async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Na
         .expect("load head")
 }
 
-#[tokio::test]
-async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
-    let namespace_id = NamespaceId::parse("fence").expect("valid namespace id");
-
-    let writer_a = writer(&store, "writer-a").await;
+/// Creates the namespace as writer A, which `cache` builds, and puts
+/// `/a1.txt`. Writer B then puts `/b1.txt` and takes over, and A's next put
+/// is fenced. Returns A's runtime, A's fenced handle, B's handle and B's
+/// commit.
+async fn takeover(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    cache: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
+) -> (
+    LoonFs<Writable>,
+    Namespace<Writable>,
+    Namespace<Writable>,
+    Commit,
+) {
+    let writer_a = writer_with_cache(store, "writer-a", cache).await;
     writer_a
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
     let namespace_writer_a = writer_a
-        .open_namespace(&namespace_id)
+        .open_namespace(namespace_id)
         .expect("open namespace");
     namespace_writer_a
         .put_file("/a1.txt", b"a", &loonfs_test_support::test_actor())
         .await
         .expect("writer a first put");
 
-    let writer_b = writer(&store, "writer-b").await;
-    let namespace_writer_b = writer_b
-        .open_namespace(&namespace_id)
+    let namespace_writer_b = writer(store.clone(), "writer-b")
+        .await
+        .open_namespace(namespace_id)
         .expect("open namespace");
     let takeover = namespace_writer_b
         .put_file("/b1.txt", b"b", &loonfs_test_support::test_actor())
         .await
         .expect("writer b takes over the epoch");
-
-    let fenced = namespace_writer_a
-        .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
-        .await
-        .expect_err("superseded writer surfaces fencing");
-    assert_matches!(
-        &fenced,
-        Error::Core(error) if error.code() == loonfs::ErrorCode::WriterFenced,
-        "unexpected error: {fenced:?}"
+    expect_writer_fenced(
+        namespace_writer_a
+            .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
+            .await,
+        "superseded writer surfaces fencing",
     );
+    (writer_a, namespace_writer_a, namespace_writer_b, takeover)
+}
+
+#[tokio::test]
+async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let namespace_id = NamespaceId::parse("fence").expect("valid namespace id");
+    let (writer_a, namespace_writer_a, namespace_writer_b, takeover) =
+        takeover(&store, &namespace_id, |builder| builder).await;
 
     // The fenced session stays fenced on the next attempt too, and the live
     // writer keeps publishing undisturbed.
@@ -172,34 +156,8 @@ async fn fenced_session_cannot_delete_namespace() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
     let namespace_id = NamespaceId::parse("fence").expect("valid namespace id");
-
-    let writer_a = writer(&store, "writer-a").await;
-    writer_a
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace_writer_a = writer_a
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    namespace_writer_a
-        .put_file("/a1.txt", b"a", &loonfs_test_support::test_actor())
-        .await
-        .expect("writer a first put");
-
-    let writer_b = writer(&store, "writer-b").await;
-    let namespace_writer_b = writer_b
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    namespace_writer_b
-        .put_file("/b1.txt", b"b", &loonfs_test_support::test_actor())
-        .await
-        .expect("writer b takes over the epoch");
-    expect_writer_fenced(
-        namespace_writer_a
-            .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
-            .await,
-        "superseded writer surfaces fencing",
-    );
+    let (_writer_a, namespace_writer_a, namespace_writer_b, _) =
+        takeover(&store, &namespace_id, |builder| builder).await;
     let head_after_fencing = head_state(&store, &namespace_id).await;
 
     let fence = expect_writer_fenced(
@@ -239,44 +197,18 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
     ));
     let store: SharedObjectStore = counting.clone();
 
-    let writer_a = writer_with_cache(&store, "writer-a", |builder| {
-        builder.metadata_cache(
-            MetadataCache::builder()
-                .max_segment_bytes(0)
-                .max_manifest_bytes(0)
-                .max_head_bytes(0)
-                .max_wal_tail_bytes(0)
-                .build(),
-        )
-    })
-    .await;
-    writer_a
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace_writer_a = writer_a
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    namespace_writer_a
-        .put_file("/a1.txt", b"a", &loonfs_test_support::test_actor())
-        .await
-        .expect("writer a first put");
-
-    let writer_b = writer(&store, "writer-b").await;
-    let namespace_writer_b = writer_b
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    namespace_writer_b
-        .put_file("/b1.txt", b"b", &loonfs_test_support::test_actor())
-        .await
-        .expect("writer b takes over the epoch");
-
-    expect_writer_fenced(
-        namespace_writer_a
-            .put_file("/a2.txt", b"a", &loonfs_test_support::test_actor())
-            .await,
-        "superseded writer surfaces fencing",
-    );
+    let (_writer_a, namespace_writer_a, namespace_writer_b, _) =
+        takeover(&store, &namespace_id, |builder| {
+            builder.metadata_cache(
+                MetadataCache::builder()
+                    .max_segment_bytes(0)
+                    .max_manifest_bytes(0)
+                    .max_head_bytes(0)
+                    .max_wal_tail_bytes(0)
+                    .build(),
+            )
+        })
+        .await;
 
     let swaps_after_fencing = counting.count(OperationSelector::CompareAndSwap);
     expect_writer_fenced(
@@ -318,7 +250,7 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
         .await
         .expect("reader");
     let namespace = reader.namespace(&namespace_id);
-    let writer = writer(&store, "revalidation-writer").await;
+    let writer = writer(store.clone(), "revalidation-writer").await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -414,7 +346,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .await
         .expect("reader");
     let namespace = reader.namespace(&namespace_id);
-    let writer = writer(&store, "probe-pause-writer").await;
+    let writer = writer(store.clone(), "probe-pause-writer").await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -462,7 +394,10 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .stat("/file.txt")
         .await
         .expect("read inside the interval");
-    crate::common::assert_wal_probe(recording.take(), &namespace_id, next_wal_no);
+    assert_eq!(
+        recording.take(),
+        [crate::common::wal_probe(&namespace_id, next_wal_no)]
+    );
 
     // The next HEAD is sent just inside the bound of that check and answered
     // at the bound. Both answers find nothing, and the view is not served.
@@ -500,7 +435,7 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
         .await
         .expect("reader");
     let namespace = reader.namespace(&namespace_id);
-    let writer = writer(&store, "collected-gap-writer").await;
+    let writer = writer(store.clone(), "collected-gap-writer").await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -581,7 +516,7 @@ async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
         .await
         .expect("reader");
     let namespace = reader.namespace(&namespace_id);
-    let writer = writer(&store, "late-probe-error-writer").await;
+    let writer = writer(store.clone(), "late-probe-error-writer").await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -618,7 +553,7 @@ async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
 /// Creates `other_id` from a writer of its own and gives it one 16 KiB
 /// inline file, so its WAL tail outweighs a namespace of a few small files.
 async fn fill_other(store: &SharedObjectStore, other_id: &NamespaceId) {
-    let setup = writer(store, "other-setup").await;
+    let setup = writer(store.clone(), "other-setup").await;
     setup
         .create_namespace(other_id, &loonfs_test_support::test_actor())
         .await
@@ -821,8 +756,12 @@ async fn read_pressure_leaves_an_idle_writer_tail_and_its_next_publish_replays_n
         .build();
     fill_other(&store, &other_id).await;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer =
-        writer_with_cache_and_metrics(&store, "idle-writer", cache.clone(), recorder.clone()).await;
+    let writer = writer_with_cache(&store, "idle-writer", |builder| {
+        builder
+            .metadata_cache(cache.clone())
+            .metrics_recorder(recorder.clone())
+    })
+    .await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await

@@ -184,17 +184,6 @@ async fn settle_commit(commit: JoinHandle<crate::Result<Commit>>) -> crate::Resu
         .expect("join the commit")
 }
 
-fn histogram_count(recorder: &DefaultMetricsRecorder, name: &str) -> u64 {
-    recorder
-        .snapshot()
-        .by_name(name)
-        .map(|entry| match entry.value {
-            MetricValue::Histogram { count, .. } => count,
-            ref other => panic!("expected a histogram, found {other:?}"),
-        })
-        .sum()
-}
-
 async fn engine_wal_tail_objects(publisher: &NamespacePublisher) -> u64 {
     publisher
         .engine
@@ -231,7 +220,10 @@ async fn a_commit_at_the_write_stop_waits_for_the_fold_and_commits() {
     assert_eq!(counter(recorder, "loonfs.publisher.write_stop_waits"), 1);
     assert_eq!(counter(recorder, "loonfs.publisher.write_stop_refusals"), 0);
     assert_eq!(
-        histogram_count(recorder, "loonfs.publisher.write_stop_wait_seconds"),
+        crate::test_support::histogram_count(
+            &recorder.snapshot(),
+            "loonfs.publisher.write_stop_wait_seconds"
+        ),
         1
     );
     fixture.writer.shutdown().await.expect("shut down writer");
@@ -644,7 +636,10 @@ async fn a_commit_queued_behind_an_expired_wait_is_refused_after_the_engine_exam
     );
     assert_eq!(counter(recorder, "loonfs.publisher.write_stop_refusals"), 2);
     assert_eq!(
-        histogram_count(recorder, "loonfs.publisher.write_stop_wait_seconds"),
+        crate::test_support::histogram_count(
+            &recorder.snapshot(),
+            "loonfs.publisher.write_stop_wait_seconds"
+        ),
         2
     );
     fixture.store.release();

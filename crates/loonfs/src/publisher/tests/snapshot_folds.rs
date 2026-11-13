@@ -216,15 +216,7 @@ async fn dropped_creations_return_their_fold_permits() {
 
 /// Returns how many folds the runtime that reports to `recorder` has run.
 fn folds_run(recorder: &DefaultMetricsRecorder) -> u64 {
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name("loonfs.publisher.wal_fold_seconds")
-        .next()
-        .expect("the fold duration is registered");
-    match entry.value {
-        MetricValue::Histogram { count, .. } => count,
-        ref other => panic!("expected a histogram, found {other:?}"),
-    }
+    crate::test_support::histogram_count(&recorder.snapshot(), "loonfs.publisher.wal_fold_seconds")
 }
 
 /// Checks that the snapshots that wait for a fold in progress share one

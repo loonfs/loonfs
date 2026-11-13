@@ -10,6 +10,7 @@
 //! lookups was the scale term, and dependent per-section GETs were the
 //! wave count.
 
+use loonfs::test_support::writer;
 use loonfs::{LoonFs, Namespace, NamespaceId, Writable};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -86,15 +87,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let store: loonfs::SharedObjectStore = log.clone();
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("coldstat-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let writer = writer(store.clone(), "coldstat-writer").await;
     let maintenance = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("coldstat-maintenance"))
         .build()

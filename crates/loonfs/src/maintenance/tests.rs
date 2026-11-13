@@ -1,8 +1,8 @@
 //! The compaction loop, `Maintenance::compact_metadata`, and the store
 //! requests of other maintenance calls, over a live runtime.
 
-use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
-use crate::test_support::maintenance_past_the_grace_window;
+use crate::metrics::DefaultMetricsRecorder;
+use crate::test_support::{counter, maintenance_past_the_grace_window, writer};
 use crate::{
     LoonFs, Maintenance, MetadataCompactionOutcome, NamespaceId, SharedObjectStore, Writable,
 };
@@ -19,7 +19,6 @@ use loonfs_types::format::manifest::{
     decode_namespace_manifest_json, MetadataRowFamily, NamespaceManifestPayload, RunTier,
 };
 use loonfs_types::RunNo;
-use std::assert_matches;
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -50,23 +49,6 @@ async fn manual_deployment(
             "standalone-maintenance",
         ));
     (writer, standalone, recorder)
-}
-
-fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
-    let entry = snapshot
-        .by_name(name)
-        .find(|entry| entry.labels == labels)
-        .expect("the counter must be registered with these labels");
-    assert_matches!(
-        entry.value,
-        MetricValue::Counter(_),
-        "expected a counter, found {:?}",
-        entry.value
-    );
-    let MetricValue::Counter(value) = entry.value else {
-        return 0;
-    };
-    value
 }
 
 #[tokio::test]
@@ -624,15 +606,7 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
 async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("writer"))
-        .config(crate::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..crate::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store.clone(), "writer").await;
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     let namespace = namespace_id("backlog");
     writer

@@ -2,7 +2,8 @@
 //! runtime or another one publishes a newer manifest.
 
 use crate::common::wait_for_operation;
-use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
+use loonfs::metrics::DefaultMetricsRecorder;
+use loonfs::test_support::counter;
 use loonfs::{
     AccessState, AttributeChanges, Consistency, CreateNamespaceOptions, CreateSnapshotOptions,
     LoonFs, Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadAt,
@@ -234,15 +235,11 @@ impl Fixture {
 
     /// Returns how many publishes read the WAL tail from the store.
     fn tail_replays(&self) -> u64 {
-        let snapshot = self.recorder.snapshot();
-        let entry = snapshot
-            .by_name("loonfs.publisher.tail_replays")
-            .next()
-            .expect("the publisher registers its replay counter");
-        match entry.value {
-            MetricValue::Counter(value) => value,
-            ref other => panic!("replays are reported as a counter, found {other:?}"),
-        }
+        counter(
+            &self.recorder.snapshot(),
+            "loonfs.publisher.tail_replays",
+            &[],
+        )
     }
 
     /// Commits a file, and checks that the publish replays no WAL tail and

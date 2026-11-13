@@ -18,6 +18,7 @@ use loonfs::engine::{
 use loonfs::publish::{
     parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation, InlineContent,
 };
+use loonfs::test_support::writer;
 use loonfs::{
     ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
     MaintainMetadataOptions, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore, StatOptions,
@@ -287,15 +288,7 @@ fn full_attributes() -> BTreeMap<AttributeKey, AttributeValue> {
 }
 
 async fn seed(store: &SharedObjectStore, shape: &Shape) {
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("seed-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store.clone(), "seed-writer").await;
     let maintenance = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
         .build()
