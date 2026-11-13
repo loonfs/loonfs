@@ -11,12 +11,14 @@ pub trait MonotonicTimer: std::fmt::Debug + Send + Sync {
 
 /// Measures monotonic elapsed time, including host sleep and a freeze that the host can't see.
 ///
-/// Each reading adds the wall clock's progress since the previous reading, and the total is never
-/// less than the boot-time clock's progress since the first reading. The boot-time clock counts
-/// host sleep. The wall clock also counts a freeze that the boot-time clock misses (a virtual
-/// machine restored from a snapshot, or paused by its hypervisor), once the wall clock is
-/// corrected. A wall clock that steps backward adds nothing. Every instance adds to one
-/// process-wide total, so readings from any two standard timers are comparable.
+/// Each reading adds the boot-time clock's progress since the previous reading, which counts host
+/// sleep. A reading also adds a forward step of the wall clock that the boot-time clock didn't
+/// see: the wall clock's progress less the boot-time clock's, when that difference is at least
+/// [`WALL_CLOCK_NOISE_MARGIN`]. So a freeze that the boot-time clock misses (a virtual machine
+/// restored from a snapshot, or paused by its hypervisor) counts once the wall clock is corrected.
+/// A wall clock that steps backward adds nothing and hides none of the boot-time clock's
+/// progress. Every instance adds to one process-wide total, so readings from any two standard
+/// timers are comparable.
 #[derive(Debug, Default)]
 pub struct StdMonotonicTimer(());
 
@@ -33,7 +35,7 @@ impl MonotonicTimer for StdMonotonicTimer {
             .expect("the elapsed time lock should not be poisoned");
         let (boot, wall) = (monotonic_now(), SystemTime::now());
         let elapsed = elapsed.get_or_insert(Elapsed {
-            boot_origin: boot,
+            boot,
             wall,
             total: Duration::ZERO,
         });
@@ -41,28 +43,35 @@ impl MonotonicTimer for StdMonotonicTimer {
     }
 }
 
-/// The standard timer's total elapsed time, the boot-time clock's first reading, and the wall
-/// clock's last reading.
+/// The smallest amount by which the wall clock's progress between two readings can exceed the
+/// boot-time clock's and count as a step of the wall clock.
+///
+/// A smaller difference is noise: the two clocks are read a moment apart, and that moment varies
+/// from reading to reading. Adding every such difference would make the timer run fast in
+/// proportion to how often it's read. The margin is far below the shortest budget that reads the
+/// timer.
+const WALL_CLOCK_NOISE_MARGIN: Duration = Duration::from_secs(1);
+
+/// The standard timer's total elapsed time, and the clock readings it was last advanced to.
 #[derive(Debug)]
 struct Elapsed {
-    boot_origin: Duration,
+    boot: Duration,
     wall: SystemTime,
     total: Duration,
 }
 
 impl Elapsed {
-    /// Adds the wall clock's progress since its previous reading, raises the total to the
-    /// boot-time clock's progress if the total is behind it, and returns the total.
-    ///
-    /// The total follows one clock between readings, so the small differences between the two
-    /// clocks' readings don't add up, as they would if each reading added the larger of the two
-    /// clocks' progress.
+    /// Adds the boot-time clock's progress since the previous readings, and a forward step of the
+    /// wall clock that the boot-time clock didn't see, and returns the total.
     fn advance(&mut self, boot: Duration, wall: SystemTime) -> Duration {
+        let boot_progress = boot.saturating_sub(self.boot);
         let wall_progress = wall.duration_since(self.wall).unwrap_or_default();
-        self.total = self
-            .total
-            .saturating_add(wall_progress)
-            .max(boot.saturating_sub(self.boot_origin));
+        let unseen = wall_progress.saturating_sub(boot_progress);
+        self.total = self.total.saturating_add(boot_progress);
+        if unseen >= WALL_CLOCK_NOISE_MARGIN {
+            self.total = self.total.saturating_add(unseen);
+        }
+        self.boot = boot;
         self.wall = wall;
         self.total
     }
@@ -171,27 +180,44 @@ mod tests {
     }
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    const HALF_HOUR: Duration = Duration::from_secs(30 * 60);
 
-    #[test]
-    fn a_wall_clock_jump_forward_counts_as_elapsed_time() {
-        let mut elapsed = Elapsed {
-            boot_origin: Duration::ZERO,
+    fn elapsed() -> Elapsed {
+        Elapsed {
+            boot: Duration::ZERO,
             wall: UNIX_EPOCH,
             total: Duration::ZERO,
-        };
+        }
+    }
+
+    #[test]
+    fn a_backward_correction_after_a_forward_jump_hides_no_elapsed_time() {
+        let mut elapsed = elapsed();
+        let started = elapsed.advance(Duration::ZERO, UNIX_EPOCH + DAY);
+        assert_eq!(started, DAY, "the forward jump counts in full");
+        // Half an hour passes, and the wall clock is set back by a day.
         assert_eq!(
-            elapsed.advance(Duration::from_millis(3), UNIX_EPOCH + DAY),
-            DAY
+            elapsed.advance(HALF_HOUR, UNIX_EPOCH + HALF_HOUR) - started,
+            HALF_HOUR
+        );
+    }
+
+    #[test]
+    fn a_freeze_after_a_forward_jump_and_a_backward_correction_counts() {
+        let mut elapsed = elapsed();
+        let second = Duration::from_secs(1);
+        elapsed.advance(second, UNIX_EPOCH + DAY + second);
+        elapsed.advance(2 * second, UNIX_EPOCH + 2 * second);
+        // The wall clock moves half an hour that the boot-time clock doesn't see.
+        assert_eq!(
+            elapsed.advance(3 * second, UNIX_EPOCH + 3 * second + HALF_HOUR),
+            DAY + 3 * second + HALF_HOUR
         );
     }
 
     #[test]
     fn a_wall_clock_jump_backward_adds_only_the_boot_time_clocks_progress() {
-        let mut elapsed = Elapsed {
-            boot_origin: Duration::ZERO,
-            wall: UNIX_EPOCH,
-            total: Duration::ZERO,
-        };
+        let mut elapsed = elapsed();
         let earlier = UNIX_EPOCH - DAY;
         assert_eq!(
             elapsed.advance(Duration::from_millis(3), earlier),
@@ -201,6 +227,19 @@ mod tests {
             elapsed.advance(Duration::from_millis(5), earlier + Duration::from_millis(2)),
             Duration::from_millis(5)
         );
+    }
+
+    #[test]
+    fn small_differences_between_the_clocks_add_nothing() {
+        let mut elapsed = elapsed();
+        let step = Duration::from_micros(100);
+        let mut total = Duration::ZERO;
+        for reading in 1..=10_000_u32 {
+            // The wall clock is read up to 99 microseconds after the boot-time clock.
+            let lag = Duration::from_micros(u64::from(reading * 37 % 100));
+            total = elapsed.advance(reading * step, UNIX_EPOCH + reading * step + lag);
+        }
+        assert_eq!(total, 10_000 * step);
     }
 
     #[test]
