@@ -36,7 +36,11 @@ const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/max_staleness_ms", "/s
     utoipa::path(
         post,
         operation_id = "create_download",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["files"])),
+            ("x-fern-sdk-method-name" = json!("createDownload")),
+        ),
         path = "/v0/namespaces/{namespace_id}/filesystem/downloads",
         tag = "filesystem",
         summary = "Begin download",
@@ -115,7 +119,11 @@ pub(super) async fn create_download(
     utoipa::path(
         post,
         operation_id = "create_download_by_inode",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["inodes"])),
+            ("x-fern-sdk-method-name" = json!("createDownload")),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
         tag = "inodes",
         summary = "Begin download by inode",
@@ -176,7 +184,11 @@ pub(super) async fn create_download_by_inode(
     utoipa::path(
         post,
         operation_id = "create_revision_download_by_inode",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["inodes"])),
+            ("x-fern-sdk-method-name" = json!("createRevisionDownload")),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin revision download by inode",

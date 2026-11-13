@@ -679,7 +679,7 @@ GET routes identify resources, so their paths use nouns such as `entry`, `entrie
 
 `/v0/maintenance/` is the only API group prefix, and routes under it belong to the `maintenance/v0` API group. Other routes are grouped by resource, including `GET /v0/namespaces/{ns}/grep`, which belongs to the `query/v0` group. Every other route shown in this section belongs to `filesystem/v0`.
 
-Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance_job`, and `extend_snapshot`. Operation IDs are identifiers in the wire registry, and they don't determine SDK names. Generated SDK group and method names come from the SDK naming table in the OpenAPI postprocessor, and every operation MUST appear in that table or be explicitly excluded from it.
+Operation IDs start with a verb. `get` reads one resource, `list` reads a page, and `create` posts a new resource to a collection. Other verbs describe the operation directly, as in `grep`, `run_maintenance_job`, and `extend_snapshot`. Operation IDs are identifiers in the wire registry, and they don't determine SDK names. Every operation MUST declare its SDK group and method names in its OpenAPI extensions (`x-fern-sdk-group-name` and `x-fern-sdk-method-name`), or declare `x-fern-ignore` to be left out of generated SDKs.
 
 The examples in the following sections are representative, not exhaustive. Responses might gain fields within v0, and clients MUST ignore JSON fields they don't recognize. An optional response field that has no value is left out, and it's never encoded as `null`.
 

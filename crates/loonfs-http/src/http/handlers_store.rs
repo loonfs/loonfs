@@ -16,7 +16,11 @@ use std::sync::Arc;
     utoipa::path(
         post,
         operation_id = "probe_store",
-        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["maintenance", "store"])),
+            ("x-fern-sdk-method-name" = json!("probe")),
+        ),
         path = "/v0/maintenance/store/probe",
         tag = "maintenance",
         summary = "Probe the store contract",

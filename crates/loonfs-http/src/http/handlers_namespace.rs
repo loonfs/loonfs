@@ -77,7 +77,11 @@ fn advertised_limit(limit: Option<u64>) -> u64 {
     utoipa::path(
         get,
         operation_id = "get_capabilities",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["capabilities"])),
+            ("x-fern-sdk-method-name" = json!("retrieve")),
+        ),
         path = "/v0/capabilities",
         tag = "system",
         summary = "Get capabilities",
@@ -191,6 +195,8 @@ pub(super) async fn get_capabilities(
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("create")),
         ),
         path = "/v0/namespaces",
         tag = "namespaces",
@@ -237,7 +243,12 @@ pub(super) async fn create_namespace(
     utoipa::path(
         get,
         operation_id = "get_namespace",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("retrieve")),
+            ("x-fern-request-name" = json!("GetNamespaceRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Get namespace",
@@ -271,7 +282,12 @@ pub(super) async fn get_namespace(
     utoipa::path(
         get,
         operation_id = "get_namespace_diagnostics",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["maintenance", "diagnostics"])),
+            ("x-fern-sdk-method-name" = json!("retrieve")),
+            ("x-fern-request-name" = json!("GetNamespaceDiagnosticsRequest")),
+        ),
         path = "/v0/maintenance/namespaces/{namespace_id}/diagnostics",
         tag = "maintenance",
         summary = "Get namespace diagnostics",
@@ -305,7 +321,12 @@ pub(super) async fn get_namespace_diagnostics(
     utoipa::path(
         delete,
         operation_id = "delete_namespace",
-        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("delete")),
+            ("x-fern-request-name" = json!("DeleteNamespaceRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Delete namespace",
@@ -351,6 +372,8 @@ pub(super) async fn delete_namespace(
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("fork")),
         ),
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
@@ -406,6 +429,8 @@ pub(super) async fn fork_namespace(
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("merge")),
         ),
         path = "/v0/namespaces/{namespace_id}/merges",
         tag = "namespaces",
@@ -470,7 +495,12 @@ pub(super) async fn merge_fork(
     utoipa::path(
         get,
         operation_id = "get_next_merge_range",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("nextMergeRange")),
+            ("x-fern-request-name" = json!("GetNextMergeRangeRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/merges",
         tag = "namespaces",
         summary = "Get a fork's next merge range",
@@ -532,6 +562,8 @@ pub(super) async fn get_next_merge_range(
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("forkForRebase")),
         ),
         path = "/v0/namespaces/{namespace_id}/rebases",
         tag = "namespaces",
@@ -591,6 +623,8 @@ pub(super) async fn fork_namespace_for_rebase(
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("replay")),
         ),
         path = "/v0/namespaces/{namespace_id}/replays",
         tag = "namespaces",

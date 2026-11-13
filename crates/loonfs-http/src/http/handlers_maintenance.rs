@@ -21,7 +21,11 @@ use std::sync::Arc;
     utoipa::path(
         post,
         operation_id = "run_maintenance_job",
-        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["maintenance", "jobs"])),
+            ("x-fern-sdk-method-name" = json!("create")),
+        ),
         path = "/v0/maintenance/namespaces/{namespace_id}/jobs",
         tag = "maintenance",
         summary = "Run one maintenance job",
@@ -102,7 +106,11 @@ pub(super) struct PoolSegment {
     utoipa::path(
         post,
         operation_id = "run_pool_maintenance_job",
-        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-fern-sdk-group-name" = json!(["maintenance", "pools", "jobs"])),
+            ("x-fern-sdk-method-name" = json!("create")),
+        ),
         path = "/v0/maintenance/pools/{pool_id}/jobs",
         tag = "maintenance",
         summary = "Run one maintenance job on a pool",

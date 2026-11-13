@@ -97,7 +97,12 @@ pub(super) struct StatInodeQuery {
     utoipa::path(
         get,
         operation_id = "get_inode",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["inodes"])),
+            ("x-fern-sdk-method-name" = json!("retrieve")),
+            ("x-fern-request-name" = json!("GetInodeRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}",
         tag = "inodes",
         summary = "Stat inode",
@@ -182,7 +187,12 @@ pub(super) struct ListInodeChildrenQuery {
     utoipa::path(
         get,
         operation_id = "list_inode_children",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["inodes"])),
+            ("x-fern-sdk-method-name" = json!("listChildren")),
+            ("x-fern-request-name" = json!("ListInodeChildrenRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
         tag = "inodes",
         summary = "List directory children by inode",
@@ -237,7 +247,12 @@ pub(super) async fn list_inode_children(
     utoipa::path(
         get,
         operation_id = "list_file_revisions_by_inode",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["inodes"])),
+            ("x-fern-sdk-method-name" = json!("listRevisions")),
+            ("x-fern-request-name" = json!("ListFileRevisionsByInodeRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
         tag = "inodes",
         summary = "List file revisions by inode",
@@ -286,7 +301,12 @@ pub(super) async fn list_file_revisions_by_inode(
     utoipa::path(
         get,
         operation_id = "get_file_content_by_inode",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["inodes"])),
+            ("x-fern-sdk-method-name" = json!("content")),
+            ("x-fern-request-name" = json!("GetFileContentByInodeRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         tag = "inodes",
         summary = "Read file by inode",
@@ -340,7 +360,12 @@ pub(super) async fn get_file_content_by_inode(
     utoipa::path(
         get,
         operation_id = "get_file_revision_content_by_inode",
-        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["inodes"])),
+            ("x-fern-sdk-method-name" = json!("revisionContent")),
+            ("x-fern-request-name" = json!("GetFileRevisionContentByInodeRequest")),
+        ),
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
         summary = "Read file revision by inode",
