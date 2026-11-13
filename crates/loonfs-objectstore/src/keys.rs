@@ -14,7 +14,6 @@ pub const PROBE_RUN_PREFIX: &str = "probe-runs";
 pub(crate) const NAMESPACES_DIRECTORY: &str = "namespaces";
 pub(crate) const POOLS_DIRECTORY: &str = "pools";
 pub(crate) const POOL_RECORD_NAME: &str = "pool.json";
-pub(crate) const HINT_NAME: &str = "hint.json";
 pub(crate) const BOUNDARY_NAME: &str = "boundary.json";
 pub(crate) const WAL_DIRECTORY: &str = "wal";
 pub(crate) const WAL_SUFFIX: &str = ".wal.zst";
@@ -86,11 +85,6 @@ pub fn wal_object(namespace_id: &NamespaceId, wal_no: &WalNo) -> String {
 /// Builds the listing prefix for numbered WAL objects.
 pub fn wal_prefix(namespace_id: &NamespaceId) -> String {
     format!("{}{WAL_DIRECTORY}/", namespace_prefix(namespace_id))
-}
-
-/// Builds the starting point for numbered manifest discovery.
-pub fn hint(namespace_id: &NamespaceId) -> String {
-    format!("{}{HINT_NAME}", namespace_prefix(namespace_id))
 }
 
 /// Builds the key of a namespace's manifest boundary.
@@ -255,9 +249,9 @@ mod tests {
 
     use super::{
         boundary, content_blob, content_blob_name, content_prefix, content_span, content_span_name,
-        extension_segment, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_object_key, pool_prefix, pool_record, probe_run_prefix, probe_runs_prefix,
-        snapshot_record, temporary_object, upload_outcome, upload_session, wal_object, wal_prefix,
+        extension_segment, metadata_manifest_object, metadata_segment, metadata_segment_object_key,
+        pool_prefix, pool_record, probe_run_prefix, probe_runs_prefix, snapshot_record,
+        temporary_object, upload_outcome, upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -393,7 +387,6 @@ mod tests {
             ),
             ("Upload sessions", upload_session(&pool_id(), &upload_id())),
             ("Upload outcomes", upload_outcome(&pool_id(), &upload_id())),
-            ("Hint", hint(&namespace_id())),
             ("Manifest boundary", boundary(&namespace_id())),
             ("Pool records", pool_record(&pool_id())),
             ("Content objects", content_blob(&pool_id(), &content_id())),

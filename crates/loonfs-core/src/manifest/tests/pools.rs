@@ -54,6 +54,8 @@ async fn a_create_generates_a_pool_and_every_fork_records_its_source_pool() {
     }
 }
 
+/// Checks that a process that has a manifest refuses a successor that
+/// changes the pool when it probes above that manifest.
 #[tokio::test]
 async fn a_successor_that_changes_the_pool_is_refused() {
     let directory = tempdir().expect("directory");
@@ -81,7 +83,7 @@ async fn a_successor_that_changes_the_pool_is_refused() {
     .await
     .expect("write the successor");
     let error = crate::test_support::namespace_store(&store, &root)
-        .load_current_manifest()
+        .find_newest_manifest_above(&first)
         .await
         .expect_err("the successor changes the pool");
     assert!(error.to_string().contains("pool_id"), "{error}");

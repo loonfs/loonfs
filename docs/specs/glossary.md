@@ -10,15 +10,11 @@ A directory tree with its own history, stored under its own prefix in object sto
 
 ### Manifest
 
-A numbered, immutable object that describes a namespace: its identity and status (active or deleted), which writer can commit, the metadata segments that make up its files and directories, and how much history it keeps (its [retention floor](#retention-floor)). The highest-numbered manifest is the current one. Commits made after it was published are in the WAL objects that follow it. See [Manifests, runs, and segments](format.md#71-manifests-runs-and-segments).
-
-### Hint
-
-A small object that records the number of a recent manifest, so readers know where to start looking for the current one. The hint is best effort. LoonFS updates it after it publishes a manifest, but the update can lag, so the hint is a safe starting point but not an authoritative pointer to the current manifest. Readers load the hinted manifest and then check for newer ones. See [The current manifest and WAL tip](format.md#24-the-current-manifest-and-wal-tip).
+A numbered, immutable object that describes a namespace: its identity and status (active or deleted), which writer can commit, the metadata segments that make up its files and directories, and how much history it keeps (its [retention floor](#retention-floor)). The highest-numbered manifest is the current one, and LoonFS finds it by listing the manifests above the [manifest boundary](#manifest-boundary). Commits made after it was published are in the WAL objects that follow it. See [Manifests, runs, and segments](format.md#71-manifests-runs-and-segments).
 
 ### Manifest boundary
 
-A manifest number, stored in one small object for each namespace (`namespaces/{namespace_id}/boundary.json`), such that every manifest of the namespace numbered at or below it has been replaced by a newer manifest. A namespace's [collection](#collection) raises the boundary to the highest manifest number that it's about to delete, before it deletes any manifest, so every manifest that a collection deletes is at or below the boundary. The number never decreases, and a missing object means that no manifest is at or below the boundary. For example, if a collection deletes manifests 31 to 37 and 39 to 44, it first raises the boundary to 44. See [One complete collection](format.md#111-one-complete-collection).
+A manifest number, stored in one small object for each namespace (`namespaces/{namespace_id}/boundary.json`), such that every manifest of the namespace numbered at or below it is dead: no process publishes a manifest at such a number, and no process treats such a manifest as the namespace's newest. (A dead manifest can still exist, because a [snapshot](#snapshot) keeps it or a collection hasn't deleted it yet.) A namespace's [collection](#collection) raises the boundary to the highest manifest number that it's about to delete, before it deletes any manifest, and no publisher writes the boundary. The number never decreases, and a missing object means that the boundary is 0. A process with nothing in memory for a namespace finds the newest manifest by listing the manifests above the boundary, and reads the boundary again after it loads that manifest. A publisher reads the boundary after each manifest put, and a put at or below the boundary counts as lost. For example, if a collection deletes manifests 31 to 37 and 39 to 44, it first raises the boundary to 44, and a later cold read lists the manifests from 45 upward. See [Resolving the metadata basis](format.md#41-resolving-the-metadata-basis) and [One complete collection](format.md#111-one-complete-collection).
 
 ### WAL
 
@@ -238,7 +234,7 @@ A namespace setting, in milliseconds, for how much recent history a scheduled re
 
 ### Control object
 
-A small object used for discovery, manifest cleanup, retained views, upload state, or a pool's creation: the hint, the [manifest boundary](#manifest-boundary), snapshots, the session and outcome records of upload sessions, and [pool records](#pool-record). Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
+A small object used for finding the newest manifest, manifest cleanup, retained views, upload state, or a pool's creation: the [manifest boundary](#manifest-boundary), snapshots, the session and outcome records of upload sessions, and [pool records](#pool-record). Each kind has its own update rules (for example, the manifest boundary is created with put-if-absent and then rises by compare-and-swap, and an upload record is never changed after it's written).
 
 ## Reads and retained views
 
@@ -281,7 +277,7 @@ A collection of the pool deletes the pool's unreferenced content objects, upload
 
 ### Pool record
 
-A control object that records the creation of one [pool](#pool), stored at `pools/{pool_id}/pool.json`. A create call that generates a pool writes the pool record once, with put-if-absent, after the namespace's hint and before manifest 1, so every pool that a manifest records has a pool record. The record contains the pool's ID (`pool_id`), the namespace that was created with the pool, which is the pool's first member (`first_member_namespace_id`), and the create call's request clock (`created_at_ms`). A fork joins its source's pool and writes no pool record. If the create call fails, or loses to another create call for the same namespace ID, the pool has no members, and the pool's collection deletes the pool record once the record's creation grace (the [grace window](#grace-window) after `created_at_ms`) has passed. A pool whose first member is retired keeps its pool record, so a later collection of the pool can find that the pool has no members. For example, creating `main` with the pool `pool_3s0drmj8em84yb4mnetqkz2j0x` writes `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/pool.json` with `first_member_namespace_id` `main`. See [Pools and pool records](../design/pools.md#pools-and-pool-records) and [Creating a namespace](format.md#91-creating-a-namespace).
+A control object that records the creation of one [pool](#pool), stored at `pools/{pool_id}/pool.json`. A create call that generates a pool writes the pool record once, with put-if-absent, after the call finds no namespace with the ID and before manifest 1, so every pool that a manifest records has a pool record. The record contains the pool's ID (`pool_id`), the namespace that was created with the pool, which is the pool's first member (`first_member_namespace_id`), and the create call's request clock (`created_at_ms`). A fork joins its source's pool and writes no pool record. If the create call fails, or loses to another create call for the same namespace ID, the pool has no members, and the pool's collection deletes the pool record once the record's creation grace (the [grace window](#grace-window) after `created_at_ms`) has passed. A pool whose first member is retired keeps its pool record, so a later collection of the pool can find that the pool has no members. For example, creating `main` with the pool `pool_3s0drmj8em84yb4mnetqkz2j0x` writes `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/pool.json` with `first_member_namespace_id` `main`. See [Pools and pool records](../design/pools.md#pools-and-pool-records) and [Creating a namespace](format.md#91-creating-a-namespace).
 
 ### Merge
 
@@ -309,7 +305,7 @@ A live read with the `eventual` [consistency](#consistency), which is the defaul
 
 ### Revalidation bound
 
-The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view, to a [writer position](#writer-position), and to the manifest that a manifest publication builds on. After that, the reader loads the current manifest again before it serves a read, and the publication loads the current manifest through the hint before its put. The minimum [grace window](#grace-window) is at least this bound plus the clock allowance, so an object published after a reader's last check isn't deleted while the reader trusts that check. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view, to a [writer position](#writer-position), and to the manifest that a manifest publication builds on. After that, the reader loads the current manifest again before it serves a read, and the publication finds the newest manifest again (see [Resolving the metadata basis](format.md#41-resolving-the-metadata-basis)) before its put. The minimum [grace window](#grace-window) is at least this bound plus the clock allowance, so an object published after a reader's last check isn't deleted while the reader trusts that check. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Cursor
 
@@ -363,7 +359,7 @@ The reference server's scheduler listing every namespace in the store, including
 
 ### Compare-and-swap (CAS)
 
-A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap to raise the hint, to extend a user snapshot's expiry, and to record a user snapshot's deletion.
+A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap to raise the [manifest boundary](#manifest-boundary), to extend a user snapshot's expiry, and to record a user snapshot's deletion.
 
 ### Publication budget
 

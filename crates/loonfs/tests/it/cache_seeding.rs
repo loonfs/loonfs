@@ -43,13 +43,13 @@ fn runtime_reads_reuse_the_writer_tail_for_repeated_reads() {
     )
     .expect("put file");
 
-    block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("drain");
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read is served from the position's tail");
     assert_eq!(recording.take(), []);
 
-    block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("drain");
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read reuses the position's tail");
@@ -62,7 +62,7 @@ fn runtime_reads_reuse_the_writer_tail_for_repeated_reads() {
         &loonfs_test_support::test_actor(),
     )
     .expect("put other");
-    block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("drain");
     recording.reset();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("read after local mutation takes the tail the mutation extended");
@@ -217,12 +217,6 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
             {
                 wal_puts += 1;
             }
-            loonfs_test_support::stores::RecordedOperation::GetWithMetadata { key, .. }
-            | loonfs_test_support::stores::RecordedOperation::Put {
-                key,
-                mode: loonfs_objectstore::PutMode::CompareAndSwap { .. },
-                ..
-            } if key == &loonfs_objectstore::keys::hint(&namespace_id) => {}
             other => panic!("unexpected operation after fold: {other:?}"),
         }
     }
@@ -308,7 +302,7 @@ fn a_cache_with_zero_limits_keeps_nothing() {
     )
     .expect("put file");
 
-    block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("drain");
     raw_store.reset_wal_get_count();
     fs.read_file_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read takes the position's tail");
@@ -340,7 +334,7 @@ fn two_namespaces_with_one_file(store: SharedObjectStore) -> (NamespaceId, Names
             )
             .expect("put file");
     }
-    block_on(setup.writer.drain()).expect("finish hints");
+    block_on(setup.writer.drain()).expect("drain");
     (first, other)
 }
 
@@ -404,10 +398,10 @@ fn heads_and_wal_tails_evict_by_bytes_anchors_included() {
         .read_file_blocking(&first, "/file.txt")
         .expect("reload the evicted head and WAL tail");
     assert_eq!(file.bytes, b"first");
-    // Discovery reads the starting hint and rechecks it after the final gap.
+    // The search for the newest manifest lists the namespace's manifests.
     assert_eq!(
-        raw_store.hint_get_count(),
-        2,
+        raw_store.manifest_gets.count(OperationSelector::List),
+        1,
         "the oldest entry, the first namespace's anchor, was evicted"
     );
     assert_eq!(raw_store.wal_get_count(), 3);
@@ -429,11 +423,11 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
     const NAMESPACES: usize = 80;
 
     let temp_dir = tempdir().expect("tempdir");
-    let hints = Arc::new(RecordingStore::new(
+    let boundaries = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::family(DurableObjectFamily::Hint),
+        KeyPredicate::family(DurableObjectFamily::Boundary),
     ));
-    let object_store: SharedObjectStore = hints.clone();
+    let object_store: SharedObjectStore = boundaries.clone();
     let setup = open_runtime_async(object_store.clone(), "many-namespaces").await;
     let namespaces = (0..NAMESPACES)
         .map(|index| namespace_id(&format!("ns-{index:03}")))
@@ -460,10 +454,10 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
     };
 
     stat_every_root().await;
-    hints.reset();
+    boundaries.reset();
     stat_every_root().await;
     assert_eq!(
-        hints.count(OperationSelector::Read),
+        boundaries.count(OperationSelector::Read),
         0,
         "no namespace's head was dropped and loaded again"
     );
@@ -493,7 +487,7 @@ fn runtime_wal_tail_cache_skips_oversized_projection() {
         &loonfs_test_support::test_actor(),
     )
     .expect("put file");
-    block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("drain");
     let reader = block_on(
         loonfs::LoonFs::builder_with_store(object_store)
             .read_only()
@@ -581,7 +575,7 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     )
     .expect("write succeeds after the WAL publication conflict");
 
-    block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("drain");
     recording.reset();
     let before_read = fs.metadata_cache_stats();
     fs.stat_path_blocking(&namespace_id, "/after-stale")
@@ -696,7 +690,7 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
     .expect("put file");
     fs.create_snapshot_blocking(&namespace_id)
         .expect("snapshot");
-    block_on(fs.writer.drain()).expect("finish hints");
+    block_on(fs.writer.drain()).expect("drain");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let fs = open_runtime_with(store(temp_dir.path()), "materialized-reader", |builder| {
         builder.metrics_recorder(recorder.clone())
@@ -736,7 +730,7 @@ fn a_cached_head_anchor_serves_materialization_validation() {
     fs.stat_path_blocking(&namespace_id, "/docs")
         .expect("second cached materialization validation reuses the cached head");
 
-    assert_eq!(raw_store.hint_get_count(), 0);
+    assert_eq!(raw_store.manifest_gets.count(OperationSelector::List), 0);
 }
 
 #[test]
@@ -751,10 +745,8 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
             ..loonfs::RuntimeConfig::default()
         })
     });
-    // The writer's first commit publishes the claim of its writer epoch, and
-    // the writer raises the hint after that publication in a background task
-    // that reads the hint. The writer uses a store of its own, so the probe
-    // counts only the reader's requests, wherever that task runs.
+    // The writer uses a store of its own, so the probe counts only the
+    // reader's requests.
     let writer = open_runtime(store(temp_dir.path()), "control-cache-writer");
 
     writer
@@ -773,7 +765,7 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     reader
         .stat_path_blocking(&namespace_id, "/docs")
         .expect("reuse the unchanged head anchor");
-    assert_eq!(raw_store.hint_get_count(), 0);
+    assert_eq!(raw_store.manifest_gets.count(OperationSelector::List), 0);
 
     writer
         .create_directory_blocking(
@@ -786,7 +778,7 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     reader
         .stat_path_blocking(&namespace_id, "/docs/new")
         .expect("probe changed head");
-    assert_eq!(raw_store.hint_get_count(), 0);
+    assert_eq!(raw_store.manifest_gets.count(OperationSelector::List), 0);
 }
 
 #[test]

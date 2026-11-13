@@ -358,9 +358,8 @@ mod tests {
     use crate::path::write::{CommitIntent, FilesystemOperation};
     use crate::test_support::WriterAt;
 
-    use loonfs_objectstore::keys::{hint, wal_prefix};
+    use loonfs_objectstore::keys::wal_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::ObjectStore;
     use loonfs_objectstore::ObjectStoreExtension;
     use loonfs_types::{AbsolutePath, CommitId, CommitSeq, NamespaceId, MAX_PUBLIC_INTEGER};
     use std::assert_matches;
@@ -456,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequence_exhaustion_writes_neither_wal_nor_hint() {
+    async fn sequence_exhaustion_writes_no_wal_object() {
         let (_temp_dir, store, namespace_id, context) = crate::test_support::created_namespace(
             "demo",
             crate::test_support::writer_at("writer", 1_000),
@@ -472,12 +471,6 @@ mod tests {
             .await
             .expect("load publish view");
 
-        let hint_key = hint(&namespace_id);
-        let hint_before = store
-            .get(&hint_key, None)
-            .await
-            .expect("read hint")
-            .expect("hint exists");
         let wal_before = store
             .list_prefix(&wal_prefix(&namespace_id))
             .await
@@ -513,14 +506,6 @@ mod tests {
         assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
         assert!(error.to_string().contains("largest sequence number"));
         assert_matches!(result.effect, PublishViewEffect::Unchanged);
-        assert_eq!(
-            store
-                .get(&hint_key, None)
-                .await
-                .expect("read hint after")
-                .expect("hint exists"),
-            hint_before
-        );
         assert_eq!(
             store
                 .list_prefix(&wal_prefix(&namespace_id))

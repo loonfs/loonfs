@@ -1,6 +1,6 @@
 # The manifest boundary
 
-This note describes how LoonFS finds a [namespace](../specs/glossary.md#namespace)'s newest manifest, cleans up old manifests, and records that a namespace ID was used. One small object for each namespace stores one manifest number, the "manifest boundary", and every manifest at or below that number is dead. Cleanup raises the boundary before it deletes a manifest, a publisher reads the boundary after its put, and a reader lists the manifests above the boundary. Retiring a deleted namespace raises the boundary to a "retired" state, and the retired namespace keeps nothing else under its prefix. The boundary replaces the [hint](../specs/glossary.md#hint).
+This note describes how LoonFS finds a [namespace](../specs/glossary.md#namespace)'s newest manifest, cleans up old manifests, and records that a namespace ID was used. One small object for each namespace stores one manifest number, the "manifest boundary", and every manifest at or below that number is dead. Cleanup raises the boundary before it deletes a manifest, a publisher reads the boundary after its put, and a reader lists the manifests above the boundary. Retiring a deleted namespace raises the boundary to a "retired" state, and the retired namespace keeps nothing else under its prefix. The boundary replaces the hint, a small object that pointed readers at a recent manifest (see [The problem](#the-problem)).
 
 ## The problem
 

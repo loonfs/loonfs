@@ -112,20 +112,19 @@ pub const MAX_CONTENTION_ATTEMPTS: usize = 8;
 /// The most manifests that one check of a writer position moves it onto.
 ///
 /// A walk that finds more drops the position, so the session's next publish
-/// loads the namespace by discovery, which reads the hint instead of every
-/// manifest in between. The walk sends at most one GET more than this.
+/// finds the newest manifest from the manifest boundary instead of loading
+/// every manifest in between. The walk sends at most one GET more than this.
 pub const MAX_POSITION_MOVES: usize = 8;
 
 /// Manifest numbers that one window of a probe for newer manifests checks
 /// at once.
 ///
-/// Discovery, and a publication whose manifest put lost, send one HEAD
-/// request for the number after the newest manifest they loaded. When that
-/// manifest exists, they send one HEAD request for each of the next this
-/// many numbers, all at once, and probe the next window only when the last
-/// number of a window exists. A current hint costs the one HEAD request, and
-/// a hint that lags by at most this many manifests costs one window more,
-/// which takes about one round trip.
+/// A publication whose manifest put lost sends one HEAD request for the
+/// number after the manifest that it built on. When that manifest exists, it
+/// sends one HEAD request for each of the next this many numbers, all at
+/// once, and probes the next window only when the last number of a window
+/// exists. A basis that lags by at most this many manifests costs one window
+/// more than the one HEAD request, which takes about one round trip.
 pub const MANIFEST_PROBE_WINDOW: usize = 8;
 
 /// Unfolded WAL bytes that make a WAL fold due.

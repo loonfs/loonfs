@@ -1,17 +1,21 @@
-//! Manifest discovery while a lagging hint advances and old manifests are swept.
+//! Finding the newest manifest, and publishing one, while a collection raises
+//! the manifest boundary and deletes old manifests.
 
 use super::*;
 use crate::manifest::publish::ManifestUpdate;
 use loonfs_test_support::stores::MetadataMapStore;
 use std::assert_matches;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Parks a request of discovery, raises the hint to manifest 4 and collects
-/// the manifests below it while the request waits, and checks that
-/// discovery then returns manifest 4 and the raised hint.
+/// Parks a search for the newest manifest after it listed manifests 1 to 3,
+/// publishes manifests 4 and 5 and collects the manifests below 5 while the
+/// search waits, and checks that the search starts again and returns
+/// manifest 5.
 ///
-/// With `block_probe`, the parked request is the probe's HEAD of the number
-/// after `start`, and otherwise it's the GET of manifest `start`.
-async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
+/// With `park_last_boundary_read`, the parked request is the search's second
+/// read of the boundary, after the search loaded manifest 3. Otherwise it's
+/// the load of manifest 3, which the collection deletes.
+async fn find_during_collection(park_last_boundary_read: bool) {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("discovery-gc").expect("namespace");
     let store = MetadataMapStore::aged(
@@ -23,49 +27,36 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
         .create()
         .await
         .expect("bootstrap");
-    if start == ManifestNo(2) {
+    let claim = || async {
         crate::test_support::namespace_store(&store, &namespace_id)
             .acquire_writer_epoch(&context.writer_id)
             .await
-            .expect("publish manifest 2");
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .raise_hint(start, None)
-            .await
-            .expect("advance initial hint");
-    }
-    // A publication doesn't raise the hint, so the hint lags at `start` until
-    // the reader below has read it.
-    for _ in start.0..4 {
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context.writer_id)
-            .await
-            .expect("publish without a hint raise");
-    }
-    let (expected, initial_hint) = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest_with_hint()
-        .await
-        .expect("current manifest");
-    assert_eq!(expected.manifest().manifest_no, ManifestNo(4));
-    assert_eq!(initial_hint.state.manifest_no, start);
-    let blocked_number = ManifestNo(start.0 + u64::from(block_probe));
-    let blocked_key = metadata_manifest_object(&namespace_id, &blocked_number);
-    let blocked = BlockingStore::new(
-        store,
-        KeyPredicate::exact(&blocked_key),
-        if block_probe {
-            OperationSelector::Head
+            .expect("publish a manifest");
+    };
+    claim().await;
+    claim().await;
+    let listed = metadata_manifest_object(&namespace_id, &ManifestNo(3));
+    let boundary_key = boundary(&namespace_id);
+    let boundary_reads = AtomicUsize::new(0);
+    let blocked = BlockingStore::matching(store, move |operation| {
+        if park_last_boundary_read {
+            operation.key() == boundary_key
+                && OperationSelector::Read.matches(operation.kind())
+                && boundary_reads.fetch_add(1, Ordering::SeqCst) == 1
         } else {
-            OperationSelector::Get
-        },
-    );
+            operation.key() == listed && OperationSelector::Get.matches(operation.kind())
+        }
+    });
     blocked.block_next();
     let namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
-    let (discovered, ()) = tokio::join!(namespace.load_current_manifest_with_hint(), async {
+    let (found, ()) = tokio::join!(namespace.load_current_manifest(), async {
         blocked.wait_until_blocked().await;
-        crate::test_support::namespace_store(blocked.inner(), &namespace_id)
-            .raise_hint(expected.manifest().manifest_no, None)
-            .await
-            .expect("raise discovery hint");
+        for _ in 4..=5 {
+            crate::test_support::namespace_store(blocked.inner(), &namespace_id)
+                .acquire_writer_epoch(&context.writer_id)
+                .await
+                .expect("publish a manifest");
+        }
         let report = crate::test_support::namespace_store(blocked.inner(), &namespace_id)
             .gc(&WriterAt {
                 now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
@@ -74,69 +65,79 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
             .clock())
             .await
             .expect("collect old manifests");
-        assert_eq!(report.deleted.manifests, 3);
-        assert!(blocked
-            .inner()
-            .head(&blocked_key)
-            .await
-            .expect("collected manifest")
-            .is_none());
+        assert_eq!(report.deleted.manifests, 4);
         blocked.release();
     });
-    let (discovered, hint) = discovered.expect("reload the advanced hint after collection");
-    assert_eq!(discovered, expected);
-    assert_eq!(hint.state.manifest_no, ManifestNo(4));
-}
-
-#[tokio::test]
-async fn discovery_reloads_a_hint_when_gc_removes_its_starting_manifest() {
-    for start in [ManifestNo(1), ManifestNo(2)] {
-        discover_during_collection(start, false).await;
-    }
-}
-
-/// Checks that discovery whose probe finds the manifest after the hinted one
-/// collected reads the newer hint again and finds the newest manifest.
-#[tokio::test]
-async fn discovery_reloads_a_hint_when_gc_removes_the_next_manifest() {
-    for start in [ManifestNo(1), ManifestNo(2)] {
-        discover_during_collection(start, true).await;
-    }
-}
-
-#[tokio::test]
-async fn discovery_still_rejects_a_missing_manifest_when_the_hint_has_not_advanced() {
-    let directory = tempdir().expect("directory");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("missing-manifest").expect("namespace");
-    bootstrap_namespace(&store, &namespace_id, &test_context())
-        .await
-        .expect("bootstrap");
-    // The runtime that published the bootstrap's manifests raises the hint.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
-    let selected = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest");
-    assert!(selected.manifest().manifest_no > ManifestNo(1));
-    store
-        .delete(&selected.object_key)
-        .await
-        .expect("remove hinted manifest");
-    let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect_err("an unchanged hint cannot explain a missing manifest");
-    assert_matches!(
-        error,
-        CoreError::ControlObjectLoad(crate::control_object::ControlObjectLoadError::Codec { .. })
+    assert_eq!(
+        found
+            .expect("find the newest manifest")
+            .manifest()
+            .manifest_no,
+        ManifestNo(5)
     );
 }
 
+/// Checks that a search for the newest manifest starts again when the
+/// highest manifest that it listed is gone by its load.
 #[tokio::test]
-async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
+async fn the_cold_find_starts_again_when_the_listed_manifest_is_collected() {
+    find_during_collection(false).await;
+}
+
+/// Checks that a search for the newest manifest starts again when a
+/// collection raises the boundary over the manifest that it loaded, between
+/// the load and the last read of the boundary, and returns the newer
+/// manifest.
+#[tokio::test]
+async fn the_cold_find_starts_again_when_the_boundary_passes_the_loaded_manifest() {
+    find_during_collection(true).await;
+}
+
+/// Checks that a search for the newest manifest that lists no manifest
+/// returns `namespace_not_found` when the boundary object is missing, and
+/// reports a corrupt store when the boundary object exists.
+#[tokio::test]
+async fn an_empty_listing_is_not_found_without_a_boundary_and_corrupt_with_one() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("missing-manifest").expect("namespace");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    assert_matches!(
+        namespace.load_current_manifest().await,
+        Err(CoreError::NamespaceNotFound { .. })
+    );
+    bootstrap_namespace(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    let current = namespace
+        .load_current_manifest()
+        .await
+        .expect("current manifest");
+    // Cleanup never raises the boundary to the newest manifest.
+    namespace
+        .raise_boundary(current.manifest().manifest_no)
+        .await
+        .expect("raise the boundary");
+    let error = namespace
+        .load_current_manifest()
+        .await
+        .expect_err("a boundary with no manifest above it is a corrupt store");
+    assert_matches!(
+        error,
+        CoreError::ControlObjectLoad(crate::control_object::ControlObjectLoadError::Codec {
+            object_key,
+            ..
+        }) if object_key == boundary(&namespace_id)
+    );
+}
+
+/// Checks that a create whose put of manifest 1 lands after a collection
+/// deleted the namespace's manifest 1, and whose response is lost, settles
+/// the put as its own and then counts it as lost because manifest 1 is at
+/// the boundary. The create returns `namespace_exists`, and the newest
+/// manifest stays the one that another create's namespace published.
+#[tokio::test]
+async fn a_late_ambiguous_put_at_an_emptied_number_is_lost() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("late-manifest").expect("namespace");
     let store = Arc::new(MetadataMapStore::aged(
@@ -144,18 +145,7 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         KeyPredicate::manifest(&namespace_id),
     ));
     let context = test_context();
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect("create");
-    let current = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current");
-    let mut payload = current.payload().clone();
-    payload.manifest_no = ManifestNo(2);
-    let manifest = encode_manifest(payload.clone());
-    let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(1));
     let recorded = Arc::new(RecordingStore::new(store.clone(), KeyPredicate::any()));
     let failing = FailStore::new(
         recorded.clone(),
@@ -170,82 +160,75 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
         KeyPredicate::exact(&object_key),
         OperationSelector::PutCreateIfAbsent,
     );
-    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let deadline = OperationClock::start(0, timer.clone());
+    let late = NamespaceManifestPayload::initial(
+        namespace_id.clone(),
+        loonfs_types::PoolId::generate(),
+        context.now_ms,
+        loonfs_test_support::test_actor(),
+        loonfs_types::NamespaceAccess::Unrestricted {},
+    );
+    let late_namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
+    let clock = context.clock();
     blocked.block_next();
-    let (outcome, ()) = tokio::join!(
-        publish_once_within(&blocked, manifest.clone(), &deadline),
-        async {
-            blocked.wait_until_blocked().await;
-            publish_once(&store, manifest.clone())
-                .await
-                .expect("publish manifest two");
-            payload.manifest_no = ManifestNo(3);
-            publish_once(&store, encode_manifest(payload))
-                .await
-                .expect("publish manifest three");
-            // The runtime that published the manifests raises the hint.
+    let (outcome, ()) = tokio::join!(late_namespace.publish_first_manifest(late, &clock), async {
+        blocked.wait_until_blocked().await;
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
+            .await
+            .expect("another create");
+        for _ in 2..=3 {
             crate::test_support::namespace_store(&store, &namespace_id)
-                .raise_hint_to_current_manifest()
-                .await;
-            timer.advance_ms(crate::limits::GC_GRACE_WINDOW_MS + 1);
-            let report = crate::NamespaceStore {
-                timer: timer.clone(),
-                ..crate::test_support::namespace_store(&store, &namespace_id)
-            }
+                .acquire_writer_epoch(&context.writer_id)
+                .await
+                .expect("publish a manifest");
+        }
+        let report = crate::test_support::namespace_store(&store, &namespace_id)
             .gc(&WriterAt {
-                now_ms: timer.now_ms(),
+                now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
                 ..context.clone()
             }
             .clock())
             .await
             .expect("collect old manifests");
-            assert_eq!(report.deleted.manifests, 2);
-            assert!(store
-                .get(&object_key, None)
-                .await
-                .expect("collected manifest")
-                .is_none());
-            recorded.reset();
-            blocked.release();
-        }
-    );
-    assert_matches!(
-        outcome,
-        Err(CoreError::OutcomeUnknown {
-            object_key: actual_key,
-            ..
-        }) if actual_key == object_key
-    );
+        assert_eq!(report.deleted.manifests, 2);
+        recorded.reset();
+        blocked.release();
+    });
+    assert_matches!(outcome, Err(CoreError::NamespaceExists { .. }));
     assert_eq!(blocked.inner().remaining(), 0);
-    assert_eq!(recorded.counts().create_if_absent_puts, 1);
-    assert_eq!(recorded.counts().compare_and_swaps, 0);
-    assert_eq!(recorded.take_gets(), vec![(object_key.clone(), None)]);
+    let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
+    let boundary = boundary(&namespace_id);
+    // The put, the load that settles it as the create's own, the boundary
+    // read that counts it as lost, and the search for the newest manifest.
     assert_eq!(
-        store
-            .get(&object_key, None)
-            .await
-            .expect("recreated manifest"),
-        Some(Bytes::from(manifest.into_bytes()))
+        control_requests(&namespace_id, &recorded.take()),
+        vec![
+            ("put", manifest(1)),
+            ("get", manifest(1)),
+            ("get", boundary.clone()),
+            ("get", boundary.clone()),
+            ("list", metadata_manifest_prefix(&namespace_id)),
+            ("get", manifest(3)),
+            ("get", boundary),
+        ]
     );
-    let (current, hint) = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest_with_hint()
-        .await
-        .expect("current manifest");
-    assert_eq!(current.manifest().manifest_no, ManifestNo(3));
-    assert_eq!(hint.state.manifest_no, ManifestNo(3));
+    assert_eq!(
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("current manifest")
+            .manifest()
+            .manifest_no,
+        ManifestNo(3)
+    );
 }
 
-/// Checks that a publication whose basis was checked the revalidation bound
-/// ago or longer, and whose basis's successor has been deleted by garbage
-/// collection, loads the current manifest through the hint and publishes
-/// after it.
-///
-/// The basis's successor is missing, so a publication that put the
-/// successor's number without discovery would create the deleted number
-/// again, beside the newer manifests.
+/// Checks that a publication whose basis was checked just now, and whose
+/// basis's successor a collection deleted, puts the deleted number, counts
+/// that put as lost because the number is at the boundary, and publishes
+/// after the newest manifest.
 #[tokio::test]
-async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current_manifest() {
+async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("stale-basis").expect("namespace");
     let store = MetadataMapStore::aged(
@@ -261,27 +244,21 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("publish manifest 2");
-    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let basis = crate::namespace::PublicationBasis {
         manifest: crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_manifest()
             .await
             .expect("manifest 2"),
-        checked: crate::time::Observation::now(clock.clone()),
+        checked: crate::test_support::observed_now(),
     };
-    // Other processes publish manifests 3 to 5 and raise the hint, and a
-    // garbage collection one grace later deletes every manifest below
-    // the hint.
+    // Other processes publish manifests 3 to 5, and a collection one grace
+    // window later deletes every manifest below 5.
     for _ in 3..=5 {
         crate::test_support::namespace_store(&store, &namespace_id)
             .acquire_writer_epoch(&context.writer_id)
             .await
             .expect("another process publishes");
     }
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
-    clock.advance_ms(crate::limits::GC_GRACE_WINDOW_MS + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&WriterAt {
             now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
@@ -298,14 +275,13 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         .expect("the basis's successor")
         .is_none());
 
+    let recorded = RecordingStore::new(store, KeyPredicate::any());
     let ManifestUpdate {
-        current: published,
-        hint,
-        ..
-    } = crate::test_support::namespace_store(&store, &namespace_id)
+        current: published, ..
+    } = crate::test_support::namespace_store(&recorded, &namespace_id)
         .update_manifest(
             Some(basis),
-            &OperationClock::start(0, clock),
+            &OperationClock::start(0, crate::test_support::std_timer()),
             |current: crate::namespace::control::LoadedManifest| async move {
                 Ok(super::super::publish::ManifestChange::Next(
                     Box::new(current.payload().clone()),
@@ -316,13 +292,19 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         .await
         .expect("publish");
     assert_eq!(published.manifest().manifest_no, ManifestNo(6));
-    assert_eq!(hint.expect("discovery").state.manifest_no, ManifestNo(5));
-    assert!(
-        store
-            .head(&successor)
-            .await
-            .expect("the basis's successor")
-            .is_none(),
-        "the publication didn't put the deleted number again"
+    let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
+    let boundary = boundary(&namespace_id);
+    assert_eq!(
+        control_requests(&namespace_id, &recorded.take()),
+        vec![
+            ("put", manifest(3)),
+            ("get", boundary.clone()),
+            ("get", boundary.clone()),
+            ("list", metadata_manifest_prefix(&namespace_id)),
+            ("get", manifest(5)),
+            ("get", boundary.clone()),
+            ("put", manifest(6)),
+            ("get", boundary),
+        ]
     );
 }

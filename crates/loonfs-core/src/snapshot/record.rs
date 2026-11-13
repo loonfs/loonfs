@@ -197,7 +197,7 @@ pub(crate) enum SnapshotBasisVerification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_objectstore::keys::hint;
+    use loonfs_objectstore::keys::boundary;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::stores::replace_object;
     use loonfs_types::CommitSeq;
@@ -237,7 +237,7 @@ mod tests {
     async fn listed_loader_rejects_a_different_durable_family() {
         let (_directory, store) = local_store();
         let object_key =
-            hint(&loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"));
+            boundary(&loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"));
 
         let error = load_snapshot_record_at_key(&store, &object_key)
             .await

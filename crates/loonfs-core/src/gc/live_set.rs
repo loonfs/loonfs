@@ -58,7 +58,9 @@ impl RetirementStatus {
 
 pub(super) struct LiveSet {
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
-    pub(super) discovery_start_manifest_no: ManifestNo,
+    /// The number of the newest manifest that the collection found. The
+    /// collection keeps that manifest and every manifest above it.
+    pub(super) newest_manifest_no: ManifestNo,
     pub(super) objects: ChargedSet<String>,
     /// The collection's decision about each key that the snapshot listing
     /// returned, which the collection applies after its other deletes.
@@ -88,9 +90,9 @@ impl LiveSet {
     ) -> Result<Self> {
         let namespace_id = &namespace.namespace_id;
         let observed = Observation::now(Arc::clone(&namespace.timer));
-        let (manifest, hint) = namespace.load_current_manifest_with_hint().await?;
+        let manifest = namespace.load_current_manifest().await?;
         let anchor = namespace
-            .load_read_anchor_from_manifest(manifest, hint, observed)
+            .load_read_anchor_from_manifest(manifest, observed)
             .await?;
         let memory = CollectionMemory::new(
             namespace_id.to_string(),
@@ -99,7 +101,7 @@ impl LiveSet {
         let head = anchor.manifest.payload();
         let mut live = Self {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
-            discovery_start_manifest_no: anchor.hint.state.manifest_no,
+            newest_manifest_no: head.manifest_no,
             objects: ChargedSet::new(&memory),
             snapshot_decisions: ChargedQueue::new(&memory),
             snapshot_listed_bytes: 0,
@@ -202,13 +204,15 @@ impl LiveSet {
     }
 
     /// Returns whether the collection keeps the object of `family` at `key`, because
-    /// a live root references the object, discovery can still read it, or a
-    /// live head hasn't folded it.
+    /// a live root references the object, the object is a manifest numbered at
+    /// or above the newest manifest that the collection found, or a live head
+    /// hasn't folded it.
     pub(super) fn protects(&self, family: CandidateFamily, key: &str) -> bool {
         self.objects.contains(key)
             || match family {
-                CandidateFamily::Manifests => manifest_no_of(key)
-                    .is_some_and(|number| number >= self.discovery_start_manifest_no),
+                CandidateFamily::Manifests => {
+                    manifest_no_of(key).is_some_and(|number| number >= self.newest_manifest_no)
+                }
                 CandidateFamily::WalObjects => self
                     .live_folded_wal_no
                     .is_some_and(|folded_wal_no| object_is_required(key, folded_wal_no)),

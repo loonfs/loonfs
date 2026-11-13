@@ -401,7 +401,7 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
 
     // After the data put loses its answer, the retry cannot load its view.
     let answer_lost = std::sync::atomic::AtomicBool::new(false);
-    let hint = loonfs_objectstore::keys::hint(&namespace_id);
+    let boundary = loonfs_objectstore::keys::boundary(&namespace_id);
     let wal_prefix = loonfs_objectstore::keys::wal_prefix(&namespace_id);
     let store = FailStore::matching(
         ack_lost_wal_put_store(temp_dir.path(), &namespace_id),
@@ -409,9 +409,9 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
             if is_data_wal_put(operation, &wal_prefix) {
                 answer_lost.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            operation.key() == hint && answer_lost.load(std::sync::atomic::Ordering::SeqCst)
+            operation.key() == boundary && answer_lost.load(std::sync::atomic::Ordering::SeqCst)
         },
-        InjectedError::PermissionDenied("hint read refused".to_owned()),
+        InjectedError::PermissionDenied("boundary read refused".to_owned()),
     );
     store.fail_all();
 

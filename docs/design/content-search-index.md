@@ -66,7 +66,7 @@ namespaces/{owner_namespace_id}/extensions/grep/
 └── segments/{segment_id}.sst
 ```
 
-The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. Grep assigns the index's run numbers itself, one above the largest number in its entry. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a pool](grep-across-a-pool.md) explains why.
+The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. Grep assigns the index's run numbers itself, one above the largest number in its entry. Every core publication copies the entry forward, so the index needs no manifests, manifest boundary, or discovery of its own. [Grep across a pool](grep-across-a-pool.md) explains why.
 
 A run of index steps changes a copy of the entry in memory (the "pending entry") and publishes the change in a manifest of its own:
 

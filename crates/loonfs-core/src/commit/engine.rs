@@ -109,10 +109,6 @@ struct PositionState {
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionStatus`].
     session: SharedWriterSessionStatus,
-    /// The newest manifest that this engine published itself (the claim of
-    /// the session's writer epoch, or a tombstone) and that
-    /// [`NamespaceCommitEngine::take_published_manifest_no`] hasn't returned yet.
-    published_manifest_no: Option<ManifestNo>,
 }
 
 impl<S: ObjectStore> NamespaceCommitEngine<S> {
@@ -127,7 +123,6 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
                 projection_observed: None,
                 acquired_anchor: None,
                 session: SharedWriterSessionStatus::default(),
-                published_manifest_no: None,
             },
         }
     }
@@ -240,16 +235,6 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         self.position.current.clone()
     }
 
-    /// Returns the number of the newest manifest that this engine published
-    /// since the last call, so that the runtime can raise the namespace's hint
-    /// to that manifest.
-    ///
-    /// The engine publishes a manifest when it acquires the session's writer
-    /// epoch and when it deletes the namespace.
-    pub fn take_published_manifest_no(&mut self) -> Option<ManifestNo> {
-        self.position.published_manifest_no.take()
-    }
-
     /// Deletes the namespace using this writer session (format spec,
     /// "Deleting a namespace").
     ///
@@ -274,13 +259,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .await;
         self.position.invalidate_projection();
         match deleted {
-            Ok(report) => {
-                if let Some(tombstone) = report.published {
-                    self.position
-                        .record_published_manifest_no(tombstone.manifest.manifest_no);
-                }
-                Ok(report.response)
-            }
+            Ok(report) => Ok(report.response),
             Err(error) => {
                 if let CoreError::WriterFenced(fence) = &error {
                     *self.position.lock_session() = WriterSessionStatus::Fenced(fence.clone());
@@ -431,13 +410,6 @@ impl PositionState {
         }
     }
 
-    fn record_published_manifest_no(&mut self, manifest_no: ManifestNo) {
-        self.published_manifest_no = Some(
-            self.published_manifest_no
-                .map_or(manifest_no, |newest| newest.max(manifest_no)),
-        );
-    }
-
     /// Returns the session's writer epoch, acquiring it on first use. A fenced
     /// session fails immediately without accessing the store or acquiring a new
     /// epoch.
@@ -461,7 +433,6 @@ impl PositionState {
             .await
             .inspect_err(|error| self.record_namespace_gone(error))?;
         let acquired_writer = acquisition.writer;
-        self.record_published_manifest_no(acquisition.claim.manifest.manifest_no);
         self.acquired_anchor = Some(acquisition.anchor);
         let mut session = self.lock_session();
         if let WriterSessionStatus::Fenced(fence) = &*session {

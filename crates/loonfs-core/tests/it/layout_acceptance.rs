@@ -12,11 +12,11 @@ use loonfs_core::test_support::namespace_store;
 use loonfs_core::test_support::writer_at;
 use loonfs_core::test_support::WriterAt;
 use loonfs_core::CreateNamespaceOptions;
-use loonfs_objectstore::keys::wal_prefix;
+use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 use loonfs_types::AbsolutePath;
 use loonfs_types::CompleteUploadBody;
 use loonfs_types::{CommitSeq, NamespaceId};
@@ -71,7 +71,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn reads_commits_and_change_feed_never_list() {
+async fn reads_commits_and_change_feed_list_only_the_manifests() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -98,7 +98,6 @@ async fn reads_commits_and_change_feed_never_list() {
         .await
         .expect("write junk");
 
-    let baseline = store.count(OperationSelector::List);
     let staged = engine.begin_upload().await.expect("begin upload");
     engine
         .upload_content(&staged.upload_id, b"uploaded\n")
@@ -154,10 +153,22 @@ async fn reads_commits_and_change_feed_never_list() {
         .expect("change feed");
     assert!(!changes.changes.is_empty());
 
-    assert_eq!(
-        store.count(OperationSelector::List),
-        baseline,
-        "read, commit, upload, and change-feed paths must not LIST"
+    // A search for the newest manifest lists the namespace's manifests, and
+    // nothing else lists.
+    let listings: Vec<_> = store
+        .snapshot()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::List { prefix } => Some(prefix),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        listings
+            .iter()
+            .all(|prefix| *prefix == metadata_manifest_prefix(&namespace_id)),
+        "read, commit, upload, and change-feed paths list nothing but the manifests: \
+         {listings:?}"
     );
 }
 

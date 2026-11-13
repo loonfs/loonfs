@@ -699,9 +699,6 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .compactor_epoch(&claimed)
         .await
         .expect("claim the namespace");
-    // Each publication raised its namespace's hint, so every hint records the
-    // current manifest before the collection below and before the test
-    // counts requests.
     for namespace in [&idle, &claimed, &retired] {
         maintenance
             .gc(namespace)
@@ -723,27 +720,28 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     );
     assert_eq!(requests(store.counts()), [0; 4]);
 
-    // A load of a live namespace sends a HEAD request for the missing
-    // manifest after the current one in its discovery, and again in its
-    // check of the manifest's successor. A collection lists each of its five
-    // families once, the snapshots included, and lists nothing under its
-    // pool's prefix, whether the namespace is live or deleted.
-    let heads = 2;
+    // A load of a namespace lists its manifests once, and a load of a live
+    // namespace sends a HEAD request for the missing manifest after the
+    // current one in its check of the manifest's successor. A collection
+    // lists each of its five families once, the snapshots included, and
+    // lists nothing under its pool's prefix, whether the namespace is live or
+    // deleted.
+    let heads = 1;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [4, heads, 0, 0], None, [4, heads, 5, 0], None),
-        (&claimed, [4, heads, 0, 0], None, [4, heads, 5, 0], None),
+        (&idle, [4, heads, 1, 0], None, [4, heads, 6, 0], None),
+        (&claimed, [4, heads, 1, 0], None, [4, heads, 6, 0], None),
         (
             &retired,
-            [2, 0, 0, 0],
+            [3, 0, 1, 0],
             Some(crate::ErrorCode::NamespaceDeleted),
-            [2, 0, 5, 0],
+            [3, 0, 6, 0],
             None,
         ),
         (
             &missing,
-            [1, 0, 0, 0],
+            [2, 0, 1, 0],
             Some(crate::ErrorCode::NamespaceNotFound),
-            [1, 0, 0, 0],
+            [2, 0, 1, 0],
             Some(crate::ErrorCode::NamespaceNotFound),
         ),
     ] {
@@ -798,7 +796,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     assert_eq!(fenced.compaction, MetadataCompactionOutcome::Fenced);
     assert_eq!(
         requests(store.counts()),
-        [4, heads, 0, 0],
+        [4, heads, 1, 0],
         "the observed anchor already reports the fence"
     );
 }
@@ -846,25 +844,25 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
         (
             CommitSeq(1),
             [
-                (RetentionTarget::Seq(CommitSeq(0)), 4),
-                (RetentionTarget::Seq(CommitSeq(1)), 4),
+                (RetentionTarget::Seq(CommitSeq(0)), 5),
+                (RetentionTarget::Seq(CommitSeq(1)), 5),
                 // The scan reads commit 2 from the commits segment, and
                 // commit 2 is later than the cutoff.
-                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 5),
+                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 6),
             ],
         ),
         (
             CommitSeq(2),
             [
-                (RetentionTarget::Head, 4),
-                (RetentionTarget::Seq(CommitSeq(u64::MAX)), 4),
+                (RetentionTarget::Head, 5),
+                (RetentionTarget::Seq(CommitSeq(u64::MAX)), 5),
                 // No folded commit is above the head, so the scan reads no
                 // segment.
                 (
                     RetentionTarget::Cutoff {
                         cutoff_at_ms: u64::MAX,
                     },
-                    4,
+                    5,
                 ),
             ],
         ),
@@ -907,6 +905,7 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                     RecordedOperation::Get { .. }
                         | RecordedOperation::GetWithMetadata { .. }
                         | RecordedOperation::Head { .. }
+                        | RecordedOperation::List { .. }
                 )),
                 "{target:?} sends only reads: {operations:?}"
             );
@@ -918,11 +917,11 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 .count();
             assert_eq!(
                 (loads, operations.len() - heads, heads),
-                (1, gets, 2),
+                (1, gets, 1),
                 "{target:?} loads the current manifest once and plans from the view after it \
-                 (the hint, the manifest, a HEAD request for the missing manifest after it, \
-                 the hint again, a GET of the missing WAL number after the manifest, and the \
-                 manifest HEAD again): {operations:?}"
+                 (the manifest boundary, a listing of the manifests, the manifest, the \
+                 boundary again, a GET of the missing WAL number after the manifest, and a \
+                 HEAD request for the missing manifest after it): {operations:?}"
             );
         }
     }
@@ -1253,8 +1252,6 @@ async fn a_read_after_an_extension_publication_sends_no_request() {
         .put_file("/file", b"body", &actor)
         .await
         .expect("put a file");
-    // The writer's shutdown ends its hint raises before the test counts
-    // requests.
     writer.shutdown().await.expect("shut down the writer");
     // The runtime's timer doesn't move, so its cached head stays within an
     // eventual read's maximum staleness.

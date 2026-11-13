@@ -19,9 +19,9 @@
 
 use loonfs_types::format::control::{
     decode_control_object, BoundaryPayload, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
-    HintPayload, ManifestBoundary, ManifestRef, NamespaceStatus, PoolPayload, RebasedFrom,
-    SnapshotOwner, SnapshotPayload, UploadOutcome, UploadOutcomePayload, UploadSessionMode,
-    UploadSessionPayload, WriterBlock,
+    ManifestBoundary, ManifestRef, NamespaceStatus, PoolPayload, RebasedFrom, SnapshotOwner,
+    SnapshotPayload, UploadOutcome, UploadOutcomePayload, UploadSessionMode, UploadSessionPayload,
+    WriterBlock,
 };
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::format::manifest::{
@@ -977,14 +977,6 @@ fn manifest_status_rejects_unknown_fields_as_corruption() {
 #[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(
-        "control_hint.v1.json",
-        ControlObjectKind::Hint,
-        HintPayload {
-            namespace_id: namespace_id(),
-            manifest_no: ManifestNo(2),
-        },
-    );
-    check_control_golden(
         "control_snapshot.v1.json",
         ControlObjectKind::Snapshot,
         SnapshotPayload {
@@ -1168,11 +1160,6 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
     let add_unknown = |payload: &mut serde_json::Value| {
         payload["field_from_the_future"] = serde_json::Value::from(true);
     };
-    assert_control_payload_edit_is_corrupt::<HintPayload>(
-        "control_hint.v1.json",
-        ControlObjectKind::Hint,
-        add_unknown,
-    );
     assert_control_payload_edit_is_corrupt::<SnapshotPayload>(
         "control_snapshot.v1.json",
         ControlObjectKind::Snapshot,
@@ -1390,12 +1377,12 @@ fn upload_sessions_reject_a_zero_multipart_part_size() {
 #[test]
 fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
     let mut document: serde_json::Value =
-        serde_json::from_slice(&read_golden("control_hint.v1.json"))
+        serde_json::from_slice(&read_golden("control_boundary.v1.json"))
             .expect("decode control fixture");
     document["field_from_the_future"] = serde_json::Value::from(true);
     let edited = serde_json::to_vec(&document).expect("encode edited envelope");
 
-    let error = decode_control_object::<HintPayload>(&edited, ControlObjectKind::Hint)
+    let error = decode_control_object::<BoundaryPayload>(&edited, ControlObjectKind::Boundary)
         .expect_err("unknown mutable envelope field must be rejected");
     assert_matches!(
         error,
@@ -1794,19 +1781,21 @@ fn wal_decode_rejects_a_version_one_commit_without_committed_by() {
 
 #[test]
 fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
-    let envelope = HintPayload {
+    let envelope = BoundaryPayload {
         namespace_id: namespace_id(),
-        manifest_no: ManifestNo(2),
+        boundary: ManifestBoundary::Manifest {
+            manifest_no: ManifestNo(2),
+        },
     };
     let encoded =
-        loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &envelope)
+        loonfs_types::format::control::encode_control_state(ControlObjectKind::Boundary, &envelope)
             .expect("encode control object");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    document["payload"]["manifest_no"] = serde_json::Value::from(999);
+    document["payload"]["boundary"]["manifest_no"] = serde_json::Value::from(999);
     let tampered = serde_json::to_vec(&document).expect("encode tampered document");
 
-    let err = decode_control_object::<HintPayload>(&tampered, ControlObjectKind::Hint)
+    let err = decode_control_object::<BoundaryPayload>(&tampered, ControlObjectKind::Boundary)
         .expect_err("tampered payload must be rejected");
     assert_matches!(
         err,

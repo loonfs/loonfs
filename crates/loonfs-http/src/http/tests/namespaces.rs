@@ -239,7 +239,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
     let namespace_id = namespace_id("close-during-open");
     let blocking = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::hint(&namespace_id),
+        KeyPredicate::exact(loonfs_objectstore::keys::boundary(&namespace_id)),
         OperationSelector::Read,
     ));
     let (router, state, namespaces) = test_app_with_sessions(

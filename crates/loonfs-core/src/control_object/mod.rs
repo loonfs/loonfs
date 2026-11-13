@@ -5,4 +5,7 @@ mod load;
 
 pub use error::ControlObjectLoadError;
 pub use load::LoadedControl;
-pub(crate) use load::{expect_identity_field, expect_namespace, load_control_object, present};
+pub(crate) use load::{
+    decode_control_object_body, expect_identity_field, expect_namespace, load_control_object,
+    present, store_load_error,
+};

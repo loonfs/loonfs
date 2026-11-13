@@ -1,7 +1,7 @@
 //! Loading and classification shared by mutable control-object families.
 
 use super::ControlObjectLoadError;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ObjectBody, ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{decode_control_object, ControlObjectKind};
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::NamespaceId;
@@ -29,18 +29,42 @@ where
     T: DeserializeOwned,
     F: FnOnce(&str, &T) -> Result<(), ControlObjectLoadError>,
 {
-    let store_error = |error: ObjectStoreError| ControlObjectLoadError::Store {
-        object_key: object_key.clone(),
-        message: error.public_message().into_owned(),
-        kind: error.kind(),
-    };
     let body = store
         .get_with_metadata(&object_key)
         .await
-        .map_err(store_error)?
+        .map_err(|error| store_load_error(&object_key, &error))?
         .ok_or_else(|| ControlObjectLoadError::MissingObject {
             object_key: object_key.clone(),
         })?;
+    decode_control_object_body(object_key, body, kind, validate_identity)
+}
+
+/// Returns the load error for a store request about the object at
+/// `object_key` that failed with `error`.
+pub(crate) fn store_load_error(
+    object_key: &str,
+    error: &ObjectStoreError,
+) -> ControlObjectLoadError {
+    ControlObjectLoadError::Store {
+        object_key: object_key.to_owned(),
+        message: error.public_message().into_owned(),
+        kind: error.kind(),
+    }
+}
+
+/// Decodes `body`, the control object read at `object_key`, as `kind`, and
+/// checks the identity its payload embeds as [`load_control_object`] does.
+pub(crate) fn decode_control_object_body<T, F>(
+    object_key: String,
+    body: ObjectBody,
+    kind: ControlObjectKind,
+    validate_identity: F,
+) -> Result<LoadedControl<T>, ControlObjectLoadError>
+where
+    T: DeserializeOwned,
+    F: FnOnce(&str, &T) -> Result<(), ControlObjectLoadError>,
+{
+    let store_error = |error: ObjectStoreError| store_load_error(&object_key, &error);
     let etag =
         loonfs_objectstore::required_etag(&object_key, body.metadata.etag).map_err(store_error)?;
     let envelope = decode_control_object(&body.bytes, kind).map_err(|error| match error {
@@ -116,14 +140,14 @@ pub(crate) fn expect_identity_field(
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use loonfs_objectstore::keys::hint;
+    use loonfs_objectstore::keys::boundary;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_objectstore::ObjectStoreErrorKind;
     use loonfs_test_support::stores::{
         replace_object, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
     };
-    use loonfs_types::format::control::HintPayload;
+    use loonfs_types::format::control::{BoundaryPayload, ManifestBoundary};
     use loonfs_types::NamespaceId;
     use serde_json::Value;
     use std::assert_matches;
@@ -139,14 +163,18 @@ mod tests {
         loonfs_test_support::ids::namespace_id(value)
     }
 
-    fn encoded_hint(namespace_id: &NamespaceId) -> (HintPayload, Vec<u8>) {
-        let state = HintPayload {
+    fn encoded_boundary(namespace_id: &NamespaceId) -> (BoundaryPayload, Vec<u8>) {
+        let state = BoundaryPayload {
             namespace_id: namespace_id.clone(),
-            manifest_no: loonfs_types::ManifestNo(1),
+            boundary: ManifestBoundary::Manifest {
+                manifest_no: loonfs_types::ManifestNo(1),
+            },
         };
-        let bytes =
-            loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &state)
-                .expect("hint bytes");
+        let bytes = loonfs_types::format::control::encode_control_state(
+            ControlObjectKind::Boundary,
+            &state,
+        )
+        .expect("boundary bytes");
         (state, bytes)
     }
 
@@ -156,16 +184,16 @@ mod tests {
             .expect("write test object");
     }
 
-    async fn load_hint<S: ObjectStore + ?Sized>(
+    async fn load_boundary<S: ObjectStore + ?Sized>(
         store: &S,
         object_key: &str,
         expected_namespace_id: &NamespaceId,
-    ) -> Result<LoadedControl<HintPayload>, ControlObjectLoadError> {
+    ) -> Result<LoadedControl<BoundaryPayload>, ControlObjectLoadError> {
         load_control_object(
             store,
             object_key.to_owned(),
-            ControlObjectKind::Hint,
-            |object_key, state: &HintPayload| {
+            ControlObjectKind::Boundary,
+            |object_key, state: &BoundaryPayload| {
                 expect_namespace(object_key, expected_namespace_id, &state.namespace_id)
             },
         )
@@ -176,9 +204,9 @@ mod tests {
     async fn absence_is_missing_object() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
 
-        let error = load_hint(&store, &object_key, &namespace_id)
+        let error = load_boundary(&store, &object_key, &namespace_id)
             .await
             .expect_err("absent object should fail");
 
@@ -189,7 +217,7 @@ mod tests {
     async fn permission_failure_preserves_its_store_class() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key.clone()),
@@ -198,7 +226,7 @@ mod tests {
         );
         store.fail_next(1);
 
-        let error = load_hint(&store, &object_key, &namespace_id)
+        let error = load_boundary(&store, &object_key, &namespace_id)
             .await
             .expect_err("permission failure should surface");
 
@@ -215,7 +243,7 @@ mod tests {
     async fn other_provider_failure_preserves_its_store_class() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
         let store = FailStore::new(
             inner,
             KeyPredicate::exact(object_key.clone()),
@@ -224,7 +252,7 @@ mod tests {
         );
         store.fail_next(1);
 
-        let error = load_hint(&store, &object_key, &namespace_id)
+        let error = load_boundary(&store, &object_key, &namespace_id)
             .await
             .expect_err("provider failure should surface");
 
@@ -241,12 +269,12 @@ mod tests {
     async fn missing_etag_is_a_store_failure() {
         let (_directory, inner) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
-        let (_, bytes) = encoded_hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
+        let (_, bytes) = encoded_boundary(&namespace_id);
         write_bytes(&inner, &object_key, bytes).await;
         let store = MetadataMapStore::without_etag(inner, KeyPredicate::exact(object_key.clone()));
 
-        let error = load_hint(&store, &object_key, &namespace_id)
+        let error = load_boundary(&store, &object_key, &namespace_id)
             .await
             .expect_err("missing etag should fail");
 
@@ -264,10 +292,10 @@ mod tests {
     async fn malformed_envelope_is_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
         write_bytes(&store, &object_key, b"not json".to_vec()).await;
 
-        let error = load_hint(&store, &object_key, &namespace_id)
+        let error = load_boundary(&store, &object_key, &namespace_id)
             .await
             .expect_err("malformed envelope should fail");
 
@@ -278,8 +306,8 @@ mod tests {
     async fn wrong_envelope_kind_is_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
-        let (_, bytes) = encoded_hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
+        let (_, bytes) = encoded_boundary(&namespace_id);
         let mut document: Value = serde_json::from_slice(&bytes).expect("envelope json");
         document["kind"] = Value::String(ControlObjectKind::Snapshot.as_str().to_owned());
         write_bytes(
@@ -289,7 +317,7 @@ mod tests {
         )
         .await;
 
-        let error = load_hint(&store, &object_key, &namespace_id)
+        let error = load_boundary(&store, &object_key, &namespace_id)
             .await
             .expect_err("wrong kind should fail");
 
@@ -304,8 +332,8 @@ mod tests {
     async fn checksum_disagreement_has_its_own_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
-        let (_, bytes) = encoded_hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
+        let (_, bytes) = encoded_boundary(&namespace_id);
         let mut document: Value = serde_json::from_slice(&bytes).expect("envelope json");
         let recorded = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         document["payload_checksum"] = Value::String(recorded.to_owned());
@@ -316,7 +344,7 @@ mod tests {
         )
         .await;
 
-        let error = load_hint(&store, &object_key, &namespace_id)
+        let error = load_boundary(&store, &object_key, &namespace_id)
             .await
             .expect_err("checksum mismatch should fail");
 
@@ -335,11 +363,11 @@ mod tests {
         let (_directory, store) = local_store();
         let expected_namespace_id = namespace("demo");
         let actual_namespace_id = namespace("other");
-        let object_key = hint(&expected_namespace_id);
-        let (_, bytes) = encoded_hint(&actual_namespace_id);
+        let object_key = boundary(&expected_namespace_id);
+        let (_, bytes) = encoded_boundary(&actual_namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
-        let error = load_hint(&store, &object_key, &expected_namespace_id)
+        let error = load_boundary(&store, &object_key, &expected_namespace_id)
             .await
             .expect_err("namespace mismatch should fail");
 
@@ -357,14 +385,14 @@ mod tests {
     async fn other_identity_disagreement_is_not_a_codec_error() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
-        let (_, bytes) = encoded_hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
+        let (_, bytes) = encoded_boundary(&namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
-        let error = load_control_object::<_, HintPayload, _>(
+        let error = load_control_object::<_, BoundaryPayload, _>(
             &store,
             object_key.clone(),
-            ControlObjectKind::Hint,
+            ControlObjectKind::Boundary,
             |object_key, _state| expect_identity_field(object_key, "test id", "expected", "actual"),
         )
         .await
@@ -385,11 +413,11 @@ mod tests {
     async fn successful_load_returns_state_key_and_etag() {
         let (_directory, store) = local_store();
         let namespace_id = namespace("demo");
-        let object_key = hint(&namespace_id);
-        let (state, bytes) = encoded_hint(&namespace_id);
+        let object_key = boundary(&namespace_id);
+        let (state, bytes) = encoded_boundary(&namespace_id);
         write_bytes(&store, &object_key, bytes).await;
 
-        let loaded = load_hint(&store, &object_key, &namespace_id)
+        let loaded = load_boundary(&store, &object_key, &namespace_id)
             .await
             .expect("valid control object");
 

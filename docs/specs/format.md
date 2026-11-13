@@ -4,7 +4,7 @@ This document describes how LoonFS stores a filesystem in object storage: the ob
 
 A filesystem in object storage has to recover from a crash at any point. For example, an upload might finish, and then the metadata commit that references it might fail. The uploaded object exists, but it isn't referenced by any visible file. To recover after a restart, a reader needs a durable record of which changes were committed.
 
-LoonFS keeps that record in an immutable write-ahead log (WAL). WAL objects are numbered in order (1, 2, 3, ...). To commit a batch of changes, a writer writes them into the next WAL object, and once that object is durably written to object storage, every change in it is committed. Periodically, LoonFS writes the committed metadata into sorted segments and publishes a numbered manifest that lists the segments a reader needs. A small hint records a recent manifest number, so readers know where to start looking for the current manifest.
+LoonFS keeps that record in an immutable write-ahead log (WAL). WAL objects are numbered in order (1, 2, 3, ...). To commit a batch of changes, a writer writes them into the next WAL object, and once that object is durably written to object storage, every change in it is committed. Periodically, LoonFS writes the committed metadata into sorted segments and publishes a numbered manifest that lists the segments a reader needs. A small object, the manifest boundary, records a manifest number at or below which no manifest can be the current one, so a reader finds the current manifest by listing the manifests above that number.
 
 File contents are stored separately from metadata, in content objects. File content is durable no later than the commit that references it ([File contents and ownership](#15-file-contents-and-ownership) describes the two ways content becomes durable).
 
@@ -21,7 +21,7 @@ The key words MUST and MUST NOT in this document are to be interpreted as descri
 | Section | Subject |
 | --- | --- |
 | [1. The storage model](#1-the-storage-model) | Namespaces, inodes, names, revisions, deletion, attributes, access, and row families |
-| [2. Objects and references](#2-objects-and-references) | Object keys, numbered manifests and WAL objects, and the hint |
+| [2. Objects and references](#2-objects-and-references) | Object keys, numbered manifests and WAL objects, and the manifest boundary |
 | [3. Object-storage requirements](#3-object-storage-requirements) | Conditional writes, reads, listings, and provider assumptions |
 | [4. Reading a namespace](#4-reading-a-namespace) | Recovery, visibility, path lookup, and content verification |
 | [5. Uploading content](#5-uploading-content) | Upload sessions, direct transfers, and admission proofs |
@@ -350,7 +350,6 @@ Each namespace's objects are stored under its own prefix, except its content obj
 
 ```text
 namespaces/{namespace_id}/
-├── hint.json
 ├── boundary.json
 ├── manifests/{manifest_no:020}.json.zst
 ├── wal/{wal_no:020}.wal.zst
@@ -378,8 +377,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | --- | --- | --- |
 | Manifest | The namespace's identity, lifecycle status, writer authority, metadata runs, and retention floor | A new manifest is published at the next number. |
 | WAL object | Commits, a writer fence, or a [floor object](glossary.md#floor-object), after the folded boundary | A new WAL object is created at the next number. |
-| Hint | A recent manifest number, where discovery starts | Compare-and-swap. The number never decreases. |
-| Manifest boundary | A manifest number at or below which every manifest of the namespace has been replaced by a newer manifest | Created with put-if-absent, then changed by compare-and-swap. The number never decreases. Garbage collection writes it. |
+| Manifest boundary | A manifest number at or below which every manifest of the namespace has been replaced by a newer manifest. A reader lists the manifests above it, and a publisher reads it after its manifest put. | Created with put-if-absent, then changed by compare-and-swap. The number never decreases. Garbage collection writes it. |
 | Metadata segment | Sorted metadata rows that a manifest references | A new immutable object is written. |
 | Extension segment | Sorted rows of an extension's state, which an extension entry in a manifest lists | A new immutable object is written. |
 | Snapshot | A reference that keeps one manifest for a user or a fork | Created and deleted. A user snapshot's expiry time can be extended, and its deletion recorded, by compare-and-swap. |
@@ -388,7 +386,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | Content object (whole or span) | A range of chain bytes, along with the provider's stored checksum of the whole object | Immutable. |
 | Temporary object | Bytes that an assembly needs as a separate object | Created, then deleted. |
 
-Manifests and WAL objects are immutable once they're written. A manifest publication can change the physical layout or the namespace's control state without creating a commit, and a WAL publication can add commits without creating a manifest. The hint doesn't determine history or visibility. It's a best-effort pointer, so its number can lag behind successful manifest publications.
+Manifests and WAL objects are immutable once they're written. A manifest publication can change the physical layout or the namespace's control state without creating a commit, and a WAL publication can add commits without creating a manifest.
 
 ### 2.3 Numbered objects and generated IDs
 
@@ -412,7 +410,7 @@ The current manifest is the source of truth for the namespace's identity, status
 
 Every WAL object records the head sequence after its commits. A fence moves the WAL number and the writer epoch forward without adding a commit, and it keeps the head sequence it started from. A [floor object](glossary.md#floor-object) is a WAL object with no commits that records a new [retention floor](glossary.md#retention-floor), and it also keeps the head sequence it started from (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
 
-Creating or forking a namespace writes the hint before manifest 1, and nothing deletes the hint of a live namespace. So a reader that doesn't find a hint can report that the namespace doesn't exist, without listing any objects.
+A process that has no manifest of the namespace in memory finds the newest manifest by reading the [manifest boundary](glossary.md#manifest-boundary) and listing the manifests numbered above it. If that listing is empty and no boundary object exists, no namespace has the ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
 
 The namespace's counters advance at different times:
 
@@ -424,12 +422,6 @@ The namespace's counters advance at different times:
 | `revision_no` | A new content revision is committed for one file. |
 
 For example, manifest 5 might cover WAL objects through 8 and sequences through 40. WAL object 9 can be a fence at sequence 40, and WAL object 10 can contain commits 41 to 43. The read view is then at sequence 43. A fold can publish manifest 6, covering WAL object 10, without allocating sequence 44.
-
-A manifest publication returns once its manifest is durable, and the runtime that published it then raises the hint to the manifest's number. Every publication raises the hint once. To raise it, the runtime reads the hint and, when the hint records a lower number, writes the new number with one compare-and-swap. The runtime doesn't retry a raise. A raise that fails, or that loses its compare-and-swap to another raise, is logged and ignored, so the hint can stay behind the newest manifest until the next publication raises it. For example, if a runtime publishes manifests 6, 7, and 8 in quick succession, it raises the hint to 6, then to 7, then to 8. If the provider refuses the raise to 7, the hint records 6 until the raise to 8 succeeds, and a reader that starts at 6 in the meantime probes forward and finds 7 (see [A summary of the log protocol](#26-a-summary-of-the-log-protocol)).
-
-Why does the hint exist, and why can it lag? A reader needs a place to start that doesn't require listing the namespace's manifests, because object-storage listings are slow, and LoonFS keeps them off every hot path. LoonFS updates the hint after it publishes a manifest, as a separate compare-and-swap. Keeping the hint and the manifest in step would need a transaction across two objects, which object storage doesn't support. So readers treat the hint as a starting point and check for newer manifests (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). A publication that already has a manifest confirmed current less than `READ_REVALIDATION_BOUND_MS` ago starts from that manifest instead of from the hint, and checks it for a successor (see [Publishing a manifest](#72-publishing-a-manifest)).
-
-Why does every publication raise the hint, when some providers accept about one write per second to one object (see the [provider reference](object-storage-providers.md#1-frequently-used-data-points))? The runtime could pace its raises to stay under that limit, and raise the hint once more when each second ends. Pacing would keep the hint at most a second behind, but it would need a timer and a background task for each namespace. Without pacing, those providers refuse the raises in between, and the hint stays behind until the next publication. Either way, a reader that starts at a hint that lags probes forward, which costs one more round trip and doesn't change what the reader finds (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
 
 ### 2.5 Manifest references
 
@@ -453,10 +445,9 @@ This section summarizes how commits, writer takeover, folds, discovery, and garb
 Each namespace has two sequences of numbered objects, manifests and WAL objects. Each sequence starts at 1, and a publisher creates each object with put-if-absent at the previous number plus one.
 
 ```text
-                 hint (best effort)
-                   |
-                   v
-manifests:  [4]  [5]  [6]   <- current manifest, folded_wal_no = 8
+manifests:  [4] | [5]  [6]   <- current manifest, folded_wal_no = 8
+                ^
+                manifest boundary = 4 (a reader lists the manifests above it)
 
 WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
                       |_____________|
@@ -465,7 +456,7 @@ WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
 
 - A manifest records the namespace's lifecycle status, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that contain its rows through `head_seq`.
 - A WAL object is a data object, a fence, or a floor object. A data object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote those commits. A fence contains no commits. A [floor object](glossary.md#floor-object) contains no commits either, and it records a new retention floor. Any process can create a floor object without the writer epoch (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
-- The hint is mutable. It records a manifest number that never decreases, and the runtime that publishes a manifest raises the hint afterward with one compare-and-swap.
+- The [manifest boundary](glossary.md#manifest-boundary) is mutable. It records a manifest number that never decreases, and every manifest at or below that number has been replaced by a newer manifest. Garbage collection raises the boundary before it deletes manifests, and a publisher reads the boundary after each manifest put. A manifest put at or below the boundary counts as lost.
 - Content objects store immutable ranges of file bytes, and a layout lists those ranges in chain order.
 - Snapshots are retained manifests (see [Snapshots](#8-snapshots)).
 
@@ -477,14 +468,13 @@ A fold doesn't need a writer epoch, and any process can run one. A fold moves th
 
 To discover a namespace's current state, a reader:
 
-1. Loads the hint and the manifest it points to.
-2. Sends a HEAD request for the next manifest number. If that manifest exists, probes the `MANIFEST_PROBE_WINDOW` (8) numbers after it at once, takes the highest that exists, and repeats from it while the window's last number exists. It then loads the highest manifest found, checks that it's a later manifest of the same namespace (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), and rereads the hint in case it was raised in the meantime.
-3. Reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first missing number.
-4. Checks that the manifest still has no successor.
+1. Reads the manifest boundary, lists the manifests numbered above it, loads the highest-numbered manifest in the listing, and reads the boundary again to check that the loaded manifest is still above it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
+2. Reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first missing number.
+3. Checks that the manifest still has no successor.
 
-If a successor appeared, or the check in step 4 happened `READ_REVALIDATION_BOUND_MS` or more after the manifest probe, the reader reloads the manifest and starts again. A missing or invalid WAL object also makes the reader reload the manifest, and if the manifest number hasn't changed, the store is corrupt (see [Resolving the metadata basis](#41-resolving-the-metadata-basis) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+If a successor appeared, or the check in step 3 happened `READ_REVALIDATION_BOUND_MS` or more after the reader started to find the manifest, the reader reloads the manifest and starts again. A missing or invalid WAL object also makes the reader reload the manifest, and if the manifest number hasn't changed, the store is corrupt (see [Resolving the metadata basis](#41-resolving-the-metadata-basis) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 
-Garbage collection deletes WAL objects at or below the current manifest's `folded_wal_no`, and unpinned manifests below the hint value it observed. It deletes each one only after the object's provider age reaches the grace window (see [Reference roots](#112-reference-roots) and [Candidate and age rules](#113-candidate-and-age-rules)). It deletes a metadata or extension segment once neither the current manifest nor a manifest that a snapshot keeps lists it, and the segment is more than 24 hours old. A read that must outlive the current manifest takes a snapshot (see [Snapshots](#8-snapshots)).
+Garbage collection deletes WAL objects at or below the current manifest's `folded_wal_no`, and manifests below the newest manifest that it found that no snapshot keeps. Before it deletes a manifest, it raises the manifest boundary to the highest manifest number that it deletes. It deletes each object only after the object's provider age reaches the grace window (see [Reference roots](#112-reference-roots) and [Candidate and age rules](#113-candidate-and-age-rules)). It deletes a metadata or extension segment once neither the current manifest nor a manifest that a snapshot keeps lists it, and the segment is more than 24 hours old. A read that must outlive the current manifest takes a snapshot (see [Snapshots](#8-snapshots)).
 
 Every numbered put has a time budget. A publisher starts each numbered put within a budget of the observation it planned against, and it treats a put that returns after the budget as having an unknown outcome. The grace window is at least the longest budget, plus the provider request bound, plus the clock allowance. Under the provider requirement in [Required operations](#31-required-operations), an object can therefore be deleted only after the provider has applied or rejected every put planned against an observation older than the object (see [Clock and operation assumptions](#114-clock-and-operation-assumptions) and [Publication and collection timing](#c1-publication-and-collection-timing)). Readers have a matching bound. A reader trusts that a manifest has no successor only within `READ_REVALIDATION_BOUND_MS` of the probe that confirmed it (see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 
@@ -510,8 +500,9 @@ The object-store layer MUST provide:
 - create-if-absent (put-if-absent), for publishing immutable objects, at every size (so a large create sent in parts completes conditionally),
 - compare-and-swap, for mutable control objects,
 - full and ranged reads,
+- a read that's conditional on the object's version, which returns no body when the stored version is the one the caller gives (a store that can't make the read conditional returns the object, and LoonFS compares the versions itself, see the [provider reference](object-storage-providers.md#2-provider-matrix)),
 - deletion, and
-- reliable prefix listing.
+- reliable prefix listing, from the beginning of the prefix or starting after a given key.
 
 Every operation MUST stay within the configured storage scope.
 
@@ -582,15 +573,21 @@ This section describes how a reader finds a namespace's current state, determine
 
 ### 4.1 Resolving the metadata basis
 
-A cold read (a read with no cached view) starts by finding the current manifest:
+A cold read (a read with no cached view) starts by finding the newest manifest. The [manifest boundary](glossary.md#manifest-boundary) (`namespaces/{namespace_id}/boundary.json`) records a manifest number `B` such that every manifest of the namespace numbered `B` or lower is dead: no process publishes a manifest at such a number, and no process treats such a manifest as the namespace's newest. A dead manifest can still exist, because a snapshot keeps it or garbage collection hasn't deleted it yet. A missing boundary object means that `B` is 0. Garbage collection raises the boundary before it deletes manifests (see [One complete collection](#111-one-complete-collection)), and no publisher writes it.
 
-1. Load `hint.json`, and load the manifest at its `manifest_no`.
-2. Send a HEAD request for the next manifest number. If it exists, probe the `MANIFEST_PROBE_WINDOW` (8) numbers after it at once, take the highest that exists, and repeat from it while the probed window's last number exists. Load the highest manifest found, which is the current one.
-3. If the probe ended after an active manifest, read the hint again. If the hint now points to a higher number than the last manifest found, start again from that number. (Garbage collection might have deleted manifests below the new hint while the probe ran.)
+A process that has nothing in memory for the namespace (a cold read, a collection, or a create or fork) finds the newest manifest in these steps:
 
-The hint is expected to lag. It's a starting point, not a statement that later objects don't exist.
+1. Read the boundary, `b`.
+2. List the manifests numbered above `b`, with a listing of the manifest prefix that starts after the key of manifest `b`.
+3. If the listing is empty, read the boundary again. If the boundary changed, start again. If it's unchanged and no boundary object exists, no namespace has the ID. If it's unchanged and a boundary object exists, the store is corrupt, because garbage collection never leaves a live namespace without a manifest above its boundary.
+4. Load the highest-numbered manifest in the listing, `n`. If that manifest is gone, start again.
+5. Read the boundary again. If `n` is at or below the boundary, start again. Otherwise `n` is the newest manifest, and a tombstone at `n` means that the namespace is deleted.
 
-Each manifest that discovery loads MUST be a valid later manifest of the one loaded before it:
+When step 1 found the boundary object, the second read in step 3 or step 5 is a conditional read with the version that step 1 read, so the store returns no body when the boundary is unchanged (see [Required operations](#31-required-operations)). A find that hasn't returned after `MAX_CONTENTION_ATTEMPTS` (8) attempts fails with `store_contention`.
+
+For example, a cold read of `main` reads the boundary 44, lists manifests 45 and 46, loads manifest 46, and reads the boundary again. The boundary is still 44, so manifest 46 is the newest. The find sends four requests: a boundary read, one listing, one manifest load, and one conditional boundary read. For an ID that no namespace has, it sends a boundary read, one listing that returns nothing, and a second boundary read.
+
+Each manifest that a successor probe loads above a manifest that a process already has MUST be a valid later manifest of that manifest:
 
 - Its identity fields are equal.
 - Its `folded_wal_no`, both epochs, `head_seq`, retention floor, next run number, and activity counters are the same or higher.
@@ -598,33 +595,35 @@ Each manifest that discovery loads MUST be a valid later manifest of the one loa
 
 A publication's successor check applies the same rules to the next number (see [Publishing a manifest](#72-publishing-a-manifest)). A sequence of manifests that fails this check is corrupt.
 
-| Discovery result | Interpretation |
+| Result of a find | Interpretation |
 | --- | --- |
-| The hint is missing | The namespace isn't installed. |
-| The hint points to manifest 1, which is missing | Installation hasn't finished. |
-| A higher hinted manifest is missing | Read the hint again. If it now points to a higher number, start again from it. If it's unchanged, the store is corrupt. (Garbage collection deletes manifests below the hint value it observed, so a manifest that an older hint value pointed to can be gone after the hint is raised.) |
+| The listing is empty, the boundary is unchanged, and no boundary object exists | No namespace has the ID. |
+| The listing is empty, the boundary is unchanged, and a boundary object exists | The store is corrupt. |
+| The boundary changed after an empty listing, the highest listed manifest is gone, or the loaded manifest is at or below the boundary | Start again. |
 | A required object is unreadable or invalid | An error, not absence. |
-| The current manifest is deleted | Ordinary namespace operations return `namespace_deleted`. |
+| The newest manifest is deleted | Ordinary namespace operations return `namespace_deleted`. |
 
 Every namespace has its own manifest from the moment it's installed. A new namespace's empty manifest describes the root directory at sequence 0. A fork's first manifest lists the source runs it inherits. Its `fork_basis` records where the fork came from and which fork snapshot keeps its basis, and readers don't follow that field to choose a different basis.
 
-The current manifest and the unfolded WAL together make up one read view:
+The newest manifest and the unfolded WAL together make up one read view:
 
 ```text
-hint --(start)--> manifest 5 --HEAD 6 exists, HEAD 7..14--> manifest 6 is the newest
-                                            |
-                          +-----------------+-----------------+
-                          |                                   |
-                     listed runs                      folded WAL = 10
-                          |                                   |
-                    metadata rows                    replay WAL 11, 12
-                          |                                   |
-                          +-----------------+-----------------+
-                                            |
-                                        read view
+boundary 4 --list--> 5, 6 --load 6, boundary 4--> manifest 6 is the newest
+                                                              |
+                                            +-----------------+-----------------+
+                                            |                                   |
+                                       listed runs                      folded WAL = 10
+                                            |                                   |
+                                      metadata rows                    replay WAL 11, 12
+                                            |                                   |
+                                            +-----------------+-----------------+
+                                                              |
+                                                          read view
 ```
 
 In this example, WAL object 12 is the discovered tip. Discovery MUST also account for a manifest that's published while it runs, as [Replaying the visible WAL](#42-replaying-the-visible-wal) describes.
+
+Why is the boundary read again after the highest manifest is loaded? A manifest at or below the boundary is dead, whatever the listing showed. For example, a process lists manifests 45 and 46 above the boundary 44, loads manifest 46, and then pauses. Meanwhile, other processes publish manifests 47 to 50, and a day later a collection raises the boundary to 49 and deletes manifests 45 to 49. When the process resumes, the second read finds the boundary 49, so the process starts again and finds manifest 50. With the second read, what the find returns doesn't depend on how long the process paused.
 
 ### 4.2 Replaying the visible WAL
 
@@ -652,7 +651,7 @@ A warm read is a read from a cached view. The reference runtime checks a cached 
 
 The runtime sends a namespace's probes together, as one refresh, and runs one refresh at a time. A read that finds a refresh running waits for it, because the refresh might have sent its probes before the read started, and then shares the next refresh, which every read that arrives during the first refresh shares.
 
-The reader also runs discovery again if an answer to either probe arrives `READ_REVALIDATION_BOUND_MS` or more after the previous successor probe was sent, whatever the answer is. The time is measured when the answer arrives, and against the previous successor probe, not the one being answered. A successor probe that finds nothing becomes the previous successor probe for later reads only after both answers have arrived in time. This is how cached readers notice deletions and retention changes. The hint isn't used to validate a cached view.
+The reader also runs discovery again if an answer to either probe arrives `READ_REVALIDATION_BOUND_MS` or more after the previous successor probe was sent, whatever the answer is. The time is measured when the answer arrives, and against the previous successor probe, not the one being answered. A successor probe that finds nothing becomes the previous successor probe for later reads only after both answers have arrived in time. This is how cached readers notice deletions and retention changes.
 
 An `eventual` warm read (see [Read consistency](api.md#read-consistency)) reads the cached view without a WAL probe or a successor probe while the cached tip was confirmed less than the read's maximum staleness ago. The tip's confirmation time is taken before the WAL probe or the load that confirmed the tip is sent, so the read sees every commit that was acknowledged before then. The read also requires the previous successor probe to be less than `READ_REVALIDATION_BOUND_MS` old. After that, an `eventual` read runs the probes the way a `strong` read does. The reference runtime replaces a cached view only with a newer one, so an `eventual` read never reads an older head than a read that completed before it. When the runtime makes or learns of a change whose effect on the head it can't identify (it creates, forks, or deletes the namespace, a mutation's outcome is unknown, or it finds its writer session fenced), it drops the cached view, and the next read loads the namespace by discovery. A load that started before the drop doesn't install its result, because it might have read the namespace before the change.
 
@@ -948,8 +947,6 @@ acknowledge
 
 A confirmed precondition failure creates no object. The writer discovers the winning publication, checks whether it has been fenced, and plans again before it tries another number. It never creates a parallel branch of history. The object at the next number can be another writer's commit or fence, or a [floor object](glossary.md#floor-object), which any process can create (see [Advancing the retention floor](#101-advancing-the-retention-floor)). So a collision doesn't always mean that another writer has taken the namespace over. After a floor object, discovery finds no higher writer epoch, so the writer isn't fenced, and it plans the batch again against the floor that the floor object records. The writer's callers see no error from the collision.
 
-Commits don't raise the hint. The runtime that publishes a manifest raises the hint afterward (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)), and readers stay correct while the hint lags, because discovery probes forward.
-
 Every put is planned against an observed state, and that observation has to be recent. A writer tracks two kinds of observation:
 
 | Observation | What it confirms | Recorded by |
@@ -973,7 +970,7 @@ After a WAL put whose outcome is unknown, or a publication that's cancelled afte
 
 Why check for a manifest successor at all? The check stops a successor that garbage collection already deleted from looking absent. Any successor created after the previous confirmation is kept for at least the revalidation bound, under the grace window and clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions). Another writer has to publish a claim manifest before it can write a WAL object with commits, and a fold or a compaction by another process also publishes a successor, so the manifest check finds each of those manifests, and the writer runs discovery. That includes a fold that covered another process's floor object, whose manifest folds past the writer's tip, so the writer doesn't keep a position below that manifest's `folded_wal_no` (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). A manifest this runtime publishes itself (a fold, a compaction, a snapshot, or an extension's publication) moves the session to that manifest, so the check doesn't find the manifest as a successor.
 
-A manifest publication that builds on a manifest it already has relies on the same bound (see [Publishing a manifest](#72-publishing-a-manifest)). If garbage collection had deleted that manifest's successor, the publication's put at the next number would create the deleted number again, beside the newer manifests. If the publication confirmed its manifest less than the bound ago, every manifest after it was published less than a grace window ago, so garbage collection still keeps each manifest from the confirmed one upward, a put that succeeds proves that the manifest had no successor, and a missing number above it is the end of the sequence. A publication whose manifest was confirmed longer ago discovers the current manifest through the hint, because garbage collection keeps every manifest at or above the hint value it observed.
+A manifest publication that builds on a manifest it already has relies on the same bound (see [Publishing a manifest](#72-publishing-a-manifest)). If garbage collection had deleted that manifest's successor, the publication's put at the next number would create the deleted number again, beside the newer manifests. If the publication confirmed its manifest less than the bound ago, every manifest after it was published less than a grace window ago, so garbage collection still keeps each manifest from the confirmed one upward, a put that succeeds proves that the manifest had no successor, and a missing number above it is the end of the sequence. A publication whose manifest was confirmed longer ago finds the newest manifest again (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), because that find reads the manifest boundary after it loads the newest manifest.
 
 Why does a tip confirmation check the next WAL number? A WAL put is create-only, so the put itself checks that number, and a put that collides creates nothing. But without the WAL check, a put at `tip + 1` could write a number that garbage collection has already emptied. Another writer creates a WAL object with commits only after it publishes its claim manifest, so if the manifest check found no claim, the other writer's WAL object was created after the check, and garbage collection can't delete an object that young before the put runs. A floor object has no claim manifest, and it can be older than the writer's last confirmation. For example, a session has tip 30 and has been idle. Another process created a floor object at 31 thirty minutes ago, and nothing has folded the floor object. If the session confirmed its tip with the manifest HEAD request alone, the request would find no successor. If a fold then covered 31 a minute later, and a collection deleted WAL object 31 (which is folded and older than the grace window), the session would commit at 31 within its publication budget, with no further request. The put would succeed at or below the manifest's `folded_wal_no`, so no reader would replay the commit, and an acknowledged commit would be lost. With the WAL check, the confirmation finds the object at 31, and the session runs discovery. The cost is a second round trip in each confirmation, which a writer runs before a commit that follows a quiet period longer than the publication budget.
 
@@ -1140,9 +1137,17 @@ For example, if the predecessor's floor is 5 and the fold covers a floor object 
 
 A fold is a publication by the namespace's "maintainer", the role that folds, compacts, publishes an extension's entry, advances the retention floor, and collects garbage. The writer commits and deletes the namespace, under the writer epoch. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
-Every manifest publication builds on a manifest it has, its "basis". A publication whose basis was confirmed current less than `READ_REVALIDATION_BOUND_MS` ago puts its manifest at the basis's number plus one with put-if-absent, with no request before the put. (A writer session's own fold, compaction, or deletion builds on the manifest of the session's [writer position](glossary.md#writer-position), a fold call builds on the manifest that its discovery found, and a compaction builds on the manifest it planned from.) A put that succeeds proves that the basis had no successor, because within the bound garbage collection hasn't deleted any manifest above it (see [Publication and group commit](#63-publication-and-group-commit)). If the put loses, the publication finds the manifest that won by probing above its basis, the way discovery probes above the hint (see [A summary of the log protocol](#26-a-summary-of-the-log-protocol)), without reading the hint, and the next attempt builds on the winner with the losing attempt's confirmation. The manifest that won was published after that confirmation, so it also had no successor at that time.
+Every manifest publication builds on a manifest it has, its "basis". A publication whose basis was confirmed current less than `READ_REVALIDATION_BOUND_MS` ago puts its manifest at the basis's number plus one with put-if-absent, with no request before the put. (A writer session's own fold, compaction, or deletion builds on the manifest of the session's [writer position](glossary.md#writer-position), a fold call builds on the manifest that its discovery found, and a compaction builds on the manifest it planned from.) A put that succeeds proves that the basis had no successor, because within the bound garbage collection hasn't deleted any manifest above it (see [Publication and group commit](#63-publication-and-group-commit)). If the put loses, the publication finds the manifest that won by probing above its basis. It sends a HEAD request for the next manifest number, and if that manifest exists, it probes the `MANIFEST_PROBE_WINDOW` (8) numbers after it at once, takes the highest that exists, and repeats from it while the window's last number exists. The next attempt builds on the winner with the losing attempt's confirmation. The manifest that won was published after that confirmation, so it also had no successor at that time.
 
-A publication without a basis, or whose basis was confirmed `READ_REVALIDATION_BOUND_MS` ago or longer, or whose probe answers arrive that long after the confirmation, discovers the current manifest through the hint (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). Each publication attempt records the time before its first request as the confirmation of the manifest it finds. For example, a session's fold whose position is on manifest 40, confirmed a second ago, puts manifest 41 with no request first. If another process has published 41 and 42, the put loses, the fold finds 42 by probing above 40, and it builds on 42.
+A publication without a basis, or whose basis was confirmed `READ_REVALIDATION_BOUND_MS` ago or longer, or whose probe answers arrive that long after the confirmation, finds the newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). Each publication attempt records the time before its first request as the confirmation of the manifest it finds. For example, a session's fold whose position is on manifest 40, confirmed a second ago, puts manifest 41 with no request first. If another process has published 41 and 42, the put loses, the fold finds 42 by probing above 40, and it builds on 42.
+
+After a put that succeeds, the publisher reads the [manifest boundary](glossary.md#manifest-boundary). This read follows every put that the publisher counts as its own, including a put with an unknown outcome that a read-back confirmed (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)):
+
+1. If the manifest's number is above the boundary, or no boundary object exists, the publication succeeded.
+2. If the number is at or below the boundary, the put counts as lost, like a put that found the number taken. The publisher doesn't probe above a basis, because the basis is at or below the boundary too. It finds the newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)) and continues as after any lost put.
+3. If the boundary read fails, the publication returns `outcome_unknown`, and the caller reloads as after a put whose response was lost.
+
+The boundary read is the publication's last request. For example, suppose a publication on manifest 40 puts manifest 41 after other processes have published manifests 41 to 45, and a collection has deleted manifests 41 to 44 and raised the boundary to 44. The put succeeds at the emptied number, but the boundary read returns 44, so the publication treats its put as lost, finds manifest 45, and builds its next attempt on manifest 45.
 
 A fold builds on its basis, finds the current manifest again if its put loses, and then checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's folded head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, retention window, runs, next run number, and extension entries, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, a retention window change, and an [extension's](#124-extensions) publication publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
 
@@ -1177,9 +1182,9 @@ A successor can set, change, or clear the [retention window](glossary.md#retenti
 
 The bounded metadata publication budget runs from the start of the publication, before any output segment is written, until the manifest put starts. An attempt whose budget expired publishes nothing more, and its unreferenced output is deleted under the segment-age rules in [Candidate and age rules](#113-candidate-and-age-rules). Compaction has a longer bound (see [Streaming compaction](#104-streaming-compaction)).
 
-The fold doesn't raise the hint. The runtime that published the fold's manifest raises the hint afterward (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)), and a failed raise doesn't undo the publication. Garbage collection keeps every manifest number at or above the hint value it observed for its collection, so discovery can probe forward from a hint that lags. The intermediate manifests kept for discovery don't keep their own runs. Only the current manifest and the snapshots' manifests keep their runs (see [Reference roots](#112-reference-roots)).
-
 Forks follow the same path from manifest 1. A manifest owned by the fork doesn't mean the inherited segments were copied into the fork's prefix, and each segment keeps its owner.
+
+Why read the boundary after a put that succeeded? A put-if-absent at a number that garbage collection emptied succeeds, so a successful put alone doesn't show that the number was free. Garbage collection raises the boundary before it deletes a manifest, so the read finds every such put, however long the publisher waited before its put or between its put and its read.
 
 Why does the doubling rule exist? Without it, every fold of a growing chain would either add one more extent (so a log file with many appends would end up with thousands of objects to read) or copy the whole chain again (so each append would cost a copy of everything before it). The doubling rule keeps each extent at least twice as large as the one after it, so a chain has a small number of extents, and each byte is copied only about once for each doubling of the chain's size. The 32-extent limit covers the case where many small appends would otherwise build up more extents than that.
 
@@ -1304,23 +1309,28 @@ This section describes how namespaces are created, forked, deleted, and retired.
 To create a namespace, LoonFS:
 
 1. Builds the first manifest (see [Publishing a manifest](#72-publishing-a-manifest)). For a namespace created without a source, LoonFS generates a pool ID, and the first manifest records that pool ID.
-2. Writes the hint, pointing to manifest 1, with put-if-absent. A new hint means a new namespace ID. If the hint already exists, LoonFS reads the existing namespace state through it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence. A hint whose manifest 1 is missing belongs to a creation that failed before it wrote manifest 1, and LoonFS then continues with the next step.
-3. For a namespace created without a source, writes the pool record (`pools/{pool_id}/pool.json`) with put-if-absent. The record's `created_at_ms` is the create call's request clock. The put follows the rule for a record created under a generated ID (see [Immutable writes and retries](#32-immutable-writes-and-retries)). If the record still isn't stored, the call ends with the error and doesn't write manifest 1. The hint stays, as after any creation that failed before it wrote manifest 1. A fork writes no pool record (see [Forking a namespace](#92-forking-a-namespace)).
-4. Writes manifest 1 with put-if-absent. If that put is refused, LoonFS reads the state again, and returns `namespace_exists` (or the current summary, with `allow_existing`) or `namespace_deleted`.
+2. Finds the newest manifest for the new ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). If it finds one, the call writes nothing. An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence.
+3. For a namespace created without a source, writes the pool record (`pools/{pool_id}/pool.json`) with put-if-absent. The record's `created_at_ms` is the create call's request clock. The put follows the rule for a record created under a generated ID (see [Immutable writes and retries](#32-immutable-writes-and-retries)). If the record still isn't stored, the call ends with the error and doesn't write manifest 1. A fork writes no pool record (see [Forking a namespace](#92-forking-a-namespace)).
+4. Publishes manifest 1 with put-if-absent, and after a put that succeeds, reads the [manifest boundary](glossary.md#manifest-boundary), as every manifest publication does (see [Publishing a manifest](#72-publishing-a-manifest)). If the put is refused, or succeeds at or below the boundary, LoonFS finds the newest manifest, and returns `namespace_exists` (or the current summary, with `allow_existing`) or `namespace_deleted`.
 5. For a namespace created without a source, if the manifest 1 put lost to another creation, reloads the namespace's current manifest. If that manifest records another pool, LoonFS deletes the call's own pool record. The call returns the result of step 4 in every case. If the reload or the deletion fails, the pool record stays. A manifest 1 put with an unknown outcome leaves the pool record in place.
 
-The hint decides whether the ID is new, because the hint lives as long as the namespace. Manifest 1 can't decide, because garbage collection can delete it once a newer manifest replaces it and the grace window passes (see [Reference roots](#112-reference-roots)), so a missing manifest 1 doesn't mean a missing namespace. If two processes create the same ID at the same time, the one whose hint put succeeds writes manifest 1, the other reads a hint without a manifest and writes manifest 1 too, and the one whose manifest 1 put succeeds creates the namespace. A hint written before that put doesn't mean the namespace exists, because its writer might have failed before it wrote manifest 1.
+Manifest 1's put and the boundary read after it decide whether the call created the namespace. The put alone can't decide, because garbage collection can delete manifest 1 once a newer manifest replaces it and the grace window passes (see [Reference roots](#112-reference-roots)), and a put-if-absent at the emptied number succeeds. Before garbage collection deletes manifest 1, it raises the boundary to at least 1, so a later put at that number reads a boundary at or above 1 and counts as lost. If two processes create the same ID at the same time, both can find no namespace in step 2, and the one whose manifest 1 put succeeds above the boundary creates the namespace. The other returns `namespace_exists`.
 
-Why is the pool record written between the hint and manifest 1? The record is written before manifest 1 so that every pool that a manifest records has a pool record, because no manifest can record the pool before the record's put succeeds. The record is written after the hint so that a create call for an existing namespace writes nothing (for example, a call that creates a namespace only if it doesn't exist yet). A pool ID is generated by one create call, so no other call writes that pool's record. A namespace writes under a pool's prefix only after a manifest records the pool, so if the create call fails, its pool record is the only object under the pool's prefix. A call whose manifest put has an unknown outcome keeps its pool record, because the manifest might have been written. The call takes `created_at_ms` from its request clock, and its metadata publication budget (see [Publishing a manifest](#72-publishing-a-manifest)) starts when the call reads that clock, in the same way that a fork call's budget starts before it creates its fork snapshot (see [Forking a namespace](#92-forking-a-namespace)).
+For example, `main` has manifests 45 and 46 and a boundary of 44, and a create of `main` that started before `main` existed puts manifest 1 late. The put succeeds, because manifest 1 was deleted long ago, but the boundary read returns 44. So the put counts as lost, and the create finds manifest 46 and returns `namespace_exists`.
+
+Why does the call look for the namespace before its first write? Publishing manifest 1 already decides whether the call created the namespace, but the lookup keeps a call for a taken ID from writing anything, such as a pool record or a fork snapshot. A create that fails before it writes manifest 1 leaves no manifest, so a later find for that ID finds no namespace.
+
+Why is the pool record written between the lookup and manifest 1? The record is written before manifest 1 so that every pool that a manifest records has a pool record, because no manifest can record the pool before the record's put succeeds. The record is written after the lookup so that a create call for an existing namespace writes nothing (for example, a call that creates a namespace only if it doesn't exist yet). A pool ID is generated by one create call, so no other call writes that pool's record. A namespace writes under a pool's prefix only after a manifest records the pool, so if the create call fails, its pool record is the only object under the pool's prefix. A call whose manifest put has an unknown outcome keeps its pool record, because the manifest might have been written. The call takes `created_at_ms` from its request clock, and its metadata publication budget (see [Publishing a manifest](#72-publishing-a-manifest)) starts when the call reads that clock, in the same way that a fork call's budget starts before it creates its fork snapshot (see [Forking a namespace](#92-forking-a-namespace)).
 
 ### 9.2 Forking a namespace
 
 A fork starts its own history from the source's retained metadata. To create one, LoonFS:
 
-1. Creates a verified fork snapshot whose owner is the target namespace, either from the source's head or from an unexpired user snapshot (see [Creating and verifying a snapshot](#82-creating-and-verifying-a-snapshot)). The fork reads nothing of the target first: the put of the target's hint in step 4 decides whether the target exists (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
-2. Loads and verifies the snapshot's manifest.
-3. Copies these values from the snapshot's manifest: its run references, folded head sequence, next run number, access configuration, pool, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor is the folded head sequence of the snapshot's manifest (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the reference to the snapshot's manifest and the fork snapshot's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
-4. Builds the rest of the first manifest's fields (see [Publishing a manifest](#72-publishing-a-manifest)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
+1. Finds the newest manifest for the target's ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). If it finds one, the fork writes nothing, and returns `namespace_exists`, or `namespace_deleted` for a tombstone, as a create does.
+2. Creates a verified fork snapshot whose owner is the target namespace, either from the source's head or from an unexpired user snapshot (see [Creating and verifying a snapshot](#82-creating-and-verifying-a-snapshot)). The put of manifest 1 in step 5, with the boundary read after it, decides whether the fork creates the target (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
+3. Loads and verifies the snapshot's manifest.
+4. Copies these values from the snapshot's manifest: its run references, folded head sequence, next run number, access configuration, pool, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor is the folded head sequence of the snapshot's manifest (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the reference to the snapshot's manifest and the fork snapshot's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
+5. Builds the rest of the first manifest's fields (see [Publishing a manifest](#72-publishing-a-manifest)) and publishes manifest 1, with the boundary read after a put that succeeds, as step 4 of [Creating a namespace](#91-creating-a-namespace) describes.
 
 The fork copies no file bytes or metadata segments. Its first commit is one sequence above its initial head. The fork can itself be forked right away, because its manifest already lists its inherited runs.
 
@@ -1330,7 +1340,7 @@ The fork snapshot's creation grace protects the installation. Garbage collection
 
 ### 9.3 Conflicting and unknown installations
 
-A losing hint put, or a losing manifest 1 put, reads the existing namespace state, as [Creating a namespace](#91-creating-a-namespace) describes. Deleted status follows the lifetime rule in [Namespaces and identity](#11-namespaces-and-identity). Invalid bytes, or a key that doesn't match its payload, are corruption. A loser never overwrites the winner.
+A losing manifest 1 put, or a manifest 1 put that succeeds at or below the [manifest boundary](glossary.md#manifest-boundary), finds the newest manifest and reads the existing namespace state, as [Creating a namespace](#91-creating-a-namespace) describes. Deleted status follows the lifetime rule in [Namespaces and identity](#11-namespaces-and-identity). Invalid bytes, or a key that doesn't match its payload, are corruption. A loser never overwrites the winner.
 
 A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number:
 
@@ -1612,7 +1622,7 @@ LoonFS runs two kinds of collection, and each one is a job of its own:
 
 A namespace's collection first establishes the roots. It:
 
-1. Discovers the namespace's current manifest.
+1. Finds the namespace's newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
 2. Reads the WAL tail.
 3. Lists all snapshot keys, reads each snapshot record, and loads the manifests that the snapshots keep.
 4. Records the protected manifests and segments.
@@ -1623,7 +1633,7 @@ A pool's collection reads the pool record, lists the pool's upload sessions, and
 
 Each collection then lists each of its candidate families completely, from the beginning. To collect content, a pool's collection reads the extent filter of each distinct layout segment of the members' rooted manifests and lists the pool's content prefix once (see [Content roots](#119-content-roots)). The only exact sets of content roots are the chains of the members' WAL tails and the content IDs of the upload sessions, and they use read working memory together with the extent filters. A collection stores no durable progress, run, phase, reference table, or cursor. Snapshot cleanup determines which snapshots can be deleted from the complete snapshot listing that establishes a namespace's roots. Session cleanup determines which session records can be deleted from the complete session listing that establishes the pool's roots.
 
-A namespace's collection lists the namespace's manifests, chooses the manifests to delete under the rules in [Candidate and age rules](#113-candidate-and-age-rules), raises the [manifest boundary](glossary.md#manifest-boundary) to the highest chosen number, and then deletes exactly the chosen manifests. To raise the boundary, the collection loads the boundary object, and writes nothing if the stored number is already that high. Otherwise it creates a missing object with put-if-absent, or writes the higher number with a compare-and-swap, and after a lost write it loads the boundary again and tries again. If the raise fails, the collection fails before it deletes any manifest. A collection that chooses no manifest sends no request for the boundary. The boundary isn't progress that a later collection continues from: each collection chooses its manifests from its own listing. For example, suppose the boundary is 30, the newest manifest is 45, the observed hint is 45, and snapshots keep manifests 7 and 38. If manifests 31 to 44 are older than the grace window, the collection chooses 31 to 37 and 39 to 44, raises the boundary to 44, and deletes those 13 manifests. Manifests 7 and 38 stay. [The manifest boundary](../design/manifest-boundary.md#cleaning-up-manifests) explains the reasons for this order.
+A namespace's collection lists the namespace's manifests, chooses the manifests to delete under the rules in [Candidate and age rules](#113-candidate-and-age-rules), raises the [manifest boundary](glossary.md#manifest-boundary) to the highest chosen number, and then deletes exactly the chosen manifests. To raise the boundary, the collection loads the boundary object, and writes nothing if the stored number is already that high. Otherwise it creates a missing object with put-if-absent, or writes the higher number with a compare-and-swap, and after a lost write it loads the boundary again and tries again. If the raise fails, the collection fails before it deletes any manifest. A collection that chooses no manifest sends no request for the boundary. The boundary isn't progress that a later collection continues from: each collection chooses its manifests from its own listing. For example, suppose the boundary is 30, the newest manifest is 45, and snapshots keep manifests 7 and 38. If manifests 31 to 44 are older than the grace window, the collection chooses 31 to 37 and 39 to 44, raises the boundary to 44, and deletes those 13 manifests. Manifests 7 and 38 stay. [The manifest boundary](../design/manifest-boundary.md#cleaning-up-manifests) explains the reasons for this order.
 
 Every age decision in a collection uses the same `now_ms`, captured when the collection starts. A later collection reads fresh roots and uses its own clock. Concurrent collectors can delete eligible objects independently, and an object that's already gone needs no more cleanup. A failed collection might have deleted some candidates already, but the next collection can safely start over.
 
@@ -1634,14 +1644,14 @@ Every age decision in a collection uses the same `now_ms`, captured when the col
 | The current active manifest | The manifest, and every segment it lists. |
 | The current deleted manifest (the namespace tombstone) | The tombstone, and every segment it lists. |
 | Every recognized snapshot key in the complete listing | The manifest numbered in its ID, and every segment in that manifest. |
-| The hint's observed manifest number | Every manifest number at or above it, so discovery can probe forward. (This root doesn't protect their runs.) |
+| The number of the newest manifest that the collection found | Every manifest numbered above it, because other processes can publish manifests after the collection's find. (This root doesn't protect their runs.) |
 | The current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
 The segments that a manifest lists are the segments of its runs and the extension segments of its `extensions` entries (see [Extensions](#124-extensions)). A tombstone's entries list no segments.
 
 Snapshot bodies aren't needed to identify these roots, because the manifest number is part of the snapshot key. Bodies are normally read later, for owner and expiry decisions. If a snapshot's manifest is missing, the collector reads the snapshot and applies the same owner and grace rules as snapshot cleanup. An absent or collectable snapshot doesn't require that missing basis, which allows recovery from a failed installation cleanup or a concurrent snapshot removal. A retained snapshot that refers to a missing manifest is corruption, and invalid or unreadable manifests still fail the collection. Each listed snapshot whose manifest is present protects its files for the whole collection, even if that collection deletes the snapshot.
 
-A manifest that a newer manifest replaced isn't a root unless a snapshot keeps it, whether it's above or below the observed hint, and however recently the newer manifest was published.
+A manifest below the newest manifest that the collection found isn't a root unless a snapshot keeps it, however recently the newer manifest was published.
 
 The tombstone keeps its runs, so a deleted namespace's references protect its content until retirement. Retirement doesn't read those segments (see [Retirement](#95-retirement)). Content objects have their own roots (see [Content roots](#119-content-roots)).
 
@@ -1655,7 +1665,7 @@ Being unreferenced makes an object a candidate for deletion, but it doesn't make
 
 | Family | Conditions for deletion |
 | --- | --- |
-| Namespace manifest | Below the observed hint, not a root (see [Reference roots](#112-reference-roots)), and a provider age of at least `T`. |
+| Namespace manifest | Below the newest manifest that the collection found, not a root (see [Reference roots](#112-reference-roots)), and a provider age of at least `T`. |
 | WAL object in an active namespace | At or below `folded_wal_no`, and a provider age of at least `T`. |
 | WAL object in a deleted namespace | A provider age of at least `T` (no current WAL object is protected). |
 | Metadata or extension segment | No root lists it, and its provider age is strictly greater than `T`. |
@@ -1665,9 +1675,9 @@ Being unreferenced makes an object a candidate for deletion, but it doesn't make
 | Temporary object | A provider age of at least `T`. |
 | Pool record | The pool has no members because its create call failed, and the record's creation grace has passed (see [Content roots](#119-content-roots)). |
 
-The hint, the manifest boundary, and the current manifest are never deleted. Core garbage collection keeps unrecognized keys. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
+The manifest boundary and the current manifest are never deleted. Core garbage collection keeps unrecognized keys. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
 
-For example, suppose a collector observes hint 8 and current manifest 10. It keeps manifests 8, 9, and 10 for discovery, and it keeps the segments in manifest 10 and in any manifest that a snapshot keeps. A segment that only manifest 8 or 9 lists is a candidate, even if manifest 10 was published a moment ago, but it still has to be strictly older than `T` before it's deleted.
+For example, suppose a collector finds manifest 10 as the newest, and no snapshot keeps manifest 8 or 9. It keeps manifest 10 and every higher number, and it keeps the segments in manifest 10 and in any manifest that a snapshot keeps. Manifests 8 and 9 are deleted once their provider age is at least `T`. A segment that only manifest 8 or 9 lists is a candidate, even if manifest 10 was published a moment ago, but it still has to be strictly older than `T` before it's deleted.
 
 ### 11.4 Clock and operation assumptions
 
@@ -1696,7 +1706,7 @@ A new snapshot from the current head is acknowledged only after LoonFS checks it
 
 A collector protects every WAL number above its captured folded boundary. Writers MUST observe a cached tip within the publication budget before they try to write its successor, by discovery or by the confirmation in [Publication and group commit](#63-publication-and-group-commit). So a writer can't treat a much later WAL number, whose object was deleted, as a free slot.
 
-Readers have the matching obligation. A cold discovery trusts a missing successor only if the answer arrives within `READ_REVALIDATION_BOUND_MS` of its manifest probe, and a cached view trusts its probe answers only if they arrive within that bound of its previous successor probe (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). Metadata segments have no matching time bound. Garbage collection keeps the segments of the current manifest and of manifests that snapshots keep, so a read or a write on a manifest that a newer manifest replaced can find a segment deleted, and LoonFS then reads again, or plans the write again, on the current manifest (see [Reference roots](#112-reference-roots)).
+Readers have the matching obligation. A cold discovery trusts a missing successor only if the answer arrives within `READ_REVALIDATION_BOUND_MS` of the start of its find, and a cached view trusts its probe answers only if they arrive within that bound of its previous successor probe (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). Metadata segments have no matching time bound. Garbage collection keeps the segments of the current manifest and of manifests that snapshots keep, so a read or a write on a manifest that a newer manifest replaced can find a segment deleted, and LoonFS then reads again, or plans the write again, on the current manifest (see [Reference roots](#112-reference-roots)).
 
 New metadata and extension segments are protected by the grace window while a publisher writes and verifies them. Streaming compaction MUST start its publication before its budget expires, and every compaction checks its epoch and its selected inputs. These rules apply to output that isn't yet listed by a root the collection captured earlier.
 
@@ -1765,7 +1775,7 @@ A fork snapshot is cleaned up based on its target namespace:
 | The target is absent, or its fork basis doesn't refer to this snapshot | Delete the snapshot of the abandoned installation. |
 | The target's current fork basis refers to this snapshot with a different manifest reference | Fail with `namespace_corrupt`. |
 
-The source finds the target's current manifest through the target's hint. It reads no target WAL objects and makes no listings. [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone) defines when a fork snapshot is deleted.
+The source finds the target's newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), with one listing of the target's manifests above its boundary, and it reads no target WAL objects. [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone) defines when a fork snapshot is deleted.
 
 The pool's collection finds each [member](glossary.md#pool) of the pool through the fork snapshot on the member's source (see [Content roots](#119-content-roots)). That snapshot stays until the member is retired, so the member's content references protect content until then.
 
@@ -1963,11 +1973,10 @@ This section describes designs that were considered for the format and the reaso
 - **One upload session record whose status changes.** A single record could move from open to completed or aborted by compare-and-swap. But an upload would then write that record when the session starts and again when it ends, often less than a second later, and some providers allow about one write per second to one object. With two records that are each created once, completion and abort still race on one put-if-absent, and the cost is a second key for each ended session in the uploads listing (see [Upload sessions](#51-upload-sessions)).
 - **A per-namespace naming mode.** A namespace could choose at creation whether names that differ only in case are the same name. But the choice is made before anyone knows which filesystems the tree will be copied to, it can't change later, a fork inherits it, and two siblings that differ only in case can't be stored on the case-insensitive filesystems most trees end up on. One rule for every namespace avoids the choice (see [Names and paths](#14-names-and-paths)).
 - **An expire event in the writer's log.** The writer could end each deletion's recoverability with an `expire` event that it commits once the floor reaches the deletion, so that the WAL orders the expiry against every restore and a base compaction removes a deletion's rows once its latest event is `expire`. But that costs one event for every deletion, a scan loop in the writer with its own failure handling, and one commit for each 1,000 inherited deletions before a fork's first request, and a namespace that nobody writes to reclaims nothing. A [floor object](glossary.md#floor-object) in the WAL orders the advance against every restore, and the fold that covers the floor object publishes the new floor, so one object for each advance expires every deletion that the floor passed, with no event per deletion (see [Advancing the retention floor](#101-advancing-the-retention-floor) and the [retention window](../design/retention-window.md#alternatives-considered) note).
-- **A hint raised at most once per second, with one more raise when the second ends.** A runtime could pace its raises of a namespace's hint to the one write per second that some providers accept. A publication less than a second after the last raise would skip its raise, and the runtime would raise the hint once more when that second ends, to the newest manifest among the skipped raises. That keeps the hint at most a second behind, but it needs the time of each namespace's last raise, the highest manifest number among the skipped raises, and a task that sleeps until the second ends and has to be stopped at shutdown. In return, the hint lags for a shorter time on the providers that would refuse the writes in between. A hint that lags costs a reader one more round trip and doesn't change what the reader finds (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)).
 - **Content stored under the namespace that writes it.** Each namespace could store its uploads and folded pieces under its own prefix, with a fork reading its source's objects through the fork snapshot. A reference would then identify an object in one namespace's prefix. Content that one member of a pool wrote could be used by another member only by copying the bytes under a new content ID, or by a snapshot from the reader onto the writer for as long as the reference exists. With one prefix for each pool, a reference identifies the same object in every member, and one collection sees every root (see [File contents and ownership](#15-file-contents-and-ownership)).
 - **An owner namespace on every content reference.** Each reference could record the prefix that stores its bytes. Every reference that a member reads refers to an object under the pool's prefix, which the reader's manifest records, so the field would repeat one value in every reference and every extent. The field would also make a reference into another pool's prefix representable, and that pool's collection doesn't read the reader's roots.
 - **Any member extends a chain in place.** Two members that appended to one chain from the same length would write span objects at one key with different bytes, and the chain's layout rows would describe one content ID as two byte sequences. Recording each chain's creator, and starting a new chain for every other member's append, keeps each content ID one sequence of bytes at the cost of a content ID and a layout row (see [Operations and WAL deltas](#66-operations-and-wal-deltas)).
-- **A durable record of used WAL and manifest numbers.** Recording every number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions), because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement and every read of the current state, and it would remove only that one assumption.
+- **A durable record of used WAL numbers.** Recording every WAL number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions) for WAL objects, because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement, and it would remove only that one assumption. For manifests, the [manifest boundary](glossary.md#manifest-boundary) is such a record: it records a manifest number at or below which every manifest is dead, garbage collection raises it before it deletes a manifest, and a publisher reads it after each manifest put.
 
 ## Appendix A. Durable records and byte encodings
 
@@ -1975,13 +1984,12 @@ This appendix is the field and encoding reference for the protocols above. Field
 
 ### A.1 Family versions
 
-There are six kinds of control object: `hint`, `snapshot`, `upload_session`, `upload_outcome`, `pool`, and `boundary`.
+There are five kinds of control object: `snapshot`, `upload_session`, `upload_outcome`, `pool`, and `boundary`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
 | WAL object | `wal_object` | zstd-compressed CBOR envelope with CBOR payload bytes | 1 |
 | Namespace manifest | `manifest` | zstd-compressed JSON envelope with an inline JSON payload | 1 |
-| Namespace hint | `hint` | Uncompressed JSON | 1 |
 | Metadata segment | No envelope | Block sections (see [A.7](#a7-block-segment-encoding)), containing the rows in [A.6](#a6-metadata-rows-and-row-keys) | 1, given by the segment descriptor's `encoding` |
 | Snapshot record | `snapshot` | Uncompressed JSON | 1 |
 | Upload session record | `upload_session` | Uncompressed JSON | 1 |
@@ -2061,7 +2069,6 @@ These tables list the durable payload fields. The protocol sections define how t
 
 | Payload | Fields |
 | --- | --- |
-| Namespace hint | `namespace_id`, `manifest_no` |
 | Writer block | `writer_id`, `acquired_at_ms` |
 | Fork basis | `manifest`, `source_snapshot_id`, optional `rebased_from` |
 | Rebased from | `source_namespace_id`, `resume_after_seq` |
@@ -2430,7 +2437,6 @@ These patterns define the core object families. A segment's owner can be differe
 | Extension segments | `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst` |
 | Upload sessions | `pools/{pool_id}/uploads/{upload_id}.json` |
 | Upload outcomes | `pools/{pool_id}/uploads/{upload_id}.outcome.json` |
-| Hint | `namespaces/{namespace_id}/hint.json` |
 | Manifest boundary | `namespaces/{namespace_id}/boundary.json` |
 | Pool records | `pools/{pool_id}/pool.json` |
 | Content objects | `pools/{pool_id}/content/{content_id}` |

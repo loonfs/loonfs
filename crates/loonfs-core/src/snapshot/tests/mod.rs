@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::keys::{
-    hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
+    boundary, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{

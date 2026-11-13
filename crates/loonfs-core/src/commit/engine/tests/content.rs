@@ -4,7 +4,7 @@ use super::*;
 use crate::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, CONTENT_RECLAMATION_GRACE_WINDOW_MS};
 use crate::test_support::WriterAt;
 use crate::upload::complete::CompletedUpload;
-use loonfs_objectstore::keys::{content_blob, hint, wal_prefix};
+use loonfs_objectstore::keys::{boundary, content_blob, wal_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MetadataMapStore, OperationSelector,
@@ -139,7 +139,7 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(hint(&namespace_id)),
+        KeyPredicate::exact(boundary(&namespace_id)),
         OperationSelector::Read,
     );
     let setup = context(1_000);
@@ -234,7 +234,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let namespace_id = NamespaceId::parse("retry-expiry").expect("namespace id");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(hint(&namespace_id)),
+        KeyPredicate::exact(boundary(&namespace_id)),
         OperationSelector::Read,
     );
     let setup = context(1_000);

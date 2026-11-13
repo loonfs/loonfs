@@ -35,7 +35,8 @@ async fn a_pool_without_a_record_is_not_found_and_nothing_is_deleted() {
 
 /// Checks that the record of a pool without members, because the create call
 /// failed or another create call for the namespace ID won, is kept inside its
-/// creation grace and deleted after it, and that the collection lists nothing.
+/// creation grace and deleted after it, and that each collection lists only
+/// the first member's manifests.
 #[tokio::test]
 async fn the_record_of_a_pool_without_members_is_deleted_after_its_creation_grace() {
     let created_at_ms = 1_000;
@@ -79,7 +80,7 @@ async fn the_record_of_a_pool_without_members_is_deleted_after_its_creation_grac
         .await;
         assert_eq!(after, PoolGcResponse::empty(pool_id.clone()));
         assert!(store.head(&key).await.expect("pool record").is_none());
-        assert_eq!(store.counts().lists, 0, "won elsewhere: {won_elsewhere}");
+        assert_eq!(store.counts().lists, 2, "won elsewhere: {won_elsewhere}");
         assert_eq!(store.counts().deletes, 1);
         assert!(store
             .list_prefix(&pool_prefix(&pool_id))

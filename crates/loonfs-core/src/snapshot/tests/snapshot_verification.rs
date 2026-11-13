@@ -93,10 +93,6 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     .await
     .expect("compact");
     assert_matches!(report, CompactionUnitOutcome::Published { .. });
-    // The runtime that published the compaction raises the hint.
-    crate::test_support::namespace_store(store, namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
     let current = crate::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
@@ -141,7 +137,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(hint(&namespace_id)),
+        KeyPredicate::exact(boundary(&namespace_id)),
         OperationSelector::Read,
     );
     let context = test_context();

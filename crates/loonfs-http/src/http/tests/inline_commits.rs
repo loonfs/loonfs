@@ -34,11 +34,9 @@ impl Harness {
 
     async fn with_policy(inline_content: loonfs::InlineContentPolicy) -> Self {
         let directory = tempdir().expect("directory");
-        // The runtime raises the hint after each publication returns, so the
-        // recording leaves the hint out of the counts.
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any().except_hints(),
+            KeyPredicate::any(),
         ));
         let mut config = test_options(directory.path(), "inline-host");
         config.inline_content = inline_content;

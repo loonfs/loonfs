@@ -5,10 +5,10 @@ use loonfs_objectstore::keys::{content_blob, metadata_segment_object_key};
 use loonfs_types::format::manifest::MetadataRowFamily;
 
 /// Checks that a namespace's collection and a pool's collection each send HEAD
-/// requests only for discovery's probe above the hinted manifest and for the
-/// anchor's check of the current manifest's successor.
+/// requests only for the anchor's check of the current manifest's successor,
+/// because they find the newest manifest with a listing.
 #[tokio::test]
-async fn a_collection_heads_only_the_discovery_probe_and_successor() {
+async fn a_collection_heads_only_the_successor() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("no-heads").expect("namespace");
@@ -22,12 +22,6 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .manifest_no
         .successor()
         .expect("successor");
-    let hinted = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_hint()
-        .await
-        .expect("hint")
-        .state
-        .manifest_no;
     let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let orphan = content_blob(&pool_id, &numbered_content_id(3));
     store
@@ -53,14 +47,7 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .gc(&context(GC_GRACE_WINDOW_MS + 1).clock())
         .await
         .expect("collection");
-    // The hint lags, so the probe finds the manifest after the hinted one,
-    // and then probes one window above that.
-    assert!(hinted < manifest.manifest().manifest_no);
-    let window = u64::try_from(crate::limits::MANIFEST_PROBE_WINDOW).expect("a small window");
-    let mut expected: Vec<_> = (hinted.0 + 1..=hinted.0 + 1 + window)
-        .map(|number| metadata_manifest_object(&namespace_id, &ManifestNo(number)))
-        .collect();
-    expected.push(metadata_manifest_object(&namespace_id, &successor));
+    let expected = vec![metadata_manifest_object(&namespace_id, &successor)];
     assert_eq!(heads(), expected);
     recorded.reset();
     let report = collect_pool(&recorded, &pool_id, &context(GC_GRACE_WINDOW_MS + 1)).await;
@@ -91,13 +78,8 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .await
         .expect("retire fork");
     assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
-    // The fork's hint lags at its first manifest, so discovery's probe finds
-    // the manifest after it and probes one window above that, and a tombstone
-    // needs no successor check.
-    assert_eq!(
-        recorded.counts().heads,
-        1 + crate::limits::MANIFEST_PROBE_WINDOW
-    );
+    // A tombstone needs no successor check.
+    assert_eq!(recorded.counts().heads, 0);
 }
 
 #[tokio::test]

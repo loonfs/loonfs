@@ -280,8 +280,8 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
     let (acquired, ()) = futures::join!(namespace.acquire_writer(&setup.writer_id), async {
         // The claim is written and its first WAL read is held. Meanwhile
         // a fold folds the first fence, a compactor claim supersedes the
-        // fold, the runtime that published them raises the hint, and
-        // collection removes the folded manifest and the folded fence.
+        // fold, and collection removes the folded manifest and the folded
+        // fence.
         store.wait_until_blocked().await;
         let claim = crate::test_support::namespace_store(store.inner(), &namespace_id)
             .load_current_manifest()
@@ -293,7 +293,7 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
             .fold_wal()
             .await
             .expect("fold");
-        let compactor_claim = crate::test_support::NamespaceFixture::new(
+        crate::test_support::NamespaceFixture::new(
             store.inner(),
             &namespace_id,
             &crate::test_support::writer_at("test-writer", 0),
@@ -304,10 +304,6 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
         .expect("compactor claim")
         .published
         .expect("a published claim");
-        crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .raise_hint(compactor_claim.manifest.manifest_no, None)
-            .await
-            .expect("raise the hint");
         for key in [
             metadata_manifest_object(&namespace_id, &claim.successor().expect("next")),
             wal_object(&namespace_id, &WalNo(1)),
@@ -338,13 +334,14 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("slow-anchor").expect("namespace");
     let timer = Arc::new(ManualClock::new(0));
-    let slow_hint = Arc::clone(&timer);
+    let slow_listing = Arc::clone(&timer);
+    // Each anchor load lists manifest 1.
     let store = FailStore::new(
         MetadataMapStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::hint(&namespace_id),
+            KeyPredicate::exact(metadata_manifest_object(&namespace_id, &ManifestNo(1))),
             move |metadata| {
-                slow_hint.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
+                slow_listing.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
                 metadata
             },
         ),
