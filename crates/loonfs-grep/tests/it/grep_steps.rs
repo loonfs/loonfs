@@ -2,9 +2,9 @@
 //! reorganizations that it runs while builds are due, and the index reads
 //! of its build steps while a writer keeps committing.
 
-use crate::common::{control, GrepHost};
+use crate::common::{control, writable_namespace, GrepHost};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
-use loonfs::{CommitId, DestinationBehavior, LoonFs, Namespace, SharedObjectStore, Writable};
+use loonfs::{CommitId, DestinationBehavior, Namespace, SharedObjectStore, Writable};
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepEnableOutcome, GrepProgress, GrepReorganizeOutcome,
@@ -45,22 +45,7 @@ impl StepsFixture {
             )),
         ));
         let store: SharedObjectStore = segment_reads.clone();
-        let writer = LoonFs::builder_with_store(store.clone())
-            .writer_id(loonfs_test_support::ids::writer_id(name))
-            .config(loonfs::RuntimeConfig {
-                min_publish_interval_ms: 0,
-                ..loonfs::RuntimeConfig::default()
-            })
-            .build()
-            .await
-            .expect("writer");
-        writer
-            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-            .await
-            .expect("create the namespace");
-        let namespace = writer
-            .open_namespace(&namespace_id)
-            .expect("open the namespace");
+        let (_writer, namespace) = writable_namespace(&store, &namespace_id).await;
         let host = GrepHost::new(&store, &format!("{name}-grep")).await;
         Self {
             _directory: directory,

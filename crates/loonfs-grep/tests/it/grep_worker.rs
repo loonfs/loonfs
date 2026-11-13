@@ -1,7 +1,8 @@
 //! GrepWorker lifecycle, rebootstrap, query contracts, and grep's entry.
 
 use crate::common::{
-    control, default_block_cache, fold_wal_and_advance_retention, grep_with, page_request, GrepHost,
+    control, default_block_cache, drive_worker_to_current, fold_wal_and_advance_retention,
+    grep_with, page_request, request, worker, writable_namespace, GrepHost,
 };
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions,
@@ -9,10 +10,7 @@ use loonfs::{
 };
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::NamespaceReads;
-use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
-    GrepWorker,
-};
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepService};
 use loonfs_objectstore::keys::{extension_segment_prefix, metadata_manifest_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -28,45 +26,6 @@ use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use tempfile::tempdir;
-
-fn request(pattern: &str) -> GrepRequest {
-    GrepRequest {
-        pattern: pattern.to_owned(),
-        case_insensitive: false,
-        scope: GrepScope::Namespace,
-        allow_stale: false,
-        allow_scan: false,
-    }
-}
-
-async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
-    GrepHost::new(store, "grep-worker-tests").await.worker
-}
-
-async fn drive_worker_to_current(
-    worker: &GrepWorker<SharedObjectStore>,
-    namespace_id: &NamespaceId,
-    policy: GramIndexBuildPolicy,
-) {
-    for _ in 0..512 {
-        let build = worker
-            .steps(namespace_id, 0)
-            .build_step(policy)
-            .await
-            .expect("worker build step");
-        let reorganize = worker
-            .steps(namespace_id, 0)
-            .reorganize_step(policy)
-            .await
-            .expect("worker reorganize step");
-        if matches!(build, GrepBuildOutcome::UpToDate { .. })
-            && matches!(reorganize, GrepReorganizeOutcome::NotNeeded { .. })
-        {
-            return;
-        }
-    }
-    panic!("worker backlog must drain");
-}
 
 /// A cold query: a fresh reader and a fresh grep service, so nothing an
 /// earlier query decoded can answer this one.
@@ -120,22 +79,7 @@ async fn grep_worker_lifecycle_backfills_queries_and_disables() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-lifecycle").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("lifecycle-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     for index in 0..3u32 {
         namespace
             .put_file(
@@ -221,24 +165,7 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("run-number-limit").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "run-number-limit-writer",
-        ))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     namespace
         .put_file(
             "/initial.txt",
@@ -324,28 +251,8 @@ async fn a_retention_gap_restarts_a_fresh_backfill() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-gap").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("gap-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("gap-maintenance"))
-        .build()
-        .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("gap-maintenance"));
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
+    let maintenance = GrepHost::new(&store, "gap-maintenance").await.maintenance;
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -399,32 +306,10 @@ async fn retention_passing_a_backfill_sequence_restarts_the_backfill() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-handoff-gap").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("handoff-gap-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
+    let maintenance = GrepHost::new(&store, "handoff-gap-maintenance")
         .await
-        .expect("writer");
-    let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "handoff-gap-maintenance",
-        ))
-        .build()
-        .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(
-            "handoff-gap-maintenance",
-        ));
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+        .maintenance;
     for index in 0..2u32 {
         namespace
             .put_file(
@@ -436,17 +321,7 @@ async fn retention_passing_a_backfill_sequence_restarts_the_backfill() {
             .expect("write a file at the backfill sequence");
     }
 
-    // The maintenance handle is a separate runtime. The worker reads the
-    // retention floor from the manifest of its reader, so the worker must
-    // revalidate on every read to observe the advance within this test.
-    let worker = GrepHost::with_reader(&store, "grep-worker-tests", |builder| {
-        builder.config(loonfs::RuntimeConfig {
-            manifest_revalidation_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-    })
-    .await
-    .worker;
+    let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
     let captured_seq = match worker
         .lifecycle(&namespace_id)
@@ -584,22 +459,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("backfill-overlap").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("overlap-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     for index in 0..4u32 {
         namespace
             .put_file(
@@ -695,22 +555,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("move-no-reindex").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("move-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     namespace
         .put_file(
             "/docs/note.txt",
@@ -758,24 +603,9 @@ async fn a_recursive_delete_hides_matches_and_a_restore_brings_them_back() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("delete-restore").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("delete-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let (writer, namespace_writer) = writable_namespace(&store, &namespace_id).await;
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace_writer = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     for name in ["a", "b"] {
         namespace_writer
             .put_file(
@@ -865,26 +695,9 @@ async fn restoring_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("restore-after-backfill").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "restore-backfill-writer",
-        ))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let (writer, namespace_writer) = writable_namespace(&store, &namespace_id).await;
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace_writer = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     for name in ["a", "b"] {
         namespace_writer
             .put_file(
@@ -975,24 +788,9 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-isolation").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("isolation-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let (writer, namespace_writer) = writable_namespace(&store, &namespace_id).await;
     let reader = writer.read_only();
     let namespace = reader.namespace(&namespace_id);
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace_writer = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     let host = GrepHost::new(&store, "worker-isolation").await;
     let worker = &host.worker;
     worker.enable(&namespace_id).await.expect("enable");
@@ -1236,22 +1034,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("scan-gap").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("scan-gap-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
 
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
@@ -1310,22 +1093,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("deep-scan").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("deep-scan-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let commit = |operation| {
         CommitIntent::single(
             CommitId::generate(),
@@ -1472,22 +1240,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("worker-results").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("worker-results-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let worker = worker(&store).await;
     let policy = GramIndexBuildPolicy {
         max_delta_runs: nonzero_usize(2),
@@ -1720,22 +1473,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("enable-honesty").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("enable-honesty-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     namespace
         .put_file(
             "/note.txt",

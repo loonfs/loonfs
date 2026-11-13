@@ -1,30 +1,21 @@
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
 use crate::common::{
-    control, default_block_cache, grep_with, page_request, publish_same_content_files, GrepHost,
+    control, default_block_cache, drive_worker_step, drive_worker_to_current, grep_with,
+    page_request, publish_same_content_files, request, worker, writable_namespace,
 };
 use loonfs::{
     DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId, PutFileOptions,
     ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_grep::GramIndexBuildPolicy;
-use loonfs_grep::{GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService, GrepWorker};
+use loonfs_grep::{GrepError, GrepService};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
-use loonfs_types::{GrepRequest, GrepResponse, GrepScope, PageRequest};
+use loonfs_types::{GrepRequest, GrepResponse, PageRequest};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
-
-fn request(pattern: &str) -> GrepRequest {
-    GrepRequest {
-        pattern: pattern.to_owned(),
-        case_insensitive: false,
-        scope: GrepScope::Namespace,
-        allow_stale: false,
-        allow_scan: false,
-    }
-}
 
 /// The query half of a host's composition: one service and one reader over
 /// the namespace under test.
@@ -109,52 +100,6 @@ impl ServiceHarness {
             "error text for {case}"
         );
     }
-}
-
-async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
-    GrepHost::new(store, "grep-worker-tests").await.worker
-}
-
-async fn drive_worker_step(
-    worker: &GrepWorker<SharedObjectStore>,
-    namespace_id: &NamespaceId,
-    policy: GramIndexBuildPolicy,
-) {
-    worker
-        .steps(namespace_id, 0)
-        .build_step(policy)
-        .await
-        .expect("grep build step");
-    worker
-        .steps(namespace_id, 0)
-        .reorganize_step(policy)
-        .await
-        .expect("grep reorganize step");
-}
-
-async fn drive_worker_to_current(
-    worker: &GrepWorker<SharedObjectStore>,
-    namespace_id: &NamespaceId,
-    policy: GramIndexBuildPolicy,
-) {
-    for _ in 0..512 {
-        let build = worker
-            .steps(namespace_id, 0)
-            .build_step(policy)
-            .await
-            .expect("grep build step");
-        let reorganize = worker
-            .steps(namespace_id, 0)
-            .reorganize_step(policy)
-            .await
-            .expect("grep reorganize step");
-        if matches!(build, GrepBuildOutcome::UpToDate { .. })
-            && matches!(reorganize, GrepReorganizeOutcome::NotNeeded { .. })
-        {
-            return;
-        }
-    }
-    panic!("grep worker backlog must drain");
 }
 
 struct PlanlessBoundaryFixture {
@@ -358,15 +303,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grep-service-differential").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("grep-service-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let policy = GramIndexBuildPolicy {
         max_delta_runs: nonzero_usize(2),
         max_mid_runs: nonzero_usize(2),
@@ -374,13 +311,6 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     };
     let worker = worker(&store).await;
 
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     worker.enable(&namespace_id).await.expect("enable grep");
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 

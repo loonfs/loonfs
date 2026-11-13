@@ -390,19 +390,7 @@ pub(super) async fn tail_revisions(
             .list_changes_after(after_seq, TAIL_FEED_PAGE_COMMITS)
             .await?;
         for change in &feed.changes {
-            let start_event_index = resume.start_event_index(change.committed_seq);
-            let events = &change.events;
-            if start_event_index > events.len() {
-                let next_event_index = resume.next_event_index();
-                return Err(GrepError::IndexCorrupt {
-                    message: format!(
-                        "grep event cursor `{next_event_index}` exceeds commit `{}` length `{}`",
-                        change.committed_seq,
-                        events.len()
-                    ),
-                });
-            }
-            for event in events.iter().skip(start_event_index) {
+            for (_, event) in resume.events_after(change)? {
                 if let Some(revision) = published_revision(event) {
                     files.insert(
                         revision.inode_id,

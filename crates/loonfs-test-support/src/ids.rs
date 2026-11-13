@@ -36,11 +36,6 @@ pub fn attribute_text(value: &str) -> AttributeValue {
     AttributeValue::parse(value).expect("valid attribute value")
 }
 
-/// Parses a content id that is expected to be valid test data.
-pub fn content_id(value: &str) -> ContentId {
-    ContentId::parse(value).expect("valid content id")
-}
-
 /// Returns the content ID whose body is the decimal digits of `number`.
 ///
 /// A garbage collection keeps an unreferenced content object whose name an

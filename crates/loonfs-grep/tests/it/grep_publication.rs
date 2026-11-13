@@ -3,7 +3,9 @@
 //! entry and publishes nothing over another change of the entry, and an
 //! unknown outcome keeps what the put may list.
 
-use crate::common::{control, fold_wal_and_advance_retention, page_request, GrepHost};
+use crate::common::{
+    control, fold_wal_and_advance_retention, page_request, writable_namespace, GrepHost,
+};
 use loonfs::{LoonFs, SharedObjectStore, Writable};
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
@@ -46,20 +48,7 @@ async fn seed(
     namespace_id: &NamespaceId,
     paths: &[&str],
 ) -> LoonFs<Writable> {
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("publication-seed"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("namespace");
-    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    let (writer, namespace) = writable_namespace(store, namespace_id).await;
     for path in paths {
         namespace
             .put_file(path, b"needle\n", &loonfs_test_support::test_actor())

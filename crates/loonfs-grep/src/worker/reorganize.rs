@@ -438,17 +438,6 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                 combined.exhausted = true;
                 return Ok(combined);
             }
-            let (object_key, run_no) = current_segment(&readers[position], self);
-            let row = readers[position].take_head();
-            self.combine_row(
-                &mut combined,
-                row,
-                &object_key,
-                run_no,
-                tables,
-                &mut text_tables,
-            )
-            .await?;
             loop {
                 refill_iterators(
                     &loader,

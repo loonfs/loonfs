@@ -7,8 +7,8 @@
 
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::{
-    CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, ReadOnly,
-    SharedObjectStore, Writable,
+    CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, Namespace,
+    ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
@@ -17,7 +17,9 @@ use loonfs_grep::{
     NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, DEFAULT_GREP_PUBLISH_INTERVAL_MS,
 };
 use loonfs_types::GrepIndex;
-use loonfs_types::{AbsolutePath, CommitSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
+use loonfs_types::{
+    AbsolutePath, CommitSeq, GrepRequest, GrepResponse, GrepScope, NamespaceId, PageRequest,
+};
 use std::sync::Arc;
 
 pub(crate) struct GrepHost {
@@ -260,6 +262,88 @@ pub(crate) async fn publish_grep_entry(
         ),
         "no other publication races a test's own"
     );
+}
+
+/// Builds a writer over `store` that publishes each commit at once, creates
+/// `namespace_id`, and opens the namespace. The writer ID is the namespace ID
+/// followed by `-writer`.
+pub(crate) async fn writable_namespace(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> (LoonFs<Writable>, Namespace<Writable>) {
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id(&format!(
+            "{namespace_id}-writer"
+        )))
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
+        .build()
+        .await
+        .expect("build writer");
+    writer
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    (writer, namespace)
+}
+
+pub(crate) fn request(pattern: &str) -> GrepRequest {
+    GrepRequest {
+        pattern: pattern.to_owned(),
+        case_insensitive: false,
+        scope: GrepScope::Namespace,
+        allow_stale: false,
+        allow_scan: false,
+    }
+}
+
+pub(crate) async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
+    GrepHost::new(store, "grep-worker-tests").await.worker
+}
+
+pub(crate) async fn drive_worker_step(
+    worker: &GrepWorker<SharedObjectStore>,
+    namespace_id: &NamespaceId,
+    policy: GramIndexBuildPolicy,
+) {
+    worker
+        .steps(namespace_id, 0)
+        .build_step(policy)
+        .await
+        .expect("grep build step");
+    worker
+        .steps(namespace_id, 0)
+        .reorganize_step(policy)
+        .await
+        .expect("grep reorganize step");
+}
+
+pub(crate) async fn drive_worker_to_current(
+    worker: &GrepWorker<SharedObjectStore>,
+    namespace_id: &NamespaceId,
+    policy: GramIndexBuildPolicy,
+) {
+    for _ in 0..512 {
+        let build = worker
+            .steps(namespace_id, 0)
+            .build_step(policy)
+            .await
+            .expect("grep build step");
+        let reorganize = worker
+            .steps(namespace_id, 0)
+            .reorganize_step(policy)
+            .await
+            .expect("grep reorganize step");
+        if matches!(build, GrepBuildOutcome::UpToDate { .. })
+            && matches!(reorganize, GrepReorganizeOutcome::NotNeeded { .. })
+        {
+            return;
+        }
+    }
+    panic!("grep worker backlog must drain");
 }
 
 /// Returns an empty grep block cache with the default budget.
