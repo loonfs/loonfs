@@ -1074,7 +1074,7 @@ LoonFS doesn't schedule GC when a namespace is deleted, when an upload expires, 
 
 When the server shuts down, its scheduler doesn't start any new steps, and a compaction in a running step stops at its next block. A writer session's metadata compaction stops the same way. Shutdown waits for the folds and compactions that already started.
 
-A deployment needs to keep the provider's lifecycle rule for incomplete multipart uploads. Provider upload state can exist outside object listings, so deleting a pool's content objects doesn't replace session abort and provider cleanup. Deleting a key also doesn't erase physical versions that bucket versioning or retention locks keep.
+A deployment on a provider where LoonFS uses multipart uploads needs to keep the provider's lifecycle rule for incomplete multipart uploads. Provider upload state can exist outside object listings, so deleting a pool's content objects doesn't replace session abort and provider cleanup. Deleting a key also doesn't erase physical versions that bucket versioning or retention locks keep.
 
 The `retained` counts in a GC response show what a collection kept. To find the snapshots that block reclamation, an operator lists them with `GET /v0/maintenance/namespaces/{ns}/snapshots`.
 
@@ -1433,7 +1433,7 @@ The snapshot inventory and snapshot deletion are explicit exceptions, and they s
 
 Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement deletes. The namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member refers to it (see [Garbage collection jobs](#garbage-collection-jobs)).
 
-A deployment should run garbage collection repeatedly to catch late writes, and it should keep the provider's lifecycle rule for incomplete multipart uploads. Deleting an object key doesn't erase the physical versions kept by bucket versioning or retention locks.
+A deployment should run garbage collection repeatedly to catch late writes, and, on a provider where LoonFS uses multipart uploads, it should keep the provider's lifecycle rule for incomplete multipart uploads. Deleting an object key doesn't erase the physical versions kept by bucket versioning or retention locks.
 
 With the optional `expected_head_seq` query parameter, the server deletes the namespace only if the head is still at that sequence, and otherwise fails with `stale_head`. This is the same precondition pattern that file mutations use. The rejection reports both sequences, in the message and as the `expected_head_seq` and `actual_head_seq` details, so a caller that still wants to delete the namespace can retry against the sequence it found.
 
@@ -1829,7 +1829,7 @@ Without a precondition, appends are applied in commit order, each to the result 
 
 The new revision has an ordinary content reference whose size and checksum cover the whole file. The new reference either continues the current chain or starts a new one, depending on the current revision's content ID `C` and size `S`:
 
-- When this namespace created the chain of `C` (see [File contents and ownership](format.md#15-file-contents-and-ownership)), `S` is positive, and no revision or layout refers to more than `S` bytes of `C`, the new reference keeps `C`. Its pieces start at offset `S`. Its delta omits the layout, and validation writes no content object.
+- When this namespace created the chain of `C` (see [File contents and ownership](format.md#15-file-contents-and-ownership)), `S` is positive, and the current revision is the chain's head (`S` is the chain's full current length, as [Operations and WAL deltas](format.md#66-operations-and-wal-deltas) defines it), the new reference keeps `C`. Its pieces start at offset `S`. Its delta omits the layout, and validation writes no content object.
 - Otherwise, the new reference uses a new content ID, whose chain this namespace creates, and the first `S` bytes of the new chain are the bytes of `C`. This happens when another revision has already extended `C` (for example, after a restore of an older revision, or after an append to a copy of the file), and when another member of the namespace's pool created the chain of `C`, such as in a fork whose file still refers to the source's content. The new chain shares the base's objects through the layout that its delta includes. Before it admits the reference, validation writes the base's unfolded bytes as an extent of the base chain. The commit includes only the appended bytes. An append to an empty file also starts a new content ID.
 
 Either way, the append's `content_changed` event in the commit response and the change feed includes `append_offset`, which is `S` (see [`GET /changes`](#611-get-changes)).
