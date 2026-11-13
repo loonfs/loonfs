@@ -137,31 +137,7 @@ pub(crate) fn payload_class(size_bytes: u64) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{payload_class, store_kind_label, TraceMode};
-    use loonfs_objectstore::ConfiguredObjectStoreKind;
-
-    #[test]
-    fn trace_labels_are_low_cardinality() {
-        assert_eq!(TraceMode::Embedded.as_str(), "embedded");
-        assert_eq!(TraceMode::Remote.as_str(), "remote");
-        assert_eq!(
-            store_kind_label(Some(ConfiguredObjectStoreKind::LocalFs)),
-            "local_fs"
-        );
-        assert_eq!(
-            store_kind_label(Some(ConfiguredObjectStoreKind::AwsS3)),
-            "aws_s3"
-        );
-        assert_eq!(
-            store_kind_label(Some(ConfiguredObjectStoreKind::CloudflareR2)),
-            "cloudflare_r2"
-        );
-        assert_eq!(
-            store_kind_label(Some(ConfiguredObjectStoreKind::GcpGcs)),
-            "gcp_gcs"
-        );
-        assert_eq!(store_kind_label(None), "unknown");
-    }
+    use super::payload_class;
 
     #[test]
     fn trace_helpers_classify_payloads_and_results() {

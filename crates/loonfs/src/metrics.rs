@@ -222,44 +222,57 @@ impl DefaultMetricsRecorder {
         }
     }
 
-    /// Returns the instrument registered under `key`, installing `build`'s
-    /// if there is none.
+    /// Returns the instrument registered under `name` and `labels`,
+    /// installing `fresh` if there is none.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` and `labels` are registered as another kind.
     fn register(
-        &self,
-        key: InstrumentKey,
-        build: impl FnOnce() -> RegisteredInstrument,
-    ) -> RegisteredInstrument {
-        self.registry
-            .lock()
-            .expect("the instrument registry lock should not be poisoned")
-            .entry(key)
-            .or_insert_with(build)
-            .clone()
-    }
-
-    fn register_instrument<T>(
         &self,
         name: &'static str,
         labels: &[(&'static str, &'static str)],
-        fresh: Arc<T>,
-        build: impl FnOnce(Arc<T>) -> RegisteredInstrument,
-        extract: impl FnOnce(&RegisteredInstrument) -> Option<Arc<T>>,
-        expected_kind: &'static str,
-    ) -> Arc<T> {
-        let registered = self.register(InstrumentKey::new(name, labels), || {
-            build(Arc::clone(&fresh))
-        });
-        let instrument = extract(&registered);
+        fresh: RegisteredInstrument,
+    ) -> RegisteredInstrument {
+        let expected_kind = fresh.kind();
+        let registered = self
+            .registry
+            .lock()
+            .expect("the instrument registry lock should not be poisoned")
+            .entry(InstrumentKey::new(name, labels))
+            .or_insert(fresh)
+            .clone();
         assert!(
-            instrument.is_some(),
+            registered.kind() == expected_kind,
             "metric `{name}` is registered as a {} and can't be registered as a {expected_kind}",
             registered.kind()
         );
-        instrument.expect("the assertion above checked the instrument's kind")
+        registered
     }
 }
 
 impl RegisteredInstrument {
+    fn counter(self) -> Option<Arc<CounterValue>> {
+        match self {
+            Self::Counter(counter) => Some(counter),
+            _ => None,
+        }
+    }
+
+    fn gauge(self) -> Option<Arc<GaugeValue>> {
+        match self {
+            Self::Gauge(gauge) => Some(gauge),
+            _ => None,
+        }
+    }
+
+    fn histogram(self) -> Option<Arc<HistogramValue>> {
+        match self {
+            Self::Histogram(histogram) => Some(histogram),
+            _ => None,
+        }
+    }
+
     fn kind(&self) -> &'static str {
         match self {
             Self::Counter(_) => "counter",
@@ -292,18 +305,10 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         description: &'static str,
         labels: &[(&'static str, &'static str)],
     ) -> Arc<dyn CounterHandle> {
-        let fresh = Arc::new(CounterValue::new(description));
-        self.register_instrument::<CounterValue>(
-            name,
-            labels,
-            fresh,
-            RegisteredInstrument::Counter,
-            |registered| match registered {
-                RegisteredInstrument::Counter(counter) => Some(Arc::clone(counter)),
-                _ => None,
-            },
-            "counter",
-        )
+        let fresh = RegisteredInstrument::Counter(Arc::new(CounterValue::new(description)));
+        self.register(name, labels, fresh)
+            .counter()
+            .expect("`register` checked the instrument's kind")
     }
 
     fn register_gauge(
@@ -312,18 +317,10 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         description: &'static str,
         labels: &[(&'static str, &'static str)],
     ) -> Arc<dyn GaugeHandle> {
-        let fresh = Arc::new(GaugeValue::new(description));
-        self.register_instrument::<GaugeValue>(
-            name,
-            labels,
-            fresh,
-            RegisteredInstrument::Gauge,
-            |registered| match registered {
-                RegisteredInstrument::Gauge(gauge) => Some(Arc::clone(gauge)),
-                _ => None,
-            },
-            "gauge",
-        )
+        let fresh = RegisteredInstrument::Gauge(Arc::new(GaugeValue::new(description)));
+        self.register(name, labels, fresh)
+            .gauge()
+            .expect("`register` checked the instrument's kind")
     }
 
     fn register_histogram(
@@ -333,18 +330,11 @@ impl MetricsRecorder for DefaultMetricsRecorder {
         labels: &[(&'static str, &'static str)],
         boundaries: &'static [f64],
     ) -> Arc<dyn HistogramHandle> {
-        let fresh = Arc::new(HistogramValue::new(description, boundaries));
-        self.register_instrument::<HistogramValue>(
-            name,
-            labels,
-            fresh,
-            RegisteredInstrument::Histogram,
-            |registered| match registered {
-                RegisteredInstrument::Histogram(histogram) => Some(Arc::clone(histogram)),
-                _ => None,
-            },
-            "histogram",
-        )
+        let fresh =
+            RegisteredInstrument::Histogram(Arc::new(HistogramValue::new(description, boundaries)));
+        self.register(name, labels, fresh)
+            .histogram()
+            .expect("`register` checked the instrument's kind")
     }
 }
 

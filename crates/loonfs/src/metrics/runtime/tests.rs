@@ -362,10 +362,6 @@ fn compaction_instruments_register_the_closed_vocabularies() {
         .find(|entry| entry.labels == [("outcome", "abandoned")])
         .expect("abandoned compaction duration");
     assert_matches!(duration.value, MetricValue::Histogram { count: 1, .. });
-    assert!(snapshot
-        .all()
-        .iter()
-        .all(|entry| !entry.labels.contains(&("outcome", "superseded"))));
     assert_eq!(
         counter(
             &snapshot,

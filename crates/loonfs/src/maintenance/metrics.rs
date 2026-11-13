@@ -128,7 +128,7 @@ impl CompactionInstruments {
     /// Reports one finished compaction unit and any window it compacted. A
     /// unit that found nothing to compact reports nothing.
     pub(crate) fn finished(&self, outcome: &crate::Result<CompactionUnitOutcome>, elapsed_ms: u64) {
-        let (outcome, totals) = match outcome {
+        let outcome = match outcome {
             Ok(CompactionUnitOutcome::NotNeeded) => return,
             Ok(CompactionUnitOutcome::Published {
                 rows_read,
@@ -136,34 +136,21 @@ impl CompactionInstruments {
                 input_bytes,
                 output_bytes,
                 ..
-            }) => (
-                CompactionOutcome::Completed,
-                Some((*rows_read, *rows_written, *input_bytes, *output_bytes)),
-            ),
-            Ok(CompactionUnitOutcome::Abandoned) => (CompactionOutcome::Abandoned, None),
-            Ok(CompactionUnitOutcome::Cancelled) => (CompactionOutcome::Cancelled, None),
-            Ok(CompactionUnitOutcome::Fenced) => (CompactionOutcome::Fenced, None),
-            Err(_) => (CompactionOutcome::Failed, None),
+            }) => {
+                self.input_rows.increment(*rows_read);
+                self.output_rows.increment(*rows_written);
+                self.input_bytes.increment(*input_bytes);
+                self.output_bytes.increment(*output_bytes);
+                CompactionOutcome::Completed
+            }
+            Ok(CompactionUnitOutcome::Abandoned) => CompactionOutcome::Abandoned,
+            Ok(CompactionUnitOutcome::Cancelled) => CompactionOutcome::Cancelled,
+            Ok(CompactionUnitOutcome::Fenced) => CompactionOutcome::Fenced,
+            Err(_) => CompactionOutcome::Failed,
         };
-        self.record(outcome, elapsed_ms, totals);
-    }
-
-    fn record(
-        &self,
-        outcome: CompactionOutcome,
-        elapsed_ms: u64,
-        totals: Option<(u64, u64, u64, u64)>,
-    ) {
         self.outcomes.get(outcome).increment(1);
         self.outcome_seconds(outcome)
             .record(seconds_from_ms(elapsed_ms));
-        let Some((input_rows, output_rows, input_bytes, output_bytes)) = totals else {
-            return;
-        };
-        self.input_rows.increment(input_rows);
-        self.output_rows.increment(output_rows);
-        self.input_bytes.increment(input_bytes);
-        self.output_bytes.increment(output_bytes);
     }
 }
 
@@ -205,15 +192,8 @@ impl GcInstruments {
     /// Every runtime collection path records its counts here before its
     /// caller can drop the response.
     pub(crate) fn record_collection(&self, gc: &GcResponse) {
-        for (category, count) in GC_CATEGORIES.iter().zip(self.reclaimed.iter()) {
-            let reclaimed = (category.1)(gc);
-            if reclaimed > 0 {
-                count.increment(reclaimed);
-            }
-        }
-        if gc.retained.total() > 0 {
-            self.retained.increment(gc.retained.total());
-        }
+        add_reclaimed(&self.reclaimed, &GC_CATEGORIES, gc);
+        self.retained.increment(gc.retained.total());
     }
 
     /// Reports what one collection of a pool reclaimed and retained.
@@ -221,14 +201,14 @@ impl GcInstruments {
     /// Every runtime collection path records its counts here before its
     /// caller can drop the response.
     pub(crate) fn record_pool_collection(&self, gc: &PoolGcResponse) {
-        for (category, count) in POOL_GC_CATEGORIES.iter().zip(self.pool_reclaimed.iter()) {
-            let reclaimed = (category.1)(gc);
-            if reclaimed > 0 {
-                count.increment(reclaimed);
-            }
-        }
-        if gc.retained.total() > 0 {
-            self.retained.increment(gc.retained.total());
-        }
+        add_reclaimed(&self.pool_reclaimed, &POOL_GC_CATEGORIES, gc);
+        self.retained.increment(gc.retained.total());
+    }
+}
+
+/// Adds each category's count from `gc` to that category's counter.
+fn add_reclaimed<R>(counts: &[Arc<dyn CounterHandle>], categories: &[GcKind<R>], gc: &R) {
+    for (count, (_, reclaimed)) in counts.iter().zip(categories) {
+        count.increment(reclaimed(gc));
     }
 }
