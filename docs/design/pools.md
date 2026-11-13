@@ -86,7 +86,7 @@ A collection of a pool deletes the pool's unreferenced content objects, upload r
 These rules are the same as in [Content roots](../specs/format.md#119-content-roots), applied to the members of a pool:
 
 - The sessions are listed before any member's WAL tail is read, for the reason in [Content collection](content-collection.md#why-the-roots-are-enough).
-- The collection has to read every member's roots within the retirement grace less the clock allowance (40 minutes, `POOL_ROOTS_READ_BUDGET_MS`), or it deletes no content objects in step 6. It reports `content_deletion_pool_budget` in `skipped`, and it still lists the content prefix once to measure the pool's stored bytes.
+- The collection reads each member once, and it has to read every member's roots within 12 hours (`POOL_ROOTS_READ_BUDGET_MS`), or it deletes no content objects in step 6. It reports `content_deletion_pool_budget` in `skipped`, and it still lists the content prefix once to measure the pool's stored bytes.
 - If one member's roots can't be read (for example, its manifest fails verification, or it records another pool), the collection deletes no content objects in step 6 and reports `content_deletion_unreadable_member` in `skipped`. Other pools are unaffected.
 - A member's content references are roots until the member is [retired](../specs/glossary.md#namespace-retirement). A deleted member's tombstone keeps its runs, and a member that the walk finds through a fork snapshot stays a member until its own collection retires it and deletes that fork snapshot.
 - A [fork snapshot](../specs/glossary.md#snapshot) whose target has no manifest is skipped.

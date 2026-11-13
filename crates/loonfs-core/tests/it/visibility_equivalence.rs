@@ -916,11 +916,11 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
         .assert_equivalence(&after_folds, "after eight WAL folds", &expected)
         .await;
 
-    // Every commit is now an hour old, so the floor can reach the
+    // Every commit is now a grace window old, so the floor can reach the
     // head.
     harness
         .clock
-        .advance_ms(loonfs_core::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+        .advance_ms(loonfs_core::limits::GC_GRACE_WINDOW_MS);
     match order {
         MaintenanceOrder::CompactThenRetain => {
             drain_compaction(&harness, &expected, "before retention").await;

@@ -86,9 +86,8 @@ mod trace;
 
 pub use loonfs_core::cache::SegmentFilterStats;
 pub use loonfs_core::limits::{
-    DIRECT_TRANSFER_URL_TTL_MS, GC_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS, MAX_MULTIPART_PARTS,
-    MAX_PENDING_SEGMENT_BYTES, MAX_SIGNED_PARTS_PER_REQUEST, RETENTION_ADVANCE_MIN_COMMIT_AGE_MS,
-    SSD_WRITE_QUEUE_BYTES,
+    DIRECT_TRANSFER_URL_TTL_MS, GC_GRACE_WINDOW_MS, MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES,
+    MAX_SIGNED_PARTS_PER_REQUEST, PUBLICATION_COMPLETION_BOUND_MS, SSD_WRITE_QUEUE_BYTES,
 };
 pub use loonfs_core::time::WallClock;
 pub use loonfs_core::{
@@ -134,9 +133,7 @@ pub mod engine {
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
         DecodedBlockKey, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
     };
-    pub use loonfs_core::limits::{
-        READ_REVALIDATION_BOUND_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
-    };
+    pub use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
     pub use loonfs_core::{
         refill_iterators, select_next_iterator, BudgetPermit, ExtensionBasis, ExtensionPublication,
         LoadedBlocks, PermitCounts, Permits, SegmentBlockLoader, SegmentRowIterator,

@@ -210,7 +210,7 @@ async fn an_advance_orders_the_restores_queued_around_it() {
         .fold_wal(&namespace_id)
         .await
         .expect("fold the deletions");
-    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
     let publisher = writer
         .mode
         .publisher
@@ -297,7 +297,7 @@ async fn a_restore_at_the_floor_objects_number_is_folded_before_the_floor() {
         .expect("open namespace");
     create_directories(&namespace, "deleted").await;
     let maintainer_clock = Arc::new(ManualClock::at_system_time());
-    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    maintainer_clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
     // The maintainer's first WAL put is its floor object, which the gate
     // parks.
     let gated = Arc::new(BlockingStore::new(
@@ -398,7 +398,7 @@ async fn an_advance_by_another_runtime_leaves_a_session_on_the_old_floor_unfence
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let maintainer_clock = Arc::new(ManualClock::at_system_time());
-    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    maintainer_clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
     let maintainer = runtime_at(store.clone(), "maintainer", &maintainer_clock).await;
     let maintenance = maintainer.maintenance(loonfs_test_support::ids::writer_id("maintainer"));
     // Each fold writes a run, and the directories created after the
@@ -475,7 +475,7 @@ async fn an_advance_without_a_session_folds_its_floor_object_after_a_session_ope
         .await
         .expect("fold the history");
     seed.shutdown().await.expect("shutdown");
-    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
     // The direct path checks the planned manifest's segments after it finds
     // no session and before its discovery, so the gate parks it there.
     let gated = Arc::new(BlockingStore::new(
@@ -559,7 +559,7 @@ async fn a_read_from_a_cached_head_finds_an_unfolded_floor_object() {
         OperationSelector::PutCreateIfAbsent,
     ));
     let maintainer_clock = Arc::new(ManualClock::at_system_time());
-    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    maintainer_clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
     let maintainer = runtime_at(
         gated.clone() as SharedStore,
         "maintainer",

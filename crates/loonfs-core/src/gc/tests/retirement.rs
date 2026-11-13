@@ -22,7 +22,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
         .gc(&context(deadline.now_ms - 1).clock())
         .await
         .expect("before deadline");
-    assert_eq!(waiting.retires_at_ms, Some(1_000 + retirement_ms()));
+    assert_eq!(waiting.retires_at_ms, Some(1_000 + GC_GRACE_WINDOW_MS));
     assert_eq!(waiting.next_reclamation_at_ms, Some(deadline.now_ms));
     let reclaimed = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&deadline.clock())
@@ -104,7 +104,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         }),
     );
     let first = crate::test_support::namespace_store(&store, &target)
-        .gc(&context(setup.now_ms + retirement_ms()).clock())
+        .gc(&context(setup.now_ms + GC_GRACE_WINDOW_MS).clock())
         .await
         .expect("release fork snapshot with retained session");
     // A fork's retirement deletes its fork snapshot and nothing else, and makes
@@ -210,7 +210,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .await
         .expect("retire");
     let deadline = report.retires_at_ms.expect("deadline");
-    assert_eq!(deadline, clock.now_ms() + retirement_ms());
+    assert_eq!(deadline, clock.now_ms() + GC_GRACE_WINDOW_MS);
     assert!(deadline > expires_at_ms);
     clock.advance_ms(deadline - clock.now_ms() - 1);
     let before = crate::test_support::namespace_store(&store, &namespace_id)
@@ -334,7 +334,7 @@ async fn an_unrecognized_snapshot_key_is_kept_and_blocks_retirement() {
         .put_if_absent(&unrecognized, Bytes::from_static(b"foreign key"))
         .await
         .expect("unrecognized key");
-    let retirement = context(setup.now_ms + retirement_ms());
+    let retirement = context(setup.now_ms + GC_GRACE_WINDOW_MS);
     let listed_bytes = core_listed_bytes(&store, &target).await;
     let kept = crate::test_support::namespace_store(&store, &target)
         .gc(&retirement.clock())

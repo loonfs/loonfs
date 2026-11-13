@@ -1475,9 +1475,9 @@ async fn commit_and_compact_at_the_floor(
         .create()
         .await
         .expect("namespace");
-    // The floor passes a commit once the commit is an hour old.
+    // The floor passes a commit once the commit is a grace window old.
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(
-        context.now_ms + loonfs_core::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS,
+        context.now_ms + loonfs_core::limits::GC_GRACE_WINDOW_MS,
     ));
     let maintenance = loonfs_core::NamespaceWriterEngine::writer(
         loonfs_core::test_support::namespace_store_with_wall_clock(store, namespace_id, clock),

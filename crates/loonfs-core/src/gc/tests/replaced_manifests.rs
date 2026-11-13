@@ -10,9 +10,9 @@ use crate::manifest::ManifestLoadError;
 use crate::namespace::control::LoadedManifest;
 use loonfs_types::MetadataFamilyGroup;
 
-/// A time past both the collection grace and the unreferenced segment grace
-/// for every object that reports an ancient age.
-const NOW_MS: u64 = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + GC_GRACE_WINDOW_MS + 1;
+/// A time strictly past the grace window for every object that reports an
+/// ancient age.
+const NOW_MS: u64 = GC_GRACE_WINDOW_MS + 1;
 
 /// Writes and folds two files over `store`, whose objects all report an
 /// ancient age, then collects every manifest before the current one, and
@@ -168,9 +168,9 @@ async fn a_replaced_manifest_and_its_own_segments_go_at_the_first_pass_once_old_
 }
 
 /// Checks that a collection keeps a replaced manifest while it is younger
-/// than the collection grace, and the segments that only it lists while they
-/// are younger than the unreferenced segment grace, and that each goes at the
-/// first collection after its own window.
+/// than the grace window, and the segments that only it lists until they are
+/// strictly older than the grace window, and that each goes at the first
+/// collection after that.
 #[tokio::test]
 async fn a_replaced_manifest_and_its_segments_stay_within_their_grace_windows() {
     let directory = tempdir().expect("directory");
@@ -216,8 +216,8 @@ async fn a_replaced_manifest_and_its_segments_stay_within_their_grace_windows() 
         1 + dropped.len() as u64
     );
 
-    // The collection grace applies to the manifest, and the segments
-    // keep their own longer window.
+    // The manifest goes at the grace window, and a segment that is exactly
+    // the grace window old stays.
     let report = collect(replaced_at_ms + GC_GRACE_WINDOW_MS).await;
     assert!(!exists(&store, &previous.object_key).await);
     assert_objects_exist(&store, &dropped, true).await;
@@ -225,8 +225,8 @@ async fn a_replaced_manifest_and_its_segments_stay_within_their_grace_windows() 
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.retained.within_grace_window, dropped.len() as u64);
 
-    // A segment must be strictly older than its window before it goes.
-    let report = collect(replaced_at_ms + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).await;
+    // A segment must be strictly older than the grace window before it goes.
+    let report = collect(replaced_at_ms + GC_GRACE_WINDOW_MS + 1).await;
     assert_objects_exist(&store, &dropped, false).await;
     assert_eq!(report.deleted.metadata_segments, dropped.len() as u64);
     assert_eq!(report.retained.within_grace_window, 0);

@@ -930,7 +930,7 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
 
 #[tokio::test]
 async fn a_repeated_collection_of_a_pool_without_members_lists_once_and_deletes_nothing() {
-    use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
+    use loonfs_core::limits::GC_SAFETY_MARGIN_MS;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 
     let directory = tempdir().expect("directory");
@@ -963,8 +963,7 @@ async fn a_repeated_collection_of_a_pool_without_members_lists_once_and_deletes_
         .delete_namespace(Default::default())
         .await
         .expect("delete");
-    context.now_ms +=
-        crate::GC_GRACE_WINDOW_MS.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS) + GC_SAFETY_MARGIN_MS;
+    context.now_ms += crate::GC_GRACE_WINDOW_MS + GC_SAFETY_MARGIN_MS;
     loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .gc(&context.clock())
         .await

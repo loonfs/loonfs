@@ -8,8 +8,8 @@ use std::num::NonZeroU64;
 /// A request to advance the retention floor to the folded manifest head, or to the one target that
 /// the request sets.
 ///
-/// Whatever the target, the floor doesn't pass a commit that's less than one hour old (the
-/// default garbage collection grace window).
+/// Whatever the target, the floor doesn't pass a commit that's less than 24 hours old (the
+/// garbage collection grace window).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -34,7 +34,7 @@ pub struct AdvanceRetentionResponse {
     /// The namespace whose retention floor was advanced.
     pub namespace_id: NamespaceId,
     /// The retention floor that the advance reached, which is the minimum sequence for incremental
-    /// replay. It's below the target when LoonFS reads a commit that's less than one hour old
+    /// replay. It's below the target when LoonFS reads a commit that's less than 24 hours old
     /// before it reaches the target.
     pub retention_floor_seq: CommitSeq,
 }
@@ -83,7 +83,7 @@ pub enum RunMaintenanceJobRequest {
     /// A job that advances the retention floor toward the folded manifest head, or toward the
     /// target that the request sets.
     ///
-    /// The floor doesn't pass a commit that's less than one hour old.
+    /// The floor doesn't pass a commit that's less than 24 hours old.
     Retention(AdvanceRetentionRequest),
     /// A job that sets or clears the namespace's retention window.
     RetentionWindow(SetRetentionWindowRequest),

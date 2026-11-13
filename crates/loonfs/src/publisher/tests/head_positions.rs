@@ -157,7 +157,7 @@ async fn an_advance_moves_the_sessions_position_onto_its_manifest() {
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
     maintenance.fold_wal(&namespace_id).await.expect("fold");
     let epoch = writer_epoch(&store, &namespace_id).await;
-    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    clock.advance_ms(crate::GC_GRACE_WINDOW_MS);
     let advanced = maintenance
         .advance_retention_floor(&namespace_id)
         .await

@@ -1349,11 +1349,10 @@ An ordinary operation that finds the namespace deleted returns `namespace_delete
 
 ### 9.5 Retirement
 
-"Retirement" is the point at which a deleted namespace stops being a member of its [pool](glossary.md#pool), and garbage collection deletes the namespace's fork snapshot on its source if the namespace is a fork. After retirement, the namespace's content references don't protect the pool's content. No retirement deadline is stored, and garbage collection publishes no manifest. For a namespace tombstone `T`, the deadline is derived as:
+"Retirement" is the point at which a deleted namespace stops being a member of its [pool](glossary.md#pool), and garbage collection deletes the namespace's fork snapshot on its source if the namespace is a fork. After retirement, the namespace's content references don't protect the pool's content. No retirement deadline is stored, and garbage collection publishes no manifest. A deleted namespace is retired the grace window (24 hours) after its deletion, so for a namespace tombstone `T`, the deadline is derived as:
 
 ```text
-deadline(T) = T.deleted_at_ms
-              + max(GC_GRACE_WINDOW_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
+deadline(T) = T.deleted_at_ms + GC_GRACE_WINDOW_MS
 ```
 
 A tombstone is eligible for retirement when the collection's clock reaches its retirement deadline and the complete snapshot listing contains no snapshot on the namespace. Snapshots deleted later in the same collection still count, and any unrecognized key under the snapshot prefix also blocks retirement.
@@ -1400,11 +1399,11 @@ A floor advance has one of three targets:
 
 For a cutoff time, the advance reads the `commits` family upward from the current floor, and it stops at the first commit whose `committed_at_ms` is later than the cutoff. The target is the last commit the walk passed, or the current floor if it passed none. Commit timestamps are informational and don't have to increase with sequence, so the walk stops at the first later commit instead of skipping it. For example, suppose the floor is 10, commits 11, 12, and 13 were committed at 9:00, 9:05, and 9:02, and the cutoff is 9:03. The walk passes 11, stops at 12, and the target is 11, even though 13 is earlier than the cutoff.
 
-Whatever the target, an advance MUST NOT move the floor past a commit whose `committed_at_ms` is later than the advancing host's clock minus the advance's "minimum commit age" (`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`), which is one hour (see [Publication and collection timing](#c1-publication-and-collection-timing)). The advance treats that time as a cutoff, and it finds where the floor stops with the same upward walk that a cutoff time uses. For the head or a sequence, the new floor is the lower of the target and the last commit the walk passes. For a cutoff time, or for a retention window (described below), the advance walks once, to the earlier of the two cutoffs. If the first commit above the current floor is later than the cutoff, the floor stays where it is. The advancing host reads its own clock, as garbage collection does to measure an object's age (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
+Whatever the target, an advance MUST NOT move the floor past a commit whose `committed_at_ms` is later than the advancing host's clock minus the [grace window](glossary.md#grace-window) (`GC_GRACE_WINDOW_MS`), which is 24 hours (see [Publication and collection timing](#c1-publication-and-collection-timing)). The advance treats that time as a cutoff, and it finds where the floor stops with the same upward walk that a cutoff time uses. For the head or a sequence, the new floor is the lower of the target and the last commit the walk passes. For a cutoff time, or for a retention window (described below), the advance walks once, to the earlier of the two cutoffs. If the first commit above the current floor is later than the cutoff, the floor stays where it is. The advancing host reads its own clock, as garbage collection does to measure an object's age (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 
-For example, with the same commits and the head at 13, an advance at 10:01 that targets the head uses the cutoff 9:01. The walk passes commit 11 (9:00) and stops at commit 12 (9:05), so the new floor is 11. At 10:04, commit 13 (9:02) is 62 minutes old, but the walk from 11 still stops at commit 12, which is 59 minutes old, so the floor stays at 11. At 10:05, the walk passes commits 12 and 13, so the new floor is 13. A commit dated out of order can only make the floor stop earlier, because the walk stops at the first commit after the cutoff.
+For example, with the same commits and the head at 13, an advance at 9:01 the next day that targets the head uses the cutoff 9:01. The walk passes commit 11 (9:00) and stops at commit 12 (9:05), so the new floor is 11. At 9:04 the next day, commit 13 (9:02) is 24 hours and 2 minutes old, but the walk from 11 still stops at commit 12, which is 23 hours and 59 minutes old, so the floor stays at 11. At 9:05 the next day, the walk passes commits 12 and 13, so the new floor is 13. A commit dated out of order can only make the floor stop earlier, because the walk stops at the first commit after the cutoff.
 
-The advance plans the new floor from a view that it has: a writer session's [writer position](glossary.md#writer-position), or the current manifest and the WAL tail after that manifest. The walk reads the `commits` family of that view's manifest. If the new floor isn't above the view's floor, the advance writes nothing. Otherwise, the advance creates a floor object in the steps described below. In both cases the advance returns the resulting floor of the view, which is below the target when the minimum commit age's cutoff stops the walk first. The floor never decreases.
+The advance plans the new floor from a view that it has: a writer session's [writer position](glossary.md#writer-position), or the current manifest and the WAL tail after that manifest. The walk reads the `commits` family of that view's manifest. If the new floor isn't above the view's floor, the advance writes nothing. Otherwise, the advance creates a floor object in the steps described below. In both cases the advance returns the resulting floor of the view, which is below the target when the grace window's cutoff stops the walk first. The floor never decreases.
 
 The retention floor of a [read view](glossary.md#read-view), or of a writer position, is the highest of the manifest's `retention_floor_seq` and the `retention_floor_seq` of every floor object in the view's unfolded WAL tail (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). For example, if the manifest's floor is 5 and the tail contains a floor object at WAL number 31 with floor 20, the view's floor is 20. Every rule that reads the floor of a view reads this value: restore validation (a restore of a deleted item, and a restore of a file revision), the trash listing's scan start, the change feed's lower bound, the merge floor rule, and the reads that return `below_retention_floor`. A base compaction is the exception, because it reads the floor of its basis manifest (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)).
 
@@ -1450,11 +1449,11 @@ In a second example, another process advances the floor. A server with no sessio
 
 In a third example, the same race goes the other way, and the writer's restore is written at 31 first. The advancing process's put at 31 collides, so the process runs discovery, finds tip 31, and creates the floor object at 32. Any fold that covers 32 also covers 31, so the manifest that records floor 20 also contains the restore's `revoke` event.
 
-Why does the floor stop at a commit that's at least an hour old? A reader that opened a file revision can keep reading that revision after a newer revision of the file is committed. If the floor could reach the replacing commit right away, a base compaction could remove the replaced revision's row within minutes of the replacement, so a read of the revision, or a request for a presigned URL for it, would return `revision_not_found`, and garbage collection could delete the revision's content while a presigned URL for it is still valid (see [Content roots](#119-content-roots)). With this rule, the floor reaches the replacing commit only once that commit is at least `RETENTION_ADVANCE_MIN_COMMIT_AGE_MS` old, so the reader has at least that long to finish.
+Why does the floor stop at a commit that's at least the grace window old? A reader that opened a file revision can keep reading that revision after a newer revision of the file is committed. If the floor could reach the replacing commit right away, a base compaction could remove the replaced revision's row within minutes of the replacement, so a read of the revision, or a request for a presigned URL for it, would return `revision_not_found`, and garbage collection could delete the revision's content while a presigned URL for it is still valid (see [Content roots](#119-content-roots)). With this rule, the floor reaches the replacing commit only once that commit is at least the grace window old, so a revision that a commit replaces stays referenced, and its content stays, for at least the grace window after that commit. A view, a presigned URL that the view issued, and a pool's collection that reads this namespace after that commit rely on that.
 
-Why does the walk stop at a commit dated after the cutoff, even when a later commit is older? Stopping there means that the floor passes a commit only when that commit's own timestamp is at or before the cutoff, so a commit from a writer whose clock runs behind can't move the floor past the commits below it that are dated later. The cost is that a writer whose clock runs ahead delays the floor. For example, if a writer's clock runs a day ahead, the floor doesn't pass that writer's commits until about a day and an hour after they were committed.
+Why does the walk stop at a commit dated after the cutoff, even when a later commit is older? Stopping there means that the floor passes a commit only when that commit's own timestamp is at or before the cutoff, so a commit from a writer whose clock runs behind can't move the floor past the commits below it that are dated later. The cost is that a writer whose clock runs ahead delays the floor. For example, if a writer's clock runs a day ahead, the floor doesn't pass that writer's commits until about two days after they were committed.
 
-Why does the advance apply the minimum commit age with the same walk as a cutoff time? With one walk, an advance reads the commits between the floor and the cutoff once. On a namespace whose commits are all younger than the minimum commit age, that's one commit (the first commit above the floor, which stops the walk). On a namespace whose floor advances on a schedule with a retention window, it's the commits made since the previous advance. A namespace whose floor has never advanced reads its whole history once, on its first advance, as it would for its first advance with a window.
+Why does the advance apply the grace window's cutoff with the same walk as a cutoff time? With one walk, an advance reads the commits between the floor and the cutoff once. On a namespace whose commits are all younger than the grace window, that's one commit (the first commit above the floor, which stops the walk). On a namespace whose floor advances on a schedule with a retention window, it's the commits made since the previous advance. A namespace whose floor has never advanced reads its whole history once, on its first advance, as it would for its first advance with a window.
 
 Why is the window stored in the manifest, and not in each maintainer's configuration? Namespaces in one store can need different amounts of history. Every process that maintains a namespace reads the same current manifest, so all of them use the same window for that namespace, whatever their own settings. If a maintainer applied a window of its own to a namespace whose manifest has no window, and two servers with different settings advanced that namespace's floor, the namespace would keep the history of the shorter window, because the floor never decreases. For example, with settings of 30 days and 7 days, the namespace would keep 7 days of history. The advance already loads the manifest to find its target, so reading the window costs no extra request.
 
@@ -1580,10 +1579,10 @@ A compaction runs under two deadlines:
 | Compaction deadline | Before the compaction reads its input | The compaction starts its last publication attempt within `METADATA_COMPACTION_BUDGET_MS`. | The compaction returns `abandoned`. |
 | Publication deadline | When finalization starts | Every finalization attempt runs under one `METADATA_PUBLICATION_BUDGET_MS`. | The attempt fails with the metadata publication budget error. |
 
-Segments that no root references are protected until their provider age is at least 24 hours. The compaction deadline reserves the minimum grace window inside that interval:
+Segments that no root references are protected until their provider age is more than the grace window (24 hours). The compaction deadline reserves the publication completion bound (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)) inside that interval:
 
 ```text
-compaction deadline + minimum grace window <= 24 hours
+compaction deadline + publication completion bound <= grace window
 ```
 
 With the current constants, a compaction can start its publication for at most 23 hours and 35 minutes after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed compaction leaves output that's subject to the same age rule.
@@ -1646,14 +1645,14 @@ Why isn't a replaced manifest a root? A reader or writer can still be using a ma
 
 ### 11.3 Candidate and age rules
 
-Being unreferenced makes an object a candidate for deletion, but it doesn't make it deletable right away. Provider age uses the modification time that the listing reports, and a candidate listed without a time is kept. Let `T` be the grace window (`GC_GRACE_WINDOW_MS`), which is the same for every collection and MUST be at least `GC_MIN_GRACE_WINDOW_MS`.
+Being unreferenced makes an object a candidate for deletion, but it doesn't make it deletable right away. Provider age uses the modification time that the listing reports, and a candidate listed without a time is kept. Let `T` be the grace window (`GC_GRACE_WINDOW_MS`, 24 hours), which is the same for every collection and MUST be at least `PUBLICATION_COMPLETION_BOUND_MS`.
 
 | Family | Conditions for deletion |
 | --- | --- |
 | Namespace manifest | Below the observed hint, not a root (see [Reference roots](#112-reference-roots)), and a provider age of at least `T`. |
 | WAL object in an active namespace | At or below `folded_wal_no`, and a provider age of at least `T`. |
 | WAL object in a deleted namespace | A provider age of at least `T` (no current WAL object is protected). |
-| Metadata or extension segment | No root lists it, and its provider age is strictly greater than 24 hours. |
+| Metadata or extension segment | No root lists it, and its provider age is strictly greater than `T`. |
 | Snapshot record | The owner-specific rules in [Snapshot cleanup](#117-snapshot-cleanup). |
 | Upload session | The status-specific rules in [Upload-session cleanup](#116-upload-session-cleanup). |
 | Content object under a pool's prefix | No extent filter of a layout segment in the members' layout views may contain its name, no tail or session root of the pool's members refers to its chain (see [Content roots](#119-content-roots)), and a provider age of at least `T`. |
@@ -1662,7 +1661,7 @@ Being unreferenced makes an object a candidate for deletion, but it doesn't make
 
 The hint and the current manifest are never deleted. Core garbage collection keeps unrecognized keys. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
 
-For example, suppose a collector observes hint 8 and current manifest 10. It keeps manifests 8, 9, and 10 for discovery, and it keeps the segments in manifest 10 and in any manifest that a snapshot keeps. A segment that only manifest 8 or 9 lists is a candidate, even if manifest 10 was published a moment ago, but it still has to be older than the segment minimum age before it's deleted.
+For example, suppose a collector observes hint 8 and current manifest 10. It keeps manifests 8, 9, and 10 for discovery, and it keeps the segments in manifest 10 and in any manifest that a snapshot keeps. A segment that only manifest 8 or 9 lists is a candidate, even if manifest 10 was published a moment ago, but it still has to be strictly older than `T` before it's deleted.
 
 ### 11.4 Clock and operation assumptions
 
@@ -1670,7 +1669,7 @@ Garbage collection deletes an unreferenced object based on its age, which is cal
 
 The combined allowance (`GC_SAFETY_MARGIN_MS`) is 300,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not five minutes for each participant. A provider clock that's ahead of the collector's delays garbage collection, but doesn't make it unsafe. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
 
-Publication budgets use monotonic elapsed time, on a clock that keeps running while the host sleeps. The minimum grace window is the longest bounded publication budget, plus the provider publication request bound, plus the combined allowance. Fork installation and compaction reserve that grace window within their own lifetime bounds. [Publication and collection timing](#c1-publication-and-collection-timing) records the exact calculations.
+Publication budgets use monotonic elapsed time, on a clock that keeps running while the host sleeps. The "publication completion bound" (`PUBLICATION_COMPLETION_BOUND_MS`) is the longest bounded publication budget, plus the provider publication request bound, plus the combined allowance, and the grace window is at least that long. Fork installation and compaction reserve the publication completion bound within the grace window. [Publication and collection timing](#c1-publication-and-collection-timing) records the exact calculations.
 
 If a publication's budget has expired when its put returns, the publisher treats the outcome as unknown, even if the put succeeded. A client timeout doesn't show that a remote write had no effect, so unknown outcomes still have to be reconciled. The same rule applies when a manifest put has an unknown outcome and a read-back finds identical bytes. The read-back confirms the publication only while the budget hasn't expired. After that, the put might have been applied outside the provider bound, so the outcome stays unknown. The operation returns `outcome_unknown`, and the caller reloads and plans from the current state.
 
@@ -1693,7 +1692,7 @@ A collector protects every WAL number above its captured folded boundary. Writer
 
 Readers have the matching obligation. A cold discovery trusts a missing successor only if the answer arrives within `READ_REVALIDATION_BOUND_MS` of its manifest probe, and a cached view trusts its probe answers only if they arrive within that bound of its previous successor probe (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). Metadata segments have no matching time bound. Garbage collection keeps the segments of the current manifest and of manifests that snapshots keep, so a read or a write on a manifest that a newer manifest replaced can find a segment deleted, and LoonFS then reads again, or plans the write again, on the current manifest (see [Reference roots](#112-reference-roots)).
 
-New metadata and extension segments are protected by their minimum age while a publisher writes and verifies them. Streaming compaction MUST start its publication before its budget expires, and every compaction checks its epoch and its selected inputs. These rules apply to output that isn't yet listed by a root the collection captured earlier.
+New metadata and extension segments are protected by the grace window while a publisher writes and verifies them. Streaming compaction MUST start its publication before its budget expires, and every compaction checks its epoch and its selected inputs. These rules apply to output that isn't yet listed by a root the collection captured earlier.
 
 A failed read of a required root stops garbage collection, and an uncertain read of a fork's target keeps that snapshot. Each cleanup operation MUST keep the durable evidence it needs to retry after a failure.
 
@@ -1728,8 +1727,8 @@ The completed-content grace covers every possible piece of admission evidence:
 completion
 |<-- receipt issuance window -->|
                                 |<-- final token lifetime -->|
-                                                             |<-- minimum GC grace -->|
-                                                                       earliest cleanup
+                                                             |<-- publication completion bound -->|
+                                                                                   earliest cleanup
 ```
 
 In milliseconds:
@@ -1738,7 +1737,7 @@ In milliseconds:
 CONTENT_RECLAMATION_GRACE_WINDOW_MS
     = COMPLETED_UPLOAD_RECEIPT_WINDOW_MS
       + CONTENT_RECEIPT_TTL_MS
-      + GC_MIN_GRACE_WINDOW_MS
+      + PUBLICATION_COMPLETION_BOUND_MS
 ```
 
 Every token issue checks the original completion time, so a retained receipt can't extend its issuance window. In-process proofs expire at the end of the admission window, and publication checks proof expiry immediately before the numbered WAL put. After the full completed-content grace, an unpublished upload can't be committed for the first time. Published content stays while a content root refers to it.
@@ -1769,7 +1768,7 @@ After it sweeps its candidate families, a namespace's collection retires a tombs
 
 No retirement deletes content. A retired namespace isn't a [member](glossary.md#pool) of its pool, so its content references don't protect the pool's content, and the pool's collection deletes the content that no other member refers to under [Content roots](#119-content-roots).
 
-[File contents and ownership](#15-file-contents-and-ownership) defines where content is stored. A deleted namespace refuses requests for presigned upload URLs and upload completion, and the retirement grace is longer than the lifetime of any issued presigned URL.
+[File contents and ownership](#15-file-contents-and-ownership) defines where content is stored. A deleted namespace refuses requests for presigned upload URLs and upload completion, and the grace window that comes before its retirement is longer than the lifetime of any issued presigned URL.
 
 Fork-snapshot cleanup is idempotent. A later collection that retires the same tombstone finds the snapshot gone, and it counts nothing. Retained roots follow [Reference roots](#112-reference-roots), and no progress record or journal is stored.
 
@@ -1787,7 +1786,7 @@ Garbage collection considers every other content object under the pool's content
 
 The pool record identifies the pool's first member (`first_member_namespace_id`). The members of the pool are the first member and every namespace forked from a member. The collection finds them by walking fork snapshots. The first member's fork snapshots identify its first-generation forks, and a fork of a fork keeps its fork snapshot on the fork it was created from, not the first member. So the collection lists the snapshots of each member in turn. Each fork snapshot in a listing adds the snapshot's target (`owner.target_namespace_id`) to the members, and the walk ends when a listing adds no new member. The collection lists each member's snapshots once, and that listing also finds the manifests that the member's snapshots keep.
 
-A member's content references count as roots until the member is retired. A deleted member's tombstone keeps its runs, and only the member's own collection deletes the member's fork snapshot, when it retires the member (see [Snapshot cleanup](#117-snapshot-cleanup)). So until the member is retired, the walk finds the member, and the collection reads the tombstone as one of the member's layout views. Retirement comes at least `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` after the deletion (see [Retirement](#95-retirement)). The collection MUST read the roots of every member within the retirement grace less the combined allowance (`POOL_ROOTS_READ_BUDGET_MS`, which is `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS`, see [Clock and operation assumptions](#114-clock-and-operation-assumptions)), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then deletes no content objects, and it reports `content_deletion_pool_budget` as skipped work.
+A member's content references count as roots until the member is retired. A deleted member's tombstone keeps its runs, and only the member's own collection deletes the member's fork snapshot, when it retires the member (see [Snapshot cleanup](#117-snapshot-cleanup)). So until the member is retired, the walk finds the member, and the collection reads the tombstone as one of the member's layout views. Retirement comes the grace window after the deletion (see [Retirement](#95-retirement)). The collection reads each member once, and it MUST read the roots of every member within 12 hours (`POOL_ROOTS_READ_BUDGET_MS`), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then deletes no content objects, and it reports `content_deletion_pool_budget` as skipped work.
 
 The collection skips a fork snapshot whose target has no manifest (an installation that hasn't finished or that failed, as [Snapshot cleanup](#117-snapshot-cleanup) describes). When the collection finds the snapshot, such a target has no WAL tail or views of its own. The snapshot keeps the source manifest that the target reads through, and an object that the target writes after the collection starts is younger than `T` for the collection. If one member's roots can't be read (the first member included, and including a member whose current manifest records another pool), the collection deletes no content objects, and it reports `content_deletion_unreadable_member` as skipped work. In both cases (the time limit and an unreadable member), the collection still lists the content prefix once to measure `listed_bytes`, and the rest of the collection continues. Other pools are unaffected.
 
@@ -1811,7 +1810,7 @@ A pool's collection works in these steps:
 
 The collection reads each segment's extent filter, and doesn't combine the segments of a view. A view's layout rows are the rows of its segments, so the extent filters of the listed segments cover every extent of every view. That includes a superseded layout row (a shorter layout of a chain that a longer row replaces), so an object that only a superseded row refers to stays until a compaction drops that row and no layout view lists the segment that contains it. A filter can also match the name of an object that no row of its segment refers to. The collection keeps that object, and a later collection reclaims it once no layout view lists the segment.
 
-Tail and session IDs protect every object of their chains. A presigned download URL lasts `DIRECT_TRANSFER_URL_TTL_MS` (15 minutes), and the URL lifetime isn't an input to the grace window. A URL for a revision that's current in the view that issued it works for the URL's whole lifetime. A retention advance passes the commit that replaces the revision only once that commit is older than the advance's minimum commit age (`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`), which is longer than the revalidation bound, the URL lifetime, and the clock allowance together, so the current manifest refers to the revision until the URL expires (see [Advancing the retention floor](#101-advancing-the-retention-floor)). A URL for a revision that a later commit replaced can stop working before it expires, once a base compaction removes the revision and a collection deletes its content.
+Tail and session IDs protect every object of their chains. A presigned download URL lasts `DIRECT_TRANSFER_URL_TTL_MS` (15 minutes), and the URL lifetime isn't an input to the grace window. A URL for a revision that's current in the view that issued it works for the URL's whole lifetime. A retention advance passes the commit that replaces the revision only once that commit is at least the grace window old, and the grace window is longer than the revalidation bound, the URL lifetime, and the clock allowance together, so the current manifest refers to the revision until the URL expires (see [Advancing the retention floor](#101-advancing-the-retention-floor)). A URL for a revision that a later commit replaced can stop working before it expires, once a base compaction removes the revision and a collection deletes its content.
 
 Why does each layout segment carry a filter of its extents instead of the collection reading the rows? The objects that a segment's extents name are fixed when the segment is written, so the writer records them once. A collection then reads one small section for each distinct layout segment, which the segment cache keeps for the next collection, and one listing of the content prefix. A scan of the rows would read every layout row of every rooted view, and exact sets of extent keys would grow with the namespace. At one million files, the extent filters take about 2.5 MB (one million names at 20 bits each).
 
@@ -1831,7 +1830,19 @@ Why does a pool keep its pool record after its first member is retired? A delaye
 
 Why does the collection wait for the creation grace before it deletes the pool record of a failed create? A create call writes the pool record before manifest 1, so inside the creation grace, the collection can't tell a failed create from a create call that's still running. The create call's metadata publication budget starts at the record's `created_at_ms`, so a create call ends inside the creation grace (see [Creating a namespace](#91-creating-a-namespace)).
 
-Why does the collection have to read every member within the retirement grace, less the combined allowance? A reference can move from one member to another while a collection runs. For example, suppose that after the collection has read the first member's roots, a commit in the first member refers to a chain that a fork wrote, and the fork is then deleted. The collection doesn't see the reference in the first member, so it relies on the fork's views. The commit came after the collection captured `now_ms`, and the deletion came after the commit. The deletion time comes from the deleting host's clock, and the retirement check uses another collector's clock. So the fork can't be retired until the retirement grace less the combined allowance has passed since the collection captured `now_ms`. Until then, the fork snapshot on the fork's source keeps the fork in the walk, and its tombstone keeps the runs that refer to the chain. (A member that drops a reference without being deleted commits a change that replaces or deletes the revision after the collection started. A base compaction removes the revision's rows only once the retention floor passes that commit, and the floor passes the commit at least an hour later (the minimum commit age of a retention advance). That hour is longer than the time the collection has to read every member, so the member's current manifest still refers to the chain when the collection reads the member.)
+Why does the collection have to read every member within 12 hours? A reference can move from one member to another while a collection runs. For example, a merge adds references from a fork to its target, and the collection might read the target before the merge's commit is applied and read the fork after it. While a merge or a rebase plans, LoonFS takes a snapshot of the fork (see [Cross-namespace copies and moves](#97-cross-namespace-copies-and-moves)), and the snapshot keeps the fork's manifest, and the content that the manifest refers to, until garbage collection deletes the snapshot's record. The snapshot expires `OPERATION_SNAPSHOT_TTL_MS` after the merge was prepared, and garbage collection deletes its record once the grace window has passed since the earliest of the snapshot's expiry, its deletion, and, in a deleted fork, its creation (see [Snapshot cleanup](#117-snapshot-cleanup)). Each of those times comes after the merge was prepared, so the record stays for at least the grace window after the merge was prepared. The plan's content proofs expire with the snapshot, and publication checks them immediately before the WAL put, so the merge's commit is applied within the snapshot's lifetime plus the provider's request bound after the merge was prepared. A pool's collection reads every member within its read cap, or deletes no content. So a collection that read the target before the commit was applied reads the fork while the snapshot's record still keeps the content, because the read cap, the clock allowance, the snapshot's lifetime, and the provider's request bound together are less than the grace window:
+
+```text
+POOL_ROOTS_READ_BUDGET_MS + GC_SAFETY_MARGIN_MS
+    + OPERATION_SNAPSHOT_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+    < GC_GRACE_WINDOW_MS
+```
+
+The same inequality covers three more cases:
+
+- **A fork deleted during a merge.** A fork that's deleted while a merge from it is in flight is retired no earlier than the grace window after its deletion, so the walk still finds the fork as a member when the collection reads the fork, and the fork's tombstone and snapshots still refer to the content.
+- **A replaced revision.** A revision that the fork replaces after the merge was prepared stays in the fork's history until a retention advance passes the replacing commit, which is at least the grace window after that commit (see [Advancing the retention floor](#101-advancing-the-retention-floor)), so the collection reads the fork's current manifest with the revision still in it. A revision that the merge includes and that the fork replaced before the merge was prepared is in the manifest that the plan's snapshot keeps, because the plan reads the fork through that snapshot.
+- **A fork created during a collection.** A fork whose fork snapshot is written after the collection lists the source's snapshots isn't read by that collection, because the walk finds a fork only through the fork snapshot on its source. A reference that the new fork receives from a merge or a replay is kept by the snapshot that the plan took of the fork that the reference came from, as in the paragraph above. That doesn't depend on the collection reading the new fork. A reference that the new fork starts with comes from its source: from the source's current manifest when the fork was created, or from the manifest of a snapshot of the source. The collection loads a member's current manifest and WAL tail before it lists the member's snapshots, so it read the source's manifest, tail, and snapshot listing before the new fork's fork snapshot was written. So the reference was in a root of the source that the collection read, or the source gained the reference after the collection read the source. A member gains a reference to content that it didn't already refer to in three ways: a commit of newly written or uploaded content, which the age rule and the upload session records protect, a merge or a replay, which the paragraph above covers, and its own creation as a fork, which this case covers.
 
 ## 12. Encodings, versions, and extensions
 
@@ -2579,21 +2590,18 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One attempt of a control operation. |
 | `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 300,000 | The retry budget, the final backoff, and a payload-sized final request, rounded up to 5 minutes. |
 | `GC_SAFETY_MARGIN_MS` | 300,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
-| `GC_MIN_GRACE_WINDOW_MS` | 1,500,000 | The derived minimum grace window. |
+| `PUBLICATION_COMPLETION_BOUND_MS` | 1,500,000 | The publication completion bound: the longest publication budget, plus the provider's request bound, plus the combined allowance. |
 | `READ_REVALIDATION_BOUND_MS` | 1,200,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, a writer position, or a manifest publication's basis. |
-| `GC_GRACE_WINDOW_MS` | 3,600,000 | The grace window that every collection uses. |
-| `RETENTION_ADVANCE_MIN_COMMIT_AGE_MS` | 3,600,000 | The minimum commit age of a retention advance. An advance doesn't move the floor past a younger commit. |
-| `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
+| `GC_GRACE_WINDOW_MS` | 86,400,000 | The grace window that every collection uses. An unreferenced segment MUST be strictly older than this before it's deleted, a deleted namespace is retired this long after its deletion, and a retention advance doesn't move the floor past a younger commit. |
 | `METADATA_COMPACTION_BUDGET_MS` | 84,900,000 | The longest time before a compaction starts its publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a presigned download URL and of a presigned URL for a whole-object upload. A presigned URL for one part of a multipart upload lasts one hour. |
 | `OPERATION_SNAPSHOT_TTL_MS` | 300,000 | The lifetime of a snapshot that LoonFS takes for one of its own operations (the snapshot of the fork that a merge or a rebase plans from), and of the content proofs of the operation's plan. |
-| `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` | 2,700,000 | The minimum retirement grace after the deletion call's clock. |
-| `POOL_ROOTS_READ_BUDGET_MS` | 2,400,000 | The monotonic time, from the start of a pool's collection, within which the collection reads the roots of every member of the pool, or skips the pool's content sweep. |
+| `POOL_ROOTS_READ_BUDGET_MS` | 43,200,000 | The monotonic time, from the start of a pool's collection, within which the collection reads the roots of every member of the pool, or skips the pool's content sweep. |
 
 A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, and then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (see [Required operations](#31-required-operations)), but a conditional WAL or manifest write can still be larger than the payload threshold in its one request. So the publication allowance reserves 120 + 15 + 120 seconds, rounded up to 300 seconds, not the 30-second timeout for small requests. The allowance covers the request phase, not reading the response body. It keeps the relative-clock and scheduling assumptions, and it doesn't prove that a timed-out remote change had no effect.
 
 ```text
-GC_MIN_GRACE_WINDOW_MS
+PUBLICATION_COMPLETION_BOUND_MS
     = max(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
       + GC_SAFETY_MARGIN_MS
@@ -2603,15 +2611,18 @@ READ_REVALIDATION_BOUND_MS
       + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
 
 METADATA_COMPACTION_BUDGET_MS
-    = UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GC_MIN_GRACE_WINDOW_MS
-
-NAMESPACE_RETIREMENT_GRACE_WINDOW_MS
-    = METADATA_PUBLICATION_BUDGET_MS
-      + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-      + GC_MIN_GRACE_WINDOW_MS
+    = GC_GRACE_WINDOW_MS - PUBLICATION_COMPLETION_BOUND_MS
 ```
 
-The grace window `T` can't be lower than the minimum, and retirement uses the greater of `T` and the retirement minimum. Segment age and the completed-content grace use their own constants. Changing a publication bound, or its safety relationship, changes the protocol, not just a scheduling preference.
+The grace window `T` can't be lower than the publication completion bound. A pool's collection keeps content safe when this inequality holds (see [Content roots](#119-content-roots)):
+
+```text
+POOL_ROOTS_READ_BUDGET_MS + GC_SAFETY_MARGIN_MS
+    + OPERATION_SNAPSHOT_TTL_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+    < GC_GRACE_WINDOW_MS
+```
+
+With the current constants, that's 12 hours plus 15 minutes, against 24 hours. Retirement, the retention advance's cutoff, and segment age use `T`, and the completed-content grace uses its own constant. Changing a publication bound, or its safety relationship, changes the protocol, not just a scheduling preference.
 
 ### C.2 Upload admission
 
@@ -2621,7 +2632,7 @@ The grace window `T` can't be lower than the minimum, and retirement uses the gr
 | `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | The seven-day window in which completed content can issue new receipts. |
 | `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | The one-hour token lifetime. |
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | The receipt issuance window plus the final token's lifetime. |
-| `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 609,900,000 | The admission window plus the minimum grace window. |
+| `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 609,900,000 | The admission window plus the publication completion bound. |
 
 The completed-content interval is seven days, one hour, and twenty-five minutes. Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
 

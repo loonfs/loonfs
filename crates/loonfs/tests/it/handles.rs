@@ -945,10 +945,10 @@ fn maintenance_snapshot_and_retention_are_explicit_one_shot_calls() {
             .await
             .expect("put file");
 
-        // A retention advance passes a commit once it's an hour old,
+        // A retention advance passes a commit once it's a grace window old,
         // so this runtime's clock is that far ahead of the writer's.
         let clock = Arc::new(ManualClock::at_system_time());
-        clock.advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+        clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
         let maintenance_runtime = LoonFs::builder(store_config(temp_dir.path()))
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",

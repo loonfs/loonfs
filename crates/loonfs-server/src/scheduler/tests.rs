@@ -424,10 +424,12 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
     server.scheduler.run_sweep().await.expect("list namespaces");
     assert!(
         !keys_under(store.as_ref(), &content_prefix).await.is_empty(),
-        "content outlives the deletion until the retirement grace passes"
+        "content outlives the deletion until the grace window passes"
     );
 
-    server.clock.advance_ms(DAY_MS);
+    server
+        .clock
+        .advance_ms(loonfs::GC_GRACE_WINDOW_MS + MINUTE_MS);
     assert_eq!(
         server.scheduler.run_sweep().await.expect("list namespaces"),
         1,

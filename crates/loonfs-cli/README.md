@@ -426,7 +426,7 @@ Maintenance
     it to that sequence, or to the folded manifest head when that is
     lower. --before moves it to the last commit made at or before that
     Unix time in milliseconds. Whatever the target, the floor doesn't
-    pass a commit that's less than one hour old, and the output shows the
+    pass a commit that's less than 24 hours old, and the output shows the
     floor that the advance reached. An embedded advance against a bucket
     writes the new floor to the namespace's WAL as a floor object and
     claims no writer epoch, so a server's session for that namespace isn't
@@ -453,7 +453,7 @@ Maintenance
     --json includes every retention reason.
     deleted.extension_segments counts the gram content index's segments
     that no retained manifest lists. Like metadata segments, they're
-    deleted once they're more than 24 hours old, whatever the window.
+    deleted once they're more than 24 hours old.
 
   loonfs maintenance pool gc [<pool-id>]
     Run one collection of a pool and print its report. A pool stores the

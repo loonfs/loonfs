@@ -11,7 +11,7 @@
 use crate::metrics::{MetricEntry, MetricValue, MetricsSnapshot};
 use crate::{
     LoonFs, Maintenance, ReadOnly, SharedObjectStore, WallClock, Writable, WriterId,
-    RETENTION_ADVANCE_MIN_COMMIT_AGE_MS,
+    GC_GRACE_WINDOW_MS,
 };
 use loonfs_types::SystemWallClock;
 use std::sync::Arc;
@@ -28,14 +28,15 @@ impl WallClock for FixedWallClock {
     }
 }
 
-/// Builds a maintenance handle on `store` whose wall clock is an hour ahead.
+/// Builds a maintenance handle on `store` whose wall clock is a grace window
+/// ahead.
 ///
-/// The clock is [`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`] ahead of the system
+/// The clock is [`GC_GRACE_WINDOW_MS`] ahead of the system
 /// clock, so a retention advance through the handle can pass every commit
 /// made before the call.
 pub async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Maintenance {
     let clock = FixedWallClock {
-        now_ms: SystemWallClock.now_ms() + RETENTION_ADVANCE_MIN_COMMIT_AGE_MS,
+        now_ms: SystemWallClock.now_ms() + GC_GRACE_WINDOW_MS,
     };
     let writer_id = test_writer_id("retention-maintenance");
     LoonFs::builder_with_store(store)

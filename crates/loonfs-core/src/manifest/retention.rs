@@ -8,7 +8,7 @@ use super::published::PublicationReport;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
-use crate::limits::{MAX_CONTENTION_ATTEMPTS, RETENTION_ADVANCE_MIN_COMMIT_AGE_MS};
+use crate::limits::{GC_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::store::NamespaceStore;
@@ -27,9 +27,9 @@ use std::sync::Arc;
 /// Where a retention advance moves the floor.
 ///
 /// The floor never moves down and never passes the folded manifest head.
-/// Whatever the target, the advance also treats
-/// [`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`] before its clock as a cutoff, so the floor stops at or below the last
-/// commit at or before that time, found by the same walk as a
+/// Whatever the target, the advance also treats the grace window
+/// ([`GC_GRACE_WINDOW_MS`]) before its clock as a cutoff, so the floor stops
+/// at or below the last commit at or before that time, found by the same walk as a
 /// [`Self::Cutoff`] target (format spec, "Advancing the retention floor"). A
 /// target at or below the current floor leaves the floor where it is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -120,14 +120,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `retention_floor_seq`, and publishes nothing (format spec, "Advancing
     /// the retention floor"). The view is a writer position, or the current
     /// manifest and the WAL tail after that manifest. The plan uses the
-    /// namespace's wall clock as the current time for the minimum commit age
-    /// and for a [`RetentionTarget::Window`] cutoff.
+    /// namespace's wall clock as the current time for the grace window's
+    /// cutoff and for a [`RetentionTarget::Window`] cutoff.
     ///
     /// The plan makes no request when the target is at or below the view's
     /// floor. Otherwise, it reads commits upward from the manifest's floor
     /// once, and it stops at the target or at the first commit after the
     /// cutoff, which is the earlier of the target's own cutoff, if it has
-    /// one, and the current time minus the minimum commit age. A floor that
+    /// one, and the current time minus the grace window. A floor that
     /// isn't above the view's floor stays at the view's floor.
     pub async fn plan_retention_floor(
         &self,
@@ -138,7 +138,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let now_ms = self.start_clock().request_at_ms();
         let manifest = current.payload();
         ensure_namespace_live(&manifest.namespace_id, manifest.status)?;
-        let age_cutoff_at_ms = now_ms.saturating_sub(RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+        let age_cutoff_at_ms = now_ms.saturating_sub(GC_GRACE_WINDOW_MS);
         let (through, cutoff_at_ms) = match target {
             RetentionTarget::Head => (manifest.head_seq, age_cutoff_at_ms),
             RetentionTarget::Seq(seq) => (seq.min(manifest.head_seq), age_cutoff_at_ms),

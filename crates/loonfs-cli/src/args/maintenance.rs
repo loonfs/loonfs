@@ -82,7 +82,7 @@ pub(crate) enum MaintenanceRetentionCommand {
     ///
     /// The floor moves to the folded manifest head unless a target is given.
     /// Whatever the target, the floor doesn't pass a commit that's less than
-    /// one hour old, and the output shows the floor that the advance reached.
+    /// 24 hours old, and the output shows the floor that the advance reached.
     /// A later base compaction keeps every file revision above the floor and
     /// each file's newest revision at or below it.
     Advance(MaintenanceRetentionAdvanceArgs),

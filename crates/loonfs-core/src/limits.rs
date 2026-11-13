@@ -1,13 +1,14 @@
 //! One source of truth for publication, provider, and garbage-collection
 //! timing bounds.
 //!
-//! The GC grace window's safety proof (format spec, Appendix C) is an
-//! inequality over these constants: every publication measures itself
+//! The GC grace window's safety proof (format spec, Appendix C) is a set of
+//! inequalities over these constants: every publication measures itself
 //! against a budget here and refuses to publish its manifest once the
 //! budget is spent, provider operations consume one deadline across retries,
-//! and the minimum grace window is derived — not tuned — from those bounds
-//! plus a margin for clock error and scheduling delay. Callers may configure
-//! a larger grace window, never a smaller one.
+//! and the publication completion bound is derived from those bounds plus a
+//! margin for clock error and scheduling delay. Compile-time assertions keep
+//! the grace window longer than that bound, and longer than a pool's read cap
+//! plus the allowances that a pool's collection relies on.
 
 use loonfs_types::duration_ms;
 
@@ -210,18 +211,20 @@ const fn max_u64(left: u64, right: u64) -> u64 {
     }
 }
 
-/// Minimum age of an unreachable object before garbage collection or repair may
-/// remove it.
+/// Longest time, with the clock allowance, from the observation that a
+/// publication was planned against until the provider applies the
+/// publication's put.
 ///
 /// Every numbered put starts within a publication budget of the observation
 /// it was planned against, and the provider applies it within its request
 /// bound, so an object older than the longest budget plus the request bound
 /// plus the clock allowance was written before any put still in flight was
-/// planned. Collection roots only the current manifest and the manifests
-/// that snapshots keep. A read whose manifest a newer one replaced can find a segment
-/// collected; it returns `stale_head` and is read again. A read that must
-/// outlive the current manifest takes a snapshot.
-pub const GC_MIN_GRACE_WINDOW_MS: u64 =
+/// planned. The grace window is at least this long. Collection roots only the
+/// current manifest and the manifests that snapshots keep. A read whose
+/// manifest a newer one replaced can find a segment collected; it returns
+/// `stale_head` and is read again. A read that must outlive the current
+/// manifest takes a snapshot.
+pub const PUBLICATION_COMPLETION_BOUND_MS: u64 =
     max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
         + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
         + GC_SAFETY_MARGIN_MS;
@@ -239,7 +242,8 @@ const _: () = assert!(
             + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
 );
 
-const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS);
+const _: () =
+    assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= PUBLICATION_COMPLETION_BOUND_MS);
 
 /// A writer checks its basis once the last confirmation is more than a WAL
 /// publication budget old, and the writer uses the result only within the
@@ -251,31 +255,22 @@ const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN
 const _: () = assert!(2 * WAL_PUBLISH_BUDGET_MS <= READ_REVALIDATION_BOUND_MS);
 
 const _: () = assert!(
-    3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS,
-    "3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS: \
+    3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_GRACE_WINDOW_MS,
+    "3 * PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_GRACE_WINDOW_MS: \
      the final part, precondition, and completion requests a streamed write sends after its \
      last caller byte must complete before an aborted upload's record can be removed"
 );
 
-/// Minimum provider age of a metadata segment no manifest lists before garbage
-/// collection may delete it.
-///
-/// A compaction unit writes its output under `segments/` as it goes and
-/// publishes at the end, so its earliest segment is unreferenced for the whole
-/// run. One day is the bound on a run; the difference between this age and the
-/// grace window below is how long a unit may keep compacting before it abandons
-/// its output.
-pub const UNREFERENCED_SEGMENT_GRACE_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
-
 /// Elapsed monotonic time after which a compaction unit abandons instead of
 /// publishing.
 ///
-/// A unit that starts its last publication attempt at this bound finishes within
-/// one grace window, which the minimum age above reserves after the budget. The
-/// subtraction fails to compile if the grace window ever exceeds the minimum
-/// age.
-pub const METADATA_COMPACTION_BUDGET_MS: u64 =
-    UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GC_MIN_GRACE_WINDOW_MS;
+/// A compaction unit writes its output under `segments/` as it goes and
+/// publishes at the end, so its earliest segment is unreferenced for the whole
+/// run, and a collection deletes an unreferenced segment once it is older than
+/// the grace window. A unit that starts its last publication attempt at this
+/// budget finishes within the publication completion bound, which the grace
+/// window reserves after the budget.
+pub const METADATA_COMPACTION_BUDGET_MS: u64 = GC_GRACE_WINDOW_MS - PUBLICATION_COMPLETION_BOUND_MS;
 
 /// Lifetime of a direct download or direct put presigned URL.
 ///
@@ -283,8 +278,8 @@ pub const METADATA_COMPACTION_BUDGET_MS: u64 =
 /// revalidation bound old refers to. The content of the view's current
 /// revision stays referenced until the URL ends, because a retention advance
 /// passes the commit that replaces the revision only once that commit is the
-/// advance's minimum commit age old, and an assertion further down this file
-/// keeps that age longer than the bound and this lifetime together. A URL for a
+/// grace window old, and an assertion further down this file keeps the grace
+/// window longer than the bound and this lifetime together. A URL for a
 /// revision that the view already lists as replaced can stop working before
 /// it expires, once a compaction removes the revision and a collection
 /// deletes its content. A part presigned URL writes no object.
@@ -299,46 +294,47 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 /// collector deletes the snapshot after it expires.
 pub const OPERATION_SNAPSHOT_TTL_MS: u64 = 5 * 60 * 1000;
 
-/// Minimum retirement grace from the deletion call's clock.
-///
-/// The tombstone put starts within the publication budget, and the provider
-/// applies it within its request bound. Reads and direct transfer URLs that
-/// a view issued before the tombstone end within the minimum grace window
-/// after that write.
-pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
-    METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
-
 /// Elapsed monotonic time, from the start of a pool's collection, within
 /// which the collection reads the roots of every member of the pool, or skips
 /// the pool's content sweep.
 ///
-/// A member that the collection hasn't read yet can't be retired until the
-/// retirement grace, less the clock allowance between the deleting host and
-/// the collector, has passed since the collection started, so its fork snapshot keeps
-/// it in the walk until then (format spec, "Content roots").
-pub const POOL_ROOTS_READ_BUDGET_MS: u64 =
-    NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
+/// An assertion below keeps this cap, the clock allowance, an operation
+/// snapshot's lifetime, and the provider's request bound together shorter
+/// than the grace window (format spec, "Content roots").
+pub const POOL_ROOTS_READ_BUDGET_MS: u64 = 12 * 60 * 60 * 1000;
 
-pub use loonfs_types::limits::{GC_GRACE_WINDOW_MS, RETENTION_ADVANCE_MIN_COMMIT_AGE_MS};
+pub use loonfs_types::limits::GC_GRACE_WINDOW_MS;
 
-const _: () = assert!(GC_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
+const _: () = assert!(GC_GRACE_WINDOW_MS >= PUBLICATION_COMPLETION_BOUND_MS);
 
-/// A member that replaces or deletes a revision after a pool's
-/// collection started keeps the revision's rows until a retention advance
-/// passes that commit, at least the advance's minimum commit age later, so
-/// the collection reads the member's current manifest with the reference
-/// still in it (format section 11.9).
-const _: () = assert!(POOL_ROOTS_READ_BUDGET_MS < RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+/// A merge's or a rebase's commit is applied within an operation snapshot's
+/// lifetime plus the provider's request bound after the merge was prepared,
+/// and a collection deletes the record of the snapshot that the plan took of
+/// the fork no earlier than the grace window after that time. A pool's
+/// collection that read the target before the commit was applied reads the
+/// fork within this cap, while the snapshot's record still keeps the fork's
+/// manifest, with the clock allowance between the hosts to spare. The same
+/// margin keeps a member that's deleted after the collection starts, which is
+/// retired the grace window after its deletion, and a revision that a member
+/// replaces after the collection starts, which a retention advance passes the
+/// grace window after the replacing commit, in the collection's reads (format
+/// section 11.9).
+const _: () = assert!(
+    POOL_ROOTS_READ_BUDGET_MS
+        + GC_SAFETY_MARGIN_MS
+        + OPERATION_SNAPSHOT_TTL_MS
+        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+        < GC_GRACE_WINDOW_MS
+);
 
-/// A retention advance moves the floor only past commits older than the
-/// advance's minimum commit age, so a revision stays referenced for at least
-/// that long after a commit replaces it. A view at most the revalidation
-/// bound old, and a direct transfer URL it issued, read content that was
-/// referenced when the view was checked, and the margin keeps it referenced
-/// until the URL ends.
+/// A retention advance moves the floor only past commits at least the grace
+/// window old, so a revision stays referenced for at least that long after a
+/// commit replaces it. A view at most the revalidation bound old, and a
+/// direct transfer URL it issued, read content that was referenced when the
+/// view was checked, and the margin keeps it referenced until the URL ends.
 const _: () = assert!(
     READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS + GC_SAFETY_MARGIN_MS
-        <= RETENTION_ADVANCE_MIN_COMMIT_AGE_MS
+        <= GC_GRACE_WINDOW_MS
 );
 
 /// Most parts one direct multipart upload may cut into. This is the
@@ -382,7 +378,7 @@ pub const COMPLETED_UPLOAD_ADMISSION_WINDOW_MS: u64 =
 /// put-if-absent, content proofs are checked against the request clock plus the
 /// whole attempt's elapsed monotonic time.
 pub const CONTENT_RECLAMATION_GRACE_WINDOW_MS: u64 =
-    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + GC_MIN_GRACE_WINDOW_MS;
+    COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + PUBLICATION_COMPLETION_BOUND_MS;
 
 /// Bounds a chain's own extents while keeping shared base extents separate.
 pub(crate) const MAX_LAYOUT_EXTENTS: usize = 32;
@@ -413,15 +409,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derived_minimum_grace_window_keeps_a_margin_above_the_budget() {
+    fn publication_completion_bound_keeps_a_margin_above_the_budget() {
         // 15 min publication budget + 5 min request bound + 5 min margin
         // = 25 min.
-        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_500_000);
+        assert_eq!(PUBLICATION_COMPLETION_BOUND_MS, 1_500_000);
         assert!(
-            GC_MIN_GRACE_WINDOW_MS
+            PUBLICATION_COMPLETION_BOUND_MS
                 > max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
                     + PROVIDER_OPERATION_DEADLINE_MS,
-            "the floor keeps a margin above budget plus provider deadline"
+            "the bound keeps a margin above budget plus provider deadline"
         );
     }
 }

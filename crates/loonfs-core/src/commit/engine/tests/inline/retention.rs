@@ -214,7 +214,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     crate::test_support::namespace_store(&aged, &namespace_id)
         .gc(&WriterAt {
-            now_ms: crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
+            now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
             ..context.clone()
         }
         .clock())

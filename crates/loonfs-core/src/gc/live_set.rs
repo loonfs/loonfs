@@ -6,7 +6,7 @@ use super::deletes::Decision;
 use super::families::CandidateFamily;
 use super::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
 use crate::error::Result;
-use crate::limits::{GC_GRACE_WINDOW_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
+use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::read_working_memory;
@@ -231,12 +231,11 @@ impl LiveSet {
 }
 
 /// Returns the earliest time at which the namespace of `tombstone` can be
-/// retired: the grace window or the retirement grace after its deletion,
-/// whichever is longer.
+/// retired: the grace window after its deletion.
 fn retirement_deadline_ms(tombstone: &NamespaceManifestPayload) -> u64 {
     tombstone
         .status
         .deleted_at_ms()
         .expect("a tombstone should carry its deletion stamp")
-        .saturating_add(GC_GRACE_WINDOW_MS.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS))
+        .saturating_add(GC_GRACE_WINDOW_MS)
 }

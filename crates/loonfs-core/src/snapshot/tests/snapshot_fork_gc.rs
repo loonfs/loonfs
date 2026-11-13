@@ -114,10 +114,7 @@ impl Fixture {
             replaced,
             // Old objects can be collected, but a fork snapshot created by this
             // attempt is still inside its installation grace.
-            context: writer_at(
-                "fork",
-                crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
-            ),
+            context: writer_at("fork", crate::limits::GC_GRACE_WINDOW_MS + 1),
         }
     }
 

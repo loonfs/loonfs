@@ -1,6 +1,6 @@
 //! Extension segments under the core segment rule: a segment stays while a
-//! root lists it, and goes once it's unlisted and older than the segment
-//! minimum age.
+//! root lists it, and goes once it's unlisted and strictly older than the
+//! grace window.
 
 use super::*;
 use crate::manifest::tests::extensions::{extension_run, extension_segment};
@@ -50,7 +50,7 @@ async fn write_segment(store: &LocalFsStore, segment: &ExtensionSegmentRef) -> S
 async fn collect(store: &LocalFsStore, namespace_id: &NamespaceId) -> GcResponse {
     let aged = MetadataMapStore::aged(store, KeyPredicate::any());
     crate::test_support::namespace_store(&aged, namespace_id)
-        .gc(&context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).clock())
+        .gc(&context(GC_GRACE_WINDOW_MS + 1).clock())
         .await
         .expect("collection")
 }
@@ -186,7 +186,7 @@ async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() 
         .await
         .expect("delete the fork");
     let retired = crate::test_support::namespace_store(&store, &fork)
-        .gc(&context(setup.now_ms + retirement_ms()).clock())
+        .gc(&context(setup.now_ms + GC_GRACE_WINDOW_MS).clock())
         .await
         .expect("retire the fork");
     assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);

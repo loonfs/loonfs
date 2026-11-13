@@ -209,7 +209,7 @@ impl Client {
     /// Advances the namespace's retention floor toward the target that
     /// `options` sets.
     ///
-    /// The floor doesn't pass a commit that's less than one hour old. The
+    /// The floor doesn't pass a commit that's less than 24 hours old. The
     /// runtime's options for this job include targets that the wire request
     /// can't express, so this method takes the request body. Retrying this
     /// request starts a distinct attempt.
