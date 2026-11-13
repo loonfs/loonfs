@@ -155,7 +155,7 @@ The design has no rule that a manifest publication's basis was confirmed within 
 
 - A WAL writer that confirmed its tip within `WAL_PUBLISH_BUDGET_MS` puts the next WAL object without a check.
 - A create or fork finishes inside the creation grace of the pool record or fork snapshot that it wrote before manifest 1.
-- The retirement deadline is computed as in [Retirement](../specs/format.md#95-retirement). Its minimum (`NAMESPACE_RETIREMENT_GRACE_WINDOW_MS`, 41 minutes 30 seconds) covers a tombstone publication that's applied late and the readers after the tombstone. A manifest put that a provider applies after the retirement doesn't depend on the deadline. Every manifest number is at or below a retired boundary, so the put's publisher counts the put as lost, and no reader takes that manifest as the newest.
+- The retirement deadline is computed as in [Retirement](../specs/format.md#95-retirement). Its minimum (`NAMESPACE_RETIREMENT_GRACE_WINDOW_MS`, 45 minutes) covers a tombstone publication that's applied late and the readers after the tombstone. A manifest put that a provider applies after the retirement doesn't depend on the deadline. Every manifest number is at or below a retired boundary, so the put's publisher counts the put as lost, and no reader takes that manifest as the newest.
 - The age rules for segments, content objects, and upload records.
 
 ## Costs

@@ -45,7 +45,7 @@ pub(super) struct InodeContentQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 
@@ -65,7 +65,7 @@ pub(super) struct InodeRevisionContentQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 
@@ -88,7 +88,7 @@ pub(super) struct StatInodeQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 
@@ -178,7 +178,7 @@ pub(super) struct ListInodeChildrenQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 

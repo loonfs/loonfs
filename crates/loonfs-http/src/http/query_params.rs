@@ -10,7 +10,7 @@ use loonfs_types::LimitError;
 // literal bound.
 const _: () = assert!(loonfs_types::MAX_PAGE_LIMIT == 1000);
 const _: () = assert!(loonfs_types::DEFAULT_PAGE_LIMIT == 1000);
-const _: () = assert!(READ_REVALIDATION_BOUND_MS == 1_155_000);
+const _: () = assert!(READ_REVALIDATION_BOUND_MS == 1_200_000);
 
 pub(super) fn required_query_param<T>(value: Option<T>, name: &str) -> Result<T, ApiResponseError> {
     value.ok_or_else(|| {

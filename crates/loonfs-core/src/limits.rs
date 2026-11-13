@@ -198,7 +198,7 @@ pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 /// publication checks.
 ///
 /// Direct expiry comparisons do not add this margin to stored deadlines.
-pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
+pub const GC_SAFETY_MARGIN_MS: u64 = 5 * 60 * 1000;
 
 const _: () = assert!(GC_SAFETY_MARGIN_MS >= 1000);
 
@@ -415,9 +415,9 @@ mod tests {
 
     #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {
-        // 15 min publication budget + 4 min 15 s request bound + 3 min margin
-        // = 22 min 15 s.
-        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_335_000);
+        // 15 min publication budget + 5 min request bound + 5 min margin
+        // = 25 min.
+        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_500_000);
         assert!(
             GC_MIN_GRACE_WINDOW_MS < GcOptions::default().grace_window_ms,
             "the conservative default grace window must satisfy its own floor"

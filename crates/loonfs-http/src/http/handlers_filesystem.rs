@@ -47,7 +47,7 @@ pub(super) struct PathQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 
@@ -75,7 +75,7 @@ pub(super) struct PathPageQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 
@@ -117,7 +117,7 @@ pub(super) struct ListPathPageQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 
@@ -158,7 +158,7 @@ pub(super) struct LivePageQuery {
     pub(super) consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     pub(super) max_staleness_ms: Option<u64>,
 }
 
@@ -182,7 +182,7 @@ pub(super) struct ContentQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 
@@ -220,7 +220,7 @@ pub(super) struct ChangesQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 
@@ -263,7 +263,7 @@ pub(super) struct DiffQuery {
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
-    #[cfg_attr(feature = "openapi", param(maximum = 1155000))]
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
     max_staleness_ms: Option<u64>,
 }
 

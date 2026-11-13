@@ -210,11 +210,11 @@ pub struct ServerConfig {
     pub max_compaction_input_bytes: Option<usize>,
     /// Minimum interval between checks for a successor to a cached manifest,
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
-    /// default of 1000. At most 1155000, the revalidation bound.
+    /// default of 1000. At most 1200000, the revalidation bound.
     pub manifest_revalidation_interval_ms: Option<u64>,
     /// The maximum staleness, in milliseconds, of an eventual read that doesn't
     /// set its own `max_staleness_ms`. Zero confirms the namespace head on
-    /// every read. Unset keeps the runtime default of 1000. At most 1155000,
+    /// every read. Unset keeps the runtime default of 1000. At most 1200000,
     /// the revalidation bound.
     pub max_staleness_ms: Option<u64>,
     /// The runtime's default consistency, which every read that doesn't set
