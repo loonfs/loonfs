@@ -4,11 +4,11 @@
 
 use super::registry::NamespaceChange;
 use super::worker::elapsed_ms_from;
-use super::{FoldTrigger, NamespacePublisher, PublisherRegistry};
+use super::{NamespacePublisher, PublisherRegistry};
 use crate::trace::phase_span;
 use crate::{CoreError, Error, FoldWalOutcome, NamespaceId, Result};
 use loonfs_core::control::{NamespaceStorageDiagnostics, PublicationBasis};
-use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
+use loonfs_core::limits::{FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::time::OperationClock;
 use loonfs_core::{FoldedWalTail, MetadataCompactionCancellation, Phase};
@@ -88,6 +88,17 @@ pub(crate) enum FoldWhen {
     /// least `FOLD_AT_WAL_BYTES` unfolded WAL bytes, or a tail whose newest
     /// commit has reached the runtime's idle fold age.
     Due { max_wal_tail_objects: u64 },
+}
+
+/// Returns whether a tail of `objects` WAL objects and `wal_bytes` unfolded
+/// WAL bytes has reached `max_wal_tail_objects` WAL objects or
+/// `FOLD_AT_WAL_BYTES`.
+pub(super) fn wal_tail_reached_fold_size(
+    max_wal_tail_objects: u64,
+    objects: u64,
+    wal_bytes: usize,
+) -> bool {
+    objects >= max_wal_tail_objects || wal_bytes >= FOLD_AT_WAL_BYTES
 }
 
 /// What one [`PublisherRegistry::fold_namespace`] call did.
@@ -332,11 +343,11 @@ impl PublisherRegistry {
                 )
             }
         };
-        let trigger = FoldTrigger::new(core.config());
         let idle_fold_due_at_ms = newest_commit_at_ms
             .filter(|_| objects > 0)
-            .and_then(|committed_at_ms| trigger.idle_fold_due_at_ms(committed_at_ms));
-        if trigger.fold_is_due(max_wal_tail_objects, objects, wal_bytes)
+            .zip(core.config().idle_fold_after_ms)
+            .map(|(committed_at_ms, after_ms)| committed_at_ms.saturating_add(after_ms.get()));
+        if wal_tail_reached_fold_size(max_wal_tail_objects, objects, wal_bytes)
             || idle_fold_due_at_ms.is_some_and(|due_at_ms| now_ms >= due_at_ms)
         {
             return Ok(None);

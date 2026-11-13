@@ -2,12 +2,12 @@
 //! each batch, delivers the results, and paces the publications.
 
 use super::admission::AdmissionPermit;
+use super::folds::wal_tail_reached_fold_size;
 use super::metrics::PublishOutcome;
 use super::queue::{queued_candidates, BatchCandidate, OpenBatch, WorkItem};
 use super::session_tasks::WorkerHandle;
 use super::{
-    EngineSlot, FoldTrigger, LastPublish, NamespacePublisher, NamespacePublisherState,
-    PublisherAdmissionStatus,
+    EngineSlot, LastPublish, NamespacePublisher, NamespacePublisherState, PublisherAdmissionStatus,
 };
 use crate::metrics::RESULT_OK;
 use crate::publish::CommitCandidate;
@@ -303,7 +303,7 @@ impl NamespacePublisher {
             .any(|result| result.as_ref().err().is_some_and(is_maintenance_required));
         let core = &self.context.runtime_core;
         let fold_start = if publish.wal_tail.is_some_and(|tail| {
-            FoldTrigger::new(core.config()).fold_is_due(
+            wal_tail_reached_fold_size(
                 core.session_fold_at_wal_objects().get(),
                 tail.objects,
                 tail.wal_bytes,
@@ -350,7 +350,7 @@ impl NamespacePublisher {
                     .namespace_store(&self.namespace_id),
                 writer_id.clone(),
             )
-            .writer_session(Arc::clone(&slot.session))
+            .writer_session(Arc::clone(&self.session))
         })
     }
 

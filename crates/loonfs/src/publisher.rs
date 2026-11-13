@@ -22,7 +22,6 @@
 
 mod admission;
 mod delete_barrier;
-mod fold_trigger;
 mod folds;
 mod inline_content;
 pub(crate) mod metrics;
@@ -36,17 +35,16 @@ mod write_stop;
 use crate::runtime_core::{ReadPositionSlot, RuntimeCore};
 use crate::{CoreError, SharedObjectStore, WriterState};
 use admission::PublicationAdmission;
-pub(crate) use fold_trigger::FoldTrigger;
 use folds::NamespaceTurns;
 pub(crate) use folds::{FoldWhen, NamespaceFold};
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
 use loonfs_core::time::Observation;
-use loonfs_core::MetadataCompactionCancellation;
+use loonfs_core::{MetadataCompactionCancellation, PublishedManifest};
 use loonfs_types::{CommitId, CommitSeq, ManifestNo, NamespaceId};
 use queue::{InFlightRequest, WorkItem};
+use registry::RegistryShared;
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
 pub(crate) use registry::{MergeReservation, NamespaceChange, NamespaceSession, PublisherRegistry};
-use registry::{PositionChange, RegistryShared};
 use session_tasks::{SessionTask, WorkerHandle};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
@@ -88,6 +86,10 @@ struct NamespacePublisher {
     /// The engine's position as of the last release of the engine, which
     /// reads in this runtime start from.
     read_position: Arc<ReadPositionSlot>,
+    /// The writer session, which stores the acquired epoch and terminal
+    /// fencing state. Those values describe this process and can't be
+    /// reconstructed from object storage, so the publisher keeps them for its
+    /// whole life.
     session: SharedWriterSessionStatus,
     /// Weak: the session table owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
@@ -107,18 +109,14 @@ struct NamespacePublisher {
     turns: Arc<NamespaceTurns>,
 }
 
-/// Commit engine and writer session retained by one namespace publisher.
+/// Commit engine retained by one namespace publisher.
 ///
-/// The session stores the acquired epoch and terminal fencing state. Those
-/// values describe this process and can't be reconstructed from object
-/// storage, so the publisher keeps them for its whole life. The engine keeps
-/// its WAL tail with its position until the position is dropped.
+/// The engine keeps its WAL tail with its position until the position is
+/// dropped.
 struct EngineSlot {
     /// Built on the first unit of work and kept for the publisher's life.
     /// Invalidation drops only its position and the position's WAL tail.
     engine: Option<NamespaceCommitEngine<SharedObjectStore>>,
-    /// Never dropped or rebuilt while the publisher lives.
-    session: SharedWriterSessionStatus,
 }
 
 impl EngineSlot {
@@ -246,7 +244,6 @@ impl NamespacePublisher {
         shared: &Arc<RegistryShared>,
         turns: Arc<NamespaceTurns>,
     ) -> Self {
-        let session = SharedWriterSessionStatus::default();
         let read_position = Arc::new(ReadPositionSlot::new(
             shared.context.runtime_core.head_and_wal_tail_cache(),
         ));
@@ -265,12 +262,9 @@ impl NamespacePublisher {
                 last_published: None,
                 unraised_manifest_no: None,
             })),
-            engine: Arc::new(AsyncMutex::new(EngineSlot {
-                engine: None,
-                session: Arc::clone(&session),
-            })),
+            engine: Arc::new(AsyncMutex::new(EngineSlot { engine: None })),
             read_position,
-            session,
+            session: SharedWriterSessionStatus::default(),
             shared: Arc::downgrade(shared),
             compaction_cancellation: MetadataCompactionCancellation::default(),
             fold_published: watch::Sender::new(()),
@@ -396,17 +390,28 @@ impl NamespacePublisher {
         matches!(*lock_state(&self.session), WriterSessionStatus::Fenced(_))
     }
 
-    /// Applies `change` to the engine's position once no other task has the
-    /// engine locked.
+    /// Drops the engine's position once no other task has the engine
+    /// locked.
     ///
     /// Until then, reads keep the position they have. A position on a
     /// manifest that this runtime has replaced still reads correctly,
     /// because garbage collection keeps that manifest's objects for at least
     /// one grace.
-    pub(super) async fn change_position(&self, change: PositionChange) {
+    pub(super) async fn drop_position(&self) {
         let mut slot = self.lock_engine().await;
         if let Some(engine) = slot.engine.as_mut() {
-            change.apply(engine);
+            engine.invalidate_projection();
+        }
+    }
+
+    /// Moves the engine's position onto `published`, a manifest above it
+    /// under the session's writer epoch, or drops the position when it can't
+    /// move there, once no other task has the engine locked (see
+    /// [`Self::drop_position`]).
+    pub(super) async fn move_position(&self, published: PublishedManifest) {
+        let mut slot = self.lock_engine().await;
+        if let Some(engine) = slot.engine.as_mut() {
+            engine.record_manifest_published(published);
         }
     }
 

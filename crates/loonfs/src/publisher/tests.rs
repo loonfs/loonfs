@@ -3132,11 +3132,11 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     writer.shutdown().await.expect("drain settles both units");
 }
 
-/// Checks that a maintenance call that publishes no manifest leaves the
+/// Checks that a garbage collection, which publishes no manifest, leaves the
 /// writer's position, which reads start from, and the tail that the writer
 /// publishes from.
 #[tokio::test]
-async fn maintenance_invalidation_leaves_the_writer_tail() {
+async fn garbage_collection_leaves_the_writer_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -3146,22 +3146,19 @@ async fn maintenance_invalidation_leaves_the_writer_tail() {
     let replays = counter(&recorder, "loonfs.publisher.tail_replays");
 
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    maintenance
-        .publisher
-        .invalidate_namespace(&namespace_id, NamespaceChange::Unchanged)
-        .await;
+    maintenance.gc(&namespace_id).await.expect("gc");
     assert!(writer.core.writer_position(&namespace_id).is_some());
     namespaces[0]
         .commit_candidate(CommitCandidate::new(create_directory_request(
             "after", "after",
         )))
         .await
-        .expect("publish after invalidation");
+        .expect("publish after the collection");
 
     assert_eq!(
         counter(&recorder, "loonfs.publisher.tail_replays"),
         replays,
-        "maintenance that publishes no manifest keeps the tail the writer publishes from"
+        "a collection publishes no manifest, so the writer keeps the tail it publishes from"
     );
     writer.shutdown().await.expect("shutdown");
 }
