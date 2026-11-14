@@ -1,9 +1,7 @@
 //! Derived retirement deadlines and outstanding multipart uploads.
 
 use super::*;
-use loonfs_test_support::stores::replace_object;
 use loonfs_types::format::control::ManifestBoundary;
-use std::assert_matches;
 
 #[tokio::test]
 async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest() {
@@ -269,55 +267,6 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
             .await
             .is_none()
     );
-}
-
-#[tokio::test]
-async fn a_fork_basis_naming_its_snapshot_with_a_different_checksum_is_corrupt() {
-    let directory = tempdir().expect("directory");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let source = NamespaceId::parse("source").expect("namespace");
-    let target = NamespaceId::parse("target").expect("namespace");
-    let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
-        .create()
-        .await
-        .expect("bootstrap");
-    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
-    fixture
-        .engine()
-        .fork_namespace(
-            &target,
-            &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
-                .await
-                .expect("fold the WAL tail"),
-        )
-        .await
-        .expect("fork");
-    let current = crate::test_support::namespace_store(&store, &target)
-        .load_current_manifest()
-        .await
-        .expect("target");
-    let mut payload = current.payload().clone();
-    let basis = payload.fork_basis.as_mut().expect("fork basis");
-    basis.manifest.payload_checksum = loonfs_types::sha256_digest(b"retired");
-    let snapshot_id = basis.source_snapshot_id.clone();
-    let bytes = crate::manifest::publish::encode_manifest(payload);
-    replace_object(&store, &current.object_key, bytes.into_bytes().into())
-        .await
-        .expect("corrupt basis");
-    store.reset();
-    let error = crate::test_support::namespace_store(&store, &source)
-        .gc(&context(setup.now_ms + GC_GRACE_WINDOW_MS).clock())
-        .await
-        .expect_err("corrupt basis");
-    assert_matches!(error, CoreError::NamespaceCorrupt(_));
-    assert_eq!(store.counts().puts, 0);
-    assert_eq!(store.counts().deletes, 0);
-    assert!(snapshot_record_exists(&store, &source, &snapshot_id).await);
 }
 
 /// A key under a deleted fork's snapshots prefix that isn't a snapshot record is

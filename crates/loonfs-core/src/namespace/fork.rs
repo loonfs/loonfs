@@ -137,10 +137,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///    snapshot record.
     /// 7. Publishes manifest 2 with the status `active`.
     ///
-    /// Manifest 1 records the fork snapshot's ID before the snapshot exists,
-    /// so every fork snapshot has a namespace whose manifest records it, and
-    /// the source's snapshot cleanup needs no creation grace. The call never
-    /// deletes a snapshot.
+    /// The source's collection keeps every fork snapshot, and the target's
+    /// retirement deletes it. The call never deletes a snapshot.
     async fn install_fork(
         &self,
         new_namespace_id: &NamespaceId,
@@ -431,28 +429,5 @@ impl<S: ObjectStore> NamespaceStore<S> {
         crate::namespace::control::ensure_namespace_live(&source.namespace_id, source.status)?;
         let snapshot = self.load_user_snapshot(snapshot_id).await?;
         Ok(ensure_live(snapshot, clock.now_ms())?.state)
-    }
-
-    /// Returns whether this namespace, the target of the fork snapshot
-    /// `record`, keeps the snapshot: its newest manifest is a fork of that
-    /// snapshot. A target without a manifest, or a retired target, has no
-    /// roots and keeps nothing.
-    pub(crate) async fn target_retains_snapshot(&self, record: &SnapshotPayload) -> Result<bool> {
-        let NewestManifest::Manifest(target) = self.find_newest_manifest().await? else {
-            return Ok(false);
-        };
-        let Some(basis) = target.manifest.payload().fork_basis.as_ref() else {
-            return Ok(false);
-        };
-        if basis.source_snapshot_id != record.snapshot_id {
-            return Ok(false);
-        }
-        if basis.manifest != record.manifest() {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "fork target `{}` refers to snapshot `{}` with a different manifest reference",
-                self.namespace_id, record.snapshot_id
-            )));
-        }
-        Ok(true)
     }
 }

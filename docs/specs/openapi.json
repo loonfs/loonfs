@@ -1073,7 +1073,7 @@
         "description": "The number of snapshot records that one garbage collection deleted, grouped by owner.",
         "properties": {
           "fork": {
-            "description": "The fork snapshots that the collection deleted because their target namespaces no longer exist.",
+            "description": "The fork snapshot on the namespace's source that the collection deleted when it retired the namespace (0 or 1).",
             "format": "int64",
             "minimum": 0,
             "type": "integer"

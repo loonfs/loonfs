@@ -1275,7 +1275,7 @@ Each snapshot is stored at `snapshots/{snapshot_id}.json`. Its ID includes the n
 | Owner | Stored owner fields | Reads | Removal |
 | --- | --- | --- | --- |
 | `user` | optional `name`, optional `expires_at_ms`, optional `deleted_at_ms` | Readable before its expiry time if it isn't deleted. A snapshot without an expiry stays readable until it's deleted. | Garbage collection after expiry plus the grace window, or after deletion plus the grace window. Explicit deletion records the time of the deletion in `deleted_at_ms`. Without an expiry, the snapshot stays in an active namespace until it's explicitly deleted. A fork of a source's head takes a user snapshot of the source with no name, which expires `OPERATION_SNAPSHOT_TTL_MS` (5 minutes) after the fork takes it, as a merge or a rebase takes one of its fork. The fork doesn't delete that snapshot, so the snapshot expires and garbage collection removes it (see [Forking a namespace](#92-forking-a-namespace)). |
-| `fork` | `target_namespace_id` | Readable while the record exists. It keeps the runs that the target's manifest lists. | Garbage collection, after the target stops depending on it (see [Snapshot cleanup](#117-snapshot-cleanup)). |
+| `fork` | `target_namespace_id` | Readable while the record exists. It keeps the runs that the target's manifest lists. | The target's retirement (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)). |
 
 The record also stores the namespace, head sequence, payload checksum, and creation time. The manifest number comes from the snapshot ID. A snapshot has no lifecycle status. Creating the record creates the snapshot, and deleting the record removes it. Fork snapshots have no expiry and no renewal protocol.
 
@@ -1305,7 +1305,7 @@ A fork snapshot is protected by the user snapshot that its fork is built from in
 
 The expiry check uses the request clock plus the monotonic time elapsed since the fork call began. A user snapshot that no longer exists, is deleted, or has expired returns `snapshot_not_found`, and a deleted source returns `namespace_deleted`. If the fork snapshot write or the check fails, the fork doesn't delete the fork snapshot, because another call can finish the same fork with the same fork snapshot (see [Finishing an initializing namespace](#finishing-an-initializing-namespace)). Verification has no time limit of its own. Snapshots are never recreated, so if the user snapshot still exists after the fork snapshot is written, it existed the whole time. So every collection that listed snapshots before that write also listed the user snapshot, and it protected the same manifest.
 
-Why doesn't the fork check these conditions before the write? The check after the write decides the outcome, so a check before it would only spare the write of a fork snapshot whose check then fails. The target of that fork snapshot stays initializing, and [snapshot cleanup](#117-snapshot-cleanup) deletes the fork snapshot once the target is retired. The budget check before the write is what keeps the fork snapshot's manifest in place: the user snapshot's record is deleted no earlier than the grace window after the snapshot ends, the grace window is at least the publication completion bound, and the call found the user snapshot live after it started, so a write that starts within the budget lands while the record still keeps the manifest. A check of the store before the write can't give that, because a call can stall between the check and the write.
+Why doesn't the fork check these conditions before the write? The check after the write decides the outcome, so a check before it would only spare the write of a fork snapshot whose check then fails. The target of that fork snapshot stays initializing, and the target's retirement deletes the fork snapshot (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)). The budget check before the write is what keeps the fork snapshot's manifest in place: the user snapshot's record is deleted no earlier than the grace window after the snapshot ends, the grace window is at least the publication completion bound, and the call found the user snapshot live after it started, so a write that starts within the budget lands while the record still keeps the manifest. A check of the store before the write can't give that, because a call can stall between the check and the write.
 
 ### 8.3 Reads, deletion, and expiry
 
@@ -1366,7 +1366,7 @@ For example, a fork of `main` into `sandbox` takes a temporary snapshot of `main
 
 A rebase creates its new fork from the head of the namespace that the replayed fork was forked from, so that namespace is the new fork's source namespace. The new fork's fork basis records `rebased_from`: the rebase's source, which is the fork whose commits the rebase replays into the new fork (`source_namespace_id`), and the fork sequence that the replayed fork's next merge into the new fork's source namespace would start after (`resume_after_seq`). LoonFS reads `resume_after_seq` from the manifest that the snapshot of step 2 keeps, under the range rule in [Merges](#merges), so it describes exactly the history that the new fork inherits. If the replayed fork's fork point is below the retention floor of that manifest, LoonFS returns `below_retention_floor` in step 2, before it publishes any manifest, and the temporary snapshot expires. `rebased_from` is part of the fork basis, so it can't change after creation.
 
-Why is manifest 1 published before the fork snapshot is written? Manifest 1 records the fork snapshot's ID before the snapshot exists, so every fork snapshot has a namespace whose manifest records the snapshot. The source's snapshot cleanup keeps a fork snapshot while the target's newest manifest records it, and deletes it otherwise, without waiting for the snapshot to reach an age (see [Snapshot cleanup](#117-snapshot-cleanup)).
+Why is manifest 1 published before the fork snapshot is written? Manifest 1 records the fork snapshot's ID before the snapshot exists, so the target's tombstone refers to every fork snapshot that a call writes for the target, and the target's retirement deletes the fork snapshot through that reference (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)). The source's collection keeps every fork snapshot (see [Snapshot cleanup](#117-snapshot-cleanup)).
 
 Why does a fork of the source's head take a temporary snapshot? Manifest 1 lists segments of a source manifest, and the fork snapshot that keeps that manifest is written after manifest 1. Until the fork snapshot is verified, the temporary snapshot keeps the source manifest and its segments, so a collection of the source can't delete them. A user snapshot that the request identifies does the same job, so a fork of a user snapshot takes no temporary snapshot.
 
@@ -1452,7 +1452,7 @@ The objects that a retired member wrote under the pool's prefix stay while anoth
 
 Each fork keeps a fork snapshot on its source, and a tombstone can't be retired while a snapshot is on it, so a namespace is retired after every fork of it. Once every member of a pool is retired, the pool has no members, and no root protects any of its content. Each later collection of the pool deletes its content objects and temporary objects under the age rule, and deletes its upload records under the rules in [Upload-session cleanup](#116-upload-session-cleanup) (see [Content roots](#119-content-roots)).
 
-Why is the fork snapshot deleted before the boundary is raised? The tombstone's fork basis is the record of which snapshot to delete, and the tombstone stays until the boundary is retired. If the boundary were raised first and the collection stopped, a later collection could delete the tombstone under the age rules, and the fork snapshot would stay on the source until the source's snapshot cleanup deleted it (see [Snapshot cleanup](#117-snapshot-cleanup)).
+Why is the fork snapshot deleted before the boundary is raised? The tombstone's fork basis is the record of which snapshot to delete, and the tombstone stays until the boundary is retired. If the boundary were raised first and the collection stopped, a later collection could delete the tombstone under the age rules, and nothing would delete the fork snapshot (see [Snapshot cleanup](#117-snapshot-cleanup)).
 
 Why can the member entry be deleted before the boundary is raised? The collection deletes the entry only once the tombstone is eligible for retirement, so the namespace leaves the member list no earlier than its retirement deadline. That's the bound that the pool's time limit for reading every member depends on (see [Content roots](#119-content-roots)).
 
@@ -1464,7 +1464,7 @@ Why doesn't the last member's retirement delete the pool's content in one step? 
 
 ### 9.6 Fork dependencies after deletion
 
-A fork snapshot is required until its target is retired. While the target's current manifest (initializing, active, or deleted) refers to the snapshot, garbage collection in the source keeps it (see [Snapshot cleanup](#117-snapshot-cleanup)). Retiring the target deletes the snapshot before it raises the target's boundary to retired (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)), while the target's tombstone is still its current manifest and still refers to the snapshot. Rewriting a target's metadata doesn't copy or move inherited file bytes, because every member of a pool finds them under the pool's prefix.
+A fork snapshot is required until its target is retired, and the source's collection keeps it (see [Snapshot cleanup](#117-snapshot-cleanup)). Retiring the target deletes the snapshot before it raises the target's boundary to retired (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)), while the target's tombstone is still its current manifest and still refers to the snapshot. Rewriting a target's metadata doesn't copy or move inherited file bytes, because every member of a pool finds them under the pool's prefix.
 
 For example, suppose B is a fork of A, and C is a fork of B. C's fork snapshot on B prevents B from being retired, and B's fork snapshot on A stays until B is retired. Retiring C deletes C's fork snapshot on B. B can then be retired once its deadline and snapshot checks pass, which deletes its fork snapshot on A.
 
@@ -1803,7 +1803,7 @@ Readers have the matching obligation. A process that has a manifest, whether fro
 
 New metadata and extension segments are protected by the grace window while a publisher writes and verifies them. Streaming compaction MUST start its publication before its budget expires, and every compaction checks its epoch and its selected inputs. These rules apply to output that isn't yet listed by a root the collection captured earlier.
 
-A failed read of a required root stops garbage collection, and an uncertain read of a fork's target keeps that snapshot. Each cleanup operation MUST keep the durable evidence it needs to retry after a failure.
+A failed read of a required root stops garbage collection. Each cleanup operation MUST keep the durable evidence it needs to retry after a failure.
 
 ### 11.6 Upload-session cleanup
 
@@ -1860,19 +1860,13 @@ Why is the session record deleted first? A session record left without its outco
 
 User snapshots become collectable after their expiry plus `T`, after their deletion plus `T`, or after their creation plus `T` in a deleted namespace, whichever comes first. A user snapshot with no expiry stays in an active namespace until it's explicitly deleted. A retained user snapshot reports the earliest of those times in `next_reclamation_at_ms`. Snapshots are deleted directly, and snapshot IDs are never reused.
 
-A fork snapshot is cleaned up based on its target namespace:
-
-| Condition | Decision |
-| --- | --- |
-| The target's newest manifest (initializing, active, or deleted) has a fork basis that refers to this snapshot with the same manifest reference, or a read of the target's store fails | Keep the snapshot. |
-| The target is absent, the target is retired, or its fork basis doesn't refer to this snapshot | Delete the snapshot. (A retired target means a snapshot that a fork call wrote after its target was retired. No fork call writes a fork snapshot whose target is absent or whose target's fork basis refers to another snapshot, because the fork snapshot's ID is set by the target's manifest 1, and the snapshot is written after that manifest.) |
-| The target's current fork basis refers to this snapshot with a different manifest reference | Fail with `namespace_corrupt`. |
-
-The source finds the target's newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), with one listing of the target's manifests above its boundary, and it reads no target WAL objects. The target's newest manifest can be initializing, because the fork call writes the fork snapshot after the fork's manifest 1 (see [Forking a namespace](#92-forking-a-namespace)), and the source keeps the snapshot then. A target whose boundary is retired has no roots, so the source deletes its fork snapshot, as for a target that has no manifest. [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone) defines when the target's own collection deletes a fork snapshot.
+The source's collection keeps every fork snapshot, and it reads nothing under the target's prefix. The target's retirement deletes the fork snapshot before it raises the target's boundary to retired (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)).
 
 The pool's collection finds each [member](glossary.md#pool) of the pool through the fork snapshot on the member's source (see [Content roots](#119-content-roots)). That snapshot stays until the member's own collection retires the member, so the member's content references protect content until then.
 
-A candidate user snapshot that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, garbage collection applies the user snapshot rules to it. A fork snapshot's creator never deletes the fork snapshot, and garbage collection applies the rules above to it (see [Forking a namespace](#92-forking-a-namespace)).
+A candidate user snapshot that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, garbage collection applies the user snapshot rules to it. A fork snapshot's creator never deletes the fork snapshot (see [Forking a namespace](#92-forking-a-namespace)).
+
+Why does the source's collection keep every fork snapshot? No fork snapshot is written after its target is retired. The fork call checks `METADATA_PUBLICATION_BUDGET_MS` before it puts the fork snapshot, and after the call started, it either found the target initializing or wrote the target's manifest 1. The target's tombstone is published after that, and the target is retired only once its tombstone is older than the grace window, which is at least the publication completion bound (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). So every fork snapshot is written before its target's retirement starts, and the target's retirement is the one path that deletes it.
 
 ### 11.8 Retiring an eligible tombstone
 

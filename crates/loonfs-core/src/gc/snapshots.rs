@@ -1,7 +1,7 @@
 //! Snapshot deletion decisions, the collection rules for fork snapshots, and grace
 //! window age checks.
 
-use super::deletes::{Counter, Decision};
+use super::deletes::Decision;
 use super::live_set::LiveSet;
 use crate::control_object::present;
 use crate::error::{CoreError, Result};
@@ -11,7 +11,7 @@ use crate::snapshot::record::load_snapshot_record_at_key;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, SnapshotOwner, SnapshotPayload};
-use loonfs_types::{GcResponse, NamespaceId, RetainedReason};
+use loonfs_types::{GcResponse, RetainedReason};
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Reads the snapshot record at `key` and decides what to do with the snapshot.
@@ -21,68 +21,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         live: &LiveSet,
         clock: &OperationClock,
     ) -> Result<Decision<GcResponse>> {
-        match self.load_listed_snapshot_record(key).await? {
-            Some(record) => self.sweep_snapshot_record(key, &record, live, clock).await,
-            None => Ok(Decision::Gone),
-        }
-    }
-
-    /// Decides what to do with the snapshot at `key`, whose record is `record`.
-    pub(super) async fn sweep_snapshot_record(
-        &self,
-        key: &str,
-        record: &SnapshotPayload,
-        live: &LiveSet,
-        clock: &OperationClock,
-    ) -> Result<Decision<GcResponse>> {
-        let now_ms = clock.request_at_ms();
-        let delete = |counter: Counter<GcResponse>| Decision::Delete {
-            keys: vec![key.to_owned()],
-            counter,
-        };
-        let user: Counter<GcResponse> = match &record.owner {
-            SnapshotOwner::User { .. } => |report| &mut report.deleted_snapshots_by_owner.user,
-            SnapshotOwner::Fork {
-                target_namespace_id,
-            } => {
-                return Ok(
-                    match self
-                        .fork_snapshot_is_retained(record, target_namespace_id)
-                        .await?
-                    {
-                        false => delete(|report| &mut report.deleted_snapshots_by_owner.fork),
-                        true => {
-                            tracing::debug!(object_key = key, "retaining fork snapshot");
-                            Decision::retain(RetainedReason::SnapshotNotDeletable, None, now_ms)
-                        }
-                    },
-                );
-            }
-        };
-        let expires_at_ms = record
-            .owner
-            .expires_at_ms()
-            .map(|expiry| expiry.saturating_add(GC_GRACE_WINDOW_MS));
-        let deleted_at_ms = record
-            .owner
-            .deleted_at_ms()
-            .map(|deletion| deletion.saturating_add(GC_GRACE_WINDOW_MS));
-        let ages_out_at_ms = live
-            .current_tombstone
-            .is_some()
-            .then(|| record.created_at_ms.saturating_add(GC_GRACE_WINDOW_MS));
-        let reclaimable_at_ms = expires_at_ms
-            .into_iter()
-            .chain(deleted_at_ms)
-            .chain(ages_out_at_ms)
-            .min();
-        Ok(match reclaimable_at_ms {
-            Some(at_ms) if now_ms >= at_ms => delete(user),
-            _ => Decision::retain(
-                RetainedReason::SnapshotNotDeletable,
-                reclaimable_at_ms,
-                now_ms,
-            ),
+        Ok(match self.load_listed_snapshot_record(key).await? {
+            Some(record) => sweep_snapshot_record(key, &record, live, clock),
+            None => Decision::Gone,
         })
     }
 
@@ -96,40 +37,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             present(load_snapshot_record_at_key(&self.store, key).await)?
                 .map(|loaded| loaded.state),
         )
-    }
-
-    /// Returns whether the source keeps the fork snapshot `record`: it keeps
-    /// the snapshot while the newest manifest of `target_namespace_id` records
-    /// it, whether the target is initializing, active, or deleted, and deletes
-    /// it when the target is absent or retired, or records another snapshot.
-    ///
-    /// A fork's manifest 1 records the fork snapshot before the snapshot
-    /// exists, so the rule needs no creation grace.
-    async fn fork_snapshot_is_retained(
-        &self,
-        record: &SnapshotPayload,
-        target_namespace_id: &NamespaceId,
-    ) -> Result<bool> {
-        // A target whose current manifest can't be loaded, whether the store
-        // failed or the manifest is invalid, is a member whose roots the
-        // pool's collection can't read. That stops only the pool's content
-        // sweep (format spec, "One complete collection"), and keeping the snapshot
-        // protects more, never less.
-        match self
-            .with_namespace(target_namespace_id.clone())
-            .target_retains_snapshot(record)
-            .await
-        {
-            Err(CoreError::ControlObjectLoad(error)) => {
-                tracing::warn!(
-                    namespace_id = %target_namespace_id,
-                    error = %error,
-                    "the fork target's current manifest couldn't be loaded; retaining its fork snapshot"
-                );
-                Ok(true)
-            }
-            result => result,
-        }
     }
 
     pub(super) async fn delete_source_snapshot(&self, basis: &ForkBasis) -> Result<bool> {
@@ -147,6 +54,50 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .delete_snapshot_record(&basis.source_snapshot_id)
             .await?;
         Ok(present)
+    }
+}
+
+/// Decides what to do with the snapshot at `key`, whose record is `record`.
+///
+/// The source's collection keeps every fork snapshot, because the target's
+/// retirement deletes it (format spec, "Snapshot cleanup").
+pub(super) fn sweep_snapshot_record(
+    key: &str,
+    record: &SnapshotPayload,
+    live: &LiveSet,
+    clock: &OperationClock,
+) -> Decision<GcResponse> {
+    let now_ms = clock.request_at_ms();
+    if let SnapshotOwner::Fork { .. } = record.owner {
+        return Decision::retain(RetainedReason::SnapshotNotDeletable, None, now_ms);
+    }
+    let expires_at_ms = record
+        .owner
+        .expires_at_ms()
+        .map(|expiry| expiry.saturating_add(GC_GRACE_WINDOW_MS));
+    let deleted_at_ms = record
+        .owner
+        .deleted_at_ms()
+        .map(|deletion| deletion.saturating_add(GC_GRACE_WINDOW_MS));
+    let ages_out_at_ms = live
+        .current_tombstone
+        .is_some()
+        .then(|| record.created_at_ms.saturating_add(GC_GRACE_WINDOW_MS));
+    let reclaimable_at_ms = expires_at_ms
+        .into_iter()
+        .chain(deleted_at_ms)
+        .chain(ages_out_at_ms)
+        .min();
+    match reclaimable_at_ms {
+        Some(at_ms) if now_ms >= at_ms => Decision::Delete {
+            keys: vec![key.to_owned()],
+            counter: |report| &mut report.deleted_snapshots_by_owner.user,
+        },
+        _ => Decision::retain(
+            RetainedReason::SnapshotNotDeletable,
+            reclaimable_at_ms,
+            now_ms,
+        ),
     }
 }
 

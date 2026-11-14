@@ -8,124 +8,106 @@ use loonfs_types::format::control::SnapshotOwner;
 
 #[tokio::test]
 async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cleanup() {
-    for owner in [
-        SnapshotOwner::User {
-            name: Some("abandoned".to_owned()),
-            expires_at_ms: Some(2_000),
-            deleted_at_ms: None,
-        },
-        SnapshotOwner::Fork {
-            target_namespace_id: NamespaceId::parse("never-published").expect("target"),
-        },
-    ] {
-        let fork = matches!(owner, SnapshotOwner::Fork { .. });
-        let directory = tempdir().expect("directory");
-        let namespace_id = NamespaceId::parse("demo").expect("namespace");
-        let store = BlockingStore::new(
-            FailStore::new(
-                MetadataMapStore::aged(
-                    LocalFsStore::new(directory.path()).expect("store"),
-                    KeyPredicate::any(),
-                ),
-                KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
-                OperationSelector::Delete,
-                InjectedError::Transport("cleanup unavailable".to_owned()),
+    let owner = SnapshotOwner::User {
+        name: Some("abandoned".to_owned()),
+        expires_at_ms: Some(2_000),
+        deleted_at_ms: None,
+    };
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = BlockingStore::new(
+        FailStore::new(
+            MetadataMapStore::aged(
+                LocalFsStore::new(directory.path()).expect("store"),
+                KeyPredicate::any(),
             ),
             KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
-            OperationSelector::PutCreateIfAbsent,
-        );
-        let setup = writer_at("creator", 1_000);
-        bootstrap_namespace(&store, &namespace_id, &setup)
+            OperationSelector::Delete,
+            InjectedError::Transport("cleanup unavailable".to_owned()),
+        ),
+        KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let setup = writer_at("creator", 1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup)
+        .await
+        .expect("bootstrap");
+    for path in ["/one", "/two"] {
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+            .write_file_bytes(path, b"data", None)
             .await
-            .expect("bootstrap");
-        for path in ["/one", "/two"] {
-            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
-                .write_file_bytes(path, b"data", None)
-                .await
-                .expect("write");
-            crate::test_support::namespace_store(&store, &namespace_id)
-                .fold_wal()
-                .await
-                .expect("fold");
-        }
-        let selected = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("selected manifest");
-        store.inner().fail_next(1);
-        store.block_next();
-        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-        let clock = setup.clock();
-        let (creation, ()) = tokio::join!(
-            namespace.create_snapshot_record(owner, selected.manifest(), &clock),
-            async {
-                store.wait_until_blocked().await;
-                super::snapshot_verification::compact_and_collect_replaced_segments(
-                    &store,
-                    &namespace_id,
-                    &selected,
-                )
-                .await;
-                assert!(store
-                    .head(&selected.object_key)
-                    .await
-                    .expect("old manifest")
-                    .is_none());
-                store.release();
-            }
-        );
-        assert_eq!(
-            creation.expect_err("verification failed").code(),
-            ErrorCode::SnapshotUnavailable,
-            "a failed cleanup keeps the verification error"
-        );
-        assert_eq!(store.inner().attempts(), 1);
-        store.inner().clear();
-        let snapshots = store
-            .list_prefix(&snapshot_prefix(&namespace_id))
-            .await
-            .expect("snapshots");
-        assert_eq!(
-            snapshots.len(),
-            1,
-            "failed cleanup left its unverified snapshot"
-        );
-
-        let young = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(&setup.clock())
-            .await;
-        if fork {
-            // A fork snapshot whose target has no manifest goes at once.
-            assert_eq!(
-                young
-                    .expect("a fork snapshot without a target is deleted")
-                    .deleted_snapshots_by_owner
-                    .fork,
-                1
-            );
-        } else {
-            // A missing basis is still an error while the record must be
-            // retained.
-            assert_eq!(
-                young.expect_err("young snapshot remains protected").code(),
-                ErrorCode::NamespaceCorrupt
-            );
-            let collected = crate::test_support::namespace_store(&store, &namespace_id)
-                .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_001).clock())
-                .await
-                .expect("reap abandoned snapshot once owner rules permit deletion");
-            assert_eq!(collected.deleted_snapshots_by_owner.user, 1);
-        }
-        assert!(store.head(&snapshots[0]).await.expect("snapshot").is_none());
+            .expect("write");
         crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_002).clock())
+            .fold_wal()
             .await
-            .expect("next collection also succeeds");
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_metadata_view()
-            .await
-            .expect("current view remains readable");
+            .expect("fold");
     }
+    let selected = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("selected manifest");
+    store.inner().fail_next(1);
+    store.block_next();
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let clock = setup.clock();
+    let (creation, ()) = tokio::join!(
+        namespace.create_snapshot_record(owner, selected.manifest(), &clock),
+        async {
+            store.wait_until_blocked().await;
+            super::snapshot_verification::compact_and_collect_replaced_segments(
+                &store,
+                &namespace_id,
+                &selected,
+            )
+            .await;
+            assert!(store
+                .head(&selected.object_key)
+                .await
+                .expect("old manifest")
+                .is_none());
+            store.release();
+        }
+    );
+    assert_eq!(
+        creation.expect_err("verification failed").code(),
+        ErrorCode::SnapshotUnavailable,
+        "a failed cleanup keeps the verification error"
+    );
+    assert_eq!(store.inner().attempts(), 1);
+    store.inner().clear();
+    let snapshots = store
+        .list_prefix(&snapshot_prefix(&namespace_id))
+        .await
+        .expect("snapshots");
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "failed cleanup left its unverified snapshot"
+    );
+
+    let young = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(&setup.clock())
+        .await;
+    // A missing basis is still an error while the record must be
+    // retained.
+    assert_eq!(
+        young.expect_err("young snapshot remains protected").code(),
+        ErrorCode::NamespaceCorrupt
+    );
+    let collected = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_001).clock())
+        .await
+        .expect("reap abandoned snapshot once owner rules permit deletion");
+    assert_eq!(collected.deleted_snapshots_by_owner.user, 1);
+    assert!(store.head(&snapshots[0]).await.expect("snapshot").is_none());
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_002).clock())
+        .await
+        .expect("next collection also succeeds");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_metadata_view()
+        .await
+        .expect("current view remains readable");
 }
 
 #[tokio::test]
