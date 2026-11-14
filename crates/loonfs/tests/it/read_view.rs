@@ -315,7 +315,7 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         loonfs_core::test_support::namespace_store(store.clone(), &namespace_id),
         loonfs_types::WriterId::parse("manifest-advance").expect("writer id"),
     )
-    .claim_compactor()
+    .claim_compactor(None)
     .await
     .expect("advance current manifest");
     let current = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)

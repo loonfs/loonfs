@@ -2632,10 +2632,12 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .claim_compactor()
+    .claim_compactor(None)
     .await
     .expect("claim")
-    .response;
+    .response
+    .manifest
+    .compactor_epoch();
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let input = input_keys_now(&store, &namespace, &spec).await;
     let cancellation = MetadataCompactionCancellation::default();
@@ -2660,10 +2662,12 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .claim_compactor()
+    .claim_compactor(None)
     .await
     .expect("another claim")
-    .response;
+    .response
+    .manifest
+    .compactor_epoch();
     assert_eq!(next_epoch, loonfs_types::CompactorEpoch(epoch.0 + 1));
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = crate::test_support::namespace_store(&store, &namespace)
@@ -2771,10 +2775,12 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .claim_compactor()
+    .claim_compactor(None)
     .await
     .expect("claim")
-    .response;
+    .response
+    .manifest
+    .compactor_epoch();
     let before = current_manifest_number(&store, &namespace).await;
     let first = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let second =
@@ -2991,6 +2997,59 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
     }
 }
 
+/// Checks that a compactor claim over a basis puts with no request first,
+/// and that a unit planned from the manifest the claim returns sends no
+/// request for the manifest or the manifest boundary before its own put.
+#[tokio::test]
+async fn a_unit_planned_from_a_claim_loads_no_manifest() {
+    use loonfs_test_support::stores::RecordingStore;
+
+    let directory = tempdir().expect("tempdir");
+    let namespace = NamespaceId::parse("claim-basis-requests").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    seed_bindings_workload(&store, &namespace).await;
+    let current = current_manifest_number(&store, &namespace).await;
+    let basis = crate::test_support::namespace_store(&store, &namespace)
+        .load_current_basis()
+        .await
+        .expect("current manifest");
+    let claim = current.successor().expect("the claim's number");
+    let unit = claim.successor().expect("the unit's number");
+    let store = RecordingStore::new(store, KeyPredicate::any());
+    let engine = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace,
+            &crate::test_support::writer_at("test-writer", 0),
+        );
+        fixture.namespace.run_policy = compact_everything_policy();
+        fixture
+    }
+    .engine();
+    let claimed = engine
+        .claim_compactor(Some(basis))
+        .await
+        .expect("claim")
+        .response;
+    assert_eq!(claimed.manifest.manifest().manifest_no, claim);
+    let epoch = claimed.manifest.compactor_epoch();
+    let outcome = engine
+        .compact_metadata_unit(
+            Some(claimed),
+            epoch,
+            &MetadataCompactionCancellation::default(),
+        )
+        .await
+        .expect("run a compaction unit");
+    assert_matches!(
+        outcome,
+        CompactionUnitOutcome::Published { manifest, .. } if manifest.manifest.manifest_no == unit
+    );
+    let mut expected = publication_requests(&namespace, claim);
+    expected.extend(publication_requests(&namespace, unit));
+    assert_eq!(control_requests(&namespace, &store.take()), expected);
+}
+
 /// Checks that a finalization whose put loses to a compaction of the same
 /// group abandons its output at the next attempt, because its input runs are
 /// gone from the manifest that won.
@@ -3076,10 +3135,12 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .claim_compactor()
+    .claim_compactor(None)
     .await
     .expect("claim")
-    .response;
+    .response
+    .manifest
+    .compactor_epoch();
     let before = current_manifest_number(&store, &namespace).await;
     let store = RecordingStore::new(store, KeyPredicate::any());
     let outcome = {

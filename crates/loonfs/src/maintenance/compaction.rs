@@ -195,18 +195,28 @@ impl Maintenance {
         })
     }
 
+    /// Returns this runtime's compactor epoch for `namespace_id`, and the
+    /// manifest that a unit under that epoch can plan from.
+    ///
+    /// When the runtime has no claim yet, the call claims the epoch over
+    /// `basis` (see [`NamespaceEngine::claim_compactor`]) and returns the
+    /// claim's manifest, whose compactor epoch is the claimed one. Otherwise
+    /// it returns `basis` unchanged.
+    ///
+    /// [`NamespaceEngine::claim_compactor`]: loonfs_core::NamespaceEngine::claim_compactor
     pub(crate) async fn compactor_epoch(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<CompactorEpoch> {
+        basis: Option<PublicationBasis>,
+    ) -> Result<(CompactorEpoch, Option<PublicationBasis>)> {
         // Keep the claim lock locked across publication so concurrent groups share one epoch.
         let mut epochs = self.writer.compactor_epochs.lock().await;
         if let Some(epoch) = epochs.get(namespace_id) {
-            return Ok(*epoch);
+            return Ok((*epoch, basis));
         }
         let claimed = self
             .engine(namespace_id)
-            .claim_compactor()
+            .claim_compactor(basis)
             .await
             .map_err(Error::from)?;
         if let Some(published) = claimed.published {
@@ -214,8 +224,9 @@ impl Maintenance {
                 .record_manifest_published(namespace_id, published)
                 .await;
         }
-        epochs.insert(namespace_id.clone(), claimed.response);
-        Ok(claimed.response)
+        let epoch = claimed.response.manifest.compactor_epoch();
+        epochs.insert(namespace_id.clone(), epoch);
+        Ok((epoch, Some(claimed.response)))
     }
 
     /// Returns the manifest that a unit plans from (`None` when the unit
@@ -374,11 +385,12 @@ impl Maintenance {
             () = cancellation.cancelled() => return Ok(MetadataCompactionOutcome::Cancelled),
             permit = self.core.compaction_permit() => permit,
         };
-        let compactor_epoch = self.compactor_epoch(namespace_id).await?;
-        // A claim that this call made, or that another call made while this
-        // call waited for its permit, is newer than the manifest the call
-        // planned from. The writer position moves onto the claim, so the unit
-        // plans from the position, or loads the current manifest itself.
+        let (compactor_epoch, basis) = self.compactor_epoch(namespace_id, basis).await?;
+        // A claim that this call made returns its own manifest, which the
+        // unit plans from. A claim that another call made while this call
+        // waited for its permit is newer than the manifest the call planned
+        // from. The writer position moves onto that claim, so the unit plans
+        // from the position, or loads the current manifest itself.
         let in_epoch =
             |basis: &PublicationBasis| basis.manifest.compactor_epoch() == compactor_epoch;
         let basis = match basis.filter(in_epoch) {

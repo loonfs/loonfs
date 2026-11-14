@@ -90,7 +90,7 @@ pub(crate) struct WriterState {
     /// The compactor epoch this runtime has for each namespace. Its
     /// sessions and every `Maintenance` value share it, so they never fence
     /// each other. It's a `tokio` mutex because a first claim keeps it locked
-    /// across `claim_compactor().await`, so concurrent groups share one epoch.
+    /// across the claim's publication, so concurrent groups share one epoch.
     pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
 }
 

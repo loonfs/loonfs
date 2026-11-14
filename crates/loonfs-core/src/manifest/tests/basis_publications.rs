@@ -128,7 +128,7 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
                     &crate::test_support::writer_at("test-writer", 0),
                 )
                 .engine()
-                .claim_compactor()
+                .claim_compactor(None)
                 .await
                 .expect("another process claims the compactor");
             }
