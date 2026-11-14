@@ -25,6 +25,7 @@ use loonfs_types::format::control::{
 };
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CommitSeq, NamespaceId, NamespaceMetadata, SnapshotId};
+use std::sync::Arc;
 
 /// The fork whose commits a rebase replays into the new fork that it
 /// creates, and the sequence of the forked namespace that the fork was made
@@ -130,7 +131,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///    step 1.
     /// 5. Writes the fork's member entry in the pool that manifest 1 records.
     /// 6. Checks that this namespace is active and that the snapshot of step
-    ///    2 hasn't ended, writes the fork snapshot, and checks again.
+    ///    2 hasn't ended, writes the fork snapshot, and checks again. Each
+    ///    check finds this namespace's newest manifest from the manifest that
+    ///    the call holds, and reads the snapshot record.
     /// 7. Publishes manifest 2 with the status `active`.
     ///
     /// Manifest 1 records the fork snapshot's ID before the snapshot exists,
@@ -152,7 +155,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 .publish_fork_manifest_1(&target, actor_id, &at, rebase, &clock)
                 .await
             {
-                Ok(manifest_1) => return self.finish_fork(&target, manifest_1, &clock).await,
+                Ok((manifest_1, source)) => {
+                    return self.finish_fork(&target, manifest_1, source, &clock).await
+                }
                 Err(CoreError::NamespaceExists { .. }) => {
                     target.find_existing_namespace().await?.ok_or_else(|| {
                         CoreError::NamespaceCorrupt(format!(
@@ -172,23 +177,26 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
         };
         self.ensure_fork_request_matches(manifest_1.manifest.payload(), &at, rebase)?;
-        self.finish_fork(&target, manifest_1, &clock).await
+        let source = self.namespace.load_current_basis().await?;
+        self.finish_fork(&target, manifest_1, source, &clock).await
     }
 
     /// Writes the member entry and the fork snapshot that `manifest_1`
     /// records, and publishes manifest 2 (steps 5 to 7 of
-    /// [`Self::install_fork`]).
+    /// [`Self::install_fork`]). `source` is a manifest of this namespace that
+    /// the call read, from which the checks of step 6 start.
     async fn finish_fork(
         &self,
         target: &NamespaceStore<&S>,
         manifest_1: PublicationBasis,
+        source: PublicationBasis,
         clock: &OperationClock,
     ) -> Result<NamespaceMetadata> {
         target
             .write_member_entry(&manifest_1.manifest.payload().pool_id)
             .await?;
         if let Err(error) = self
-            .write_fork_snapshot(manifest_1.manifest.payload(), clock)
+            .write_fork_snapshot(manifest_1.manifest.payload(), source, clock)
             .await
         {
             // Another call that finished the fork may have used the same fork
@@ -213,7 +221,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Takes the snapshot that a new fork is built from, and publishes the
     /// fork's manifest 1 (steps 2 to 4 of [`Self::install_fork`]).
     ///
-    /// Returns `namespace_exists` when another call's manifest 1 won the put.
+    /// Returns manifest 1 with this namespace's newest manifest as the call
+    /// read it, or `namespace_exists` when another call's manifest 1 won the
+    /// put.
     async fn publish_fork_manifest_1(
         &self,
         target: &NamespaceStore<&S>,
@@ -221,8 +231,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         at: &ForkAt<'_>,
         rebase: Option<Rebase<'_>>,
         clock: &OperationClock,
-    ) -> Result<PublicationBasis> {
-        let built_from = match at {
+    ) -> Result<(PublicationBasis, PublicationBasis)> {
+        let (built_from, source) = match at {
             ForkAt::Head(manifest) => {
                 let owner = SnapshotOwner::User {
                     name: None,
@@ -238,21 +248,34 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     .await?
             }
             ForkAt::Snapshot(snapshot_id) => {
-                self.namespace
-                    .load_snapshot_fork_basis(snapshot_id, clock)
-                    .await?
+                let source = self.namespace.load_current_basis().await?;
+                let built_from = self
+                    .namespace
+                    .load_snapshot_fork_basis(snapshot_id, &source, clock)
+                    .await?;
+                (built_from, source)
             }
         };
         let rebased_from = match rebase {
             Some(rebase) => Some(self.namespace.rebased_from(&built_from, rebase).await?),
             None => None,
         };
-        let source_manifest = load_namespace_manifest_envelope(
-            &self.namespace.store,
-            &self.namespace.namespace_id,
-            &built_from.snapshot_id.manifest_no(),
-        )
-        .await?;
+        // A fork of the head, or of a user snapshot of the newest manifest,
+        // copies the manifest that the call holds. A fork of an older user
+        // snapshot reads the snapshot's manifest.
+        let source_manifest =
+            if source.manifest.payload().manifest_no == built_from.snapshot_id.manifest_no() {
+                source.manifest.envelope().clone()
+            } else {
+                Arc::new(
+                    load_namespace_manifest_envelope(
+                        &self.namespace.store,
+                        &self.namespace.namespace_id,
+                        &built_from.snapshot_id.manifest_no(),
+                    )
+                    .await?,
+                )
+            };
         crate::manifest::ensure_manifest_reference_matches(
             "snapshot",
             &built_from.manifest(),
@@ -271,7 +294,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             fork_basis,
             source_manifest.payload(),
         );
-        target.publish_first_manifest(manifest_1, clock).await
+        let manifest_1 = target.publish_first_manifest(manifest_1, clock).await?;
+        Ok((manifest_1, source))
     }
 
     /// Checks that `manifest_1`, the manifest 1 of an initializing namespace,
@@ -316,18 +340,24 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// snapshot the fork was built from hasn't ended (step 6 of
     /// [`Self::install_fork`]).
     ///
-    /// A fork snapshot that another call wrote counts as written.
+    /// Each check finds this namespace's newest manifest from the manifest
+    /// that the previous read found, starting at `source`, with a HEAD
+    /// request for the successor and a read of the manifest boundary (see
+    /// [`NamespaceStore::find_current_above`]). A fork snapshot that another
+    /// call wrote counts as written.
     async fn write_fork_snapshot(
         &self,
         manifest_1: &NamespaceManifestPayload,
+        source: PublicationBasis,
         clock: &OperationClock,
     ) -> Result<()> {
         let fork_basis = manifest_1
             .fork_basis
             .as_ref()
             .expect("a fork's manifest 1 records its fork basis");
+        let source = self.namespace.find_current_above(&source).await?;
         self.namespace
-            .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, clock)
+            .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, clock)
             .await?;
         write_snapshot_record(
             &self.namespace.store,
@@ -343,8 +373,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             },
         )
         .await?;
+        let source = self.namespace.find_current_above(&source).await?;
         self.namespace
-            .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, clock)
+            .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, clock)
             .await?;
         Ok(())
     }
@@ -382,17 +413,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    /// Loads an unexpired snapshot of a live source namespace.
+    /// Loads the unexpired snapshot `snapshot_id` of this namespace, and
+    /// checks that `source`, a manifest of this namespace that the caller
+    /// read, is live. The caller decides when to read `source` again.
     async fn load_snapshot_fork_basis(
         &self,
         snapshot_id: &SnapshotId,
+        source: &PublicationBasis,
         clock: &OperationClock,
     ) -> Result<SnapshotPayload> {
-        let source_head = self.load_read_anchor(clock.observe()).await?.read_state;
-        crate::namespace::control::ensure_namespace_live(
-            &source_head.namespace_id,
-            source_head.status,
-        )?;
+        let source = source.manifest.payload();
+        crate::namespace::control::ensure_namespace_live(&source.namespace_id, source.status)?;
         let snapshot = self.load_user_snapshot(snapshot_id).await?;
         Ok(ensure_live(snapshot, clock.now_ms())?.state)
     }
