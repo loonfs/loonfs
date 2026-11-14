@@ -4,7 +4,7 @@ This note describes how LoonFS finds a [namespace](../specs/glossary.md#namespac
 
 ## The problem
 
-This section describes how LoonFS finds the current manifest and records a namespace ID today, and what that costs.
+This section describes how LoonFS finds the current manifest and records a namespace ID, and what that costs.
 
 Each namespace has a hint (`namespaces/{namespace_id}/hint.json`), a [control object](../specs/glossary.md#control-object) that records a recent manifest number. After each manifest publication, the runtime raises the hint with one [compare-and-swap](../specs/glossary.md#compare-and-swap-cas) (see [The current manifest and WAL tip](../specs/format.md#24-the-current-manifest-and-wal-tip)). A cold read loads the hinted manifest and probes the next numbers until one is missing (see [Resolving the metadata basis](../specs/format.md#41-resolving-the-metadata-basis)), so a [collection](../specs/glossary.md#collection) deletes only manifests below the hint value it observed (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)).
 
@@ -49,7 +49,7 @@ To publish a manifest at the next number `n`, including manifest 1 and a tombsto
 2. If the put loses, finds the manifest that won and tries again, as in [Publishing a manifest](../specs/format.md#72-publishing-a-manifest).
 3. If the put succeeds, reads the boundary. If `n` is above `B`, the publication succeeded. If `n` is at or below `B`, the put is treated as lost, like a put that found the number taken.
 
-The publisher makes no assumption about how long it waited before step 1, or between step 1 and step 3. For example, a fold that has had manifest 40 for two hours puts manifest 41. If other processes have since published manifests 41 to 45, and cleanup has deleted 41 to 44 and raised the boundary to 44, the put succeeds, but the boundary read returns 44, so the fold treats its put as lost.
+The publisher makes no assumption about how long it waited before step 1, or between step 1 and step 3. For example, a fold that has had manifest 40 for two days puts manifest 41. If other processes have since published manifests 41 to 45, and cleanup has deleted 41 to 44 and raised the boundary to 44, the put succeeds, but the boundary read returns 44, so the fold treats its put as lost.
 
 This rule has one consequence. If a call's put is good (its manifest was the namespace's newest), and the call then stalls between its put and its boundary read while another process publishes a later manifest and a cleanup raises the boundary over the call's manifest, the call is told that it lost. For a create, that's `namespace_exists` for a namespace that this call created. Cleanup raises the boundary only over manifests older than the [grace window](../specs/glossary.md#grace-window), so this takes a wait longer than the grace window (24 hours) between two adjacent steps of one call.
 
