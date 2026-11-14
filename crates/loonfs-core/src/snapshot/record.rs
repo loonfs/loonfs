@@ -6,6 +6,7 @@ use crate::control_object::{
 };
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
+use crate::namespace::basis::PublicationBasis;
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::snapshot_record;
@@ -169,28 +170,53 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
     }
 
+    /// Checks that the manifest of the snapshot `record` is still the newest
+    /// manifest of an active namespace.
+    ///
+    /// The call loads the snapshot's manifest and checks that the manifest is
+    /// active and matches the record. It then checks that the manifest is
+    /// still the newest, with a HEAD request for its successor and a read of
+    /// the manifest boundary (see [`NamespaceStore::find_current_above`]).
+    /// `Verified` carries the newest manifest with the boundary that the
+    /// call read.
     pub(crate) async fn verify_snapshot_basis(
         &self,
         record: &SnapshotPayload,
     ) -> Result<SnapshotBasisVerification> {
-        let manifest = self.load_current_manifest().await?;
-        let kept = record.manifest();
+        let Some(manifest) = self
+            .load_manifest_by_no(record.snapshot_id.manifest_no())
+            .await
+            .map_err(CoreError::ControlObjectLoad)?
+        else {
+            return Ok(SnapshotBasisVerification::Invalid);
+        };
+        if !manifest.payload().status.is_active()
+            || manifest.manifest().payload_checksum != record.payload_checksum
+        {
+            return Ok(SnapshotBasisVerification::Invalid);
+        }
+        let current = self
+            .find_current_above(&PublicationBasis {
+                manifest,
+                boundary: None,
+            })
+            .await?;
         Ok(
-            if !manifest.payload().status.is_active()
-                || manifest.manifest().manifest_no != kept.manifest_no
-                || manifest.manifest().payload_checksum != kept.payload_checksum
-            {
+            if current.manifest.payload().manifest_no != record.snapshot_id.manifest_no() {
                 SnapshotBasisVerification::Invalid
             } else {
-                SnapshotBasisVerification::Verified
+                SnapshotBasisVerification::Verified(current)
             },
         )
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The result of [`NamespaceStore::verify_snapshot_basis`].
+#[derive(Debug)]
 pub(crate) enum SnapshotBasisVerification {
-    Verified,
+    /// The snapshot's manifest is the newest manifest, with the manifest
+    /// boundary that the verification read.
+    Verified(PublicationBasis),
     Invalid,
 }
 

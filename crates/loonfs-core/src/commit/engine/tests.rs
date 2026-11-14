@@ -1467,7 +1467,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
             &writer.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("snapshot");
 
     // Without a cache, every publish view re-fetches the segment blocks

@@ -103,6 +103,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             &context.clock(),
         )
         .await
+        .map(|(record, _)| record)
         .expect("take a snapshot of the original history");
     // The session advances the floor itself, through a floor object at its
     // tip, so it keeps its position for the replay below.

@@ -58,6 +58,7 @@ impl Fixture {
                 &setup.clock(),
             )
             .await
+            .map(|(record, _)| record)
             .expect("snapshot");
         let selected = crate::test_support::namespace_store(&store, &source)
             .load_current_manifest()
@@ -366,6 +367,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             &context.clock(),
         )
         .await
+        .map(|(record, _)| record)
         .expect("snapshot");
     // The fork's second read of the snapshot, the check before the fork
     // snapshot's write, blocks, and the snapshot expires while it does.

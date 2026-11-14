@@ -389,6 +389,7 @@ pub(crate) async fn half_done_fork<S: ObjectStore + Clone>(
             &clock,
         )
         .await
+        .map(|(record, _)| record)
         .expect("take the temporary snapshot");
     let source_manifest = namespace
         .load_manifest_by_no(temporary.snapshot_id.manifest_no())

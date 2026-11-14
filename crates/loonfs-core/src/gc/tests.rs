@@ -1063,7 +1063,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
             &setup.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("first owner");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let second = namespace
@@ -1079,7 +1079,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
             &setup.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("second owner");
     assert_ne!(first.snapshot_id, second.snapshot_id);
     assert_eq!(first.manifest_no, second.manifest_no);
@@ -1461,7 +1461,7 @@ async fn snapshot_cleanup_deletes_a_fork_snapshot_that_the_target_does_not_recor
             &setup.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("a fork snapshot that the target won't record");
 
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
@@ -2175,7 +2175,7 @@ async fn expiry_and_an_absent_target_delete_snapshots_without_a_released_state()
                     &setup.clock(),
                 )
                 .await
-                .map(crate::snapshot::snapshot_record_summary)
+                .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
                 .expect("snapshot"),
         );
     }
@@ -2258,7 +2258,7 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
             &setup.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("snapshot");
     write_test_file(&store, &namespace_id, "/file", "new", &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)

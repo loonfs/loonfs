@@ -60,7 +60,7 @@ async fn snapshot_named<S: ObjectStore + ?Sized>(
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("create snapshot")
         .snapshot_id
 }
@@ -523,6 +523,7 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
                 &context.clock(),
             )
             .await
+            .map(|(record, _)| record)
             .expect("create fork snapshot");
     }
 
@@ -593,7 +594,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
                 &context.clock(),
             )
             .await
-            .map(crate::snapshot::snapshot_record_summary)
+            .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
             .expect_err("the owner is not creatable");
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
     }
@@ -633,6 +634,7 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
             &context.clock(),
         )
         .await
+        .map(|(record, _)| record)
         .expect("create fork snapshot")
         .snapshot_id;
 
@@ -741,6 +743,7 @@ async fn a_repeated_delete_writes_nothing_and_a_fork_snapshot_is_not_a_user_snap
             &context.clock(),
         )
         .await
+        .map(|(record, _)| record)
         .expect("create fork snapshot")
         .snapshot_id;
 

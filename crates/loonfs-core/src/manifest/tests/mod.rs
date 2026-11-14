@@ -152,7 +152,7 @@ pub(crate) async fn create_snapshot<S: ObjectStore + ?Sized>(
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
 }
 
 pub(crate) use crate::test_support::writer_at;

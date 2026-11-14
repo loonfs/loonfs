@@ -5,6 +5,7 @@ use super::record::{write_snapshot_record, SnapshotBasisVerification};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
+use crate::namespace::basis::PublicationBasis;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
@@ -42,7 +43,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 &self.namespace.start_clock(),
             )
             .await
-            .map(super::snapshot_summary)
+            .map(|(record, _)| super::snapshot_summary(record))
     }
 }
 
@@ -52,13 +53,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `manifest` is the manifest that the caller's fold published or found
     /// current. The call returns `snapshot_unavailable` when the manifest
     /// stopped being current before the snapshot's verification, so the caller
-    /// can fold and take a snapshot again.
+    /// can fold and take a snapshot again. Returns the snapshot record with
+    /// the newest manifest and the manifest boundary that the verification
+    /// read.
     pub(crate) async fn create_snapshot_record(
         &self,
         owner: SnapshotOwner,
         manifest: ManifestRef,
         clock: &OperationClock,
-    ) -> Result<SnapshotPayload> {
+    ) -> Result<(SnapshotPayload, PublicationBasis)> {
         validate_snapshot_owner(&owner)?;
         let snapshot_id = SnapshotId::generate(manifest.manifest_no);
         let record = SnapshotPayload {
@@ -75,7 +78,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         .await;
         let error = match verification {
-            Ok(SnapshotBasisVerification::Verified) => return Ok(record),
+            Ok(SnapshotBasisVerification::Verified(basis)) => return Ok((record, basis)),
             Ok(SnapshotBasisVerification::Invalid) => CoreError::SnapshotUnavailable(
                 "the snapshot's manifest stopped being current before the snapshot record was verified".to_owned(),
             ),

@@ -3,7 +3,7 @@
 use super::*;
 use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_test_support::stores::MetadataMapStore;
+use loonfs_test_support::stores::{MetadataMapStore, RecordedOperation};
 use loonfs_types::format::control::SnapshotOwner;
 use std::assert_matches;
 
@@ -131,14 +131,19 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     current.manifest()
 }
 
+/// Checks that a delete of the namespace during a snapshot's verification
+/// fails the verification and deletes the snapshot. The verification checks
+/// that the snapshot's manifest is still the newest with a HEAD request for
+/// its successor, so the test parks that request and publishes the tombstone
+/// as the successor while the request waits.
 #[tokio::test]
 async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(boundary(&namespace_id)),
-        OperationSelector::Read,
+        KeyPredicate::manifest(&namespace_id),
+        OperationSelector::Head,
     );
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context)
@@ -191,8 +196,13 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
         .is_empty());
 }
 
+/// Checks that a snapshot's verification reads the snapshot's manifest, and
+/// then checks that the manifest is the newest with a HEAD request for its
+/// successor and a read of the manifest boundary. A record whose manifest is
+/// missing or has a different checksum is refused after the manifest read
+/// alone.
 #[tokio::test]
-async fn snapshot_verification_checks_manifest_identity_with_only_the_current_manifest_load() {
+async fn snapshot_verification_reads_the_snapshot_manifest_then_its_successor_and_the_boundary() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = RecordingStore::new(
@@ -212,38 +222,65 @@ async fn snapshot_verification_checks_manifest_identity_with_only_the_current_ma
         .expect("load snapshot")
         .expect("snapshot exists")
         .state;
-    store.reset();
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest");
-    let mut expected = store.take();
-    loonfs_test_support::stores::sort_head_runs(&mut expected);
+    let manifest_no = record.snapshot_id.manifest_no();
+    let successor = manifest_no.successor().expect("next number");
+    let manifest_key = metadata_manifest_object(&namespace_id, &manifest_no);
+    let successor_key = metadata_manifest_object(&namespace_id, &successor);
+    let boundary_key = boundary(&namespace_id);
     let mut changed_number = record.clone();
-    changed_number.snapshot_id = SnapshotId::generate(
-        record
-            .snapshot_id
-            .manifest_no()
-            .successor()
-            .expect("next number"),
-    );
+    changed_number.snapshot_id = SnapshotId::generate(successor);
     let mut changed_checksum = record.clone();
     changed_checksum.payload_checksum = loonfs_types::sha256_digest(b"different");
-    for (record, expected_verification) in [
-        (record, record::SnapshotBasisVerification::Verified),
-        (changed_number, record::SnapshotBasisVerification::Invalid),
-        (changed_checksum, record::SnapshotBasisVerification::Invalid),
+    store.reset();
+    for (label, record, verified, expected) in [
+        (
+            "verified",
+            record,
+            true,
+            vec![
+                ("get", manifest_key.clone()),
+                ("head", successor_key.clone()),
+                ("get", boundary_key),
+            ],
+        ),
+        (
+            "changed number",
+            changed_number,
+            false,
+            vec![("get", successor_key)],
+        ),
+        (
+            "changed checksum",
+            changed_checksum,
+            false,
+            vec![("get", manifest_key)],
+        ),
     ] {
+        let verification = crate::test_support::namespace_store(&store, &record.namespace_id)
+            .verify_snapshot_basis(&record)
+            .await
+            .expect("verification");
         assert_eq!(
-            crate::test_support::namespace_store(&store, &record.namespace_id)
-                .verify_snapshot_basis(&record)
-                .await
-                .expect("verification"),
-            expected_verification
+            matches!(verification, record::SnapshotBasisVerification::Verified(_)),
+            verified,
+            "{label}: {verification:?}"
         );
         let mut requests = store.take();
         loonfs_test_support::stores::sort_head_runs(&mut requests);
-        assert_eq!(requests, expected);
+        let requests = requests
+            .iter()
+            .map(|operation| {
+                let kind = match operation {
+                    RecordedOperation::Head { .. } => "head",
+                    RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => {
+                        "get"
+                    }
+                    _ => "other",
+                };
+                (kind, operation.key().to_owned())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests, expected, "{label}");
     }
 }
 
@@ -316,6 +353,7 @@ async fn a_fork_snapshot_id_is_read_like_a_user_snapshot_and_refused_by_every_ot
                 &setup.clock(),
             )
             .await
+            .map(|(record, _)| record)
             .expect("snapshot");
         snapshots.push(created.snapshot_id);
     }
