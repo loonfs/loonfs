@@ -41,7 +41,7 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
         report.deleted.upload_sessions, 0,
         "the record outlives its abort"
     );
-    let session = read_upload_session(&store, &namespace_id, &upload_id)
+    let session = read_upload_session(&store, &pool_id, &upload_id)
         .await
         .expect("aborted session retained");
     assert_matches!(session.outcome, Some(UploadOutcome::Aborted { .. }));
@@ -91,7 +91,7 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
     let report = collect_pool(&store, &pool_id, &reaped).await;
     assert_eq!(report.deleted.upload_sessions, 0);
     assert_matches!(
-        read_upload_session(&store, &namespace_id, &upload_id)
+        read_upload_session(&store, &pool_id, &upload_id)
             .await
             .expect("aborted session retained")
             .outcome,
@@ -100,7 +100,7 @@ async fn aborted_upload_cleanup_failure_keeps_the_session_for_retry() {
 
     let report = collect_pool(&store, &pool_id, &reaped).await;
     assert_eq!(report.deleted.upload_sessions, 1);
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+    assert!(read_upload_session(&store, &pool_id, &upload_id)
         .await
         .is_none());
 }

@@ -2,6 +2,7 @@
 
 use super::*;
 use loonfs_test_support::stores::replace_object;
+use loonfs_types::format::control::ManifestBoundary;
 use std::assert_matches;
 
 #[tokio::test]
@@ -36,12 +37,22 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
     for key in &keys {
         assert!(store.head(key).await.expect("content").is_some());
     }
-    let after = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
+    // The retirement writes the boundary once, as retired, and the tombstone
+    // stays.
+    assert_eq!(store.counts().puts, 1);
+    assert_eq!(
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_boundary()
+            .await
+            .expect("boundary")
+            .map(|loaded| loaded.state.boundary),
+        Some(ManifestBoundary::Retired {})
+    );
+    assert!(store
+        .head(&before.object_key)
         .await
-        .expect("same tombstone");
-    assert_eq!(before.manifest().manifest_no, after.manifest().manifest_no);
-    assert_eq!(store.counts().puts, 0);
+        .expect("tombstone")
+        .is_some());
 }
 
 #[tokio::test]
@@ -56,6 +67,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .await
         .expect("bootstrap source");
     let source_content = publish_owned_content(&inner, &source, 2).await;
+    let pool_id = crate::test_support::load_pool_id(&inner, &source).await;
     let fixture = crate::test_support::NamespaceFixture::new(&inner, &source, &setup);
     fixture
         .engine()
@@ -112,7 +124,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     assert_eq!(first.deleted_snapshots_by_owner.fork, 1);
     assert_eq!(store.take(), []);
     assert!(!snapshot_record_exists(&store, &source, source_snapshot).await);
-    assert!(read_upload_session(&store, &target, &upload.upload_id)
+    assert!(read_upload_session(&store, &pool_id, &upload.upload_id)
         .await
         .is_some());
     for key in source_content.iter().chain(&source_segments) {
@@ -142,7 +154,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .iter()
         .all(|operation| { !operation.key().starts_with("namespaces/source/") }));
     // The pool's collection, not the fork's, collects the fork's session.
-    assert!(read_upload_session(&store, &target, &upload.upload_id)
+    assert!(read_upload_session(&store, &pool_id, &upload.upload_id)
         .await
         .is_some());
 }
@@ -234,7 +246,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     assert_eq!(store.counts().lists, 2);
     assert_eq!(store.inner().open_uploads(), 1);
     assert_eq!(store.inner().aborts(), 0);
-    let open_session = read_upload_session(&store, &namespace_id, &upload.session.upload_id)
+    let open_session = read_upload_session(&store, &pool_id, &upload.session.upload_id)
         .await
         .expect("open session");
     assert_eq!(open_session.outcome, None);
@@ -247,7 +259,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     assert_eq!(reaped.deleted.upload_sessions, 1);
     assert_eq!(store.inner().aborts(), 2);
     assert!(
-        read_upload_session(&store, &namespace_id, &upload.session.upload_id)
+        read_upload_session(&store, &pool_id, &upload.session.upload_id)
             .await
             .is_none()
     );

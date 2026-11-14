@@ -19,8 +19,8 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::control::{
-    decode_control_object, ControlObjectKind, SnapshotOwner, SnapshotPayload, UploadOutcome,
-    UploadOutcomePayload,
+    decode_control_object, ControlObjectKind, ManifestBoundary, SnapshotOwner, SnapshotPayload,
+    UploadOutcome, UploadOutcomePayload,
 };
 use loonfs_types::{ContentRef, ManifestNo, NamespaceId, SnapshotId, UploadId};
 use loonfs_types::{GcResponse, PoolGcResponse, PoolId};
@@ -216,27 +216,31 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     )
 }
 
-/// Reads an upload session's records, or returns `None` once its session
-/// record is gone.
+/// Reads an upload session's records under the prefix of `pool_id`, or
+/// returns `None` once its session record is gone. The records are read
+/// without the namespace's manifest, which a retired namespace doesn't have.
 async fn read_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
+    pool_id: &PoolId,
     upload_id: &UploadId,
 ) -> Option<UploadSessionState> {
-    let namespace = crate::test_support::namespace_store(store, namespace_id);
-    let catalog = namespace.load_catalog_entry().await.expect("catalog");
-    match namespace
-        .load_upload_session_state(&catalog, upload_id)
+    let outcome = crate::upload::records::load_upload_outcome(store, pool_id, upload_id)
         .await
-    {
-        Ok(state) => Some(state),
-        Err(CoreError::UploadNotFound { .. }) => None,
-        Err(error) => panic!("read upload session: {error}"),
-    }
+        .expect("read upload outcome")
+        .map(|record| record.outcome);
+    let session = crate::upload::records::load_upload_session_record(store, pool_id, upload_id)
+        .await
+        .expect("read upload session")?;
+    Some(UploadSessionState { session, outcome })
 }
 
+/// Checks that a deleted namespace keeps its tombstone and segments until its
+/// retirement, and that after the retirement a collection past the grace
+/// window empties the prefix except the boundary and an unrecognized key,
+/// and a later collection deletes an object written late under the prefix
+/// once that object is older than the grace window.
 #[tokio::test]
-async fn deleted_namespace_keeps_its_tombstone_and_segments() {
+async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -341,56 +345,87 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
             "prefix `{prefix}` must be empty after reclamation"
         );
     }
-    let current = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("tombstone");
-    assert!(current.payload().status.is_deleted());
-    let rooted_segments = current
-        .payload()
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .map(loonfs_objectstore::keys::metadata_segment_object_key)
-        .collect::<BTreeSet<_>>();
-    assert!(!rooted_segments.is_empty());
+    // The retirement raised the boundary to retired and left the tombstone,
+    // which is still younger than the grace window, as it was.
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     assert_eq!(
-        store
-            .list_prefix(&metadata_segment_prefix(&namespace_id))
+        namespace
+            .load_boundary()
             .await
-            .expect("rooted segments")
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
-        rooted_segments
+            .expect("boundary")
+            .map(|loaded| loaded.state.boundary),
+        Some(ManifestBoundary::Retired {})
     );
-    assert_eq!(current.payload().activity, final_activity);
-
-    assert!(store
-        .head(&current.object_key)
+    let manifests = store
+        .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
-        .expect("tombstone")
-        .is_some());
+        .expect("manifests");
+    let [tombstone_key] = manifests.as_slice() else {
+        panic!("one tombstone: {manifests:?}");
+    };
+    let tombstone = namespace
+        .load_manifest_by_no(
+            loonfs_objectstore::layout::manifest_no_of(tombstone_key).expect("manifest number"),
+        )
+        .await
+        .expect("load the tombstone")
+        .expect("tombstone");
+    assert!(tombstone.payload().status.is_deleted());
+    assert_eq!(tombstone.payload().activity, final_activity);
+    assert!(!store
+        .list_prefix(&metadata_segment_prefix(&namespace_id))
+        .await
+        .expect("segments")
+        .is_empty());
+
+    let unrecognized = format!("{}notes.txt", metadata_manifest_prefix(&namespace_id));
+    store
+        .put_if_absent(&unrecognized, Bytes::from_static(b"foreign key"))
+        .await
+        .expect("unrecognized key");
     let again =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&again.clock())
-        .await
-        .expect("second collection");
-    assert_eq!(report.deleted.wal_objects, 0);
-    assert_eq!(report.deleted.manifests, 0);
-    assert_eq!(report.deleted.metadata_segments, 0);
-    assert_eq!(report.deleted_snapshots_by_owner, Default::default());
+    let report = collect(&store, &namespace_id, &again).await;
+    assert_eq!(report.deleted.manifests, 1);
+    assert!(report.deleted.metadata_segments > 0);
+    assert_eq!(report.retained.unrecognized_key, 1);
+    assert_eq!(report.retires_at_ms, None);
     assert_eq!(
         collect_pool(&store, &pool_id, &again).await.deleted,
         Default::default()
     );
-    assert_eq!(
+    let remaining = BTreeSet::from([
+        loonfs_objectstore::keys::boundary(&namespace_id),
+        unrecognized,
+    ]);
+    let keys = || async {
         store
-            .list_prefix(&metadata_manifest_prefix(&namespace_id))
+            .list_prefix(&loonfs_objectstore::keys::namespace_prefix(&namespace_id))
             .await
-            .expect("manifests"),
-        vec![current.object_key]
+            .expect("list the prefix")
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(keys().await, remaining);
+
+    let late = metadata_manifest_object(&namespace_id, &ManifestNo(1_000));
+    store
+        .put_if_absent(&late, Bytes::from_static(b"late"))
+        .await
+        .expect("late write");
+    let young = collect(&store, &namespace_id, &again).await;
+    assert_eq!(young.deleted.manifests, 0);
+    assert_eq!(young.retained.within_grace_window, 1);
+    let later =
+        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
+    assert_eq!(
+        collect(&store, &namespace_id, &later)
+            .await
+            .deleted
+            .manifests,
+        1
     );
+    assert_eq!(keys().await, remaining);
 }
 
 #[tokio::test]
@@ -1245,9 +1280,10 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
     let released = collect(&store, &clone, &aged).await;
     assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
     assert!(!snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
+    // The repeated collection finds the clone retired and sends no delete.
     let repeated = collect(&store, &clone, &aged).await;
     assert_eq!(repeated.deleted_snapshots_by_owner.fork, 0);
-    assert_eq!(store.counts().deletes, 3);
+    assert_eq!(store.counts().deletes, 2);
     assert!(store
         .head(&metadata_manifest_object(
             &source,
@@ -2078,13 +2114,12 @@ async fn a_pool_without_members_retries_deletes_and_collects_late_writes() {
         .await
         .expect("pool record")
         .is_some());
-    assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("tombstone")
-        .payload()
-        .status
-        .is_deleted());
+    assert_matches!(
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await,
+        Err(CoreError::NamespaceDeleted { .. })
+    );
 }
 
 #[tokio::test]

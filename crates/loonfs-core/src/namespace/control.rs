@@ -4,14 +4,14 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
 use crate::limits::{MANIFEST_PROBE_WINDOW, MAX_CONTENTION_ATTEMPTS};
 use crate::namespace::basis::PublicationBasis;
-use crate::namespace::boundary::boundary_manifest_no;
+use crate::namespace::boundary::at_or_below_boundary;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
+use loonfs_types::format::control::{ManifestBoundary, ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_types::{CompactorEpoch, ManifestNo, NamespaceId};
 use std::sync::Arc;
@@ -55,6 +55,18 @@ impl LoadedManifest {
     }
 }
 
+/// What a find of a namespace's newest manifest from the manifest boundary
+/// found (see [`NamespaceStore::find_newest_manifest`]).
+#[derive(Debug, Clone)]
+pub(crate) enum NewestManifest {
+    /// No namespace has the ID.
+    Absent,
+    /// The namespace's boundary is retired.
+    Retired,
+    /// The namespace's newest manifest, with the boundary of the last read.
+    Manifest(PublicationBasis),
+}
+
 pub(crate) fn ensure_head_identity(
     head: &NamespaceReadState,
     namespace_id: &NamespaceId,
@@ -88,19 +100,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     /// Loads the namespace's current manifest from the manifest boundary,
     /// with the boundary of the last read.
+    ///
+    /// The call returns `namespace_not_found` when no namespace has the ID,
+    /// and `namespace_deleted` when the namespace is retired.
     pub async fn load_current_basis(&self) -> crate::error::Result<PublicationBasis> {
-        self.find_newest_manifest()
-            .await?
-            .ok_or_else(|| self.namespace_not_found())
-    }
-
-    pub(crate) async fn load_current_manifest_if_present(
-        &self,
-    ) -> crate::error::Result<Option<LoadedManifest>> {
-        Ok(self
-            .find_newest_manifest()
-            .await?
-            .map(|current| current.manifest))
+        match self.find_newest_manifest().await? {
+            NewestManifest::Absent => Err(self.namespace_not_found()),
+            NewestManifest::Retired => Err(self.namespace_deleted()),
+            NewestManifest::Manifest(current) => Ok(current),
+        }
     }
 
     /// Returns the error for a namespace that has no manifest above its
@@ -111,13 +119,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
     }
 
+    /// Returns the error for a namespace whose boundary is retired.
+    pub(crate) fn namespace_deleted(&self) -> CoreError {
+        CoreError::NamespaceDeleted {
+            namespace_id: self.namespace_id.clone(),
+        }
+    }
+
     /// Finds the namespace's newest manifest from the manifest boundary
-    /// (format spec, "Resolving the metadata basis"), or returns `None` when
-    /// no namespace has the ID.
+    /// (format spec, "Resolving the metadata basis").
     ///
-    /// Each attempt reads the boundary, lists the manifests numbered above
-    /// it, loads the highest-numbered manifest in the listing, and reads the
-    /// boundary again. That manifest is the newest when it's still above the
+    /// Each attempt reads the boundary, and the call returns
+    /// [`NewestManifest::Retired`] when the boundary is retired. Otherwise
+    /// the attempt lists the manifests numbered above the boundary, loads the
+    /// highest-numbered manifest in the listing, and reads the boundary
+    /// again. That manifest is the newest when it's still above the
     /// boundary. The attempt starts again when the manifest is gone by its
     /// load or is at or below the boundary by the second read, and when the
     /// listing is empty and the boundary changed. An empty listing under an
@@ -127,15 +143,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// boundary. The call returns the manifest with the boundary of its last
     /// read, and returns `store_contention` after [`MAX_CONTENTION_ATTEMPTS`]
     /// attempts.
-    pub(crate) async fn find_newest_manifest(
-        &self,
-    ) -> crate::error::Result<Option<PublicationBasis>> {
+    pub(crate) async fn find_newest_manifest(&self) -> crate::error::Result<NewestManifest> {
         let prefix = metadata_manifest_prefix(&self.namespace_id);
         for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
             let boundary = self.load_boundary().await?;
-            let start_after = boundary.as_ref().map(|loaded| {
-                metadata_manifest_object(&self.namespace_id, &boundary_manifest_no(Some(loaded)))
-            });
+            let boundary_no = match boundary.as_ref().map(|loaded| loaded.state.boundary) {
+                Some(ManifestBoundary::Retired {}) => return Ok(NewestManifest::Retired),
+                Some(ManifestBoundary::Manifest { manifest_no }) => Some(manifest_no),
+                None => None,
+            };
+            let start_after = boundary_no
+                .map(|manifest_no| metadata_manifest_object(&self.namespace_id, &manifest_no));
             let highest = self
                 .store
                 .list_entries_from_stream(&prefix, start_after.as_deref())
@@ -148,14 +166,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 if self.reload_boundary(boundary.clone()).await? != boundary {
                     continue;
                 }
-                let Some(boundary) = boundary else {
-                    return Ok(None);
+                let (Some(boundary), Some(boundary_no)) = (boundary, boundary_no) else {
+                    return Ok(NewestManifest::Absent);
                 };
                 return Err(ControlObjectLoadError::Codec {
-                    message: format!(
-                        "no manifest is above the manifest boundary `{}`",
-                        boundary_manifest_no(Some(&boundary))
-                    ),
+                    message: format!("no manifest is above the manifest boundary `{boundary_no}`"),
                     object_key: boundary.object_key,
                 }
                 .into());
@@ -164,8 +179,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 continue;
             };
             let reloaded = self.reload_boundary(boundary).await?;
-            if manifest_no > boundary_manifest_no(reloaded.as_ref()) {
-                return Ok(Some(PublicationBasis {
+            if !at_or_below_boundary(manifest_no, reloaded.as_ref()) {
+                return Ok(NewestManifest::Manifest(PublicationBasis {
                     manifest,
                     boundary: reloaded,
                 }));

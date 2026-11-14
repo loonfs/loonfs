@@ -10,6 +10,7 @@ use super::deletes::apply_decisions;
 use super::session_cache::CompletedUploadSessionCache;
 use crate::error::{CoreError, Result};
 use crate::limits::GC_GRACE_WINDOW_MS;
+use crate::namespace::control::NewestManifest;
 use crate::pool_store::PoolStore;
 use crate::time::{Observation, OperationClock};
 use content::ContentFilters;
@@ -33,7 +34,8 @@ impl<S: ObjectStore> PoolStore<S> {
     /// and returns `pool_not_found` without deleting anything when the record
     /// is missing. A pool whose create call failed or lost has no members, and
     /// the collection then deletes the pool record once the record's creation
-    /// grace has passed, and lists nothing.
+    /// grace has passed, and lists nothing. A pool whose first member is
+    /// retired has no member roots, and the collection keeps the pool record.
     ///
     /// The content sweep reads the extent filter of each distinct layout
     /// segment of the members' rooted manifests through the segment cache,
@@ -55,10 +57,16 @@ impl<S: ObjectStore> PoolStore<S> {
         let mut report = PoolGcResponse::empty(self.pool_id.clone());
         let first_member = self.member(record.first_member_namespace_id.clone());
         let observed = Observation::now(Arc::clone(&first_member.timer));
-        let first_current = match first_member.load_current_manifest().await {
-            Err(CoreError::NamespaceNotFound { .. }) => None,
-            Ok(manifest) if manifest.payload().pool_id != self.pool_id => None,
-            current => Some(current),
+        let first_current = match first_member.find_newest_manifest().await {
+            Ok(NewestManifest::Absent) => None,
+            Ok(NewestManifest::Manifest(current))
+                if current.manifest.payload().pool_id != self.pool_id =>
+            {
+                None
+            }
+            Ok(NewestManifest::Retired) => Some(Ok(None)),
+            Ok(NewestManifest::Manifest(current)) => Some(Ok(Some(current))),
+            Err(error) => Some(Err(error)),
         };
         let Some(first_current) = first_current else {
             self.collect_pool_record(&record, clock, &mut report)

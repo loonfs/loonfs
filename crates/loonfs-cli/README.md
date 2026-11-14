@@ -192,10 +192,12 @@ Namespace management
     from an unexpired snapshot instead of the current head.
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
-    Delete a namespace and retire its ID. The deletion can't be undone. To
-    confirm, type the ID back at the prompt or pass --yes. With
-    --expected-head-seq, the command deletes only if the namespace head is
-    still at that sequence
+    Delete a namespace. The deletion can't be undone, and the namespace ID
+    can't be created or forked into again. Garbage collection later
+    retires the namespace and deletes its metadata objects. To confirm,
+    type the ID back at the prompt or pass --yes. With --expected-head-seq,
+    the command deletes only if the namespace head is still at that
+    sequence
 
   loonfs merge <namespace> --source <fork> [--through <seq>] [--record <path>]
                [--abandon] [--actor-id <stable-id>]
@@ -446,7 +448,12 @@ Maintenance
     every family under the namespace's prefix from the beginning and
     sweeps each family to the end. The collection deletes the namespace's
     unreferenced manifests, WAL objects, metadata segments, extension
-    segments, and snapshots. The namespace's content objects, upload records,
+    segments, and snapshots. For a deleted namespace whose grace window
+    has passed and that has no snapshots, the collection retires the
+    namespace. A later collection of a retired namespace deletes every
+    manifest, WAL object, segment, and snapshot under its prefix once the
+    object is more than 24 hours old, and keeps the manifest boundary
+    object. The namespace's content objects, upload records,
     and temporary objects are stored in its pool, and this command doesn't
     delete them. `loonfs maintenance pool gc` collects them, and a
     server's sweep runs a collection of each pool.

@@ -1154,6 +1154,84 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
     }
 }
 
+/// Requests that one retired namespace whose prefix is empty except its
+/// boundary costs in a sweep, under the namespace's prefix, and how many of
+/// them are lists. The metadata call reads the boundary and stops at the
+/// retired boundary (1). The namespace's collection reads the boundary and
+/// lists the namespace's prefix (2). The pool's collection reads its first
+/// member's boundary to find the member (1). The sweep makes no grep index
+/// call and no retention advance for the namespace, so a maintained grep index
+/// adds nothing. A retired namespace can't enable grep, so the enabled case is
+/// left out.
+const RETIRED_SWEEP_REQUESTS: (usize, usize) = (4, 1);
+
+#[tokio::test(start_paused = true)]
+async fn a_retired_namespace_costs_a_sweep_a_fixed_number_of_requests_and_no_failure() {
+    for grep in [Grep::NotMaintained, Grep::Maintained] {
+        let directory = tempdir().expect("tempdir");
+        let base: SharedObjectStore = local_store(directory.path());
+        let retired = namespace_id("retired");
+        let (writer, now_ms) = seed_writer(&base).await;
+        seed_unfolded_tail(&writer, &retired).await;
+        writer
+            .open_namespace(&retired)
+            .expect("open the namespace")
+            .delete()
+            .await
+            .expect("delete the namespace");
+        writer.shutdown().await.expect("stop the writer");
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("local store"),
+            KeyPredicate::any(),
+        ));
+        let config =
+            scheduler_config((grep != Grep::NotMaintained).then(GrepWorkerConfig::default));
+        let server = SchedulerServer::start(store.clone(), &config, now_ms + 2 * DAY_MS).await;
+        // The first sweep's collection retires the deleted namespace, and the
+        // second sweep's collection empties its prefix.
+        server.scheduler.run_sweep().await.expect("list namespaces");
+        server.scheduler.run_sweep().await.expect("list namespaces");
+        let prefix = loonfs_objectstore::keys::namespace_prefix(&retired);
+        let boundary = vec![loonfs_objectstore::keys::boundary(&retired)];
+        assert_eq!(keys_under(base.as_ref(), &prefix).await, boundary);
+
+        store.reset();
+        server.scheduler.run_sweep().await.expect("list namespaces");
+        let operations = store.take();
+        let namespace_requests: Vec<_> = operations
+            .iter()
+            .filter(|operation| operation.key().starts_with(&prefix))
+            .collect();
+        let lists = namespace_requests
+            .iter()
+            .filter(|operation| matches!(operation, RecordedOperation::List { .. }))
+            .count();
+        assert_eq!(
+            (namespace_requests.len(), lists),
+            RETIRED_SWEEP_REQUESTS,
+            "requests and lists for the retired namespace, grep {grep:?}: {namespace_requests:?}"
+        );
+        assert!(
+            !operations.iter().any(|operation| matches!(
+                operation,
+                RecordedOperation::Put { .. }
+                    | RecordedOperation::PutStreamed { .. }
+                    | RecordedOperation::Assemble { .. }
+                    | RecordedOperation::Delete { .. }
+            )),
+            "{operations:?}"
+        );
+        for call in ["metadata", "grep_index", "retention", "gc", "pool_gc"] {
+            assert_eq!(
+                server.counter("loonfs.maintenance.sweep_failures", &[("call", call)]),
+                0,
+                "a retired namespace is not a `{call}` failure"
+            );
+        }
+        assert_eq!(keys_under(base.as_ref(), &prefix).await, boundary);
+    }
+}
+
 #[tokio::test]
 async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_call() {
     let directory = tempdir().expect("tempdir");
@@ -1188,11 +1266,11 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_call() {
         .iter()
         .filter(|operation| operation.key().starts_with("namespaces/stray/"))
         .collect();
-    // The metadata call, the grep build, the retention advance, and
-    // collection each look for the newest manifest: a read of the manifest
-    // boundary, a listing of the manifests, and a second read of the
-    // boundary.
-    assert_eq!(stray.len(), 12, "{stray:?}");
+    // The metadata call finds no namespace, so the sweep makes no grep build
+    // and no retention advance. The metadata call and the collection each
+    // look for the newest manifest: a read of the manifest boundary, a listing
+    // of the manifests, and a second read of the boundary.
+    assert_eq!(stray.len(), 6, "{stray:?}");
     for call in ["metadata", "grep_index", "retention", "gc"] {
         assert_eq!(
             server.counter("loonfs.maintenance.sweep_failures", &[("call", call)]),

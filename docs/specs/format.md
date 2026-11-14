@@ -44,7 +44,7 @@ This section describes the logical model that the stored objects represent: name
 
 ### 1.1 Namespaces and identity
 
-A "namespace" is a directory tree with its own ordered history of changes. A namespace ID identifies one namespace from its creation to its deletion, and it can't be reused. Deleting a namespace publishes a final manifest, the "namespace tombstone", which remains the namespace's current manifest. A create or fork that uses a deleted namespace's ID returns `namespace_deleted`.
+A "namespace" is a directory tree with its own ordered history of changes. A namespace ID identifies one namespace from its creation to its deletion, and it can't be reused. Deleting a namespace publishes a final manifest, the "namespace tombstone", which remains the namespace's current manifest until the namespace is [retired](#95-retirement). Retirement raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to a retired state, and garbage collection then deletes every other object under the namespace's prefix. The boundary object stays, and it records that the ID was used. A request to a deleted or retired namespace returns `namespace_deleted`, and so does a create or fork that uses the ID.
 
 A namespace is created when its manifest 1 is written with put-if-absent. The current manifest records the namespace's identity, creation time, lifecycle status, and writer authority. Together, the current manifest and the WAL objects after it describe the namespace's current metadata.
 
@@ -377,7 +377,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | --- | --- | --- |
 | Manifest | The namespace's identity, lifecycle status, writer authority, metadata runs, and retention floor | A new manifest is published at the next number. |
 | WAL object | Commits, a writer fence, or a [floor object](glossary.md#floor-object), after the folded boundary | A new WAL object is created at the next number. |
-| Manifest boundary | A manifest number at or below which every manifest of the namespace has been replaced by a newer manifest. A reader lists the manifests above it, and a publisher reads it after its manifest put. | Created with put-if-absent, then changed by compare-and-swap. The number never decreases. Garbage collection writes it. |
+| Manifest boundary | A manifest number at or below which every manifest of the namespace has been replaced by a newer manifest, or the retired state, which is above every manifest number. A reader lists the manifests above the number, and a publisher reads the boundary after its manifest put. | Created with put-if-absent, then changed by compare-and-swap. The boundary never decreases, a retired boundary never changes, and nothing deletes the object. Garbage collection writes it. |
 | Metadata segment | Sorted metadata rows that a manifest references | A new immutable object is written. |
 | Extension segment | Sorted rows of an extension's state, which an extension entry in a manifest lists | A new immutable object is written. |
 | Snapshot | A reference that keeps one manifest for a user or a fork | Created and deleted. A user snapshot's expiry time can be extended, and its deletion recorded, by compare-and-swap. |
@@ -410,7 +410,7 @@ The current manifest is the source of truth for the namespace's identity, status
 
 Every WAL object records the head sequence after its commits. A fence moves the WAL number and the writer epoch forward without adding a commit, and it keeps the head sequence it started from. A [floor object](glossary.md#floor-object) is a WAL object with no commits that records a new [retention floor](glossary.md#retention-floor), and it also keeps the head sequence it started from (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
 
-A process that has no manifest of the namespace in memory finds the newest manifest by reading the [manifest boundary](glossary.md#manifest-boundary) and listing the manifests numbered above it. If that listing is empty and no boundary object exists, no namespace has the ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
+A process that has no manifest of the namespace in memory finds the newest manifest by reading the [manifest boundary](glossary.md#manifest-boundary) and listing the manifests numbered above it. If the boundary is retired, the namespace is retired and has no newest manifest. If the listing is empty and no boundary object exists, no namespace has the ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
 
 The namespace's counters advance at different times:
 
@@ -456,7 +456,7 @@ WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
 
 - A manifest records the namespace's lifecycle status, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that contain its rows through `head_seq`.
 - A WAL object is a data object, a fence, or a floor object. A data object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote those commits. A fence contains no commits. A [floor object](glossary.md#floor-object) contains no commits either, and it records a new retention floor. Any process can create a floor object without the writer epoch (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
-- The [manifest boundary](glossary.md#manifest-boundary) is mutable. It records a manifest number that never decreases, and every manifest at or below that number has been replaced by a newer manifest. Garbage collection raises the boundary before it deletes manifests, and a publisher reads the boundary after each manifest put. A manifest put at or below the boundary counts as lost.
+- The [manifest boundary](glossary.md#manifest-boundary) is mutable. It records a manifest number that never decreases, and every manifest at or below that number has been replaced by a newer manifest. Retirement raises it to a retired state, which is above every manifest number. Garbage collection raises the boundary before it deletes manifests, and a publisher reads the boundary after each manifest put. A manifest put at or below the boundary counts as lost.
 - Content objects store immutable ranges of file bytes, and a layout lists those ranges in chain order.
 - Snapshots are retained manifests (see [Snapshots](#8-snapshots)).
 
@@ -573,15 +573,15 @@ This section describes how a reader finds a namespace's current state, determine
 
 ### 4.1 Resolving the metadata basis
 
-A cold read (a read with no cached view) starts by finding the newest manifest. The [manifest boundary](glossary.md#manifest-boundary) (`namespaces/{namespace_id}/boundary.json`) records a manifest number `B` such that every manifest of the namespace numbered `B` or lower is dead: no process publishes a manifest at such a number, and no process treats such a manifest as the namespace's newest. A dead manifest can still exist, because a snapshot keeps it or garbage collection hasn't deleted it yet. A missing boundary object means that `B` is 0. Garbage collection raises the boundary before it deletes manifests (see [One complete collection](#111-one-complete-collection)), and no publisher writes it.
+A cold read (a read with no cached view) starts by finding the newest manifest. The [manifest boundary](glossary.md#manifest-boundary) (`namespaces/{namespace_id}/boundary.json`) records a manifest number `B` such that every manifest of the namespace numbered `B` or lower is dead: no process publishes a manifest at such a number, and no process treats such a manifest as the namespace's newest. A dead manifest can still exist, because a snapshot keeps it or garbage collection hasn't deleted it yet. A missing boundary object means that `B` is 0. The boundary of a [retired](#95-retirement) namespace is in a second state, "retired", which is above every manifest number, so every manifest of a retired namespace is dead. Garbage collection raises the boundary before it deletes manifests (see [One complete collection](#111-one-complete-collection)), and no publisher writes it.
 
 A process that has nothing in memory for the namespace (a cold read, a collection, or a create or fork) finds the newest manifest in these steps:
 
-1. Read the boundary, `b`.
+1. Read the boundary, `b`. If `b` is retired, the namespace is retired, and the find stops.
 2. List the manifests numbered above `b`, with a listing of the manifest prefix that starts after the key of manifest `b`.
-3. If the listing is empty, read the boundary again. If the boundary changed, start again. If it's unchanged and no boundary object exists, no namespace has the ID. If it's unchanged and a boundary object exists, the store is corrupt, because garbage collection never leaves a live namespace without a manifest above its boundary.
+3. If the listing is empty, read the boundary again. If the boundary is retired, the namespace is retired, and the find stops. If the boundary changed, start again. If it's unchanged and no boundary object exists, no namespace has the ID. If it's unchanged and a boundary object exists, the store is corrupt, because garbage collection never leaves a namespace that isn't retired without a manifest above its boundary.
 4. Load the highest-numbered manifest in the listing, `n`. If that manifest is gone, start again.
-5. Read the boundary again. If `n` is at or below the boundary, start again. Otherwise `n` is the newest manifest, and a tombstone at `n` means that the namespace is deleted.
+5. Read the boundary again. If the boundary is retired, the namespace is retired, and the find stops. If `n` is at or below the boundary, start again. Otherwise `n` is the newest manifest, and a tombstone at `n` means that the namespace is deleted.
 
 When step 1 found the boundary object, the second read in step 3 or step 5 is a conditional read with the version that step 1 read, so the store returns no body when the boundary is unchanged (see [Required operations](#31-required-operations)). A find that hasn't returned after `MAX_CONTENTION_ATTEMPTS` (8) attempts fails with `store_contention`.
 
@@ -604,6 +604,7 @@ A publication's successor check applies the same rules to the next number (see [
 | The boundary changed after an empty listing, the highest listed manifest is gone, or the loaded manifest is at or below the boundary | Start again. |
 | A required object is unreadable or invalid | An error, not absence. |
 | The newest manifest is deleted | Ordinary namespace operations return `namespace_deleted`. |
+| A boundary read returns retired | The namespace is retired. Every request except a collection returns `namespace_deleted`. |
 
 Every namespace has its own manifest from the moment it's installed. A new namespace's empty manifest describes the root directory at sequence 0. A fork's first manifest lists the source runs it inherits. Its `fork_basis` records where the fork came from and which fork snapshot keeps its basis, and readers don't follow that field to choose a different basis.
 
@@ -1161,7 +1162,7 @@ If the put loses because the number is taken, the publication finds the manifest
 After a put that succeeds, the publisher reads the manifest boundary. When the basis keeps a boundary, this is a conditional read with the kept version, so the store returns no body when the boundary is unchanged (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). A publication of manifest 1 has no basis, so it sends a plain read. This read follows every put that the publisher counts as its own, including a put with an unknown outcome that a read-back confirmed (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)):
 
 1. If the manifest's number is above the boundary, or no boundary object exists, the publication succeeded.
-2. If the number is at or below the boundary, the put counts as lost, like a put that found the number taken. The publisher doesn't probe above a basis, because the basis is at or below the boundary too. It finds the newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)) and continues as after any lost put.
+2. If the number is at or below the boundary, the put counts as lost, like a put that found the number taken. The publisher doesn't probe above a basis, because the basis is at or below the boundary too. It finds the newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)) and continues as after any lost put. A retired boundary is above every manifest number, so a put that a provider applies after the namespace's [retirement](#95-retirement) counts as lost, the find returns a retired namespace, and the publication returns `namespace_deleted`.
 3. If the boundary read fails, the publication returns `outcome_unknown`, and the caller reloads as after a put whose response was lost.
 
 The boundary read is the publication's last request. For example, suppose a publication on manifest 40 puts manifest 41 after other processes have published manifests 41 to 45, and a collection has deleted manifests 41 to 44 and raised the boundary to 44. The put succeeds at the emptied number, but the boundary read returns 44, so the publication treats its put as lost, finds manifest 45, and builds its next attempt on manifest 45.
@@ -1328,7 +1329,7 @@ This section describes how namespaces are created, forked, deleted, and retired.
 To create a namespace, LoonFS:
 
 1. Builds the first manifest (see [Publishing a manifest](#72-publishing-a-manifest)). For a namespace created without a source, LoonFS generates a pool ID, and the first manifest records that pool ID.
-2. Finds the newest manifest for the new ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). If it finds one, the call writes nothing. An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence.
+2. Finds the newest manifest for the new ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). If it finds one, or finds that the namespace is retired, the call writes nothing. An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone or a retired namespace returns `namespace_deleted`. Corruption and read errors aren't absence.
 3. For a namespace created without a source, writes the pool record (`pools/{pool_id}/pool.json`) with put-if-absent. The record's `created_at_ms` is the create call's request clock. The put follows the rule for a record created under a generated ID (see [Immutable writes and retries](#32-immutable-writes-and-retries)). If the record still isn't stored, the call ends with the error and doesn't write manifest 1. A fork writes no pool record (see [Forking a namespace](#92-forking-a-namespace)).
 4. Publishes manifest 1 with put-if-absent, and after a put that succeeds, reads the [manifest boundary](glossary.md#manifest-boundary), as every manifest publication does (see [Publishing a manifest](#72-publishing-a-manifest)). If the put is refused, or succeeds at or below the boundary, LoonFS finds the newest manifest, and returns `namespace_exists` (or the current summary, with `allow_existing`) or `namespace_deleted`.
 5. For a namespace created without a source, if the manifest 1 put lost to another creation, reloads the namespace's current manifest. If that manifest records another pool, LoonFS deletes the call's own pool record. The call returns the result of step 4 in every case. If the reload or the deletion fails, the pool record stays. A manifest 1 put with an unknown outcome leaves the pool record in place.
@@ -1345,7 +1346,7 @@ Why is the pool record written between the lookup and manifest 1? The record is 
 
 A fork starts its own history from the source's retained metadata. To create one, LoonFS:
 
-1. Finds the newest manifest for the target's ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). If it finds one, the fork writes nothing, and returns `namespace_exists`, or `namespace_deleted` for a tombstone, as a create does.
+1. Finds the newest manifest for the target's ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). If it finds one, or finds that the namespace is retired, the fork writes nothing, and returns `namespace_exists`, or `namespace_deleted` for a tombstone or a retired namespace, as a create does.
 2. Creates a verified fork snapshot whose owner is the target namespace, either from the source's head or from an unexpired user snapshot (see [Creating and verifying a snapshot](#82-creating-and-verifying-a-snapshot)). The put of manifest 1 in step 5, with the boundary read after it, decides whether the fork creates the target (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
 3. Loads and verifies the snapshot's manifest.
 4. Copies these values from the snapshot's manifest: its run references, folded head sequence, next run number, access configuration, pool, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor is the folded head sequence of the snapshot's manifest (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the reference to the snapshot's manifest and the fork snapshot's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
@@ -1381,7 +1382,9 @@ An ordinary operation that finds the namespace deleted returns `namespace_delete
 
 ### 9.5 Retirement
 
-"Retirement" is the point at which a deleted namespace stops being a member of its [pool](glossary.md#pool), and garbage collection deletes the namespace's fork snapshot on its source if the namespace is a fork. After retirement, the namespace's content references don't protect the pool's content. No retirement deadline is stored, and garbage collection publishes no manifest. A deleted namespace is retired the grace window (24 hours) after its deletion, so for a namespace tombstone `T`, the deadline is derived as:
+"Retirement" is the point at which a deleted namespace stops being a member of its [pool](glossary.md#pool). Garbage collection retires a namespace by raising its [manifest boundary](glossary.md#manifest-boundary) to the retired state. After that, the namespace has no roots, its content references don't protect the pool's content, and later collections delete every recognized object under the namespace's prefix except the boundary object.
+
+No retirement deadline is stored. A deleted namespace can be retired the grace window (24 hours) after its deletion, so for a namespace tombstone `T`, the deadline is derived as:
 
 ```text
 deadline(T) = T.deleted_at_ms + GC_GRACE_WINDOW_MS
@@ -1389,19 +1392,38 @@ deadline(T) = T.deleted_at_ms + GC_GRACE_WINDOW_MS
 
 A tombstone is eligible for retirement when the collection's clock reaches its retirement deadline and the complete snapshot listing contains no snapshot on the namespace. Snapshots deleted later in the same collection still count, and any unrecognized key under the snapshot prefix also blocks retirement.
 
-An eligible tombstone's fork snapshot is deleted (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)). A namespace created without a source has no fork snapshot, so its retirement deletes nothing. No retirement deletes content. The objects that a retired member wrote stay while another member's view refers to them, and after that the pool's collection deletes them under the age rules (see [Content roots](#119-content-roots)).
+To retire a namespace whose tombstone is eligible, the namespace's collection:
+
+1. If the namespace is a fork, deletes the fork snapshot on its source that the tombstone's fork basis refers to.
+2. Raises the boundary to retired.
+
+A namespace created without a source has no fork snapshot, so its retirement starts at step 2. A collection that stops after step 1 starts again at step 1, because deleting a missing snapshot succeeds. [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone) describes both steps in a collection.
+
+After step 2, every manifest (the tombstone included), WAL object, metadata segment, extension segment, and snapshot record under the namespace's prefix is a candidate for deletion. Later collections of the namespace delete each one under the ordinary age rules, in any order, including an object that a provider writes under the prefix after the retirement (see [Candidate and age rules](#113-candidate-and-age-rules)). A collection keeps the boundary object (`boundary.json`) and every unrecognized key. A retired namespace that garbage collection has cleaned up stores one object, its boundary.
+
+A request to a retired namespace returns `namespace_deleted`, as it does while the tombstone is the namespace's newest manifest, and so does a create or fork that uses the retired ID, which writes nothing. A collection of a retired namespace is the exception, and it returns an ordinary response (see [One complete collection](#111-one-complete-collection)). A manifest put that a provider applies after the retirement is at or below the retired boundary, so its publisher counts the put as lost and returns `namespace_deleted`, and no reader takes that manifest as the newest (see [Publishing a manifest](#72-publishing-a-manifest)).
+
+For example, `sandbox`, a fork of `main`, writes its last segments at 09:50 on Monday and is deleted at 10:00. With the 24-hour grace window, its tombstone is eligible at 10:00 on Tuesday. A collection at 03:00 on Wednesday deletes `sandbox`'s fork snapshot on `main` and raises `sandbox`'s boundary to retired. The next collection of `sandbox` finds the retired boundary and deletes the tombstone, the other manifests, and the segments, which are all more than 24 hours old. Later collections of `sandbox` read its boundary and find nothing else under the prefix.
+
+The objects that a retired member wrote under the pool's prefix stay while another member's view refers to them, and after that the pool's collection deletes them under the age rules (see [Content roots](#119-content-roots)). The pool's collection treats a deleted member as a member until the member's own collection raises its boundary to retired, so a deleted member's content is deleted up to one collection of the namespace later than its tombstone's deadline.
 
 Each fork keeps a fork snapshot on its source, and a tombstone can't be retired while a snapshot is on it, so a pool's first member is retired after every other member. Once the first member is retired, the pool has no members, and no root protects any of its content. Each later collection of the pool deletes its content objects and temporary objects under the age rule, and deletes its upload records under the rules in [Upload-session cleanup](#116-upload-session-cleanup). The pool keeps its pool record (see [Content roots](#119-content-roots)).
+
+Why is the fork snapshot deleted before the boundary is raised? The tombstone's fork basis is the record of which snapshot to delete, and the tombstone stays until the boundary is retired. If the boundary were raised first and the collection stopped, a later collection could delete the tombstone under the age rules, and the fork snapshot would stay on the source until the source's snapshot cleanup deleted it (see [Snapshot cleanup](#117-snapshot-cleanup)).
+
+Why is the boundary raised to retired, and not to the tombstone's number? Garbage collection never leaves a namespace that isn't retired without a manifest above its boundary, so a reader that found no manifest above a boundary at the tombstone's number would report a corrupt store.
+
+Why is the boundary object kept? It's the record that the ID was used. A create or fork that uses the ID, and a publisher whose manifest put is applied late, find the retired boundary when they read it.
 
 Why doesn't the first member's retirement delete the pool's content in one step? Once the pool has no members, the ordinary age rule already deletes the pool's content, upload records, and temporary objects, so a separate rule would be a second way to delete content.
 
 ### 9.6 Fork dependencies after deletion
 
-A fork snapshot is required until its target is retired. While the target's current manifest (active or deleted) refers to the snapshot, garbage collection in the source keeps it (see [Snapshot cleanup](#117-snapshot-cleanup)). Retiring the target deletes the snapshot (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)), even though the target's tombstone is still its current manifest and still refers to the snapshot. Rewriting a target's metadata doesn't copy or move inherited file bytes, because every member of a pool finds them under the pool's prefix.
+A fork snapshot is required until its target is retired. While the target's current manifest (active or deleted) refers to the snapshot, garbage collection in the source keeps it (see [Snapshot cleanup](#117-snapshot-cleanup)). Retiring the target deletes the snapshot before it raises the target's boundary to retired (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)), while the target's tombstone is still its current manifest and still refers to the snapshot. Rewriting a target's metadata doesn't copy or move inherited file bytes, because every member of a pool finds them under the pool's prefix.
 
 For example, suppose B is a fork of A, and C is a fork of B. C's fork snapshot on B prevents B from being retired, and B's fork snapshot on A stays until B is retired. Retiring C deletes C's fork snapshot on B. B can then be retired once its deadline and snapshot checks pass, which deletes its fork snapshot on A.
 
-Snapshots are deleted from descendants to ancestors. If deleting a fork snapshot fails, the target's tombstone is still available for another collection.
+Snapshots are deleted from descendants to ancestors. If deleting a fork snapshot fails, the target's boundary isn't raised, so the target's tombstone is still available for another collection.
 
 ### 9.7 Cross-namespace copies and moves
 
@@ -1637,7 +1659,7 @@ An object can't be deleted as soon as nothing references it, because a publisher
 
 LoonFS runs two kinds of collection, and each one is a job of its own:
 
-- A namespace's collection deletes the namespace's unreferenced manifests, WAL objects, metadata and extension segments, and snapshots, and it retires the namespace when its tombstone is eligible (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)). It makes no request under `pools/`.
+- A namespace's collection deletes the namespace's unreferenced manifests, WAL objects, metadata and extension segments, and snapshots, and it retires the namespace when its tombstone is eligible (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)). In a retired namespace, it deletes every recognized object under the namespace's prefix except the boundary object. It makes no request under `pools/`.
 - A [pool's](glossary.md#pool) collection deletes the pool's unreferenced content objects, upload records, and temporary objects, with roots gathered from every member (see [Content roots](#119-content-roots)).
 
 A namespace's collection first establishes the roots. It:
@@ -1648,6 +1670,8 @@ A namespace's collection first establishes the roots. It:
 4. Records the protected manifests and segments.
 
 If the namespace's current manifest is invalid or unreadable, the collection stops before anything is deleted. An absent namespace has nothing for core garbage collection to delete.
+
+If step 1 finds that the namespace is [retired](#95-retirement), the namespace has no roots, and the collection reads no manifest, WAL object, or snapshot record. It makes one listing, of the namespace's prefix (`namespaces/{namespace_id}/`), because no root has to be read before an object under a retired prefix is deleted. It deletes each manifest, WAL object, metadata segment, extension segment, and snapshot record whose listed provider age meets the rule for its family in [Candidate and age rules](#113-candidate-and-age-rules). It keeps the boundary object and every unrecognized key. It raises no boundary, deletes no fork snapshot, and returns an ordinary response that reports what it deleted, not `namespace_deleted`. For example, the first collection after a namespace's retirement deletes the tombstone, the other manifests, and the segments, which are all more than 24 hours old. If a provider applies a late manifest put under the prefix after that collection, a collection that runs once the manifest is more than 24 hours old deletes it.
 
 A pool's collection reads the pool record, lists the pool's upload sessions, and then reads the roots of every member, starting from the pool's first member (see [Content roots](#119-content-roots)). If one member's roots can't be read, or the collection doesn't read every member's roots in time, the collection deletes no content objects, and the rest of the collection continues. Other pools are unaffected.
 
@@ -1662,7 +1686,7 @@ Every age decision in a collection uses the same `now_ms`, captured when the col
 | Evidence captured for the collection | Objects protected |
 | --- | --- |
 | The current active manifest | The manifest, and every segment it lists. |
-| The current deleted manifest (the namespace tombstone) | The tombstone, and every segment it lists. |
+| The current deleted manifest (the namespace tombstone), until the namespace is retired | The tombstone, and every segment it lists. |
 | Every recognized snapshot key in the complete listing | The manifest numbered in its ID, and every segment in that manifest. |
 | The number of the newest manifest that the collection found | Every manifest numbered above it, because other processes can publish manifests after the collection's find. (This root doesn't protect their runs.) |
 | The current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
@@ -1673,7 +1697,7 @@ Snapshot bodies aren't needed to identify these roots, because the manifest numb
 
 A manifest below the newest manifest that the collection found isn't a root unless a snapshot keeps it, however recently the newer manifest was published.
 
-The tombstone keeps its runs, so a deleted namespace's references protect its content until retirement. Retirement doesn't read those segments (see [Retirement](#95-retirement)). Content objects have their own roots (see [Content roots](#119-content-roots)).
+The tombstone keeps its runs, so a deleted namespace's references protect its content until retirement. Retirement doesn't read those segments (see [Retirement](#95-retirement)). A retired namespace has no roots. Its boundary is above every manifest number, so none of its manifests is current, and its snapshot records are candidates like its other objects. Content objects have their own roots (see [Content roots](#119-content-roots)).
 
 A retention floor can move past the folded head sequence of a manifest that a snapshot keeps, and that doesn't remove the snapshot's protection. Reads through the snapshot use the runs of the snapshot's manifest directly.
 
@@ -1686,16 +1710,18 @@ Being unreferenced makes an object a candidate for deletion, but it doesn't make
 | Family | Conditions for deletion |
 | --- | --- |
 | Namespace manifest | Below the newest manifest that the collection found, not a root (see [Reference roots](#112-reference-roots)), and a provider age of at least `T`. |
+| Namespace manifest in a retired namespace | A provider age of at least `T` (the tombstone included). |
 | WAL object in an active namespace | At or below `folded_wal_no`, and a provider age of at least `T`. |
-| WAL object in a deleted namespace | A provider age of at least `T` (no current WAL object is protected). |
+| WAL object in a deleted or retired namespace | A provider age of at least `T` (no current WAL object is protected). |
 | Metadata or extension segment | No root lists it, and its provider age is strictly greater than `T`. |
 | Snapshot record | The owner-specific rules in [Snapshot cleanup](#117-snapshot-cleanup). |
+| Snapshot record in a retired namespace | A provider age of at least `T`, whatever its owner. |
 | Upload session | The status-specific rules in [Upload-session cleanup](#116-upload-session-cleanup). |
 | Content object under a pool's prefix | No extent filter of a layout segment in the members' layout views may contain its name, no tail or session root of the pool's members refers to its chain (see [Content roots](#119-content-roots)), and a provider age of at least `T`. |
 | Temporary object | A provider age of at least `T`. |
 | Pool record | The pool has no members because its create call failed, and the record's creation grace has passed (see [Content roots](#119-content-roots)). |
 
-The manifest boundary and the current manifest are never deleted. Core garbage collection keeps unrecognized keys. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
+The manifest boundary is never deleted, and neither is the current manifest of a namespace that isn't retired. A retired namespace has no current manifest, so its tombstone is deleted under the age rule like its other manifests. Core garbage collection keeps unrecognized keys. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
 
 For example, suppose a collector finds manifest 10 as the newest, and no snapshot keeps manifest 8 or 9. It keeps manifest 10 and every higher number, and it keeps the segments in manifest 10 and in any manifest that a snapshot keeps. Manifests 8 and 9 are deleted once their provider age is at least `T`. A segment that only manifest 8 or 9 lists is a candidate, even if manifest 10 was published a moment ago, but it still has to be strictly older than `T` before it's deleted.
 
@@ -1736,15 +1762,15 @@ A failed read of a required root stops garbage collection, and an uncertain read
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. The records are stored under the pool's prefix, so the pool's collection covers the sessions of every member, and a namespace's collection covers none. A session's namespace is the one recorded in its session record. Retirement of that namespace (see [Retirement](#95-retirement)) takes precedence over the session status rules. The pool's collection decides a namespace's retirement from the members that its walk read (see [Content roots](#119-content-roots)). A namespace that a complete walk didn't find is retired, and a session whose namespace the collection can't decide is kept. [Content roots](#119-content-roots) defines when a pool's content is deleted.
+Uploads are collected through their session records. The records are stored under the pool's prefix, so the pool's collection covers the sessions of every member, and a namespace's collection covers none. A session's namespace is the one recorded in its session record. Retirement of that namespace (see [Retirement](#95-retirement)) takes precedence over the session status rules. A deleted namespace is a member of the pool until its own collection raises its boundary to retired, and the pool's collection doesn't decide for itself that a tombstone is eligible. A namespace whose boundary is retired, or that a complete walk didn't find, is retired, and a session whose namespace the collection can't decide is kept (see [Content roots](#119-content-roots)). [Content roots](#119-content-roots) defines when a pool's content is deleted.
 
 | Session and namespace | Action |
 | --- | --- |
 | Open session | Keep it until its expiry plus `T`, then create its aborted outcome record, and clean up its content and provider transfer state. If the session already has an outcome record, keep the session. |
 | Aborted session | Retry content and provider cleanup, and delete its records after its abort time plus `T`. |
 | Completed session in an active namespace | Keep it until the completed-content grace passes, then delete its records. Its content follows [Content roots](#119-content-roots). |
-| Session in a deleted namespace that isn't eligible for retirement | Keep it, and report a future retirement deadline, if there is one. |
-| Completed session in an eligible deleted namespace | Delete its records (no extra completion grace is required). Its content follows [Content roots](#119-content-roots). |
+| Session in a deleted namespace that isn't retired | Keep it, and report a future retirement deadline, if there is one. |
+| Completed session in a retired namespace | Delete its records (no extra completion grace is required). Its content follows [Content roots](#119-content-roots). |
 | An outcome record without its session record | Delete it once its provider age is at least `T`. |
 
 Garbage collection deletes a session's records in order: the session record first, and then the outcome record. If a collection stops between the two deletes, the outcome record is left without its session record, and a later collection deletes it without acting on the session's content. A completion or abort that creates an outcome record after the session's records were deleted also leaves an outcome record without its session record (see [Upload sessions](#51-upload-sessions)).
@@ -1753,7 +1779,7 @@ An outcome record without its session record is deleted only once its provider a
 
 An outcome key sorts directly after its session key (see [Object keys](#a8-object-keys)), so one listing of the uploads prefix shows which sessions have ended, without a read for each session.
 
-Before completion, a session exclusively owns its random content ID, and it can't issue admission evidence. In active namespaces and eligible tombstones, cleanup first creates the aborted outcome record, and then it removes the content and any provider transfer. Cleanup keeps an aborted session's records until its abort time plus `T`. So when a streamed write that passed its final check before the abort finishes, the session's records still exist, and a later cleanup attempt can remove the object that the write created. A failed cleanup leaves the records for another attempt. Open and aborted sessions still need provider cleanup after the namespace is retired, because provider upload state can exist outside object listings.
+Before completion, a session exclusively owns its random content ID, and it can't issue admission evidence. In active and retired namespaces, cleanup first creates the aborted outcome record, and then it removes the content and any provider transfer. Cleanup keeps an aborted session's records until its abort time plus `T`. So when a streamed write that passed its final check before the abort finishes, the session's records still exist, and a later cleanup attempt can remove the object that the write created. A failed cleanup leaves the records for another attempt. Open and aborted sessions still need provider cleanup after the namespace is retired, because provider upload state can exist outside object listings.
 
 Cleanup runs in the pool's collection, so it derives every content key and provider cleanup target from the pool's ID and the content ID that the session record stores.
 
@@ -1794,24 +1820,29 @@ A fork snapshot is cleaned up based on its target namespace:
 | Condition | Decision |
 | --- | --- |
 | The snapshot is inside its creation grace (less than `T` after its `created_at_ms`), the target's current fork basis refers to this snapshot with the same manifest reference, or a read of the target's store fails | Keep the snapshot, including when the target is deleted. |
-| The target is absent, or its fork basis doesn't refer to this snapshot | Delete the snapshot of the abandoned installation. |
+| The target is absent, the target is retired, or its fork basis doesn't refer to this snapshot | Delete the snapshot. (An absent target or a basis that refers to another snapshot means an abandoned installation.) |
 | The target's current fork basis refers to this snapshot with a different manifest reference | Fail with `namespace_corrupt`. |
 
-The source finds the target's newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), with one listing of the target's manifests above its boundary, and it reads no target WAL objects. [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone) defines when a fork snapshot is deleted.
+The source finds the target's newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), with one listing of the target's manifests above its boundary, and it reads no target WAL objects. A target whose boundary is retired has no roots, so the source deletes its fork snapshot, as for a target that has no manifest. The fork snapshot's creation grace applies in both cases. [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone) defines when the target's own collection deletes a fork snapshot.
 
-The pool's collection finds each [member](glossary.md#pool) of the pool through the fork snapshot on the member's source (see [Content roots](#119-content-roots)). That snapshot stays until the member is retired, so the member's content references protect content until then.
+The pool's collection finds each [member](glossary.md#pool) of the pool through the fork snapshot on the member's source (see [Content roots](#119-content-roots)). That snapshot stays until the member's own collection retires the member, so the member's content references protect content until then.
 
 A candidate snapshot that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, garbage collection applies the snapshot owner's rules, including a fork snapshot's creation grace.
 
 ### 11.8 Retiring an eligible tombstone
 
-After it sweeps its candidate families, a namespace's collection retires a tombstone that's eligible for retirement (see [Retirement](#95-retirement)). It deletes the fork snapshot that the tombstone's fork basis refers to, and counts the snapshot in `deleted_snapshots_by_owner.fork` only if the snapshot was present. A namespace created without a source has no fork snapshot, so its retirement deletes nothing.
+After it sweeps its candidate families, a namespace's collection retires the namespace if its tombstone is eligible for retirement (see [Retirement](#95-retirement)). The collection:
+
+1. If the tombstone's fork basis refers to a fork snapshot, deletes that snapshot from the source, and counts it in `deleted_snapshots_by_owner.fork` only if the snapshot was present. A namespace created without a source has no fork snapshot, so this step deletes nothing.
+2. Raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired. If the boundary object is missing, the collection creates it with put-if-absent, and otherwise it writes the retired state with a compare-and-swap. After a lost write, it loads the boundary again and tries again. A boundary that's already retired needs no write.
+
+If step 1 or step 2 fails, the collection fails, and the tombstone stays the newest manifest. A later collection finds the same eligible tombstone and starts again at step 1. A fork snapshot that's already gone counts nothing, so both steps can run any number of times. Retained roots follow [Reference roots](#112-reference-roots), and no progress record or journal is stored.
+
+Later collections of the namespace find the retired boundary, and they delete the tombstone, the other manifests, the WAL objects, the segments, and the snapshot records under the age rules, and keep the boundary object (see [One complete collection](#111-one-complete-collection) and [Candidate and age rules](#113-candidate-and-age-rules)). For example, if a collection retires a namespace whose tombstone is a day and a half old, the next collection of the namespace deletes the tombstone and the segments that the tombstone lists.
 
 No retirement deletes content. A retired namespace isn't a [member](glossary.md#pool) of its pool, so its content references don't protect the pool's content, and the pool's collection deletes the content that no other member refers to under [Content roots](#119-content-roots).
 
 [File contents and ownership](#15-file-contents-and-ownership) defines where content is stored. A deleted namespace refuses requests for presigned upload URLs and upload completion, and the grace window that comes before its retirement is longer than the lifetime of any issued presigned URL.
-
-Fork-snapshot cleanup is idempotent. A later collection that retires the same tombstone finds the snapshot gone, and it counts nothing. Retained roots follow [Reference roots](#112-reference-roots), and no progress record or journal is stored.
 
 ### 11.9 Content roots
 
@@ -1827,21 +1858,21 @@ Garbage collection considers every other content object under the pool's content
 
 The pool record identifies the pool's first member (`first_member_namespace_id`). The members of the pool are the first member and every namespace forked from a member. The collection finds them by walking fork snapshots. The first member's fork snapshots identify its first-generation forks, and a fork of a fork keeps its fork snapshot on the fork it was created from, not the first member. So the collection lists the snapshots of each member in turn. Each fork snapshot in a listing adds the snapshot's target (`owner.target_namespace_id`) to the members, and the walk ends when a listing adds no new member. The collection lists each member's snapshots once, and that listing also finds the manifests that the member's snapshots keep.
 
-A member's content references count as roots until the member is retired. A deleted member's tombstone keeps its runs, and only the member's own collection deletes the member's fork snapshot, when it retires the member (see [Snapshot cleanup](#117-snapshot-cleanup)). So until the member is retired, the walk finds the member, and the collection reads the tombstone as one of the member's layout views. Retirement comes the grace window after the deletion (see [Retirement](#95-retirement)). The collection reads each member once, and it MUST read the roots of every member within 12 hours (`POOL_ROOTS_READ_BUDGET_MS`), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then deletes no content objects, and it reports `content_deletion_pool_budget` as skipped work.
+A member's content references count as roots until the member is retired, which is when the member's own collection raises the member's boundary to retired (see [Retirement](#95-retirement)). The pool's collection doesn't decide for itself that a tombstone is eligible for retirement. It reads a deleted member like any other member. The tombstone is one of the member's layout views, its layout segments are roots, and the collection reads the member's snapshots. Only the member's own collection deletes the member's fork snapshot, when it retires the member (see [Snapshot cleanup](#117-snapshot-cleanup)), so until then the walk finds the member. A member whose boundary is retired has no roots and no forks, like a fork snapshot's target that has no manifest. Retirement comes no earlier than the grace window after the deletion, so a deleted member's content is deleted up to one collection of the member later than its tombstone's retirement deadline. The collection reads each member once, and it MUST read the roots of every member within 12 hours (`POOL_ROOTS_READ_BUDGET_MS`), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then deletes no content objects, and it reports `content_deletion_pool_budget` as skipped work.
 
-The collection skips a fork snapshot whose target has no manifest (an installation that hasn't finished or that failed, as [Snapshot cleanup](#117-snapshot-cleanup) describes). When the collection finds the snapshot, such a target has no WAL tail or views of its own. The snapshot keeps the source manifest that the target reads through, and an object that the target writes after the collection starts is younger than `T` for the collection. If one member's roots can't be read (the first member included, and including a member whose current manifest records another pool), the collection deletes no content objects, and it reports `content_deletion_unreadable_member` as skipped work. In both cases (the time limit and an unreadable member), the collection still lists the content prefix once to measure `listed_bytes`, and the rest of the collection continues. Other pools are unaffected.
+The collection skips a fork snapshot whose target is retired, and a fork snapshot whose target has no manifest (an installation that hasn't finished or that failed, as [Snapshot cleanup](#117-snapshot-cleanup) describes). When the collection finds the snapshot, such a target has no WAL tail or views of its own. The snapshot keeps the source manifest that the target reads through, and an object that the target writes after the collection starts is younger than `T` for the collection. If one member's roots can't be read (the first member included, and including a member whose current manifest records another pool), the collection deletes no content objects, and it reports `content_deletion_unreadable_member` as skipped work. In both cases (the time limit and an unreadable member), the collection still lists the content prefix once to measure `listed_bytes`, and the rest of the collection continues. Other pools are unaffected.
 
 A pool has no members in two cases:
 
-- **Retired first member.** The first member is eligible for retirement (its tombstone's retirement deadline has passed by the collection's clock, and its snapshot listing has no key). Each fork keeps a fork snapshot on its source, so every other member is already retired. The first member contributes no roots, so no root protects the pool's content, and the collection deletes the pool's content objects and temporary objects under the age rule. A completed session's record protects its content in the collection that deletes the record, so a later collection deletes that content. The pool keeps its pool record, and each later collection finds no member roots and applies the same rules.
-- **Failed create.** The first member has no current manifest, or its current manifest records another pool, because the pool's create call failed or lost to another create call for the same namespace ID (see [Creating a namespace](#91-creating-a-namespace)). The pool record's "creation grace" lasts until the collection's clock reaches the record's `created_at_ms` plus `T`. Inside the creation grace, the collection deletes nothing and reports the end of the creation grace in `next_reclamation_at_ms`. After the creation grace, the collection deletes the pool record, makes no listing, and returns. The result doesn't report the deleted pool record.
+- **Retired first member.** The first member's boundary is retired. Each fork keeps a fork snapshot on its source, and a tombstone can't be retired while a snapshot is on it, so every other member is already retired. The first member contributes no roots, so no root protects the pool's content, and the collection deletes the pool's content objects and temporary objects under the age rule. A completed session's record protects its content in the collection that deletes the record, so a later collection deletes that content. The pool keeps its pool record, and each later collection finds no member roots and applies the same rules.
+- **Failed create.** The first member has no current manifest and isn't retired, or its current manifest records another pool, because the pool's create call failed or lost to another create call for the same namespace ID (see [Creating a namespace](#91-creating-a-namespace)). The pool record's "creation grace" lasts until the collection's clock reaches the record's `created_at_ms` plus `T`. Inside the creation grace, the collection deletes nothing and reports the end of the creation grace in `next_reclamation_at_ms`. After the creation grace, the collection deletes the pool record, makes no listing, and returns. The result doesn't report the deleted pool record.
 
 For example, suppose that `main` was created with `pool_3s0drmj8em84yb4mnetqkz2j0x`, `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, and all three are deleted. `trial` is retired first, which deletes its fork snapshot on `sandbox`, and then `sandbox` is retired, which deletes its fork snapshot on `main`. Once `main` is retired, a collection of the pool finds no member roots. It deletes every content object and temporary object whose provider age is at least `T`, deletes the pool's upload records under the rules in [Upload-session cleanup](#116-upload-session-cleanup), and keeps the pool record.
 
 A pool's collection works in these steps:
 
 1. Reads the pool record. If the record is missing, the collection returns `pool_not_found` and deletes nothing.
-2. Reads the current manifest of the pool's first member. If the pool has no members because its create call failed, the collection applies the creation grace rule above and stops.
+2. Finds the newest manifest of the pool's first member. If the pool has no members because its create call failed, the collection applies the creation grace rule above and stops. If the first member is retired, the pool has no member roots, and the collection continues with no members.
 3. Lists the pool's upload sessions, before it reads any member's WAL tail.
 4. Reads the roots of every member, and finds each fork in the snapshot listing of the member it was forked from.
 5. Lists each layout segment of the members' layout views once, however many views list it. A fork's inherited segments are its source's, so the distinct segments are the first member's and each other member's own.
@@ -2110,7 +2141,12 @@ Snapshot owners have the fields in [Records and owners](#81-records-and-owners),
 
 Both upload records are stored under the prefix of the pool of the namespace that created the session (see [Object keys](#a8-object-keys)), and their `namespace_id` is that namespace.
 
-A manifest boundary is stored under the prefix of its namespace, and its `namespace_id` MUST match the key. Its `boundary` is `{"kind":"manifest"}` with a required `manifest_no` of at least 1, as in `{"kind":"manifest","manifest_no":44}`. A missing boundary object means that no manifest of the namespace is at or below the boundary.
+A manifest boundary is stored under the prefix of its namespace, and its `namespace_id` MUST match the key. Its `boundary` is one of two tagged variants:
+
+- `manifest`: a required `manifest_no` of at least 1, as in `{"kind":"manifest","manifest_no":44}`. Every manifest numbered `manifest_no` or lower is dead.
+- `retired`: no other fields, as in `{"kind":"retired"}`. The namespace is [retired](#95-retirement), and every manifest of the namespace is dead. A retired boundary never changes to another value.
+
+A missing boundary object means that no manifest of the namespace is at or below the boundary.
 
 A pool record is stored under the prefix of its pool, and its `pool_id` MUST match the key. Its `first_member_namespace_id` is the namespace that was created with the pool, and its `created_at_ms` is that create call's request clock (see [Creating a namespace](#91-creating-a-namespace)).
 
@@ -2634,7 +2670,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `GC_SAFETY_MARGIN_MS` | 300,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
 | `PUBLICATION_COMPLETION_BOUND_MS` | 1,500,000 | The publication completion bound: the longest publication budget, plus the provider's request bound, plus the combined allowance. |
 | `READ_REVALIDATION_BOUND_MS` | 1,200,000 | The largest maximum staleness that a read can ask for, the largest manifest check interval that an operator can set, and the age of a cached view's last manifest check at which an `eventual` read stops using the view without a request. It doesn't limit the age of a publication's basis or of a writer position. |
-| `GC_GRACE_WINDOW_MS` | 86,400,000 | The grace window that every collection uses. An unreferenced segment MUST be strictly older than this before it's deleted, a deleted namespace is retired this long after its deletion, and a retention advance doesn't move the floor past a younger commit. |
+| `GC_GRACE_WINDOW_MS` | 86,400,000 | The grace window that every collection uses. An unreferenced segment MUST be strictly older than this before it's deleted, a deleted namespace's tombstone is eligible for retirement this long after its deletion, and a retention advance doesn't move the floor past a younger commit. |
 | `METADATA_COMPACTION_BUDGET_MS` | 43,200,000 | The longest time before a compaction starts its publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a presigned download URL and of a presigned URL for a whole-object upload. A presigned URL for one part of a multipart upload lasts one hour. |
 | `OPERATION_SNAPSHOT_TTL_MS` | 300,000 | The lifetime of a snapshot that LoonFS takes for one of its own operations (the snapshot of the fork that a merge or a rebase plans from), and of the content proofs of the operation's plan. |

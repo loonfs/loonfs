@@ -1123,6 +1123,14 @@ fn control_objects_match_golden_bytes() {
             },
         },
     );
+    check_control_golden(
+        "control_boundary_retired.v1.json",
+        ControlObjectKind::Boundary,
+        BoundaryPayload {
+            namespace_id: namespace_id(),
+            boundary: ManifestBoundary::Retired {},
+        },
+    );
 }
 
 #[test]
@@ -1133,6 +1141,7 @@ fn every_durable_status_is_a_kind_tagged_object() {
         ("control_upload_outcome_completed.v1.json", "outcome"),
         ("control_upload_outcome_aborted.v1.json", "outcome"),
         ("control_boundary.v1.json", "boundary"),
+        ("control_boundary_retired.v1.json", "boundary"),
     ];
     for (fixture, field) in fixtures {
         let document: serde_json::Value =

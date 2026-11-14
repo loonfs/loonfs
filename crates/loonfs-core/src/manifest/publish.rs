@@ -5,7 +5,7 @@ use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::published::{PublicationReport, PublishedManifest};
 use crate::namespace::basis::PublicationBasis;
 use crate::namespace::boundary::LoadedBoundary;
-use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest, NewestManifest};
 use crate::namespace::store::NamespaceStore;
 use crate::phase::Phase;
 use crate::segment::runs::runs_newest_first;
@@ -233,13 +233,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.load_current_basis().await
     }
 
-    /// Returns `namespace_exists`, or `namespace_deleted` for a tombstone,
-    /// when the namespace's newest manifest exists, so that a create or fork
+    /// Returns `namespace_exists`, or `namespace_deleted` for a tombstone or
+    /// a retired namespace, when the ID is taken, so that a create or fork
     /// for a taken ID writes nothing (format spec, "Creating a namespace").
     pub(crate) async fn ensure_namespace_absent(&self) -> Result<()> {
-        match self.load_current_manifest_if_present().await? {
-            Some(current) => Err(existing_namespace(self.namespace_id.clone(), &current)),
-            None => Ok(()),
+        match self.find_newest_manifest().await? {
+            NewestManifest::Absent => Ok(()),
+            NewestManifest::Retired => Err(self.namespace_deleted()),
+            NewestManifest::Manifest(current) => Err(existing_namespace(
+                self.namespace_id.clone(),
+                &current.manifest,
+            )),
         }
     }
 
@@ -531,17 +535,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
         confirm_authorship: bool,
     ) -> Result<ManifestKind> {
         let current = match basis {
-            Some(basis) => Some(self.find_current_above(basis).await?),
-            None => self.find_newest_manifest().await?,
+            Some(basis) => self.find_current_above(basis).await?,
+            None => match self.find_newest_manifest().await? {
+                NewestManifest::Absent => return Ok(ManifestKind::Installable),
+                NewestManifest::Retired => return Err(self.namespace_deleted()),
+                NewestManifest::Manifest(current) => current,
+            },
         };
-        Ok(current.map_or(ManifestKind::Installable, |current| {
-            classify_current(
-                &current,
-                candidate,
-                expected_predecessor,
-                confirm_authorship,
-            )
-        }))
+        Ok(classify_current(
+            &current,
+            candidate,
+            expected_predecessor,
+            confirm_authorship,
+        ))
     }
 }
 

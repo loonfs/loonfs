@@ -143,10 +143,11 @@ pub(crate) struct StepRetry {
 ///
 /// A sweep runs at start and then every `sweep_interval_ms`, beside the
 /// session steps. It covers namespaces without held sessions and garbage
-/// still inside its grace window. It runs every step of every namespace that
-/// it lists, and it doesn't wait for a held entry's retry times. A namespace
-/// without a held entry keeps no retry state, because the next sweep is its
-/// retry.
+/// still inside its grace window. It runs the steps of every namespace that it
+/// lists, and it doesn't wait for a held entry's retry times. A namespace
+/// whose metadata call returns `namespace_deleted` or `namespace_not_found`
+/// gets only its collection. A namespace without a held entry keeps no retry
+/// state, because the next sweep is its retry.
 ///
 /// A sweep also advances each active namespace's retention floor to the last
 /// commit at or before the current time minus the namespace's retention

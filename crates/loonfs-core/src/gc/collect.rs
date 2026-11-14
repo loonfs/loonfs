@@ -5,11 +5,12 @@ use super::charged_set::{ChargedQueue, CollectionMemory};
 use super::deletes::{apply_decisions, CollectionReport, Decision};
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
-use super::sweep::Sweep;
+use super::sweep::{retired_candidate, Sweep};
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use futures::{stream, Stream, StreamExt, TryStreamExt};
+use futures::{future, stream, Stream, StreamExt, TryStreamExt};
+use loonfs_objectstore::keys::{boundary, namespace_prefix};
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{GcResponse, ManifestNo};
@@ -20,12 +21,33 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// extension segments, and snapshots, and retires the namespace when its
     /// tombstone is eligible.
     ///
+    /// A retired namespace has no roots, so the collection reads no manifest
+    /// and makes one listing of the namespace's prefix. It deletes every
+    /// manifest, WAL object, segment, and snapshot record there once the
+    /// object is old enough, and keeps the boundary object.
+    ///
     /// The collection lists nothing under its pool's prefix. The pool's own
     /// collection collects the content objects, upload records, and temporary
     /// objects there (see [`crate::PoolStore::gc`]).
     pub async fn gc(&self, clock: &OperationClock) -> Result<GcResponse> {
         let mut report = GcResponse::empty(self.namespace_id.clone());
-        let mut live = LiveSet::load(self, clock).await?;
+        let Some(mut live) = LiveSet::load(self, clock).await? else {
+            let prefix = namespace_prefix(&self.namespace_id);
+            let boundary_key = boundary(&self.namespace_id);
+            let mut listed_bytes = 0;
+            let decisions = self
+                .store
+                .list_entries_from_stream(&prefix, None)
+                .map_err(|error| CoreError::store(&prefix, &error))
+                // The boundary object is not a candidate. The listings of a
+                // namespace with roots don't return it either.
+                .try_filter(|entry| future::ready(entry.key != boundary_key))
+                .map_ok(|entry| retired_candidate(entry, clock.request_at_ms(), &mut listed_bytes))
+                .boxed();
+            apply_decisions(&self.store, decisions, &mut report).await?;
+            report.listed_bytes += listed_bytes;
+            return Ok(report);
+        };
         report.retires_at_ms = live
             .current_tombstone
             .as_ref()

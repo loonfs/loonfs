@@ -1310,9 +1310,12 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
 }
 
 #[tokio::test]
-async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
+async fn gc_preserves_unfolded_data_then_empties_the_retired_prefix() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
     let context = default_writer();
     let namespace_id = namespace_id("demo");
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -1348,26 +1351,44 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .await
         .expect("gc the tombstone");
     assert!(report.deleted.wal_objects >= 1, "{report:?}");
-    namespace_store(&store, &namespace_id)
+    // The collection retired the eligible namespace, so the next collection
+    // lists the namespace's prefix once, deletes the tombstone and its
+    // segments, and keeps the boundary and the two keys that it doesn't
+    // recognize.
+    let stray = format!("namespaces/{}/stray", namespace_id.as_str());
+    let unnumbered = format!("{}latest.json.zst", metadata_manifest_prefix(&namespace_id));
+    for key in [&stray, &unnumbered] {
+        store
+            .put_if_absent(key, Bytes::from_static(b"foreign key"))
+            .await
+            .expect("unrecognized key");
+    }
+    store.reset();
+    let report = namespace_store(&store, &namespace_id)
         .gc(&aged.clock())
         .await
-        .expect("collect obsolete tombstone version");
-    let current = namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current tombstone");
-    // The collections deleted manifests, so they raised the manifest boundary.
-    let mut expected = vec![boundary(&namespace_id), current.object_key.clone()];
-    expected.extend(
-        current
-            .payload()
-            .runs
-            .iter()
-            .flat_map(|run| &run.segments)
-            .map(loonfs_objectstore::keys::metadata_segment_object_key),
+        .expect("collect the retired prefix");
+    assert_eq!(report.deleted.manifests, 1, "{report:?}");
+    assert!(report.deleted.metadata_segments >= 1, "{report:?}");
+    assert_eq!(report.retained.unrecognized_key, 2, "{report:?}");
+    let listings = store
+        .take()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::List { prefix } => Some(prefix),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(listings, [format!("namespaces/{}/", namespace_id.as_str())]);
+    assert_matches!(
+        namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await,
+        Err(CoreError::NamespaceDeleted { .. })
     );
-    expected.sort();
-    assert_eq!(namespace_keys(&store, &namespace_id).await, expected);
+    let mut kept = vec![boundary(&namespace_id), stray, unnumbered];
+    kept.sort();
+    assert_eq!(namespace_keys(&store, &namespace_id).await, kept);
 }
 
 /// Returns the kind and key of each request in `operations` whose key is one

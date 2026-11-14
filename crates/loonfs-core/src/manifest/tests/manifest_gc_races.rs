@@ -321,3 +321,71 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
         );
     }
 }
+
+/// Checks that a manifest put that lands after the namespace's retirement is
+/// lost: a writer claim that found manifest 1 as the newest puts manifest 2
+/// after the namespace was deleted and retired and its manifests were
+/// collected. The claim returns `namespace_deleted`, and a reader doesn't take
+/// manifest 2 as the newest.
+#[tokio::test]
+async fn a_manifest_put_after_the_retirement_is_lost() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("late-after-retirement").expect("namespace");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
+    );
+    let context = test_context();
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
+        .await
+        .expect("bootstrap");
+    let late = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let blocked = BlockingStore::new(
+        store,
+        KeyPredicate::exact(&late),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    blocked.block_next();
+    let publisher = crate::test_support::namespace_store(&blocked, &namespace_id);
+    let (claimed, ()) = tokio::join!(publisher.acquire_writer_epoch(&context.writer_id), async {
+        blocked.wait_until_blocked().await;
+        crate::test_support::NamespaceFixture::new(blocked.inner(), &namespace_id, &context)
+            .engine()
+            .delete_namespace(Default::default())
+            .await
+            .expect("delete");
+        let retirement = WriterAt {
+            now_ms: context.now_ms + crate::limits::GC_GRACE_WINDOW_MS,
+            ..context.clone()
+        };
+        // The first collection retires the namespace, and the second deletes
+        // its manifests.
+        for _ in 0..2 {
+            crate::test_support::namespace_store(blocked.inner(), &namespace_id)
+                .gc(&retirement.clock())
+                .await
+                .expect("collect");
+        }
+        assert!(blocked
+            .inner()
+            .head(&late)
+            .await
+            .expect("head manifest 2")
+            .is_none());
+        blocked.release();
+    });
+    assert_matches!(claimed, Err(CoreError::NamespaceDeleted { .. }));
+    assert!(blocked
+        .inner()
+        .head(&late)
+        .await
+        .expect("head manifest 2")
+        .is_some());
+    assert_matches!(
+        crate::test_support::namespace_store(blocked.inner(), &namespace_id)
+            .load_current_manifest()
+            .await,
+        Err(CoreError::NamespaceDeleted { .. })
+    );
+}

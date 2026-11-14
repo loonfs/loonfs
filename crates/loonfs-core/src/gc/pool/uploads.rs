@@ -246,10 +246,11 @@ impl<S: ObjectStore> PoolStore<S> {
     /// Determines what to do with a session whose records the sweep read, by
     /// the status of the namespace that created the session.
     ///
-    /// An open or aborted session follows the same rules in an active
-    /// namespace and in one that's eligible for retirement, and its provider
-    /// cleanup runs even after the namespace is retired, because the records
-    /// and the content are under the pool's prefix.
+    /// A session of a deleted namespace is kept while the namespace is a
+    /// member, which is until its boundary is retired. An open or aborted
+    /// session follows the same rules in an active namespace and in a retired
+    /// one, and its provider cleanup runs after the retirement, because the
+    /// records and the content are under the pool's prefix.
     pub(super) async fn sweep_upload_session(
         &self,
         roots: &PoolRoots,
