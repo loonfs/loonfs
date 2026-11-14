@@ -89,10 +89,11 @@ pub(crate) async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
         .await
 }
 
-/// What a retention advance does, planned from one view.
+/// What a retention advance does, planned from one manifest and floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionPlan {
-    /// The floor stays at this sequence, the view's floor.
+    /// The floor stays at this sequence, the floor that the plan started
+    /// from.
     Stays(CommitSeq),
     /// The floor moves up to this sequence.
     Moves(CommitSeq),
@@ -119,7 +120,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// view whose manifest is `current` and whose floor is
     /// `retention_floor_seq`, and publishes nothing (format spec, "Advancing
     /// the retention floor"). The view is a writer position, or the current
-    /// manifest and the WAL tail after that manifest. The plan uses the
+    /// manifest with that manifest's floor. The plan uses the
     /// namespace's wall clock as the current time for the grace window's
     /// cutoff and for a [`RetentionTarget::Window`] cutoff.
     ///
