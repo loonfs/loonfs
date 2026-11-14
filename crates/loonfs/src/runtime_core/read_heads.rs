@@ -15,7 +15,8 @@ use crate::{Consistency, CoreError, NamespaceId, SnapshotId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    project_anchor_tail, NamespaceReadAnchor, ReadBasis, VerifiedNamespaceCatalogEntry,
+    ensure_namespace_live, project_anchor_tail, NamespaceReadAnchor, ReadBasis,
+    VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
@@ -376,6 +377,25 @@ impl RuntimeCore {
         Ok(VerifiedNamespaceCatalogEntry::from_head(
             &context.read_basis.head,
         ))
+    }
+
+    /// Returns the namespace's immutable identity like
+    /// [`Self::load_namespace_catalog_cached`], and refuses a namespace whose
+    /// head is initializing or deleted.
+    ///
+    /// The head is the one that [`HeadConfirmation::View`] confirms, so the
+    /// refusal follows another process's tombstone within the revalidation
+    /// bound.
+    pub(crate) async fn load_live_namespace_catalog_cached(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<VerifiedNamespaceCatalogEntry> {
+        let context = self
+            .current_read_context(namespace_id, HeadConfirmation::View)
+            .await?;
+        let head = &context.read_basis.head;
+        ensure_namespace_live(&head.namespace_id, head.status)?;
+        Ok(VerifiedNamespaceCatalogEntry::from_head(head))
     }
 
     /// Drops the namespace's cached head, after this runtime learns of a

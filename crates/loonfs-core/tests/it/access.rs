@@ -839,10 +839,11 @@ async fn a_replay_from_another_principal_scope_is_refused() {
 #[tokio::test]
 async fn upload_sessions_belong_to_their_subject() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
+    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
     assert_eq!(
         engine
-            .begin_upload()
+            .begin_upload(&catalog)
             .await
             .expect_err("subject required")
             .code(),
@@ -851,18 +852,18 @@ async fn upload_sessions_belong_to_their_subject() {
     let ada = subject("usr_ada", &[]);
     let bob = subject("usr_bob", &[]);
     let as_ada = namespace_engine(&store, &namespace_id, &context).with_subject(ada.clone());
-    let session = as_ada.begin_upload().await.expect("begin");
+    let session = as_ada.begin_upload(&catalog).await.expect("begin");
     assert_eq!(
         namespace_engine(&store, &namespace_id, &context)
             .with_subject(bob)
-            .get_upload(&session.upload_id)
+            .get_upload(&catalog, &session.upload_id)
             .await
             .expect_err("hidden session")
             .code(),
         ErrorCode::UploadNotFound
     );
     as_ada
-        .get_upload(&session.upload_id)
+        .get_upload(&catalog, &session.upload_id)
         .await
         .expect("owner session");
     let unrestricted = NamespaceId::parse("unrestricted").expect("namespace");
@@ -870,13 +871,14 @@ async fn upload_sessions_belong_to_their_subject() {
         .create()
         .await
         .expect("bootstrap");
+    let catalog = loonfs_core::test_support::load_catalog(&store, &unrestricted).await;
     let session = namespace_engine(&store, &unrestricted, &context)
         .with_subject(ada)
-        .begin_upload()
+        .begin_upload(&catalog)
         .await
         .expect("begin");
     namespace_engine(&store, &unrestricted, &context)
-        .get_upload(&session.upload_id)
+        .get_upload(&catalog, &session.upload_id)
         .await
         .expect("subject ignored");
 }

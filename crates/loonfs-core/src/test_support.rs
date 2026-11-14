@@ -272,6 +272,7 @@ pub mod kept_inodes;
 pub mod ops;
 
 use crate::engine::NamespaceWriterEngine;
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use loonfs_objectstore::ObjectStore;
@@ -454,6 +455,18 @@ pub async fn load_pool_id<S: ObjectStore>(store: S, namespace_id: &NamespaceId) 
         .payload()
         .pool_id
         .clone()
+}
+
+/// Loads the catalog of `namespace_id` from its current manifest, the
+/// catalog that a runtime hands the upload calls.
+pub async fn load_catalog<S: ObjectStore>(
+    store: S,
+    namespace_id: &NamespaceId,
+) -> VerifiedNamespaceCatalogEntry {
+    namespace_store(store, namespace_id)
+        .load_catalog_entry()
+        .await
+        .expect("the namespace should have a catalog")
 }
 
 /// Folds the namespace's WAL tail and returns the manifest that covers it,

@@ -134,15 +134,6 @@ pub(crate) fn ensure_session_subject(
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    pub(crate) async fn ensure_upload_namespace_available(
-        &self,
-    ) -> Result<VerifiedNamespaceCatalogEntry> {
-        let manifest = self.load_current_manifest().await?;
-        let head = crate::namespace::state::NamespaceReadState::from(manifest.payload());
-        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
-        Ok(VerifiedNamespaceCatalogEntry::from_head(&head))
-    }
-
     /// Checks, just before a streamed write sends its final request, that the
     /// session is still open.
     ///

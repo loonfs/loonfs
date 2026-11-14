@@ -125,10 +125,11 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .expect("bootstrap");
     // Evidence exists only for a session the store already says completed,
     // so the token this test admits has to come from a real upload.
+    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload().await.expect("begin upload");
+    let upload = engine.begin_upload(&catalog).await.expect("begin upload");
     engine
-        .upload_content(&upload.upload_id, b"admitted")
+        .upload_content(&catalog, &upload.upload_id, b"admitted")
         .await
         .expect("stage content");
     let catalog = namespace_store(&store, &namespace_id)
@@ -136,7 +137,11 @@ async fn valid_content_admission_skips_durable_content_validation() {
         .await
         .expect("load namespace catalog");
     let completed = engine
-        .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(
+            &catalog,
+            &upload.upload_id,
+            CompleteUploadBody::ServiceProxied {},
+        )
         .await
         .expect("complete upload");
     let content_ref = completed
@@ -247,14 +252,19 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .create()
         .await
         .expect("bootstrap");
+    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload().await.expect("begin upload");
+    let upload = engine.begin_upload(&catalog).await.expect("begin upload");
     engine
-        .upload_content(&upload.upload_id, b"deadline")
+        .upload_content(&catalog, &upload.upload_id, b"deadline")
         .await
         .expect("stage content");
     let completed = engine
-        .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(
+            &catalog,
+            &upload.upload_id,
+            CompleteUploadBody::ServiceProxied {},
+        )
         .await
         .expect("complete upload");
     let completed_at_ms = match &completed.response.status {
@@ -1041,10 +1051,11 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .create()
         .await
         .expect("bootstrap");
+    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload().await.expect("begin upload");
+    let upload = engine.begin_upload(&catalog).await.expect("begin upload");
     let staged = engine
-        .upload_content(&upload.upload_id, b"re-minted")
+        .upload_content(&catalog, &upload.upload_id, b"re-minted")
         .await
         .expect("stage content");
     let catalog = namespace_store(&store, &namespace_id)
@@ -1052,7 +1063,11 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .await
         .expect("load namespace catalog");
     let completed = engine
-        .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(
+            &catalog,
+            &upload.upload_id,
+            CompleteUploadBody::ServiceProxied {},
+        )
         .await
         .expect("complete upload");
     // The evidence the completion handed back, past its life.
@@ -1077,7 +1092,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         evidence,
         ..
     } = engine
-        .get_upload(&upload.upload_id)
+        .get_upload(&catalog, &upload.upload_id)
         .await
         .expect("get upload status");
     match status.status {

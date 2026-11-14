@@ -482,9 +482,10 @@ async fn a_forks_content_is_stored_in_its_sources_pool_and_only_the_pools_collec
     let (first, fork) = (&members[0], &members[1]);
     let first_content = put_file_content(&store, first, "/root", b"first").await;
     let fork_content = put_file_content(&store, fork, "/upload", b"upload").await;
+    let catalog = crate::test_support::load_catalog(&store, fork).await;
     crate::test_support::NamespaceFixture::new(&store, fork, &context(1_000))
         .engine()
-        .begin_upload()
+        .begin_upload(&catalog)
         .await
         .expect("open an upload in the fork");
     assert_eq!(

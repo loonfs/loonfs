@@ -1887,7 +1887,7 @@ Later collections of the namespace find the retired boundary, and they delete th
 
 No retirement deletes content. A retired namespace isn't a [member](glossary.md#pool) of its pool, so its content references don't protect the pool's content, and the pool's collection deletes the content that no other member refers to under [Content roots](#119-content-roots).
 
-[File contents and ownership](#15-file-contents-and-ownership) defines where content is stored. A deleted namespace refuses requests for presigned upload URLs and upload completion, and the grace window that comes before its retirement is longer than the lifetime of any issued presigned URL.
+[File contents and ownership](#15-file-contents-and-ownership) defines where content is stored. A deleted namespace refuses requests for presigned upload URLs and upload completion, and the grace window that comes before its retirement is longer than the lifetime of any issued presigned URL. LoonFS answers these requests from the namespace head that a runtime holds (its [writer position](glossary.md#writer-position) or its cached view), and a runtime checks that head for a successor at least once every `READ_REVALIDATION_BOUND_MS` (20 minutes), so a runtime can still grant one of these requests up to 20 minutes after another process deletes the namespace. The grace window (24 hours) is still far longer than that bound and the one-hour lifetime of a part URL together.
 
 ### 11.9 Content roots
 

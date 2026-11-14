@@ -75,8 +75,9 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> Result<loonfs_types::UploadSession, CoreError> {
+    let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
     namespace_engine(store, namespace_id, context)
-        .begin_upload()
+        .begin_upload(&catalog)
         .await
 }
 
@@ -85,8 +86,9 @@ async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> Result<DirectPutUploadTarget, CoreError> {
+    let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
     namespace_engine(store, namespace_id, context)
-        .begin_direct_put_upload_target()
+        .begin_direct_put_upload_target(&catalog)
         .await
 }
 
@@ -97,8 +99,9 @@ async fn upload_content<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &WriterAt,
 ) -> Result<loonfs_types::UploadSession, CoreError> {
+    let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
     namespace_engine(store, namespace_id, context)
-        .upload_content(upload_id, bytes)
+        .upload_content(&catalog, upload_id, bytes)
         .await
 }
 
@@ -108,8 +111,9 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     context: &WriterAt,
 ) -> Result<loonfs_types::UploadSession, CoreError> {
+    let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
     namespace_engine(store, namespace_id, context)
-        .complete_upload(upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(&catalog, upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .map(|completed| completed.response)
 }
@@ -137,8 +141,9 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
             .await
             .expect("namespace");
         for streamed in [false, true] {
+            let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
             let engine = namespace_engine(&store, &namespace_id, &context);
-            let begin = engine.begin_upload().await.expect("begin");
+            let begin = engine.begin_upload(&catalog).await.expect("begin");
             assert_matches!(
                 begin.status,
                 loonfs_types::UploadSessionStatus::Open {
@@ -153,12 +158,12 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
                 ])
                 .boxed();
                 engine
-                    .upload_content_stream(&begin.upload_id, body)
+                    .upload_content_stream(&catalog, &begin.upload_id, body)
                     .await
                     .expect("stream");
             } else {
                 engine
-                    .upload_content(&begin.upload_id, b"hello")
+                    .upload_content(&catalog, &begin.upload_id, b"hello")
                     .await
                     .expect("bytes");
             }
@@ -248,41 +253,6 @@ fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore
     );
     store.fail_all();
     store
-}
-
-#[tokio::test]
-async fn begin_upload_rejects_missing_and_deleted_namespaces() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = default_writer();
-
-    let missing_error = begin_upload(&store, &namespace_id, &context)
-        .await
-        .expect_err("missing namespace");
-    assert_eq!(missing_error.code(), ErrorCode::NamespaceNotFound);
-
-    NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect("bootstrap");
-    begin_upload(&store, &namespace_id, &context)
-        .await
-        .expect("a live namespace admits uploads");
-
-    let fresh_store = LocalFsStore::new(temp_dir.path()).expect("store");
-    loonfs_core::NamespaceWriterEngine::writer(
-        namespace_store(&fresh_store, &namespace_id),
-        loonfs_types::WriterId::parse("writer-a").expect("writer id"),
-    )
-    .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
-    .await
-    .expect("delete namespace");
-
-    let deleted_error = begin_upload(&store, &namespace_id, &context)
-        .await
-        .expect_err("deleted namespace");
-    assert_eq!(deleted_error.code(), ErrorCode::NamespaceDeleted);
 }
 
 #[tokio::test]
@@ -443,11 +413,15 @@ mod streamed_content {
             Ok(Bytes::from_static(b"late bytes"))
         })
         .boxed();
+        let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
         let engine = namespace_engine(&store, &namespace_id, &context);
-        let uploading = engine.upload_content_stream(&begin.upload_id, stream);
+        let uploading = engine.upload_content_stream(&catalog, &begin.upload_id, stream);
         let collecting = async {
             started_rx.await.expect("upload waiting for its body");
-            let aborted = engine.abort_upload(&begin.upload_id).await.expect("abort");
+            let aborted = engine
+                .abort_upload(&catalog, &begin.upload_id)
+                .await
+                .expect("abort");
             let UploadSessionStatus::Aborted { aborted_at_ms } = aborted.status else {
                 panic!("expected aborted");
             };
@@ -605,8 +579,9 @@ mod streamed_content {
         bytes: &[u8],
         context: &WriterAt,
     ) -> Result<loonfs_types::UploadSession, CoreError> {
+        let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
         namespace_engine(store, namespace_id, context)
-            .upload_content_stream(upload_id, body(bytes))
+            .upload_content_stream(&catalog, upload_id, body(bytes))
             .await
     }
 
@@ -848,8 +823,9 @@ mod direct_multipart {
             .await
             .expect("bootstrap");
         let payload = PART.repeat(3);
+        let catalog = loonfs_core::test_support::load_catalog(store, &namespace_id).await;
         let begin = namespace_engine(store, &namespace_id, context)
-            .begin_direct_multipart_upload_target(DirectMultipartUploadOptions::default())
+            .begin_direct_multipart_upload_target(&catalog, DirectMultipartUploadOptions::default())
             .await
             .expect("begin direct multipart");
         let state = session_state(store, &namespace_id, &begin.session.upload_id).await;
@@ -935,8 +911,9 @@ mod direct_multipart {
         request: &CompleteUploadBody,
         context: &WriterAt,
     ) -> Result<loonfs_types::UploadSession, CoreError> {
+        let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
         namespace_engine(store, namespace_id, context)
-            .complete_upload(upload_id, request.clone())
+            .complete_upload(&catalog, upload_id, request.clone())
             .await
             .map(|completed| completed.response)
     }
@@ -1440,19 +1417,26 @@ mod direct_multipart {
             .await
             .expect("bootstrap");
 
+        let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
         let chosen = namespace_engine(&store, &namespace_id, &context)
-            .begin_direct_multipart_upload_target(DirectMultipartUploadOptions {
-                part_size_bytes: Some(16 * 1024 * 1024),
-            })
+            .begin_direct_multipart_upload_target(
+                &catalog,
+                DirectMultipartUploadOptions {
+                    part_size_bytes: Some(16 * 1024 * 1024),
+                },
+            )
             .await
             .expect("a part size inside the bounds is honoured");
         assert_eq!(chosen.part_size_bytes, 16 * 1024 * 1024);
 
         for out_of_bounds in [5 * 1024 * 1024 - 1, 5 * 1024 * 1024 * 1024 + 1] {
             let error = namespace_engine(&store, &namespace_id, &context)
-                .begin_direct_multipart_upload_target(DirectMultipartUploadOptions {
-                    part_size_bytes: Some(out_of_bounds),
-                })
+                .begin_direct_multipart_upload_target(
+                    &catalog,
+                    DirectMultipartUploadOptions {
+                        part_size_bytes: Some(out_of_bounds),
+                    },
+                )
                 .await
                 .expect_err("a part size no provider accepts is refused");
             assert_eq!(error.code(), ErrorCode::InvalidRequest);
