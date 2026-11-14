@@ -31,9 +31,9 @@ pub(crate) enum MemberState {
     /// The collection has read the member's roots, and its retirement status by the
     /// collection's clock.
     Read { status: RetirementStatus },
-    /// The listed namespace has no roots: it's initializing, or it isn't a
-    /// member of the pool, so no commit can be published in it that refers
-    /// to the pool's content.
+    /// The listed member is initializing, so it has no roots: LoonFS refuses
+    /// commits to it, so no commit can be published in it that refers to the
+    /// pool's content.
     NoRoots,
 }
 
@@ -54,10 +54,11 @@ pub(super) enum MemberReadOutcome {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MemberReadReport {
     pub(super) outcome: MemberReadOutcome,
-    /// The member entries that the listing of the member list returned.
+    /// The member entries that the listing of the member list returned, up
+    /// to the entry at which the collection stopped.
     pub(super) members: usize,
-    /// The listed members that the collection read. A listed namespace
-    /// without roots counts as read.
+    /// The listed entries that the collection read. An initializing member
+    /// and a deleted stale entry count as read.
     pub(super) members_read: usize,
 }
 
@@ -166,23 +167,23 @@ impl PoolRoots {
         Ok(roots)
     }
 
-    /// Lists the pool's member list once, and then reads the roots of each
-    /// listed member in listing order.
+    /// Lists the pool's member list once, and reads the roots of each listed
+    /// member as the listing yields its entry.
     ///
     /// The collection reads each member once, one member at a time. It stops
-    /// at a member whose roots can't be read, and before a member that
-    /// it would start after [`POOL_ROOTS_READ_BUDGET_MS`] has passed since the
+    /// at a member whose roots can't be read, and before a member that it
+    /// would start after [`POOL_ROOTS_READ_BUDGET_MS`] has passed since the
     /// collection's clock started. Either way the collection skips the content
     /// sweep and continues. A charge to the read working memory that fails
-    /// ends the collection. A key under the member list's prefix that isn't a
-    /// member entry is logged and left alone.
+    /// ends the collection, and so does a listing that fails. A key under the
+    /// member list's prefix that isn't a member entry is logged and left
+    /// alone.
     async fn load_members<S: ObjectStore>(
         &mut self,
         pool: &PoolStore<S>,
         clock: &OperationClock,
     ) -> Result<()> {
         let prefix = pool_members_prefix(&pool.pool_id);
-        let mut listed = ChargedQueue::new(&self.memory);
         let mut entries = std::pin::pin!(pool.store.list_entries_from_stream(&prefix, None));
         while let Some(entry) = entries
             .try_next()
@@ -195,77 +196,68 @@ impl PoolRoots {
                 .filter(|parsed| parsed.family() == DurableObjectFamily::PoolMember)
                 .and_then(|parsed| parsed.identifier())
                 .and_then(|identifier| NamespaceId::parse(identifier).ok());
-            let Some(namespace_id) = namespace_id else {
+            let Some(member_id) = namespace_id else {
                 tracing::warn!(pool_id = %pool.pool_id, key = %entry.key,
                     "left alone a key under the pool's member list that isn't a member entry");
                 continue;
             };
-            listed.push_back(namespace_id)?;
             self.member_read.members += 1;
-        }
-        let read = async {
-            while let Some(member_id) = listed.pop_front() {
-                if clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
-                    return Ok(MemberReadOutcome::BudgetExceeded);
+            if clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
+                self.member_read.outcome = MemberReadOutcome::BudgetExceeded;
+                return Ok(());
+            }
+            let member = pool.member(member_id.clone());
+            match self.load_member(&member, &pool.pool_id).await {
+                Ok(Some(state)) => self.members.insert(member_id, state)?,
+                Ok(None) => {}
+                Err(error @ CoreError::LiveSetExceedsReadMemory { .. }) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        pool_id = %pool.pool_id,
+                        error = %error,
+                        "a pool member's roots couldn't be read; skipping the pool's content sweep"
+                    );
+                    self.member_read.outcome = MemberReadOutcome::UnreadableMember;
+                    return Ok(());
                 }
-                let member = pool.member(member_id.clone());
-                let state = self.load_member(&member, &pool.pool_id).await?;
-                self.members.insert(member_id, state)?;
-                self.member_read.members_read += 1;
             }
-            // A member read that ends after the budget is as late as one that
-            // starts after it.
-            Ok::<_, CoreError>(
-                if self.member_read.members_read > 0
-                    && clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS
-                {
-                    MemberReadOutcome::BudgetExceeded
-                } else {
-                    MemberReadOutcome::Complete
-                },
-            )
+            self.member_read.members_read += 1;
         }
-        .await;
-        self.member_read.outcome = match read {
-            Ok(outcome) => outcome,
-            Err(error @ CoreError::LiveSetExceedsReadMemory { .. }) => return Err(error),
-            Err(error) => {
-                tracing::warn!(
-                    pool_id = %pool.pool_id,
-                    error = %error,
-                    "a pool member's roots couldn't be read; skipping the pool's content sweep"
-                );
-                MemberReadOutcome::UnreadableMember
-            }
-        };
+        // A member read that ends after the budget is as late as one that
+        // starts after it.
+        if self.member_read.members_read > 0 && clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
+            self.member_read.outcome = MemberReadOutcome::BudgetExceeded;
+        }
         Ok(())
     }
 
     /// Reads the roots of `member`, a namespace that the pool's member list
-    /// lists, and returns the member's state.
+    /// lists, and returns the member's state, or `None` for a namespace that
+    /// isn't a member.
     ///
     /// An initializing namespace has no roots, and the collection reads
     /// nothing of it beyond its newest manifest: LoonFS refuses commits to it,
     /// and a fork's manifest lists the source's segments, which the source's
     /// snapshot keeps. A retired namespace, an ID without a manifest, and a
-    /// namespace whose manifest records another pool aren't members, and the
-    /// collection deletes their entries.
+    /// namespace whose manifest records another pool aren't members. The
+    /// collection deletes their entries as the listing yields them and keeps
+    /// nothing of them, so stale entries take no read working memory.
     async fn load_member<S: ObjectStore>(
         &mut self,
         member: &NamespaceStore<S>,
         pool_id: &PoolId,
-    ) -> Result<MemberState> {
+    ) -> Result<Option<MemberState>> {
         let observed = Observation::now(Arc::clone(&member.timer));
         let reason = match member.find_newest_manifest().await? {
             NewestManifest::Manifest(current) if current.manifest.payload().pool_id == *pool_id => {
                 if let NamespaceStatus::Initializing {} = current.manifest.payload().status {
-                    return Ok(MemberState::NoRoots);
+                    return Ok(Some(MemberState::NoRoots));
                 }
                 let read = self.read_member(member, current, observed).await?;
                 self.protect_layout_segments(&read.current)?;
-                return Ok(MemberState::Read {
+                return Ok(Some(MemberState::Read {
                     status: read.status,
-                });
+                }));
             }
             NewestManifest::Manifest(_) => "other_pool",
             NewestManifest::Retired => "retired",
@@ -279,7 +271,7 @@ impl PoolRoots {
             .map_err(|error| CoreError::store(&key, &error))?;
         tracing::info!(pool_id = %pool_id, namespace_id = %member.namespace_id, reason,
             "deleted the member entry of a namespace that isn't a member");
-        Ok(MemberState::NoRoots)
+        Ok(None)
     }
 
     /// Adds the content IDs of the WAL tail above `current` and the layout
@@ -375,9 +367,10 @@ impl PoolRoots {
     /// it hasn't read, so a namespace that it hasn't read has no status when
     /// the collection stopped before reading every listed member. A listed
     /// namespace without roots is eligible, because no commit that refers to
-    /// the pool's content can be published in it. A namespace that the
-    /// listing didn't include has no member entry, so it was retired or its
-    /// entry was written after the listing, and it's eligible too. A session
+    /// the pool's content can be published in it. A namespace that isn't in
+    /// the map has no member entry, because the listing didn't include it or
+    /// the collection deleted its entry: it was retired, it isn't in the pool,
+    /// or its entry was written after the listing, and it's eligible too. A session
     /// that the collection listed before the member listing can't belong to a
     /// namespace whose entry was written after, because a namespace has its
     /// entry before it's active. A session that the collection didn't list as

@@ -12,7 +12,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::segment::MetadataRunPolicy;
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::{
-    content_blob, temporary_object, temporary_prefix, upload_outcome, upload_session,
+    content_blob, pool_member, temporary_object, temporary_prefix, upload_outcome, upload_session,
 };
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
@@ -391,42 +391,35 @@ async fn a_collection_past_the_pool_roots_budget_skips_the_content_sweep() {
     assert!(!exists(&store, &unreferenced).await);
 }
 
+/// Checks that the collection deletes stale member entries as the listing
+/// yields them, so a member list that wouldn't fit the read memory never
+/// has to: 256 entries of namespaces without a manifest, each with a 128-byte
+/// ID, under 32 KiB.
 #[tokio::test]
-async fn a_collection_fails_when_the_member_list_does_not_fit_the_read_memory() {
+async fn stale_member_entries_are_deleted_as_they_are_listed_within_the_read_memory() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let (pool_id, members) = pool(&store, &["first", "fork"]).await;
     let limit_bytes = 32 * 1024;
-    gc_within(
-        &store,
-        &pool_id,
-        limit_bytes,
-        &aged_context(&store, &members).await.clock(),
-    )
-    .await
-    .expect("the pool's roots fit the read memory");
-    // No listed namespace has a manifest. The collection keeps a copy of
-    // each listed 128-byte ID until it reads the namespace, so the listing
-    // alone needs more than the read memory.
-    for index in 0..limit_bytes / 128 {
-        let namespace_id = NamespaceId::parse(format!("pending-{index:0120}")).expect("namespace");
-        crate::test_support::write_member_entry(&store, &pool_id, &namespace_id).await;
+    let stale = (0..limit_bytes / 128)
+        .map(|index| NamespaceId::parse(format!("pending-{index:0120}")).expect("namespace"))
+        .collect::<Vec<_>>();
+    for namespace_id in &stale {
+        crate::test_support::write_member_entry(&store, &pool_id, namespace_id).await;
     }
     let unreferenced = plant(&store, &pool_id, &ContentId::generate()).await;
     let aged = aged_context(&store, &members).await;
-    let error = gc_within(&store, &pool_id, limit_bytes, &aged.clock())
+    let report = gc_within(&store, &pool_id, limit_bytes, &aged.clock())
         .await
-        .expect_err("the listed members don't fit the read memory");
-    assert_matches!(
-        error,
-        CoreError::LiveSetExceedsReadMemory { limit, .. } if limit == limit_bytes
-    );
-    assert!(exists(&store, &unreferenced).await);
-    let report = gc_within(&store, &pool_id, 64 * 1024 * 1024, &aged.clock())
-        .await
-        .expect("a collection with enough read memory");
+        .expect("the live members fit the read memory");
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
+    for namespace_id in &stale {
+        assert!(!exists(&store, &pool_member(&pool_id, namespace_id)).await);
+    }
+    for namespace_id in &members {
+        assert!(exists(&store, &pool_member(&pool_id, namespace_id)).await);
+    }
 }
 
 /// Checks that a deleted member that isn't eligible for retirement still
