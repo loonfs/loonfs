@@ -983,6 +983,48 @@ async fn a_missing_manifest_above_the_boundary_is_corrupt() {
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
+/// Checks that an eventual read within its maximum staleness from a position
+/// whose manifest a collection deleted returns the file from the newest
+/// manifest. The read asks the store for the position's manifest, finds
+/// nothing, and then reads a newer manifest.
+#[tokio::test]
+async fn a_read_from_a_collected_position_reads_the_newest_manifest() {
+    let (fixture, position) = collected_position("read-collected").await;
+    let newest = loonfs_core::test_support::namespace_store(
+        fixture.recording.clone() as SharedObjectStore,
+        &fixture.namespace_id,
+    )
+    .load_current_manifest()
+    .await
+    .expect("the newest manifest")
+    .manifest()
+    .manifest_no;
+    fixture.recording.reset();
+    let file = fixture
+        .reader
+        .read_file("/small.txt")
+        .await
+        .expect("the read retries at the newest manifest");
+    assert_eq!(file.bytes, [b's'; 1024]);
+    let operations = fixture.recording.take();
+    let missing = operations
+        .iter()
+        .position(|operation| {
+            matches!(
+                operation,
+                RecordedOperation::Get { key, result_bytes: 0, .. }
+                    if *key == metadata_manifest_object(&fixture.namespace_id, &position)
+            )
+        })
+        .unwrap_or_else(|| panic!("a GET of the deleted manifest: {operations:?}"));
+    assert!(
+        operations[missing..]
+            .iter()
+            .any(|operation| is_manifest_get(operation, &fixture.namespace_id, newest)),
+        "a read of the newest manifest after the GET that found nothing: {operations:?}"
+    );
+}
+
 /// Checks that the reads that need a check of the position share the
 /// session's checks, and that the check confirms the position for the
 /// eventual reads after it.
