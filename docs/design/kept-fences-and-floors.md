@@ -65,7 +65,7 @@ The same argument covers a deleted namespace. Deletion runs under an acquired wr
 
 A fence put, and a floor object put by a process without the writer epoch, aren't covered, because a writer may legally commit at the numbers that those puts use. [The check after a fence or floor object put](#the-check-after-a-fence-or-floor-object-put) covers them. A writer session that creates a floor object from its own publication queue puts it at its position's tip plus one, like a commit, and the argument above covers that put.
 
-Why keep floor objects and not just fences? A process that isn't the writer creates a floor object at the writer's next number with no claim manifest first, so a writer can find a floor object at `tip + 1` that no manifest announced. Why keep them in a retired namespace? A namespace ID can't be reused, so a stale writer's put there has to collide too, or the writer would acknowledge a commit that no reader replays.
+Why keep fences? A stale writer whose next number was taken by a newer session's fence would commit at that number once a fold covered the fence and a collection deleted it, in the same steps as the example in [The problem](#the-problem), with the fence in place of the floor object. Why keep floor objects and not just fences? A process that isn't the writer creates a floor object at the writer's next number with no claim manifest first, so a writer can find a floor object at `tip + 1` that no manifest announced. Why keep them in a retired namespace? A namespace ID can't be reused, so a stale writer's put there has to collide too, or the writer would acknowledge a commit that no reader replays.
 
 ### The check after a fence or floor object put
 
@@ -78,6 +78,10 @@ A fence put, and a floor object put by a process without the writer epoch, are t
 For example, a new writer session for `main` claims epoch 6, discovers tip 30 on Monday, and pauses before its fence put. The previous writer, with epoch 5, commits 31 to 40, and a fold covers them. On Wednesday a collection deletes 31 to 40. The new writer's fence put at 31 succeeds, but its check finds `folded_wal_no` 40, so the writer discovers again and puts its fence at 41.
 
 The claim manifest's publication budget stays as it is, but nothing in this design depends on that budget. A floor object that a paused process creates at an emptied number is dead, and the process puts the floor object again, so the advance isn't lost.
+
+A failed check doesn't always mean that the number was emptied. A fold can cover a live fence or floor object between the put and the check, and the check then treats the object as dead, though readers replayed it. The outcome is the same: the session puts a second fence at the new tip, and the advancer's discovery finds its floor already in the view and writes nothing. The rule stays one comparison, and the cost is one more fence in a rare case.
+
+For a fence, the check also applies the rule of [Writer ownership](../specs/format.md#61-writer-ownership) that the discovery before the put applies: a newest manifest with a higher writer epoch than the claim means that another session has claimed since, and the acquisition returns `writer_fenced`. For a floor object, the epoch doesn't matter. The floor object records the epoch of the manifest that the discovery loaded, and a newer session's fence lands above it.
 
 Why is the check enough? A fold covers only WAL objects that exist, so a number that a collection emptied was folded before the put, and the newest manifest at the check has a `folded_wal_no` at or above that number. After a passing check, the fence's number was never used. The previous writer writes consecutive numbers, so none of its objects is at or above the fence's number, and its next put collides with the fence.
 
