@@ -4,6 +4,7 @@
 
 use super::*;
 use loonfs_objectstore::keys::snapshot_prefix;
+use loonfs_types::format::control::SnapshotOwner;
 use loonfs_types::NamespaceRebasedFrom;
 
 fn rebase_fork(name: &str) -> NamespaceId {
@@ -48,7 +49,7 @@ async fn fork_for_rebase(
 /// Checks that a rebase's new fork records the fork sequence that the fork's
 /// next merge into main starts after, as the manifest of main's snapshot records it,
 /// and that a fork point below that manifest's retention floor creates no
-/// namespace and leaves no fork snapshot.
+/// namespace and writes no fork snapshot.
 #[tokio::test]
 async fn a_rebase_fork_records_where_the_forks_next_merge_starts() {
     let (_directory, store, main, writer) = setup().await;
@@ -109,14 +110,25 @@ async fn a_rebase_fork_records_where_the_forks_next_merge_starts() {
             .await,
         Err(CoreError::NamespaceNotFound { .. })
     );
-    assert_eq!(
-        store
-            .list_prefix(&snapshot_prefix(&main))
+    let mut fork_snapshots = 0;
+    for key in store
+        .list_prefix(&snapshot_prefix(&main))
+        .await
+        .expect("main's snapshots")
+    {
+        let record = crate::snapshot::record::load_snapshot_record_at_key(&store, &key)
             .await
-            .expect("main's snapshots")
-            .len(),
-        2,
-        "only the two rebase forks keep fork snapshots"
+            .expect("a snapshot record")
+            .state;
+        if let SnapshotOwner::Fork { .. } = record.owner {
+            fork_snapshots += 1;
+        } else {
+            assert_matches!(record.owner, SnapshotOwner::User { name: None, .. });
+        }
+    }
+    assert_eq!(
+        fork_snapshots, 2,
+        "only the two rebase forks keep fork snapshots, and every fork call leaves a temporary snapshot"
     );
 }
 

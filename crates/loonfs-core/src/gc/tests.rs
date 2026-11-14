@@ -45,6 +45,7 @@ mod boundary;
 mod concurrent_retirement;
 mod extension_segments;
 mod fork_chain;
+mod initializing;
 mod listings;
 mod many_snapshots;
 mod pool_content;
@@ -1385,6 +1386,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .expect("advance manifest past the fork basis");
 
     let grace_deadline = fork_record.created_at_ms + GC_GRACE_WINDOW_MS;
+    let mut deleted_user_snapshots = 0;
     for now_ms in [
         now_after_newest_object(&store, &source, GC_GRACE_WINDOW_MS + 1).await,
         grace_deadline,
@@ -1393,12 +1395,14 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     ] {
         let report = collect(&store, &source, &context(now_ms)).await;
         assert_eq!(report.deleted_snapshots_by_owner.fork, 0, "at {now_ms}");
-        assert_eq!(report.deleted_snapshots_by_owner.user, 0, "at {now_ms}");
+        deleted_user_snapshots += report.deleted_snapshots_by_owner.user;
         assert!(
             snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await,
             "a live target keeps its snapshot at {now_ms}"
         );
     }
+    // Only the fork's temporary snapshot expires.
+    assert_eq!(deleted_user_snapshots, 1);
     assert!(crate::manifest::load_namespace_manifest_envelope(
         &store,
         &source,
@@ -1419,8 +1423,19 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .expect("forked file readable");
 }
 
+async fn snapshot_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> usize {
+    store
+        .list_prefix(&snapshot_prefix(namespace_id))
+        .await
+        .expect("list snapshots")
+        .len()
+}
+
+/// Checks that snapshot cleanup deletes a fork snapshot whose target's
+/// manifest records another fork snapshot at the source's first collection,
+/// and keeps the fork's own fork snapshot and its temporary snapshot.
 #[tokio::test]
-async fn a_fork_retry_keeps_young_snapshots_and_reclaims_the_abandoned_one_after_grace() {
+async fn snapshot_cleanup_deletes_a_fork_snapshot_that_the_target_does_not_record() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");
@@ -1444,7 +1459,7 @@ async fn a_fork_retry_keeps_young_snapshots_and_reclaims_the_abandoned_one_after
         )
         .await
         .map(crate::snapshot::snapshot_record_summary)
-        .expect("fork snapshot from the abandoned attempt");
+        .expect("a fork snapshot that the target won't record");
 
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
     fixture
@@ -1457,41 +1472,26 @@ async fn a_fork_retry_keeps_young_snapshots_and_reclaims_the_abandoned_one_after
                 .expect("fold the WAL tail"),
         )
         .await
-        .expect("fork retry after abandonment");
-    let retry = store
-        .list_prefix(&snapshot_prefix(&source))
-        .await
-        .expect("list snapshots")
-        .len();
+        .expect("fork");
     assert_eq!(
-        retry, 2,
-        "the retry takes its own snapshot instead of reusing one"
-    );
-    assert!(
-        snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await,
-        "the retry leaves the abandoned record alone"
+        snapshot_count(&store, &source).await,
+        3,
+        "the fork takes a temporary snapshot and its own fork snapshot"
     );
 
-    let before_creation_grace = context(setup.now_ms + 1);
-    let report = collect(&store, &source, &before_creation_grace).await;
-    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
-    assert!(snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await);
-    let report = collect(&store, &source, &context(setup.now_ms + GC_GRACE_WINDOW_MS)).await;
+    let report = collect(&store, &source, &context(setup.now_ms + 1)).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
+    assert_eq!(report.deleted_snapshots_by_owner.user, 0);
     assert!(!snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await);
     assert_eq!(
-        store
-            .list_prefix(&snapshot_prefix(&source))
-            .await
-            .expect("list snapshots")
-            .len(),
-        1,
-        "the retry's own snapshot stays"
+        snapshot_count(&store, &source).await,
+        2,
+        "the fork's own snapshots stay"
     );
     crate::test_support::namespace_store(&store, &clone)
         .load_current_metadata_view()
         .await
-        .expect("target readable after retry and collection")
+        .expect("target readable after the collection")
         .resolve_path(
             "/docs/one.txt",
             AttributeInclusion::Omit,
@@ -2122,8 +2122,11 @@ async fn a_pool_without_members_retries_deletes_and_collects_late_writes() {
     );
 }
 
+/// Checks that expiry deletes user snapshots without a released state, and
+/// that a fork snapshot whose target has no manifest goes at the first
+/// collection.
 #[tokio::test]
-async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
+async fn expiry_and_an_absent_target_delete_snapshots_without_a_released_state() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("snapshot-grace").expect("namespace");
     let target = NamespaceId::parse("absent").expect("target");
@@ -2169,19 +2172,17 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
                 .expect("snapshot"),
         );
     }
-    let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&context(1_000 + GC_GRACE_WINDOW_MS - 1).clock())
-        .await
-        .expect("before creation grace");
-    assert_eq!(
-        before.deleted_snapshots_by_owner,
-        loonfs_types::DeletedSnapshotsByOwner::default()
-    );
     let abandoned = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&context(1_000 + GC_GRACE_WINDOW_MS).clock())
+        .gc(&context(1_000).clock())
         .await
-        .expect("creation grace");
-    assert_eq!(abandoned.deleted_snapshots_by_owner.fork, 1);
+        .expect("absent target");
+    assert_eq!(
+        abandoned.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner {
+            fork: 1,
+            ..Default::default()
+        }
+    );
     assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[3].snapshot_id).await);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let before_expiry = crate::test_support::namespace_store(&store, &namespace_id)
@@ -2280,8 +2281,11 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
     assert_eq!(store.counts().deletes, 0);
 }
 
+/// Checks that snapshot cleanup reads each fork snapshot's target with one
+/// listing of its manifests, writes nothing, and deletes only the fork
+/// snapshot whose target has no manifest.
 #[tokio::test]
-async fn fork_snapshot_grace_skips_targets_and_aged_snapshots_read_only_manifest_discovery() {
+async fn fork_snapshot_cleanup_reads_only_each_targets_manifest_discovery() {
     let directory = tempdir().expect("directory");
     let root = NamespaceId::parse("root").expect("root");
     let source = NamespaceId::parse("source").expect("source");
@@ -2326,22 +2330,19 @@ async fn fork_snapshot_grace_skips_targets_and_aged_snapshots_read_only_manifest
         targets.push(target);
     }
     write_test_file(&store, &targets[0], "/own.txt", "target-write", &setup).await;
-    store
-        .inner()
-        .delete(&metadata_manifest_object(&targets[5], &ManifestNo(1)))
-        .await
-        .expect("absent target manifest");
+    for manifest_no in [1, 2] {
+        store
+            .inner()
+            .delete(&metadata_manifest_object(
+                &targets[5],
+                &ManifestNo(manifest_no),
+            ))
+            .await
+            .expect("absent target manifest");
+    }
     store.reset();
-    let young = collect(
-        &store,
-        &source,
-        &context(setup.now_ms + GC_GRACE_WINDOW_MS - 1),
-    )
-    .await;
-    assert_eq!(young.deleted_snapshots_by_owner.fork, 0);
-    assert!(store.snapshot().is_empty());
-    let aged = collect(&store, &source, &context(setup.now_ms + GC_GRACE_WINDOW_MS)).await;
-    assert_eq!(aged.deleted_snapshots_by_owner.fork, 1);
+    let report = collect(&store, &source, &context(setup.now_ms + 1)).await;
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
     let counts = store.counts();
     // One listing of each target's manifests.
     assert_eq!(counts.lists, 6);
@@ -2359,7 +2360,8 @@ async fn fork_snapshot_grace_skips_targets_and_aged_snapshots_read_only_manifest
             .await
             .expect("fork snapshots")
             .len(),
-        5
+        // The fork snapshots of five targets, and six temporary snapshots.
+        11
     );
 }
 

@@ -305,8 +305,8 @@ async fn a_fork_snapshot_whose_target_has_no_manifest_is_skipped() {
     let store = LocalFsStore::new(directory.path()).expect("store");
     let (pool_id, members) = pool(&store, &["first", "fork"]).await;
     let first = &members[0];
-    // An installation that hasn't finished has written its snapshot and nothing
-    // else.
+    // A fork snapshot whose target has no manifest. No fork call leaves one,
+    // and the collection skips it without a read of the target.
     let namespace = crate::test_support::namespace_store(&store, first);
     namespace
         .create_snapshot_record(
@@ -400,9 +400,9 @@ async fn a_collection_fails_when_a_members_fork_targets_do_not_fit_the_read_memo
     )
     .await
     .expect("the pool's roots fit the read memory");
-    // Each target is an installation that hasn't finished. The walk keeps a
-    // copy of each target's 128-byte ID in its members and another in its
-    // queue, so the targets alone need more than the read memory.
+    // No target has a manifest. The walk keeps a copy of each target's
+    // 128-byte ID in its members and another in its queue, so the targets
+    // alone need more than the read memory.
     for index in 0..limit_bytes / 128 {
         let target_namespace_id =
             NamespaceId::parse(format!("pending-{index:0120}")).expect("namespace");

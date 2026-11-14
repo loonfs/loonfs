@@ -318,7 +318,10 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
         .get_namespace_diagnostics(&namespace)
         .await
         .expect("read snapshot diagnostics");
-    assert_eq!(diagnostics.live_snapshots, 2);
+    // The two user snapshots, and the temporary snapshot that the fork took
+    // of the head, which stays until its TTL ends. The fork snapshot has no
+    // expiry and isn't counted.
+    assert_eq!(diagnostics.live_snapshots, 3);
 
     for attempt in 0..2 {
         let deleted = delete_snapshot(&server_url, namespace.as_str(), first.snapshot_id.as_str())
@@ -335,7 +338,8 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
         .get_namespace_diagnostics(&namespace)
         .await
         .expect("read diagnostics after delete");
-    assert_eq!(diagnostics.live_snapshots, 1);
+    // The repeated snapshot and the fork's temporary snapshot.
+    assert_eq!(diagnostics.live_snapshots, 2);
     let bogus_delete = delete_snapshot(&server_url, namespace.as_str(), "not-a-snapshot-id")
         .expect_err("malformed snapshot id");
     assert_eq!(bogus_delete.code, "invalid_request");

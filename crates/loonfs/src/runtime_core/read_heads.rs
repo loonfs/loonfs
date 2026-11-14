@@ -168,7 +168,7 @@ impl RuntimeCore {
             .load_read_anchor(observed.clone())
             .instrument(phase_span!(self, Phase::ValidationAnchorLoad, namespace_id))
             .await?;
-        if !loaded.read_state.status.is_deleted() {
+        if loaded.read_state.status.is_active() {
             let tail =
                 project_anchor_tail(self.store(), &self.inner.metadata_segment_cache, &loaded)?;
             self.inner.head_and_wal_tail_cache.insert_tail(

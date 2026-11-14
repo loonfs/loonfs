@@ -225,8 +225,13 @@ async fn invalid_snapshot_forks_write_nothing() {
     }
 }
 
+/// Checks that a fork whose snapshot is deleted after the fork snapshot's
+/// write returns `snapshot_not_found`, leaves the target initializing with
+/// its fork snapshot in place, and that a delete of the target then publishes
+/// its tombstone.
 #[tokio::test]
-async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_target() {
+async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fork_snapshot_in_place(
+) {
     let directory = tempdir().expect("tempdir");
     let source = namespace_id("source");
     let target = namespace_id("target");
@@ -282,18 +287,39 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let (result, ()) = tokio::join!(forking, deleting);
     let error = result.expect_err("snapshot deleted");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
-    assert!(namespace_keys(&store, &target).await.is_empty());
+    assert_eq!(
+        namespace_keys(&store, &target).await,
+        [metadata_manifest_object(&target, &ManifestNo(1))]
+    );
+    let manifest_1 = namespace_store(&store, &target)
+        .load_current_manifest()
+        .await
+        .expect("the target's manifest 1");
+    assert_eq!(
+        manifest_1.payload().status,
+        loonfs_types::format::control::NamespaceStatus::Initializing {}
+    );
+    let fork_snapshot_id = &manifest_1
+        .payload()
+        .fork_basis
+        .as_ref()
+        .expect("a fork basis")
+        .source_snapshot_id;
+    let mut expected = vec![
+        snapshot_record(&source, &snapshot.snapshot_id),
+        snapshot_record(&source, fork_snapshot_id),
+    ];
+    expected.sort();
     let records = store
         .list_prefix(&format!("namespaces/{source}/snapshots/"))
         .await
         .expect("list records");
-    assert_eq!(
-        records,
-        [loonfs_objectstore::keys::snapshot_record(
-            &source,
-            &snapshot.snapshot_id
-        )]
-    );
+    assert_eq!(records, expected);
+    namespace_engine(&store, &target, &context)
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete the initializing target");
+    assert!(head_state(&store, &target).await.status.is_deleted());
 }
 
 async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
@@ -459,6 +485,9 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     assert_eq!(status.current_manifest_no, ManifestNo(3));
 }
 
+/// Checks that two forks with the same request into one target both succeed
+/// with one fork snapshot and one manifest 2, and that of a create and a fork
+/// for one ID, exactly one wins.
 #[tokio::test]
 async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
     let temp_dir = tempdir().expect("tempdir");
@@ -470,23 +499,46 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
 
     let mut second = context.clone();
     second.writer_id = loonfs_types::WriterId::parse("writer-second").expect("writer id");
-    let (left, right) = tokio::join!(
-        fork_namespace(store.as_ref(), &source, &target, &context,),
-        fork_namespace(store.as_ref(), &source, &target, &second,),
+    // The first fork waits at its put of manifest 2, and the second fork, with
+    // the same request, finishes the target from manifest 1 meanwhile.
+    let gate = BlockingStore::new(
+        store.clone(),
+        KeyPredicate::exact(metadata_manifest_object(&target, &ManifestNo(2))),
+        OperationSelector::PutCreateIfAbsent,
     );
-    let outcomes = [left, right];
+    gate.block_next();
+    let (first, finisher) =
+        tokio::join!(fork_namespace(&gate, &source, &target, &context), async {
+            gate.wait_until_blocked().await;
+            let finished = fork_namespace(store.as_ref(), &source, &target, &second).await;
+            gate.release();
+            finished
+        });
+    let first = first.expect("the first fork succeeds");
+    assert_eq!(finisher.expect("the same request succeeds"), first);
+    let fork_snapshots = store
+        .list_prefix(&snapshot_prefix(&source))
+        .await
+        .expect("list snapshots")
+        .into_iter()
+        .filter(|key| {
+            key.contains(
+                first
+                    .fork_basis
+                    .as_ref()
+                    .expect("a fork basis")
+                    .source_snapshot_id
+                    .as_str(),
+            )
+        })
+        .count();
+    assert_eq!(fork_snapshots, 1);
     assert_eq!(
-        outcomes.iter().filter(|result| result.is_ok()).count(),
-        1,
-        "exactly one fork may install the target: {outcomes:?}"
-    );
-    assert_eq!(
-        outcomes
-            .into_iter()
-            .find_map(|result| result.err())
-            .expect("one loser")
-            .code(),
-        ErrorCode::NamespaceExists
+        namespace_keys(store.as_ref(), &target).await,
+        [
+            metadata_manifest_object(&target, &ManifestNo(1)),
+            metadata_manifest_object(&target, &ManifestNo(2)),
+        ]
     );
 
     // A create racing a fork for a fresh id: same rule, and the loser never
@@ -600,11 +652,11 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
 
     assert_eq!(
         namespace_keys(&store, &clone_namespace_id).await,
-        vec![metadata_manifest_object(
-            &clone_namespace_id,
-            &ManifestNo(1)
-        )],
-        "a fork target installs its own manifest"
+        vec![
+            metadata_manifest_object(&clone_namespace_id, &ManifestNo(1)),
+            metadata_manifest_object(&clone_namespace_id, &ManifestNo(2)),
+        ],
+        "a fork target writes only its own manifests"
     );
 
     let clone_head = head_state(&store, &clone_namespace_id).await;
@@ -1069,7 +1121,9 @@ async fn a_fork_survives_a_concurrent_collection() {
     let clock = context.clock();
     let collecting = source_store.gc(&clock);
     let (forked, collected) = tokio::join!(forking, collecting);
-    forked.expect("creation grace protects the fork");
+    // Manifest 1 records the fork snapshot before the snapshot exists, so the
+    // collection keeps it.
+    forked.expect("the fork succeeds");
     collected.expect("the collection finishes");
     assert_eq!(
         head_state(store.as_ref(), &clone).await.status,
@@ -1171,7 +1225,7 @@ async fn fork_source_snapshot_failure_leaves_target_namespace_absent() {
     assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
     assert!(
         namespace_keys(&store, &clone_namespace_id).await.is_empty(),
-        "the target must not be installed before the fork snapshot keeps the source basis"
+        "the target has no manifest before the temporary snapshot keeps the source basis"
     );
     assert!(
         namespace_store(&store, &source_namespace_id)
@@ -1417,9 +1471,10 @@ fn request_order(
 }
 
 /// Checks that a create and a fork each look for the new namespace before
-/// their first write, then write the pool record or the fork snapshot, and
-/// then publish manifest 1 with its put and one read of the manifest
-/// boundary. A create or fork of a taken ID writes nothing.
+/// their first write, then write the pool record or the temporary snapshot,
+/// and then publish manifest 1 with its put and one read of the manifest
+/// boundary. The fork then writes its fork snapshot and publishes manifest 2.
+/// A create or fork of a taken ID writes nothing.
 #[tokio::test]
 async fn creation_and_fork_look_up_the_id_before_their_first_write() {
     let directory = tempdir().expect("tempdir");
@@ -1469,6 +1524,7 @@ async fn creation_and_fork_look_up_the_id_before_their_first_write() {
         .await
         .expect("fork");
     let target_manifest = metadata_manifest_object(&target, &ManifestNo(1));
+    let target_manifest_2 = metadata_manifest_object(&target, &ManifestNo(2));
     assert_eq!(
         request_order(
             store.take(),
@@ -1476,6 +1532,7 @@ async fn creation_and_fork_look_up_the_id_before_their_first_write() {
                 boundary(&target),
                 metadata_manifest_prefix(&target),
                 target_manifest.clone(),
+                target_manifest_2.clone(),
             ],
             &snapshot_prefix(&source),
         ),
@@ -1484,6 +1541,9 @@ async fn creation_and_fork_look_up_the_id_before_their_first_write() {
             vec![
                 ("put", "snapshot".to_owned()),
                 ("put", target_manifest),
+                ("get", boundary(&target)),
+                ("put", "snapshot".to_owned()),
+                ("put", target_manifest_2),
                 ("get", boundary(&target)),
             ],
         ]

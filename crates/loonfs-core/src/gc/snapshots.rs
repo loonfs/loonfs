@@ -47,7 +47,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             } => {
                 return Ok(
                     match self
-                        .fork_snapshot_is_retained(record, target_namespace_id, clock)
+                        .fork_snapshot_is_retained(record, target_namespace_id)
                         .await?
                     {
                         false => delete(|report| &mut report.deleted_snapshots_by_owner.fork),
@@ -98,15 +98,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
         )
     }
 
+    /// Returns whether the source keeps the fork snapshot `record`: it keeps
+    /// the snapshot while the newest manifest of `target_namespace_id` records
+    /// it, whether the target is initializing, active, or deleted, and deletes
+    /// it when the target is absent or retired, or records another snapshot.
+    ///
+    /// A fork's manifest 1 records the fork snapshot before the snapshot
+    /// exists, so the rule needs no creation grace.
     async fn fork_snapshot_is_retained(
         &self,
         record: &SnapshotPayload,
         target_namespace_id: &NamespaceId,
-        clock: &OperationClock,
     ) -> Result<bool> {
-        if clock.request_at_ms().saturating_sub(record.created_at_ms) < GC_GRACE_WINDOW_MS {
-            return Ok(true);
-        }
         // A target whose current manifest can't be loaded, whether the store
         // failed or the manifest is invalid, is a member whose roots the
         // pool's collection can't read. That stops only the pool's content

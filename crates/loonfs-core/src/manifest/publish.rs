@@ -14,7 +14,7 @@ use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-use loonfs_types::format::control::ManifestRef;
+use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
     encode_namespace_manifest_json, ExtensionEntry, NamespaceManifestEnvelope,
@@ -83,6 +83,14 @@ impl<T> ManifestUpdate<T> {
             response: self.response,
         }
     }
+}
+
+/// A namespace that a create or a fork found at its ID.
+pub(crate) enum ExistingNamespace {
+    /// The namespace's newest manifest is active.
+    Active(PublicationBasis),
+    /// The namespace's newest manifest is initializing.
+    Initializing(PublicationBasis),
 }
 
 /// Where the next attempt of [`update_manifest`] starts.
@@ -233,34 +241,38 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.load_current_basis().await
     }
 
-    /// Returns `namespace_exists`, or `namespace_deleted` for a tombstone or
-    /// a retired namespace, when the ID is taken, so that a create or fork
-    /// for a taken ID writes nothing (format spec, "Creating a namespace").
-    pub(crate) async fn ensure_namespace_absent(&self) -> Result<()> {
-        match self.find_newest_manifest().await? {
-            NewestManifest::Absent => Ok(()),
-            NewestManifest::Retired => Err(self.namespace_deleted()),
-            NewestManifest::Manifest(current) => Err(existing_namespace(
-                self.namespace_id.clone(),
-                &current.manifest,
-            )),
+    /// Finds the namespace that has this ID for a create or a fork, and
+    /// returns `namespace_deleted` for a tombstone or a retired namespace, so
+    /// that a create or fork for a deleted ID writes nothing (format spec,
+    /// "Creating a namespace").
+    pub(crate) async fn find_existing_namespace(&self) -> Result<Option<ExistingNamespace>> {
+        let current = match self.find_newest_manifest().await? {
+            NewestManifest::Absent => return Ok(None),
+            NewestManifest::Retired => return Err(self.namespace_deleted()),
+            NewestManifest::Manifest(current) => current,
+        };
+        match current.manifest.payload().status {
+            NamespaceStatus::Initializing {} => Ok(Some(ExistingNamespace::Initializing(current))),
+            NamespaceStatus::Active {} => Ok(Some(ExistingNamespace::Active(current))),
+            NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
         }
     }
 
-    /// Publishes manifest 1 of a new namespace with put-if-absent, after
-    /// [`Self::ensure_namespace_absent`], and returns `namespace_exists` or
-    /// `namespace_deleted` when another creation's manifest 1 won the put, or
-    /// when manifest 1 is at or below the manifest boundary.
+    /// Publishes manifest 1 of a new namespace with put-if-absent, and
+    /// returns manifest 1 with the manifest boundary that the put's check
+    /// read, or `namespace_exists` or `namespace_deleted` when another
+    /// creation's manifest 1 won the put, or when manifest 1 is at or below
+    /// the manifest boundary.
     pub(crate) async fn publish_first_manifest(
         &self,
         payload: NamespaceManifestPayload,
         clock: &OperationClock,
-    ) -> Result<()> {
+    ) -> Result<PublicationBasis> {
         match self
             .publish_manifest_from(encode_manifest(payload), clock, None)
             .await?
         {
-            ManifestPublicationOutcome::Published(_) => Ok(()),
+            ManifestPublicationOutcome::Published(basis) => Ok(basis),
             ManifestPublicationOutcome::CoveredByCurrent(current)
             | ManifestPublicationOutcome::PredecessorChanged(current) => Err(existing_namespace(
                 self.namespace_id.clone(),

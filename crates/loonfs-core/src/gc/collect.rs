@@ -54,7 +54,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .map(|tombstone| live.deadline(tombstone));
         report.next_reclamation_at_ms = match live.retirement_status() {
             RetirementStatus::Retained { retires_at_ms } => retires_at_ms,
-            _ => None,
+            _ => live.tombstone_at_ms,
         };
         let sweep = Sweep {
             clock,

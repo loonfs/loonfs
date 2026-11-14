@@ -3,8 +3,8 @@
 
 use crate::trace::{self, operation_span};
 use crate::{
-    CloseNamespaceReport, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, Namespace,
-    Result, Writable,
+    CloseNamespaceReport, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode,
+    Namespace, Result, Writable,
 };
 
 impl<M: crate::Mode> Namespace<M> {
@@ -19,6 +19,32 @@ impl<M: crate::Mode> Namespace<M> {
             .pinned_read(&self.namespace_id, crate::Consistency::Strong)
             .await?;
         Ok(engine.ensure_administrator(&context).await?)
+    }
+
+    /// Checks the administrator of a deletion as [`Self::ensure_administrator`]
+    /// does, and also of an initializing namespace, which every other route
+    /// treats as missing: that check reads the access and the segments of the
+    /// namespace's manifest 1.
+    async fn ensure_deletion_administrator(&self) -> Result<()> {
+        match self.ensure_administrator().await {
+            Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
+                let Some(basis) = self
+                    .core
+                    .namespace_store(&self.namespace_id)
+                    .find_initializing_read_basis()
+                    .await?
+                else {
+                    return Err(error);
+                };
+                let context = self.core.read_context(basis, None);
+                Ok(self
+                    .core
+                    .reader_engine(&self.namespace_id)
+                    .ensure_administrator(&context)
+                    .await?)
+            }
+            result => result,
+        }
     }
 }
 
@@ -43,7 +69,7 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "delete", self.namespace_id),
             async {
-                self.ensure_administrator().await?;
+                self.ensure_deletion_administrator().await?;
                 self.session().submit_delete(*options).await
             },
         )

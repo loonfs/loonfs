@@ -171,7 +171,7 @@ pub mod control {
     pub use crate::manifest::NamespaceStatistics;
     pub use crate::namespace::boundary::{higher_boundary, LoadedBoundary};
     pub use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-    pub use crate::namespace::control::LoadedManifest;
+    pub use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
     pub use crate::namespace::read_anchor::{project_anchor_tail, NamespaceReadAnchor};
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::status::NamespaceStorageDiagnostics;

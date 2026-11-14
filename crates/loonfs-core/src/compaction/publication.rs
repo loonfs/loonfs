@@ -71,7 +71,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         return settled(CompactionUnitOutcome::Cancelled);
                     }
                     let previous = current.payload();
-                    if previous.status.is_deleted() {
+                    if !previous.status.is_active() {
                         return settled(CompactionUnitOutcome::Abandoned);
                     }
                     if previous.compactor_epoch != publication.compactor_epoch {

@@ -8,6 +8,7 @@ use super::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, Snapsh
 use crate::error::Result;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
+use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::read_working_memory;
 use crate::time::Observation;
@@ -17,6 +18,7 @@ use futures::TryStreamExt;
 use loonfs_objectstore::keys::{extension_segment_object_key, metadata_segment_object_key};
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{GcResponse, ManifestNo, RetainedReason, WalNo};
 use std::sync::Arc;
@@ -74,6 +76,10 @@ pub(super) struct LiveSet {
     has_snapshots: bool,
     pub(super) now_ms: u64,
     live_folded_wal_no: Option<WalNo>,
+    /// When a collection publishes the tombstone of the namespace, whose
+    /// newest manifest is initializing: the grace window after its manifest
+    /// 1's `created_at_ms`.
+    pub(super) tombstone_at_ms: Option<u64>,
 }
 
 impl LiveSet {
@@ -81,6 +87,12 @@ impl LiveSet {
     /// current manifest, the WAL tail above it, and the manifests that snapshots
     /// keep, with their metadata and extension segments. Returns `None` when
     /// the namespace is retired, because a retired namespace has no roots.
+    ///
+    /// A newest manifest that's initializing and older than the grace window
+    /// belongs to an abandoned creation, so the call first publishes the
+    /// namespace's tombstone (see
+    /// [`NamespaceStore::tombstone_initializing_namespace`]), and continues
+    /// with the manifest that's current after that publication.
     ///
     /// The object keys and snapshot decisions that the collection keeps are charged
     /// to the read working memory of the namespace's segment cache as they
@@ -95,6 +107,27 @@ impl LiveSet {
             NewestManifest::Absent => return Err(namespace.namespace_not_found()),
             NewestManifest::Retired => return Ok(None),
             NewestManifest::Manifest(current) => current,
+        };
+        let created_at_ms = current.manifest.payload().created_at_ms;
+        let current = if matches!(
+            current.manifest.payload().status,
+            NamespaceStatus::Initializing {}
+        ) && clock.request_at_ms().saturating_sub(created_at_ms)
+            >= GC_GRACE_WINDOW_MS
+        {
+            let update = namespace
+                .tombstone_initializing_namespace(current, clock)
+                .await?;
+            if let TombstoneOutcome::Published(_) = update.response {
+                tracing::info!(
+                    namespace_id = %namespace_id,
+                    created_at_ms,
+                    "published the tombstone of an abandoned namespace creation"
+                );
+            }
+            update.current
+        } else {
+            current
         };
         let anchor = namespace
             .load_read_anchor_from_manifest(current.manifest, current.boundary, observed)
@@ -114,6 +147,8 @@ impl LiveSet {
             has_snapshots: false,
             now_ms: clock.request_at_ms(),
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
+            tombstone_at_ms: matches!(head.status, NamespaceStatus::Initializing {})
+                .then(|| head.created_at_ms.saturating_add(GC_GRACE_WINDOW_MS)),
         };
         let outcome = async {
             live.protect_manifest(&anchor.manifest)?;

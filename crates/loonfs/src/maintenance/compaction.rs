@@ -8,7 +8,7 @@ use crate::{Error, Result};
 use crate::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, NamespaceId, SharedObjectStore,
 };
-use loonfs_core::control::PublicationBasis;
+use loonfs_core::control::{ensure_namespace_live, PublicationBasis};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::{CoreError, MetadataCompactionCancellation};
 use loonfs_types::CompactorEpoch;
@@ -68,7 +68,7 @@ impl Maintenance {
         engine
     }
 
-    /// Loads the current manifest of a namespace that isn't deleted, without
+    /// Loads the current manifest of a namespace that's active, without
     /// the WAL tail above it, as a basis that a compaction unit can plan and
     /// publish from.
     pub(super) async fn load_live_basis(
@@ -80,12 +80,7 @@ impl Maintenance {
             .namespace_store(namespace_id)
             .load_current_basis()
             .await?;
-        if basis.manifest.payload().status.is_deleted() {
-            return Err(CoreError::NamespaceDeleted {
-                namespace_id: namespace_id.clone(),
-            }
-            .into());
-        }
+        ensure_namespace_live(namespace_id, basis.manifest.payload().status)?;
         Ok(basis)
     }
 

@@ -18,6 +18,7 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
             target_namespace_id: NamespaceId::parse("never-published").expect("target"),
         },
     ] {
+        let fork = matches!(owner, SnapshotOwner::Fork { .. });
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
         let store = BlockingStore::new(
@@ -90,21 +91,31 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
             "failed cleanup left its unverified snapshot"
         );
 
-        // A missing basis is still an error while the record must be retained.
         let young = crate::test_support::namespace_store(&store, &namespace_id)
             .gc(&setup.clock())
-            .await
-            .expect_err("young snapshot remains protected");
-        assert_eq!(young.code(), ErrorCode::NamespaceCorrupt);
-
-        let collected = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_001).clock())
-            .await
-            .expect("reap abandoned snapshot once owner rules permit deletion");
-        assert_eq!(
-            collected.deleted_snapshots_by_owner.user + collected.deleted_snapshots_by_owner.fork,
-            1
-        );
+            .await;
+        if fork {
+            // A fork snapshot whose target has no manifest goes at once.
+            assert_eq!(
+                young
+                    .expect("a fork snapshot without a target is deleted")
+                    .deleted_snapshots_by_owner
+                    .fork,
+                1
+            );
+        } else {
+            // A missing basis is still an error while the record must be
+            // retained.
+            assert_eq!(
+                young.expect_err("young snapshot remains protected").code(),
+                ErrorCode::NamespaceCorrupt
+            );
+            let collected = crate::test_support::namespace_store(&store, &namespace_id)
+                .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_001).clock())
+                .await
+                .expect("reap abandoned snapshot once owner rules permit deletion");
+            assert_eq!(collected.deleted_snapshots_by_owner.user, 1);
+        }
         assert!(store.head(&snapshots[0]).await.expect("snapshot").is_none());
         crate::test_support::namespace_store(&store, &namespace_id)
             .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_002).clock())

@@ -80,16 +80,18 @@ pub(crate) fn ensure_head_identity(
     Ok(())
 }
 
-pub(crate) fn ensure_namespace_live(
+/// Returns `namespace_not_found` for a namespace that's initializing, because
+/// LoonFS treats it as missing, and `namespace_deleted` for a tombstone.
+pub fn ensure_namespace_live(
     namespace_id: &NamespaceId,
     status: NamespaceStatus,
 ) -> crate::error::Result<()> {
-    if status.is_deleted() {
-        return Err(CoreError::NamespaceDeleted {
-            namespace_id: namespace_id.clone(),
-        });
+    let namespace_id = namespace_id.clone();
+    match status {
+        NamespaceStatus::Active {} => Ok(()),
+        NamespaceStatus::Initializing {} => Err(CoreError::NamespaceNotFound { namespace_id }),
+        NamespaceStatus::Deleted { .. } => Err(CoreError::NamespaceDeleted { namespace_id }),
     }
-    Ok(())
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {

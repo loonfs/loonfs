@@ -452,10 +452,15 @@ async fn fold_beside_a_parked_snapshot(head_snapshot: HeadSnapshot) {
         "{head_snapshot:?}"
     );
     let operations = [before, parked, store.take()].concat();
+    // A fork writes its temporary snapshot and then its fork snapshot.
+    let snapshot_puts = match head_snapshot {
+        HeadSnapshot::Snapshot => 1,
+        HeadSnapshot::Fork => 2,
+    };
     assert_eq!(
         write_keys(&operations, &snapshots).len(),
-        1,
-        "{head_snapshot:?}: one snapshot record put"
+        snapshot_puts,
+        "{head_snapshot:?}: snapshot record puts"
     );
     runtime.shutdown().await.expect("shutdown");
 }

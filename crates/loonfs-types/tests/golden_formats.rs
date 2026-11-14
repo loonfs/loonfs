@@ -761,6 +761,9 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                 payload_checksum: payload_checksum(),
             },
             source_snapshot_id: snapshot_id("snp_00000000000000000002-00000000000000000000000002"),
+            forked_from_snapshot_id: snapshot_id(
+                "snp_00000000000000000002-00000000000000000000000001",
+            ),
             rebased_from: None,
         }),
         ..sample_manifest_payload()
@@ -780,6 +783,21 @@ fn sample_rebase_manifest() -> NamespaceManifestPayload {
             ..basis
         }),
         ..fork
+    }
+}
+
+/// A fork's manifest 1 is initializing, has no writer, and starts its
+/// retention floor at the fork's head.
+fn sample_initializing_manifest() -> NamespaceManifestPayload {
+    NamespaceManifestPayload {
+        status: NamespaceStatus::Initializing {},
+        manifest_no: ManifestNo(1),
+        writer: None,
+        writer_epoch: WriterEpoch(0),
+        folded_wal_no: WalNo(0),
+        activity: loonfs_types::format::manifest::ManifestActivity::default(),
+        retention_floor_seq: CommitSeq(2),
+        ..sample_rebase_manifest()
     }
 }
 
@@ -1138,6 +1156,7 @@ fn every_durable_status_is_a_kind_tagged_object() {
     let fixtures = [
         ("manifest.v1.json", "status"),
         ("manifest.deleted.v1.json", "status"),
+        ("manifest.initializing.v1.json", "status"),
         ("control_upload_outcome_completed.v1.json", "outcome"),
         ("control_upload_outcome_aborted.v1.json", "outcome"),
         ("control_boundary.v1.json", "boundary"),
@@ -3197,6 +3216,10 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
     for (name, payload) in [
         ("manifest.deleted.v1.json", sample_deleted_manifest()),
         ("manifest.fork.v1.json", sample_fork_manifest()),
+        (
+            "manifest.initializing.v1.json",
+            sample_initializing_manifest(),
+        ),
         ("manifest.rebase.v1.json", sample_rebase_manifest()),
         ("manifest.acl.v1.json", sample_acl_manifest()),
         (

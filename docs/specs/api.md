@@ -230,7 +230,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `range_not_satisfiable` | 416 | A ranged read's range starts at or past the end of the file. The error's details include the file's size, so the client can choose a range that the file can satisfy. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists, but it doesn't serve this HTTP method. |
-| `namespace_not_found` | 404 | The namespace has no installed manifest, so it doesn't exist. |
+| `namespace_not_found` | 404 | The namespace has no manifest, or its newest manifest is initializing. Every request except a create, a fork, or a delete with its ID treats an initializing namespace as missing. |
 | `pool_not_found` | 404 | The pool has no pool record, so the pool's collection deletes nothing. |
 | `namespace_deleted` | 410 | The namespace ID is deleted or [retired](format.md#95-retirement), and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
 | `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, retrieve, fork, or extension found the snapshot expired. The snapshot inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
@@ -238,7 +238,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session exists with this ID. The server also returns this code for an aborted session, and for an open session asked to stage, sign parts, or complete at or after its `expires_at_ms`. Neither session will ever select content, so the server reports each one as missing, as it will once the session is deleted. |
-| `namespace_exists` | 409 | The create or fork target already exists (another namespace has the ID). |
+| `namespace_exists` | 409 | The create or fork target already exists (another namespace has the ID), or a create or fork request doesn't match the first manifest of an initializing fork with the ID (see [Creating and forking namespaces](#creating-and-forking-namespaces)). |
 | `content_not_prepared` | 409 | A path put or an explicit create or replace operation references external content without a matching admission, or it includes a relevant token that was rejected. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination already exists. A failed `path_binding`, `path_absence`, or `name_absence` precondition also returns this code. |
 | `wrong_kind` | 409 | The path or inode refers to a directory where the operation needs a file, or to a file where the operation needs a directory. A path whose parent component is a file, and a commit operation on an inode of the other kind, also return this code. For example, a content read of a directory, a listing of a file's children, or a create at `/report.pdf/notes.txt` when `/report.pdf` is a file. |
@@ -900,13 +900,14 @@ Each GC request runs one complete, stateless collection. `GcRequest` has no fiel
 
 Every GC call uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end. Before a namespace's call deletes manifests, it raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to the highest manifest number that it deletes (see [One complete collection](format.md#111-one-complete-collection)).
 
-A namespace's call reads the current manifest, lists the namespace's snapshots, and loads the manifests that the snapshots keep. If a manifest read fails, the call fails before it lists or deletes anything. [Reference roots](format.md#112-reference-roots) defines these roots. A retired namespace has no roots, so the call reads no manifest. It returns an ordinary GC response with what it deleted, not `namespace_deleted`.
+A namespace's call reads the current manifest, lists the namespace's snapshots, and loads the manifests that the snapshots keep. If a manifest read fails, the call fails before it lists or deletes anything. [Reference roots](format.md#112-reference-roots) defines these roots. A retired namespace has no roots, so the call reads no manifest. It returns an ordinary GC response with what it deleted, not `namespace_deleted`. When the newest manifest is initializing and was created more than the grace window (24 hours) before the call's clock, the call publishes the namespace's tombstone (see [Deleting a namespace](format.md#94-deleting-a-namespace)).
 
 A pool's call reads the pool record, lists the pool's upload sessions, and then reads the roots of every member of the pool. It protects content through the extent filters of the rooted layout segments, and it deletes no content objects if it couldn't read the roots of every member within the time that [Content roots](format.md#119-content-roots) allows, or couldn't read one member's roots. [Content roots](format.md#119-content-roots) defines these roots. A pool has no members when its first member is retired, or when its create call failed or lost to another create call for the same namespace ID. In the second case, the call deletes nothing while the pool record is inside its creation grace (the grace window after the record's `created_at_ms`), and after the creation grace it deletes the pool record and lists nothing else.
 
 A GC response includes `next_reclamation_at_ms` when the collection finds a future time at which more objects can be deleted. In a namespace's response, the time is one of these:
 
-- the retirement deadline of a deleted namespace whose deletion is less than the grace window old, or
+- the retirement deadline of a deleted namespace whose deletion is less than the grace window old,
+- the end of the grace window after the creation of an initializing namespace, when the call doesn't publish its tombstone yet, or
 - the deletion time of a retained snapshot.
 
 In a pool's response, the time is one of these:
@@ -1313,11 +1314,15 @@ A create request can leave out `namespace_id`, and a fork request can leave out 
 
 Route placeholders such as `{ns}`, `{source_ns}`, and an implementation-internal `:namespace` are path parameter names, and each one takes the same namespace ID value. v0 doesn't accept or return a namespace `name` alias.
 
-Create and fork first look for the namespace ID's newest manifest, and a call that finds one, or finds that the namespace is retired, writes nothing. Otherwise the call writes manifest 1 with a conditional put and then reads the namespace's [manifest boundary](glossary.md#manifest-boundary). Between the lookup and manifest 1, a plain create writes the record of the pool that it generates (`pools/{pool_id}/pool.json`), so a create of an existing namespace writes no pool record. A fork writes no pool record. The conditional put of manifest 1, with the boundary read after it, determines whether the call created the namespace (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork for the ID of another active namespace returns `namespace_exists` (409). A create or fork into a deleted or retired ID returns `namespace_deleted` (410). A namespace is never left partially created.
+Create and fork first look for the namespace ID's newest manifest, and a call that finds an active or deleted namespace, or finds that the namespace is retired, writes nothing. A create or fork for the ID of another active namespace returns `namespace_exists` (409). A create or fork into a deleted or retired ID returns `namespace_deleted` (410). The conditional put of manifest 1, with a read of the namespace's [manifest boundary](glossary.md#manifest-boundary) after it, determines whether the call created the namespace (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)).
+
+A plain create writes the record of the pool that it generates (`pools/{pool_id}/pool.json`) after the lookup, so a create of an existing namespace writes no pool record. Then it writes manifest 1 with a conditional put, and the namespace is active.
+
+A fork writes no pool record. If the request identifies no snapshot, the fork first takes a temporary snapshot of the source's head (a user snapshot with no name that expires after 5 minutes). Then it writes the fork's manifest 1 with the status `initializing`, writes the fork snapshot on the source, and writes manifest 2 with the status `active` (see [Forking a namespace](format.md#92-forking-a-namespace)). A fork that stops between manifest 1 and manifest 2 leaves the namespace initializing, and every request except a create, a fork, or a delete with its ID returns `namespace_not_found` for it. A later fork request that matches the first one finishes the namespace, a delete request removes it, and the namespace's collection removes an initializing fork whose manifest 1 is more than 24 hours old (see [Deleting a namespace](format.md#94-deleting-a-namespace)). A create request never finishes an initializing fork, and returns `namespace_exists` for it.
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
-If a creation acknowledgement is lost, a new request with the same ID returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a plain create and a fork. A plain create's manifest records a pool ID that only that attempt generated, and a fork's manifest refers to the fork's unique fork snapshot.
+If a creation acknowledgement is lost, a new create request with the same ID returns `namespace_exists`, unless the request explicitly allows an existing namespace. A new fork request with the same ID returns success while the first fork is initializing, and `namespace_exists` once the fork is active. A fork request matches an initializing fork when it has the same source and, if the request identifies a snapshot, the same snapshot, and for a rebase's new fork, the same rebased fork. A request that identifies no snapshot matches whichever snapshot the first request used. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a plain create and a fork. A plain create's manifest records a pool ID that only that attempt generated, and a fork's manifest 1 records a fork snapshot ID that only that attempt generated.
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -1325,7 +1330,7 @@ Returns the capability document described in [The capability document](#21-the-c
 
 ### 6.2 `GET /v0/namespaces/{ns}`
 
-Returns the metadata of one namespace, without listing every namespace. A missing namespace returns `404` with `namespace_not_found`, and a deleted or retired namespace returns `410` with `namespace_deleted`.
+Returns the metadata of one namespace, without listing every namespace. A missing namespace, or one whose creation hasn't finished (its newest manifest is `initializing`), returns `404` with `namespace_not_found`, and a deleted or retired namespace returns `410` with `namespace_deleted`.
 
 ```json
 {
@@ -1429,7 +1434,7 @@ The embedded `NamespaceStore::load_statistics` and `NamespaceStore::load_snapsho
 
 Deletes a namespace. In an ACL namespace, this operation requires an administrator subject. A request with no subject headers acts as the token holder.
 
-Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest until the namespace is [retired](format.md#95-retirement), and these requests return `namespace_deleted` after the retirement too.
+Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). A delete of a namespace whose creation hasn't finished (its newest manifest is `initializing`) publishes its tombstone without a writer session. The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest until the namespace is [retired](format.md#95-retirement), and these requests return `namespace_deleted` after the retirement too.
 
 The snapshot inventory and snapshot deletion are explicit exceptions, and they stay available after deletion until the namespace is retired. Deleting a fork snapshot's ID through the snapshot route still returns `snapshot_not_found`.
 
@@ -2692,23 +2697,26 @@ The `fork_basis` object identifies the captured source:
 
 The optional `snapshot_id` request field selects an unexpired snapshot of the source namespace. Without it, the server captures the current head.
 
-The snapshot has to stay unexpired, and the source namespace has to stay live, while the server verifies the fork snapshot, which it does after it writes that fork snapshot. The server returns these errors:
+The snapshot that the fork is built from (the snapshot that `snapshot_id` identifies, or the temporary snapshot that the server takes of the current head) has to stay unexpired, and the source namespace has to stay live, while the server writes and verifies the fork snapshot. A temporary snapshot expires 5 minutes after the server takes it. The server returns these errors:
 
 - A missing or expired snapshot (including one that's deleted or expires during fork verification), a fork snapshot's ID, or an ID owned by another namespace returns `snapshot_not_found`.
 - A source deleted during fork verification returns `namespace_deleted`.
+
+When either error happens during fork verification, the new namespace's manifest 1 already exists, so the namespace stays initializing until a delete request or the namespace's collection removes it, and its ID can't be used again.
 
 Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn't affect the fork. The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator. Namespace creation and forking produce no change-feed event.
 
 The new namespace has the same pool as its source. It reads inherited content under the pool's prefix, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
 
 1. Might first fold the source's outstanding WAL tail, if the fork captures the current head. The fold writes that tail's inline content to content objects.
-2. Creates a fork snapshot in the source, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
-3. Verifies the fork snapshot.
-4. Installs the target namespace with a conditional manifest write. The manifest records the fork snapshot for the target's lifetime.
+2. Takes a temporary snapshot of the source's head, if the request doesn't identify a snapshot.
+3. Writes the target's manifest 1 with the status `initializing` and a conditional put. The manifest records the fork snapshot's ID for the target's lifetime.
+4. Writes the fork snapshot in the source and verifies it, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
+5. Writes manifest 2 with the status `active`.
 
 The response contains the new namespace's initial state. Its head sequence and retention floor equal the captured basis sequence, and the target's first data commit is one sequence above that head. Inherited file history follows the floor rule from the start. After the target's first base compaction, each inherited file keeps its newest revision at or below the fork point, plus the revisions the target adds.
 
-If the target ID is active, the server returns `namespace_exists` before it writes a fork snapshot. If the target ID is deleted, the server returns `namespace_deleted` before it writes a fork snapshot. If the fork snapshot can't be verified, the server returns `snapshot_unavailable`, and no target namespace is installed.
+If the target ID is active, the server returns `namespace_exists` before it writes anything. If the target ID is deleted, the server returns `namespace_deleted` before it writes anything. If the target is an initializing fork whose first manifest matches the request, the server finishes the fork from step 4 and returns success, and if the first manifest doesn't match, it returns `namespace_exists` (see [Creating and forking namespaces](#creating-and-forking-namespaces)). If the temporary snapshot can't be verified, the server returns `snapshot_unavailable` before it writes a manifest.
 
 ### 6.14 `POST /merges`
 
@@ -2933,13 +2941,13 @@ Representative response:
 | `source_namespace_id` | The fork. The manifest that the fork was made from has to belong to this namespace, as for a merge. |
 | `new_namespace_id` | Optional. The new fork's namespace ID. |
 
-The request can leave out `new_namespace_id`, and LoonFS then generates the new fork's ID under the same rule as create and fork (see [Creating and forking namespaces](#creating-and-forking-namespaces)). Like a fork, this route isn't idempotent, so a caller that has to be safe against a lost response sends its own ID. A caller that lost the response sends the same request again, and `namespace_exists` tells the caller that the new fork exists, so the caller goes on to the replay commits.
+The request can leave out `new_namespace_id`, and LoonFS then generates the new fork's ID under the same rule as create and fork (see [Creating and forking namespaces](#creating-and-forking-namespaces)). Like a fork, this route isn't idempotent, so a caller that has to be safe against a lost response sends its own ID. A caller that lost the response sends the same request again. The request returns the new fork if the first call stopped before the new fork became active, and `namespace_exists` once the new fork is active, and in both cases the caller goes on to the replay commits.
 
 The response contains the new fork's namespace object, as [`POST /forks`](#613-post-forks) returns. The new fork's `fork_basis` records `rebased_from`, which identifies the fork (`source_namespace_id`) and the fork sequence that the fork's next merge into this namespace would have started after when the rebase created the new fork (`resume_after_seq`).
 
 To create the new fork, the server:
 
-1. Returns `namespace_exists` if `new_namespace_id` is an active namespace, and `namespace_deleted` if it was deleted.
+1. Returns `namespace_exists` if `new_namespace_id` is an active namespace, and `namespace_deleted` if it was deleted. If `new_namespace_id` is an initializing fork whose first manifest matches the request, the server finishes it, as [`POST /forks`](#613-post-forks) does.
 2. Checks that the fork was made from this namespace, and reads the fork point.
 3. Refuses a fork point below this namespace's retention floor, or a start of the fork's next merge into this namespace below the fork's own retention floor, with `below_retention_floor`.
 4. Creates the new fork from this namespace's head, as [`POST /forks`](#613-post-forks) does, and records `rebased_from` in the new fork's fork basis.

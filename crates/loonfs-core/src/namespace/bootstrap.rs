@@ -2,6 +2,7 @@
 
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
+use crate::manifest::publish::ExistingNamespace;
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::PoolPayload;
@@ -18,6 +19,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Use this before normal reads and writes for a new namespace. Returns
     /// the namespace's status after manifest 1 is installed. The call looks
     /// for the namespace first and writes nothing when the namespace exists.
+    /// With `allow_existing`, an active namespace returns its state, and an
+    /// initializing one still returns `namespace_exists`.
     /// It writes the pool record of a generated pool before manifest 1, and
     /// deletes the record again when another creation's manifest 1 wins
     /// (format spec, "Creating a namespace").
@@ -50,8 +53,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 options.access.clone(),
             )
         };
+        match self.namespace.find_existing_namespace().await? {
+            None => {}
+            Some(existing) => return self.existing_namespace(existing, options).await,
+        }
         let created = async {
-            self.namespace.ensure_namespace_absent().await?;
             self.namespace.write_pool_record(&pool).await?;
             let published = self
                 .namespace
@@ -67,11 +73,37 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         }
         .await;
         match created {
-            Ok(()) => Ok(super::status::created_namespace(&start)),
+            Ok(_) => Ok(super::status::created_namespace(&start)),
             Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {
-                self.namespace.load_metadata().await
+                match self.namespace.find_existing_namespace().await? {
+                    Some(existing) => self.existing_namespace(existing, options).await,
+                    None => Err(CoreError::NamespaceCorrupt(format!(
+                        "namespace `{}` has no manifest after its manifest 1 put was refused",
+                        self.namespace.namespace_id
+                    ))),
+                }
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Returns the state of `existing`, the namespace that a create found at
+    /// its ID, when the namespace is active and `options` allows an existing
+    /// namespace, and `namespace_exists` otherwise.
+    async fn existing_namespace(
+        &self,
+        existing: ExistingNamespace,
+        options: &CreateNamespaceOptions,
+    ) -> Result<NamespaceMetadata> {
+        match existing {
+            ExistingNamespace::Active(_) if options.allow_existing => {
+                self.namespace.load_metadata().await
+            }
+            ExistingNamespace::Active(_) | ExistingNamespace::Initializing(_) => {
+                Err(CoreError::NamespaceExists {
+                    namespace_id: self.namespace.namespace_id.clone(),
+                })
+            }
         }
     }
 }
