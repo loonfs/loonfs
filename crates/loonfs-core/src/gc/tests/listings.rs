@@ -4,11 +4,12 @@ use super::*;
 use loonfs_objectstore::keys::{content_blob, metadata_segment_object_key};
 use loonfs_types::format::manifest::MetadataRowFamily;
 
-/// Checks that a namespace's collection and a pool's collection each send HEAD
-/// requests only for the anchor's check of the current manifest's successor,
-/// because they find the newest manifest with a listing.
+/// Checks that a namespace's collection sends no HEAD request and reads no
+/// WAL object, and that a pool's collection sends one HEAD request, for the
+/// anchor's check of the member's current manifest's successor. Both find the
+/// newest manifest with a listing.
 #[tokio::test]
-async fn a_collection_heads_only_the_successor() {
+async fn only_a_pool_collection_heads_a_successor() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("no-heads").expect("namespace");
@@ -47,12 +48,15 @@ async fn a_collection_heads_only_the_successor() {
         .gc(&context(GC_GRACE_WINDOW_MS + 1).clock())
         .await
         .expect("collection");
-    let expected = vec![metadata_manifest_object(&namespace_id, &successor)];
-    assert_eq!(heads(), expected);
+    assert_eq!(heads(), Vec::<String>::new());
+    assert_eq!(wal_reads(&recorded), Vec::<String>::new());
     recorded.reset();
     let report = collect_pool(&recorded, &pool_id, &context(GC_GRACE_WINDOW_MS + 1)).await;
     assert_eq!(report.deleted.content_objects, 1);
-    assert_eq!(heads(), expected);
+    assert_eq!(
+        heads(),
+        vec![metadata_manifest_object(&namespace_id, &successor)]
+    );
     let target = NamespaceId::parse("retired-no-heads").expect("target");
     let fixture =
         crate::test_support::NamespaceFixture::new(&recorded, &namespace_id, &context(1_000));
@@ -80,6 +84,168 @@ async fn a_collection_heads_only_the_successor() {
     assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
     // A tombstone needs no successor check.
     assert_eq!(recorded.counts().heads, 0);
+}
+
+/// Returns the keys of the WAL objects that `recorded` read.
+fn wal_reads<S: ObjectStore>(recorded: &RecordingStore<S>) -> Vec<String> {
+    recorded
+        .snapshot()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            loonfs_test_support::stores::RecordedOperation::Get { key, .. }
+            | loonfs_test_support::stores::RecordedOperation::GetWithMetadata { key, .. } => {
+                Some(key)
+            }
+            _ => None,
+        })
+        .filter(|key| loonfs_objectstore::layout::wal_no_of(key).is_some())
+        .collect()
+}
+
+/// Checks that a collection of an active namespace with an unfolded WAL tail
+/// reads no WAL object and sends no HEAD request, and keeps every WAL object
+/// above the newest manifest's `folded_wal_no` and every segment that the
+/// newest manifest lists.
+#[tokio::test]
+async fn a_collection_keeps_an_unfolded_tail_without_reading_it() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("unfolded-tail").expect("namespace");
+    folded_namespace_with_two_files(&store, &namespace_id).await;
+    let setup = context(1_000);
+    for name in ["three", "four", "five"] {
+        write_test_file(
+            &store,
+            &namespace_id,
+            &format!("/docs/{name}.txt"),
+            &format!("gc-{name}"),
+            &setup,
+        )
+        .await;
+    }
+    let folded_wal_no = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest")
+        .payload()
+        .folded_wal_no;
+    let wal_keys = store
+        .list_prefix(&wal_prefix(&namespace_id))
+        .await
+        .expect("list the WAL");
+    let tail: Vec<_> = wal_keys
+        .into_iter()
+        .filter(|key| {
+            loonfs_objectstore::layout::wal_no_of(key).is_some_and(|number| number > folded_wal_no)
+        })
+        .collect();
+    assert!(tail.len() >= 3, "the setup leaves an unfolded tail");
+    let segments =
+        crate::manifest::tests::segment_keys_of_the_current_manifest(&store, &namespace_id).await;
+    assert!(!segments.is_empty());
+
+    let recorded = RecordingStore::new(
+        MetadataMapStore::aged(store, KeyPredicate::any()),
+        KeyPredicate::any(),
+    );
+    crate::test_support::namespace_store(&recorded, &namespace_id)
+        .gc(&context(GC_GRACE_WINDOW_MS + 1).clock())
+        .await
+        .expect("collection");
+    assert_eq!(recorded.counts().heads, 0);
+    assert_eq!(wal_reads(&recorded), Vec::<String>::new());
+    for key in tail.iter().chain(&segments) {
+        assert!(
+            recorded.inner().head(key).await.expect("head").is_some(),
+            "the collection keeps `{key}`"
+        );
+    }
+}
+
+/// Checks that a fold published after a collection's find, and before the
+/// collection lists anything, loses nothing: the collection keeps the WAL
+/// objects that the fold moved into the new manifest, and the segments that
+/// the new manifest lists.
+#[tokio::test]
+async fn a_fold_during_a_collection_keeps_what_the_new_manifest_needs() {
+    let directory = tempdir().expect("directory");
+    let seed = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("fold-during-gc").expect("namespace");
+    folded_namespace_with_two_files(&seed, &namespace_id).await;
+    let setup = context(1_000);
+    for name in ["three", "four", "five"] {
+        write_test_file(
+            &seed,
+            &namespace_id,
+            &format!("/docs/{name}.txt"),
+            &format!("gc-{name}"),
+            &setup,
+        )
+        .await;
+    }
+    let found = crate::test_support::namespace_store(&seed, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest");
+    let moved: Vec<_> = seed
+        .list_prefix(&wal_prefix(&namespace_id))
+        .await
+        .expect("list the WAL")
+        .into_iter()
+        .filter(|key| {
+            loonfs_objectstore::layout::wal_no_of(key)
+                .is_some_and(|number| number > found.payload().folded_wal_no)
+        })
+        .collect();
+    assert!(moved.len() >= 3, "the setup leaves an unfolded tail");
+    // Every object that the setup wrote is past the grace window for the
+    // collection, and every object that the fold writes is younger than the
+    // grace window.
+    let clock =
+        context(now_after_newest_object(&seed, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
+
+    // The collection parks at its snapshot listing, which is after its find
+    // and before every listing of a candidate family.
+    let gated = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
+        OperationSelector::List,
+    );
+    gated.block_next();
+    let namespace = crate::test_support::namespace_store(&gated, &namespace_id);
+    let collection_clock = clock.clock();
+    let (report, segments) = tokio::join!(namespace.gc(&collection_clock), async {
+        gated.wait_until_blocked().await;
+        crate::test_support::namespace_store(&seed, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold the tail");
+        let segments =
+            crate::manifest::tests::segment_keys_of_the_current_manifest(&seed, &namespace_id)
+                .await;
+        gated.release();
+        segments
+    });
+    report.expect("the collection must finish");
+    let folded = crate::test_support::namespace_store(&seed, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest");
+    assert!(folded.manifest().manifest_no > found.manifest().manifest_no);
+    assert!(moved
+        .iter()
+        .all(|key| loonfs_objectstore::layout::wal_no_of(key)
+            .is_some_and(|number| number <= folded.payload().folded_wal_no)));
+    for key in moved
+        .iter()
+        .chain(&segments)
+        .chain([&found.object_key, &folded.object_key])
+    {
+        assert!(
+            seed.head(key).await.expect("head").is_some(),
+            "the collection keeps `{key}`"
+        );
+    }
 }
 
 #[tokio::test]
