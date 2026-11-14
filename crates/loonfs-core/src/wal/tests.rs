@@ -213,7 +213,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::metadata_manifest_object(
             &namespace_id,
-            &loonfs_types::ManifestNo(3),
+            &loonfs_types::ManifestNo(4),
         )),
         OperationSelector::PutCreateIfAbsent,
     );

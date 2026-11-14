@@ -738,7 +738,7 @@ fn classify_key(key: &str) -> ObjectKeyKind {
         DurableObjectFamily::Snapshot => ObjectKeyKind::GcControl,
         DurableObjectFamily::UploadSession
         | DurableObjectFamily::UploadOutcome
-        | DurableObjectFamily::Pool => ObjectKeyKind::Metadata,
+        | DurableObjectFamily::PoolMember => ObjectKeyKind::Metadata,
     }
 }
 

@@ -48,9 +48,9 @@ mod fork_chain;
 mod initializing;
 mod listings;
 mod many_snapshots;
+mod member_entries;
 mod pool_content;
 mod pool_members;
-mod pool_records;
 mod pool_uploads;
 mod replaced_manifests;
 mod retirement;
@@ -120,14 +120,12 @@ async fn core_listed_bytes<S: ObjectStore + ?Sized>(store: &S, namespace_id: &Na
         .expect("list namespace")
 }
 
-/// Sums the listed sizes of the objects under the pool prefix that a pool's
-/// collection lists: every object except the pool record.
+/// Sums the listed sizes of the objects under the pool prefix, which a pool's
+/// collection lists, member entries included.
 async fn pool_listed_bytes<S: ObjectStore + ?Sized>(store: &S, pool_id: &PoolId) -> u64 {
     use futures::{future, TryStreamExt};
-    let pool_record = loonfs_objectstore::keys::pool_record(pool_id);
     store
         .list_entries_from_stream(&loonfs_objectstore::keys::pool_prefix(pool_id), None)
-        .try_filter(|entry| future::ready(entry.key != pool_record))
         .try_fold(0, |total, entry| future::ok(total + entry.size_bytes))
         .await
         .expect("list pool")
@@ -278,7 +276,7 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
         .activity;
     let aged =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
-    // The pool of a deleted first member that a snapshot keeps from retirement
+    // The pool of a deleted member that a snapshot keeps from retirement
     // still sweeps the content that no view refers to.
     assert_eq!(
         collect_pool(&store, &pool_id, &aged)
@@ -312,7 +310,7 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
     );
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests >= 1);
-    // The retired first member leaves the pool without members, so the pool's
+    // The retired member leaves the pool without members, so the pool's
     // collection deletes the aged content.
     assert_eq!(
         collect_pool(&store, &pool_id, &reaped)
@@ -391,9 +389,13 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
     assert!(report.deleted.metadata_segments > 0);
     assert_eq!(report.retained.unrecognized_key, 1);
     assert_eq!(report.retires_at_ms, None);
-    assert_eq!(
-        collect_pool(&store, &pool_id, &again).await.deleted,
-        Default::default()
+    // Retirement deleted the member entry and the pool's collection deleted
+    // the content, so nothing is under the pool's prefix.
+    assert_matches!(
+        crate::test_support::pool_store(&store, &pool_id)
+            .gc(None, &again.clock())
+            .await,
+        Err(CoreError::PoolNotFound { .. })
     );
     let remaining = BTreeSet::from([
         loonfs_objectstore::keys::boundary(&namespace_id),
@@ -947,7 +949,8 @@ async fn gc_retains_unrecognized_manifest_keys() {
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect(&store, &namespace_id, &aged).await;
 
-    assert_eq!(report.deleted.manifests, 0);
+    // The create's initializing manifest 1 is the only replaced manifest.
+    assert_eq!(report.deleted.manifests, 1);
     for (key, expected) in foreign_objects {
         let actual = store
             .get(&key, None)
@@ -997,10 +1000,10 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect(&store, &namespace_id, &aged).await;
 
-    // The first fold materialized the namespace's first manifest and the
-    // next two superseded it; only the current manifest is reachable. Its
-    // segments are all still referenced (a fold only appends delta runs).
-    assert_eq!(report.deleted.manifests, 6);
+    // The create's two manifests and every fold's manifest but the last are
+    // replaced; only the current manifest is reachable. Its segments are all
+    // still referenced (a fold only appends delta runs).
+    assert_eq!(report.deleted.manifests, 7);
     let manifests_left = store
         .list_prefix(&metadata_manifest_prefix(&namespace_id))
         .await
@@ -1159,9 +1162,9 @@ async fn gc_retains_active_snapshot_bases() {
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect(&store, &namespace_id, &aged).await;
 
-    // Only the bootstrap manifest, which no snapshot keeps, is collectable; both active
-    // snapshot bases stay.
-    assert_eq!(report.deleted.manifests, 3);
+    // Only the create's manifests and the manifests that no snapshot keeps
+    // are collectable; both active snapshot bases stay.
+    assert_eq!(report.deleted.manifests, 4);
     assert_eq!(
         report.deleted_snapshots_by_owner,
         loonfs_types::DeletedSnapshotsByOwner::default()
@@ -1889,7 +1892,7 @@ async fn gc_keeps_only_the_snapshot_and_current_manifests() {
         .gc(&aged.clock())
         .await
         .expect("collect");
-    assert_eq!(report.deleted.manifests, 7);
+    assert_eq!(report.deleted.manifests, 8);
     assert_eq!(
         store
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
@@ -2041,9 +2044,10 @@ async fn unreferenced_segments_are_deleted_concurrently_within_the_write_wave() 
     }
 }
 
-/// Checks that the pool's collection deletes the content of a pool whose first
-/// member was retired under the age rule, retries a failed delete, keeps the
-/// pool record, and deletes a late write and an orphaned outcome record.
+/// Checks that the pool's collection deletes the content of a pool whose only
+/// member was retired under the age rule, retries a failed delete, and
+/// deletes a late write and an orphaned outcome record, and that retirement
+/// deleted the member entry.
 #[tokio::test]
 async fn a_pool_without_members_retries_deletes_and_collects_late_writes() {
     let directory = tempdir().expect("directory");
@@ -2073,7 +2077,7 @@ async fn a_pool_without_members_retries_deletes_and_collects_late_writes() {
     crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&deadline.clock())
         .await
-        .expect("retire the first member");
+        .expect("retire the member");
     store.inner().fail_next(1);
     match crate::test_support::pool_store(&store, &pool_id)
         .gc(None, &deadline.clock())
@@ -2110,10 +2114,13 @@ async fn a_pool_without_members_retries_deletes_and_collects_late_writes() {
     assert_eq!(late.deleted.upload_sessions, 1);
     assert!(store.head(&outcome_key).await.expect("outcome").is_none());
     assert!(store
-        .head(&loonfs_objectstore::keys::pool_record(&pool_id))
+        .head(&loonfs_objectstore::keys::pool_member(
+            &pool_id,
+            &namespace_id
+        ))
         .await
-        .expect("pool record")
-        .is_some());
+        .expect("member entry")
+        .is_none());
     assert_matches!(
         crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_manifest()

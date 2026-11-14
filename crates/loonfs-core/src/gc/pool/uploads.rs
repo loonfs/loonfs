@@ -124,11 +124,13 @@ impl<S: ObjectStore> PoolStore<S> {
     /// in flight. A session that another collection deleted after the listing
     /// isn't handed to `each`. An outcome record without its session record
     /// isn't a root, because nothing can issue admission evidence from it.
+    /// Returns the number of entries that the listing returned, including
+    /// the entries that aren't handed to `each`.
     pub(super) async fn load_upload_sessions(
         &self,
         session_cache: Option<&CompletedUploadSessionCache>,
         mut each: impl FnMut(ListedUpload, Option<ListedUploadSession>) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let mut uploads = pin!(self
             .list_uploads()
             .map_ok(|listed| async move {
@@ -154,7 +156,9 @@ impl<S: ObjectStore> PoolStore<S> {
             .try_buffer_unordered(STORE_READS_IN_FLIGHT));
         let mut hits = 0_u64;
         let mut misses = 0_u64;
+        let mut listed_entries = 0_u64;
         while let Some((listed, lookup)) = uploads.try_next().await? {
+            listed_entries += 1;
             let session = match lookup {
                 None => None,
                 Some(SessionLookup::Cached(session)) => {
@@ -177,7 +181,7 @@ impl<S: ObjectStore> PoolStore<S> {
             session_cache_misses = misses,
             "listed upload sessions"
         );
-        Ok(())
+        Ok(listed_entries)
     }
 
     /// Reads what a collection needs from one listed session: the outcome record if

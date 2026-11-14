@@ -4,6 +4,7 @@
 //! [`crate::NamespaceEngine`]; these helpers are for runtime and maintenance
 //! code that needs direct namespace inspection.
 
+pub(crate) mod activate;
 pub(crate) mod basis;
 pub(crate) mod bootstrap;
 pub(crate) mod boundary;
@@ -12,7 +13,7 @@ pub(crate) mod control;
 pub(crate) mod delete;
 pub(crate) mod fork;
 pub(crate) mod head_cache;
-pub(crate) mod pool_record;
+pub(crate) mod member_entry;
 pub(crate) mod read_anchor;
 pub(crate) mod state;
 pub(crate) mod status;

@@ -240,8 +240,8 @@ impl Scheduler {
 
     /// Makes one collection call on a pool.
     ///
-    /// A pool whose record is gone is skipped without a failure, because a
-    /// create call can delete its pool record after the listing found it.
+    /// A pool whose prefix emptied after the listing found it is skipped
+    /// without a failure.
     pub(super) async fn gc_pool(&self, pool_id: &PoolId) {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {

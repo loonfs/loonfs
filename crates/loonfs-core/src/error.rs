@@ -300,7 +300,7 @@ pub enum CoreError {
     StoreContention { object_key: String },
     #[error("namespace `{namespace_id}` does not exist")]
     NamespaceNotFound { namespace_id: NamespaceId },
-    #[error("pool `{pool_id}` has no pool record")]
+    #[error("pool `{pool_id}` has no object under its prefix")]
     PoolNotFound { pool_id: PoolId },
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceExists { namespace_id: NamespaceId },

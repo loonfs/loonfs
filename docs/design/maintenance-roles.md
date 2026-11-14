@@ -29,7 +29,7 @@ Folds start in several places. A writer's host folds its session's tail after a 
 | Pool collection | Maintainer | None (it publishes nothing) | Nothing, for the same reasons as a namespace's garbage collection |
 | Snapshot creation and deletion | None | None (a snapshot is its own record, and the fold before a snapshot is the maintainer's) | Put-if-absent on the snapshot, and the verification against the current manifest |
 | Fork | None | None for the snapshots, and the writer epoch of the new namespace's first manifest, which its second manifest copies | The fork snapshot's verification, the first manifest's create, and the numbered create of the second manifest |
-| Namespace creation | None | The writer epoch of manifest 1 | The create of manifest 1 |
+| Namespace creation | None | The writer epoch of manifest 1, which manifest 2 copies | The create of manifest 1, and the numbered create of manifest 2 |
 
 A process can have both roles for a namespace. A host with an open writer session has the writer role, and it maintains the namespace as the session publishes. A maintenance runtime without a writer session has the maintainer role for the namespaces it maintains. A runtime claims the compactor epoch before its first compaction of a namespace, and a fold (including a snapshot's fold and a deletion's fold) runs under the current compactor epoch with no claim.
 

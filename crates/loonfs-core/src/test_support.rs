@@ -336,24 +336,17 @@ pub fn namespace_store_with_segment_cache<S>(
     }
 }
 
-/// Writes the record of `pool_id` with `first_member_namespace_id` as its first member,
-/// created at `created_at_ms`, for a test that writes a namespace's first
-/// manifest without a create call.
-#[cfg(test)]
-pub(crate) async fn write_pool_record<S: ObjectStore>(
+/// Writes the member entry of `namespace_id` in `pool_id`'s member list, for
+/// a test that writes a namespace's manifests without a create or fork call.
+pub async fn write_member_entry<S: ObjectStore>(
     store: S,
     pool_id: &PoolId,
-    first_member_namespace_id: &NamespaceId,
-    created_at_ms: u64,
+    namespace_id: &NamespaceId,
 ) {
-    namespace_store(store, first_member_namespace_id)
-        .write_pool_record(&loonfs_types::format::control::PoolPayload {
-            pool_id: pool_id.clone(),
-            first_member_namespace_id: first_member_namespace_id.clone(),
-            created_at_ms,
-        })
+    namespace_store(store, namespace_id)
+        .write_member_entry(pool_id)
         .await
-        .expect("write the pool record");
+        .expect("write the member entry");
 }
 
 /// Does what a fork of `source` into `target` does through manifest 1, and

@@ -716,7 +716,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
         .expect("create head-bad namespace");
     block_on(replace_object(
         &raw_store,
-        &metadata_manifest_object(&head_bad, &loonfs_types::ManifestNo(1)),
+        &metadata_manifest_object(&head_bad, &loonfs_types::ManifestNo(2)),
         Bytes::from_static(br#"{"not":"a head"}"#),
     ))
     .expect("corrupt head");

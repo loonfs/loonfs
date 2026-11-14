@@ -291,7 +291,7 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
         }
     );
     assert_eq!(first.captured_seq, CommitSeq(1));
-    assert_eq!(first.manifest_no, ManifestNo(3));
+    assert_eq!(first.manifest_no, ManifestNo(4));
     let listed = collect_snapshot_records(&client, &namespace)
         .await
         .expect("list first snapshot");

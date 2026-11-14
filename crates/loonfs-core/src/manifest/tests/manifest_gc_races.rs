@@ -33,7 +33,7 @@ async fn find_during_collection(park_last_boundary_read: bool) {
             .await
             .expect("publish a manifest");
     };
-    claim().await;
+    // The create publishes manifests 1 and 2, and the claim publishes 3.
     claim().await;
     let listed = metadata_manifest_object(&namespace_id, &ManifestNo(3));
     let boundary_key = boundary(&namespace_id);
@@ -176,12 +176,11 @@ async fn a_late_ambiguous_put_at_an_emptied_number_is_lost() {
             .create()
             .await
             .expect("another create");
-        for _ in 2..=3 {
-            crate::test_support::namespace_store(&store, &namespace_id)
-                .acquire_writer_epoch(&context.writer_id)
-                .await
-                .expect("publish a manifest");
-        }
+        // The create publishes manifests 1 and 2, and the claim publishes 3.
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .acquire_writer_epoch(&context.writer_id)
+            .await
+            .expect("publish a manifest");
         let report = crate::test_support::namespace_store(&store, &namespace_id)
             .gc(&WriterAt {
                 now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
@@ -242,10 +241,6 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
             .create()
             .await
             .expect("create");
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .acquire_writer_epoch(&context.writer_id)
-            .await
-            .expect("publish manifest 2");
         let basis = crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_basis()
             .await
@@ -323,10 +318,10 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
 }
 
 /// Checks that a manifest put that lands after the namespace's retirement is
-/// lost: a writer claim that found manifest 1 as the newest puts manifest 2
+/// lost: a writer claim that found manifest 2 as the newest puts manifest 3
 /// after the namespace was deleted and retired and its manifests were
 /// collected. The claim returns `namespace_deleted`, and a reader doesn't take
-/// manifest 2 as the newest.
+/// manifest 3 as the newest.
 #[tokio::test]
 async fn a_manifest_put_after_the_retirement_is_lost() {
     let directory = tempdir().expect("directory");
@@ -340,7 +335,7 @@ async fn a_manifest_put_after_the_retirement_is_lost() {
         .create()
         .await
         .expect("bootstrap");
-    let late = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let late = metadata_manifest_object(&namespace_id, &ManifestNo(3));
     let blocked = BlockingStore::new(
         store,
         KeyPredicate::exact(&late),
@@ -371,7 +366,7 @@ async fn a_manifest_put_after_the_retirement_is_lost() {
             .inner()
             .head(&late)
             .await
-            .expect("head manifest 2")
+            .expect("head manifest 3")
             .is_none());
         blocked.release();
     });
@@ -380,7 +375,7 @@ async fn a_manifest_put_after_the_retirement_is_lost() {
         .inner()
         .head(&late)
         .await
-        .expect("head manifest 2")
+        .expect("head manifest 3")
         .is_some());
     assert_matches!(
         crate::test_support::namespace_store(blocked.inner(), &namespace_id)

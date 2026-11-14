@@ -123,7 +123,7 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
     for key in source_keys.iter().chain(&target_keys) {
         assert!(store.head(key).await.expect("pool content").is_some());
     }
-    // The pool's collection keeps collecting while its deleted first member
+    // The pool's collection keeps collecting while its deleted source
     // is retained, and the retired target is no longer a member whose views
     // protect the content.
     let aged = context(

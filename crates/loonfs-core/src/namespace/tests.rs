@@ -9,7 +9,7 @@ use crate::CoreError;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
-    keys::{boundary, metadata_manifest_object, metadata_manifest_prefix, pool_record, wal_prefix},
+    keys::{boundary, metadata_manifest_object, metadata_manifest_prefix, pool_member, wal_prefix},
     local_fs_store::LocalFsStore,
     ObjectStore,
 };
@@ -17,18 +17,24 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
 };
-use loonfs_types::format::control::{NamespaceStatus, PoolPayload, SnapshotOwner, SnapshotPayload};
+use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner, SnapshotPayload};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{ErrorCode, ManifestNo, NamespaceId, SnapshotId};
 use std::assert_matches;
 use tempfile::tempdir;
 
+/// The store operations of the create in
+/// `a_new_namespace_is_looked_up_before_its_first_write`: 3 for the lookup, 2
+/// for manifest 1, 1 for the member entry, and 2 for manifest 2.
+const CREATE_STORE_OPERATIONS: usize = 8;
+
 /// The store operations of the fork in
 /// `a_new_namespace_is_looked_up_before_its_first_write`, with the fold of
-/// the source's WAL tail before it: 16 for the fold, and 30 for the fork, of
-/// which 16 are the two checks of the snapshot that the fork is built from.
-const FORK_STORE_OPERATIONS: usize = 46;
+/// the source's WAL tail before it: 16 for the fold, and 31 for the fork, of
+/// which 16 are the two checks of the snapshot that the fork is built from
+/// and 1 is the member entry.
+const FORK_STORE_OPERATIONS: usize = 47;
 
 /// The store operations of the deletion in
 /// `a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a_writer_session`.
@@ -49,17 +55,46 @@ fn context() -> WriterAt {
     crate::test_support::writer_at("writer", 1_000)
 }
 
-/// Returns the key of every pool record in `store`.
-async fn pool_record_keys<S: ObjectStore>(store: &S) -> Vec<String> {
+/// Returns the key of every member entry in `store`.
+async fn member_entry_keys<S: ObjectStore>(store: &S) -> Vec<String> {
     store
         .list_prefix("pools/")
         .await
         .expect("list the pools")
         .into_iter()
         .filter(|key| {
-            parse_object_key(key).is_some_and(|parsed| parsed.family() == DurableObjectFamily::Pool)
+            parse_object_key(key)
+                .is_some_and(|parsed| parsed.family() == DurableObjectFamily::PoolMember)
         })
         .collect()
+}
+
+/// Does what a create of `namespace_id` with `options` does through manifest
+/// 1 in the store at `root`, and stops there, because the store refuses the
+/// member entry's put. Returns manifest 1.
+async fn half_done_create(
+    root: &std::path::Path,
+    namespace_id: &NamespaceId,
+    options: &loonfs_types::options::CreateNamespaceOptions,
+) -> NamespaceManifestPayload {
+    let store = LocalFsStore::new(root).expect("store");
+    let refusing = FailStore::new(
+        LocalFsStore::new(root).expect("store"),
+        KeyPredicate::family(DurableObjectFamily::PoolMember),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::PermissionDenied("refused".to_owned()),
+    );
+    refusing.fail_next(1);
+    crate::test_support::NamespaceFixture::new(&refusing, namespace_id, &context())
+        .create_with_options(options)
+        .await
+        .expect_err("the create stops at the member entry");
+    let manifests = manifest_payloads(&store, namespace_id).await;
+    let [manifest_1] = &manifests[..] else {
+        panic!("manifest 1 alone, got {manifests:?}");
+    };
+    assert_eq!(manifest_1.status, NamespaceStatus::Initializing {});
+    manifest_1.clone()
 }
 
 /// Returns every manifest of `namespace_id`, from manifest 1 up to the first
@@ -153,42 +188,62 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
     assert!(state.access_revisions().is_empty());
 }
 
+/// Checks that a create with the same request as a create that's waiting on
+/// its member entry finishes the namespace, that both creates return the
+/// same pool ID, and that a create with another retention window returns
+/// `namespace_exists` while the first create still finishes the namespace.
 #[tokio::test]
-async fn two_creations_race_at_manifest_one() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("created").expect("namespace");
-    let store = BlockingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::exact(metadata_manifest_object(&namespace_id, &ManifestNo(1))),
-        OperationSelector::PutCreateIfAbsent,
-    );
-    store.block_next();
-    let context = context();
-    let namespace = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
-    let (loser, winner) = futures::join!(namespace.create(), async {
-        store.wait_until_blocked().await;
-        let result =
-            crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &context)
-                .create()
-                .await;
-        store.release();
-        result
-    });
-    let winner = winner.expect("winner");
-    assert_eq!(loser.expect_err("loser").code(), ErrorCode::NamespaceExists);
-    assert_eq!(
-        pool_record_keys(&store).await,
-        vec![pool_record(&winner.pool_id)],
-        "the loser deletes its own pool record"
-    );
+async fn a_create_finishes_a_concurrent_create_with_the_same_request_and_refuses_other_options() {
+    let other_window = loonfs_types::options::CreateNamespaceOptions {
+        retention_window_ms: std::num::NonZeroU64::new(7 * 24 * 60 * 60 * 1_000),
+        ..Default::default()
+    };
+    for (second_options, second_finishes) in [(Default::default(), true), (other_window, false)] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("created").expect("namespace");
+        let store = BlockingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::family(DurableObjectFamily::PoolMember),
+            OperationSelector::PutCreateIfAbsent,
+        );
+        store.block_next();
+        let context = context();
+        let namespace = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        let (first, second) = futures::join!(namespace.create(), async {
+            store.wait_until_blocked().await;
+            let result =
+                crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &context)
+                    .create_with_options(&second_options)
+                    .await;
+            store.release();
+            result
+        });
+        let first = first.expect("the first create finishes the namespace");
+        if second_finishes {
+            assert_eq!(second.expect("the second create finishes it too"), first);
+        } else {
+            assert_matches!(second, Err(CoreError::NamespaceExists { .. }));
+        }
+        assert_eq!(
+            member_entry_keys(&store).await,
+            vec![pool_member(&first.pool_id, &namespace_id)]
+        );
+        let manifests = manifest_payloads(&store, &namespace_id).await;
+        assert_eq!(
+            manifests
+                .iter()
+                .map(|manifest| manifest.status)
+                .collect::<Vec<_>>(),
+            [NamespaceStatus::Initializing {}, NamespaceStatus::Active {}]
+        );
+    }
 }
 
 /// Checks that a create and a fork each look for the new namespace before
 /// their first write, publish manifest 1 with its put and one read of the
-/// manifest boundary, and return the state that their last manifest records.
-/// A create writes its pool record between the lookup and manifest 1. A fork
-/// writes a temporary snapshot before manifest 1 and its fork snapshot after,
-/// then publishes manifest 2, and writes no pool record.
+/// manifest boundary, write the member entry, publish manifest 2, and return
+/// the state that manifest 2 records. A fork also writes a temporary snapshot
+/// before manifest 1, and its fork snapshot after the member entry.
 #[tokio::test]
 async fn a_new_namespace_is_looked_up_before_its_first_write() {
     let directory = tempdir().expect("directory");
@@ -203,17 +258,25 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
         .await
         .expect("create");
     let operations = store.take();
+    let member_entry = pool_member(&created.pool_id, &source);
     assert_eq!(
         operations
             .iter()
-            .filter(|operation| matches!(operation, RecordedOperation::Put { .. }))
             .map(RecordedOperation::key)
             .collect::<Vec<_>>(),
         [
-            pool_record(&created.pool_id),
+            boundary(&source),
+            metadata_manifest_prefix(&source),
+            boundary(&source),
             metadata_manifest_object(&source, &ManifestNo(1)),
+            boundary(&source),
+            member_entry.clone(),
+            metadata_manifest_object(&source, &ManifestNo(2)),
+            boundary(&source),
         ]
     );
+    assert_eq!(operations.len(), CREATE_STORE_OPERATIONS);
+    assert_matches!(&operations[5], RecordedOperation::Put { .. });
     let lookup = |namespace_id: &NamespaceId| {
         vec![
             ("get", boundary(namespace_id)),
@@ -230,27 +293,49 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
             ("get", boundary(namespace_id)),
         ]
     };
+    let second_manifest = |namespace_id: &NamespaceId| {
+        vec![
+            (
+                "put",
+                metadata_manifest_object(namespace_id, &ManifestNo(2)),
+            ),
+            ("get", boundary(namespace_id)),
+        ]
+    };
     assert_eq!(
         control_requests(&source, &operations),
-        [lookup(&source), first_manifest(&source)].concat()
+        [
+            lookup(&source),
+            first_manifest(&source),
+            second_manifest(&source)
+        ]
+        .concat()
     );
-    let position = |key: &str| {
-        operations
-            .iter()
-            .position(|operation| operation.key() == key)
-            .expect(key)
-    };
-    assert!(position(&boundary(&source)) < position(&pool_record(&created.pool_id)));
-    assert_eq!(
-        crate::test_support::pool_store(&store, &created.pool_id)
-            .load_pool_record()
+    let entry = loonfs_types::format::control::decode_control_object::<
+        loonfs_types::format::control::PoolMemberPayload,
+    >(
+        &store
+            .get(&member_entry, None)
             .await
-            .expect("load the pool record"),
-        Some(PoolPayload {
+            .expect("get the member entry")
+            .expect("a member entry"),
+        loonfs_types::format::control::ControlObjectKind::PoolMember,
+    )
+    .expect("decode the member entry");
+    assert_eq!(
+        entry.payload(),
+        &loonfs_types::format::control::PoolMemberPayload {
             pool_id: created.pool_id.clone(),
-            first_member_namespace_id: source.clone(),
-            created_at_ms: created.created_at_ms,
-        })
+            namespace_id: source.clone(),
+        }
+    );
+    let manifests = manifest_payloads(&store, &source).await;
+    assert_eq!(
+        manifests
+            .iter()
+            .map(|manifest| manifest.status)
+            .collect::<Vec<_>>(),
+        [NamespaceStatus::Initializing {}, NamespaceStatus::Active {}]
     );
     assert_eq!(
         created,
@@ -288,7 +373,7 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
         [
             lookup(&target),
             first_manifest(&target),
-            vec![("put", manifest_2.clone()), ("get", boundary(&target))],
+            second_manifest(&target),
         ]
         .concat()
     );
@@ -317,9 +402,11 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
         .filter(|(_, operation)| operation.key() == boundary(&target))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
+    let target_entry = position(&pool_member(&created.pool_id, &target));
     assert!(
         temporary_put < position(&metadata_manifest_object(&target, &ManifestNo(1)))
-            && target_boundary_reads[2] < fork_put
+            && target_boundary_reads[2] + 1 == target_entry
+            && target_entry < fork_put
             && fork_put < position(&manifest_2),
         "{operations:?}"
     );
@@ -348,9 +435,14 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
             target_namespace_id: target.clone(),
         }
     );
-    assert!(operations
-        .iter()
-        .all(|operation| !operation.key().starts_with("pools/")));
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| operation.key().starts_with("pools/"))
+            .map(RecordedOperation::key)
+            .collect::<Vec<_>>(),
+        [pool_member(&created.pool_id, &target)]
+    );
     let manifests = manifest_payloads(&store, &target).await;
     let [manifest_1, manifest_2] = &manifests[..] else {
         panic!("manifests 1 and 2, got {manifests:?}");
@@ -374,9 +466,9 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
 }
 
 /// Checks that identical bytes at manifest 1 confirm a create and a fork
-/// after a lost response, that the fork then publishes manifest 2, and that a
-/// create of the existing namespace with `allow_existing` deletes its own pool
-/// record.
+/// after a lost response, that both then publish manifest 2, and that a
+/// create of the existing namespace with `allow_existing` returns the
+/// namespace and writes no member entry.
 #[tokio::test]
 async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
     let directory = tempdir().expect("directory");
@@ -411,8 +503,8 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
         .expect("allow existing returns the created namespace");
     assert_eq!(adopted, created);
     assert_eq!(
-        pool_record_keys(&store).await,
-        vec![pool_record(&created.pool_id)]
+        member_entry_keys(&store).await,
+        vec![pool_member(&created.pool_id, &source)]
     );
     store.fail_next(1);
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
@@ -440,16 +532,17 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
     );
 }
 
-/// Checks that a create whose pool record put has an unknown outcome sends the
-/// put again after its read-back finds no record, and that a create whose
-/// manifest put has an unknown outcome keeps its pool record, so a later
-/// create of the ID succeeds.
+/// Checks that a create whose member entry put has an unknown outcome sends
+/// the put again after its read-back finds no entry, and that a create whose
+/// manifest 1 put has an unknown outcome writes no entry, so a later create
+/// with the same request finishes the namespace.
 #[tokio::test]
-async fn a_lost_pool_record_put_is_sent_again_and_a_lost_manifest_put_keeps_the_pool_record() {
+async fn a_lost_member_entry_put_is_sent_again_and_a_lost_manifest_one_put_leaves_an_initializing_namespace(
+) {
     let namespace_id = NamespaceId::parse("created").expect("namespace");
     let manifest_key = metadata_manifest_object(&namespace_id, &ManifestNo(1));
     for (keys, creates) in [
-        (KeyPredicate::family(DurableObjectFamily::Pool), true),
+        (KeyPredicate::family(DurableObjectFamily::PoolMember), true),
         (KeyPredicate::exact(&manifest_key), false),
     ] {
         let directory = tempdir().expect("directory");
@@ -463,22 +556,154 @@ async fn a_lost_pool_record_put_is_sent_again_and_a_lost_manifest_put_keeps_the_
         let created = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
             .create()
             .await;
-        assert_eq!(pool_record_keys(store.inner()).await.len(), 1);
-        let stored = store.inner().head(&manifest_key).await.expect("head");
-        assert_eq!(stored.is_some(), creates);
         if creates {
-            created.expect("the create sends the pool record put again");
+            created.expect("the create sends the member entry put again");
         } else {
             assert_matches!(
                 created.expect_err("the create fails"),
                 crate::CoreError::OutcomeUnknown { object_key, .. } if object_key == manifest_key
             );
+            assert!(member_entry_keys(store.inner()).await.is_empty());
             crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
                 .create()
                 .await
-                .expect("a later create of the ID succeeds");
+                .expect("a later create with the same request finishes the namespace");
         }
+        assert_eq!(member_entry_keys(store.inner()).await.len(), 1);
+        let manifests = manifest_payloads(store.inner(), &namespace_id).await;
+        assert_eq!(
+            manifests
+                .iter()
+                .map(|manifest| manifest.status)
+                .collect::<Vec<_>>(),
+            [NamespaceStatus::Initializing {}, NamespaceStatus::Active {}]
+        );
     }
+}
+
+/// Checks that a create call with the request of a create that stopped after
+/// manifest 1 writes the member entry in the pool that manifest 1 records,
+/// and publishes manifest 2.
+#[tokio::test]
+async fn a_create_that_stopped_after_manifest_one_is_finished_by_the_same_request() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("created").expect("namespace");
+    let manifest_1 = half_done_create(directory.path(), &namespace_id, &Default::default()).await;
+    assert!(member_entry_keys(&store).await.is_empty());
+    let created = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+        .create()
+        .await
+        .expect("finish the create");
+    assert_eq!(created.pool_id, manifest_1.pool_id);
+    assert_eq!(
+        member_entry_keys(&store).await,
+        [pool_member(&manifest_1.pool_id, &namespace_id)]
+    );
+    assert_eq!(
+        manifest_payloads(&store, &namespace_id).await,
+        [
+            manifest_1.clone(),
+            NamespaceManifestPayload {
+                manifest_no: ManifestNo(2),
+                ..manifest_1.activated()
+            }
+        ]
+    );
+    assert_eq!(
+        created,
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .load_metadata()
+            .await
+            .expect("load the created namespace")
+    );
+}
+
+/// Checks that a create can't finish an initializing fork and a fork can't
+/// finish an initializing create, and that neither writes anything to the
+/// namespace.
+#[tokio::test]
+async fn a_create_never_finishes_a_fork_and_a_fork_never_finishes_a_create() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (source, target) = source_and_target();
+    let (_, fork_manifest_1) =
+        crate::test_support::half_done_fork(&store, &source, &target, &context()).await;
+    for allow_existing in [false, true] {
+        let created = crate::test_support::NamespaceFixture::new(&store, &target, &context())
+            .create_with_options(&loonfs_types::options::CreateNamespaceOptions {
+                allow_existing,
+                ..Default::default()
+            })
+            .await;
+        assert_matches!(created, Err(CoreError::NamespaceExists { .. }));
+    }
+    assert_eq!(
+        manifest_payloads(&store, &target).await,
+        std::slice::from_ref(&fork_manifest_1)
+    );
+    let created = NamespaceId::parse("created").expect("namespace");
+    let create_manifest_1 = half_done_create(directory.path(), &created, &Default::default()).await;
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
+    let forked = fixture
+        .engine()
+        .fork_namespace(
+            &created,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
+        .await;
+    assert_matches!(forked, Err(CoreError::NamespaceExists { .. }));
+    assert_eq!(
+        manifest_payloads(&store, &created).await,
+        [create_manifest_1]
+    );
+    assert_eq!(
+        member_entry_keys(&store).await,
+        [pool_member(&fork_manifest_1.pool_id, &source)],
+        "only the source has a member entry"
+    );
+    assert!(fork_snapshots(&store, &source).await.is_empty());
+}
+
+/// Checks that a create with `allow_existing` and another access mode or
+/// retention window returns `namespace_exists` for an initializing create,
+/// because an initializing namespace isn't an existing one, and writes
+/// nothing to it.
+#[tokio::test]
+async fn a_create_with_allow_existing_returns_namespace_exists_for_an_initializing_namespace_with_other_options(
+) {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("created").expect("namespace");
+    let manifest_1 = half_done_create(directory.path(), &namespace_id, &Default::default()).await;
+    let other_access = loonfs_types::options::CreateNamespaceOptions {
+        allow_existing: true,
+        access: loonfs_types::NamespaceAccess::Acl {
+            principal_scope: loonfs_types::PrincipalScope::parse("org_test").expect("scope"),
+            root_grants: loonfs_types::AccessGrants::new(std::collections::BTreeMap::from([(
+                loonfs_types::PrincipalId::parse("prn_root").expect("principal id"),
+                loonfs_types::AccessRights::ADMIN,
+            )]))
+            .expect("root grants"),
+        },
+        ..Default::default()
+    };
+    let other_window = loonfs_types::options::CreateNamespaceOptions {
+        allow_existing: true,
+        retention_window_ms: std::num::NonZeroU64::new(7 * 24 * 60 * 60 * 1_000),
+        ..Default::default()
+    };
+    for options in [other_access, other_window] {
+        let created = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+            .create_with_options(&options)
+            .await;
+        assert_matches!(created, Err(CoreError::NamespaceExists { .. }));
+    }
+    assert_eq!(manifest_payloads(&store, &namespace_id).await, [manifest_1]);
+    assert!(member_entry_keys(&store).await.is_empty());
 }
 
 #[tokio::test]
@@ -826,8 +1051,8 @@ async fn a_fork_that_stopped_after_manifest_one_is_finished_by_the_same_request(
     );
 }
 
-/// Checks that a fork from another source, a fork at another snapshot, and a
-/// create can't finish an initializing fork, and write nothing to it.
+/// Checks that a fork from another source and a fork at another snapshot
+/// can't finish an initializing fork, and write nothing to it.
 #[tokio::test]
 async fn a_fork_request_that_differs_from_manifest_one_returns_namespace_exists() {
     let directory = tempdir().expect("directory");
@@ -874,15 +1099,6 @@ async fn a_fork_request_that_differs_from_manifest_one_returns_namespace_exists(
         .fork_namespace_at_snapshot(&target, &actor, &named.snapshot_id)
         .await;
     assert_matches!(at_named, Err(CoreError::NamespaceExists { .. }));
-    for allow_existing in [false, true] {
-        let created = crate::test_support::NamespaceFixture::new(&store, &target, &context())
-            .create_with_options(&loonfs_types::options::CreateNamespaceOptions {
-                allow_existing,
-                ..Default::default()
-            })
-            .await;
-        assert_matches!(created, Err(CoreError::NamespaceExists { .. }));
-    }
     assert_eq!(manifest_payloads(&store, &target).await, [manifest_1]);
     assert!(fork_snapshots(&store, &source).await.is_empty());
 }

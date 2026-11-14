@@ -124,13 +124,14 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
             payload.namespace_id = NamespaceId::parse("fork").expect("namespace");
             payload.fork_basis = Some(ForkBasis {
                 manifest: current.manifest(),
-                source_snapshot_id: SnapshotId::generate(ManifestNo(1)),
-                forked_from_snapshot_id: SnapshotId::generate(ManifestNo(1)),
+                source_snapshot_id: SnapshotId::generate(current.manifest().manifest_no),
+                forked_from_snapshot_id: SnapshotId::generate(current.manifest().manifest_no),
                 rebased_from: None,
             });
             payload.status = loonfs_types::format::control::NamespaceStatus::Initializing {};
+            payload.manifest_no = ManifestNo(1);
         } else {
-            payload.manifest_no = ManifestNo(2);
+            payload.manifest_no = ManifestNo(3);
         }
         let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
         let timer = Arc::new(ManualClock::new(0));
@@ -346,7 +347,8 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
             .await
             .expect("list for assertion");
-        assert_eq!(keys.len(), 3);
+        // The create's two manifests, the claim, and the winner's manifest.
+        assert_eq!(keys.len(), 4);
         if newer_head {
             assert_matches!(losing, ManifestPublicationOutcome::PredecessorChanged(_));
             let mut retry = second.into_parts().0.into_payload();
@@ -460,7 +462,7 @@ async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let basis = namespace.load_current_basis().await.expect("current");
     let mut payload = basis.manifest.payload().clone();
-    payload.manifest_no = ManifestNo(2);
+    payload.manifest_no = ManifestNo(3);
     store.fail_next(1);
     let outcome = namespace
         .publish_manifest_from(
@@ -469,7 +471,7 @@ async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
             Some(&basis),
         )
         .await;
-    let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let object_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
     assert_matches!(
         outcome,
         Err(CoreError::OutcomeUnknown { object_key: actual, .. }) if actual == object_key
@@ -731,7 +733,7 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
 
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("claimed").expect("namespace");
-    let claim_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let claim_key = metadata_manifest_object(&namespace_id, &ManifestNo(3));
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::new(move |key| key == claim_key),
@@ -761,7 +763,7 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         .load_current_manifest()
         .await
         .expect("current manifest");
-    assert_eq!(current.payload().manifest_no, ManifestNo(3));
+    assert_eq!(current.payload().manifest_no, ManifestNo(4));
     assert_eq!(
         current.payload().compactor_epoch,
         loonfs_types::CompactorEpoch(2)

@@ -30,7 +30,7 @@ The boundary is stored in one control object for each namespace, inside the name
 namespaces/{namespace_id}/boundary.json
 ```
 
-The object is uncompressed JSON of envelope kind `boundary`, like a pool record. Its payload is the namespace ID (`namespace_id`), which a reader checks against the key, and the boundary (`boundary`), a tagged value like a manifest's `status`: `{"kind":"manifest","manifest_no":44}` for a number, or `{"kind":"retired"}`. The object follows four rules:
+The object is uncompressed JSON of envelope kind `boundary`, like a [member entry](../specs/glossary.md#member-entry). Its payload is the namespace ID (`namespace_id`), which a reader checks against the key, and the boundary (`boundary`), a tagged value like a manifest's `status`: `{"kind":"manifest","manifest_no":44}` for a number, or `{"kind":"retired"}`. The object follows four rules:
 
 1. A missing object reads as `B = 0`.
 2. `B` never decreases. A write of the object is a put-if-absent when the object is missing, or a compare-and-swap that raises the number.
@@ -166,7 +166,7 @@ This section lists the design's costs.
 - Finding the newest manifest with nothing in memory sends four requests, as with the hint: a boundary read, one listing, one manifest load, and a conditional boundary read. The listing returns the manifests published since cleanup last raised the boundary, however many older manifests snapshots and forks keep.
 - A create or fork for a free ID makes those reads before its first write.
 - Each successor probe sends one conditional read of the boundary. A cached view sends the probe at most once per manifest check interval (1 second by default) for each namespace in each process.
-- The prefix of a retired namespace keeps its boundary object. So the reference server's sweep lists every retired namespace. The sweep makes no index call and no retention advance for a namespace whose metadata call returns `namespace_deleted`, so each retired namespace costs every sweep 3 requests under its prefix: the metadata call reads the boundary and returns `namespace_deleted`, and the namespace's collection reads the boundary and lists the prefix once. A retired namespace that is its pool's first member costs 4, because the pool's collection reads the boundary of the pool's first member. That cost grows with the number of retired namespaces. A retired namespace stores no tombstone and no segments.
+- The prefix of a retired namespace keeps its boundary object. So the reference server's sweep lists every retired namespace. The sweep makes no index call and no retention advance for a namespace whose metadata call returns `namespace_deleted`, so each retired namespace costs every sweep 3 requests under its prefix: the metadata call reads the boundary and returns `namespace_deleted`, and the namespace's collection reads the boundary and lists the prefix once. Retirement deletes the namespace's member entry, so the pool's collection doesn't list a retired namespace and makes no request under its prefix. That cost grows with the number of retired namespaces. A retired namespace stores no tombstone and no segments.
 
 ## Changes to the specs and glossary
 

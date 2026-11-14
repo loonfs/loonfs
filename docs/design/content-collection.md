@@ -16,14 +16,14 @@ Every [member](../specs/glossary.md#pool) of a pool writes its content under the
 
 The collection considers every other object under `P`'s content prefix (`pools/{pool_id}/content/`) for deletion once its provider age is at least `T`. It keeps objects that are younger than that, keys that don't parse as content object keys, and objects that an extent filter matches by chance.
 
-The members are the pool's first member (the namespace that was created with the pool) and every namespace forked from a member. The collection finds them by walking fork snapshots. It lists each member's snapshots once, and each fork snapshot in a listing adds the snapshot's target as a member (see [The pool's collection](pools.md#the-pools-collection)). A namespace's own collection lists no content.
+The members are the namespaces that have a [member entry](../specs/glossary.md#member-entry) in the pool: the namespace that was created with the pool, and every namespace forked from a member. The collection lists the pool's member entries once, and reads the roots of each listed namespace whose newest manifest records the pool (see [The pool's collection](pools.md#the-pools-collection)). A namespace's own collection lists no content.
 
 The same rule covers every way that content becomes garbage:
 
 - **Completed session.** Cleanup removes the session's record, but not its object, after the completed-content grace. A later collection deletes the object if nothing published it.
 - **Aborted session.** Cleanup deletes the session's object right away, and the collection deletes anything that a late write leaves after the record is gone.
-- **Retired fork.** A fork's retirement deletes the fork snapshot on the fork's source, raises the fork's manifest boundary to retired, and deletes no content. The objects that the fork wrote stay while another member's view refers to those objects, and the rest become unreferenced candidates.
-- **Retired first member.** Every other member is retired first, because each fork keeps a fork snapshot on its source. A first member whose boundary is retired contributes no roots, so the same rule then applies with no roots, and later collections of the pool delete its content under the age rule.
+- **Retired fork.** A fork's retirement deletes the fork snapshot on the fork's source and the fork's member entry, raises the fork's manifest boundary to retired, and deletes no content. The objects that the fork wrote stay while another member's view refers to those objects, and the rest become unreferenced candidates.
+- **Retired last member.** Each fork keeps a fork snapshot on its source, so the namespace that was created with the pool is retired after every fork of it. Once every member is retired, the pool has no member entries and no roots, so the same rule applies with no roots, and later collections of the pool delete the pool's content under the age rule.
 
 A deleted namespace that hasn't been retired keeps its tombstone as a rooted view, so the content that the tombstone refers to stays until the namespace's own collection retires the namespace. The pool's collection doesn't decide for itself that a tombstone is eligible for retirement.
 
@@ -40,7 +40,7 @@ The collection lists sessions before it reads any member's tail, and it reads th
 - The content of a session created later is younger than `T`.
 - Every commit that refers to the content of a removed session succeeded before the tail was read, so the tail or a rooted manifest refers to that content.
 
-A member's references count as roots until the member is retired. Only retirement deletes a member's fork snapshot, so the walk finds a deleted member until the member is retired. Retirement comes no earlier than the grace window (24 hours) after the deletion. The collection reads every member's roots within 12 hours, measured from the start of the collection, or it skips the pool's content objects. So if a reference moves from one member to another after the collection has read the second member, the collection still sees it through the first member's views, even if the first member is then deleted (see [Content roots](../specs/format.md#119-content-roots)). A member whose manifest is invalid stops the collection of the pool's content.
+A member's references count as roots until the member is retired. Only retirement deletes a member's member entry, so the collection finds a deleted member until the member is retired. Retirement comes no earlier than the grace window (24 hours) after the deletion. The collection reads every member's roots within 12 hours, measured from the start of the collection, or it skips the pool's content objects. So if a reference moves from one member to another after the collection has read the second member, the collection still sees it through the views of the member that the reference came from, even if that member is then deleted (see [Content roots](../specs/format.md#119-content-roots)). A member whose manifest is invalid stops the collection of the pool's content.
 
 Why list sessions before reading the tail? In the other order, a commit that uses an upload's content could succeed after the collection reads the tail, and a concurrent collector could then remove the session record before the collection lists sessions.
 
@@ -54,7 +54,7 @@ Why does one collection gather every member's roots, instead of each member coll
 
 Content roots add these costs to a collection of a pool:
 
-- One GET of the pool record, which identifies the first member.
+- One listing of the pool's member list.
 - One manifest discovery, one snapshot listing, and one WAL tail read for each member of the pool, including each deleted member until it's retired. A fork stops being a member when it's retired.
 - One ranged GET of the extent filter of each distinct layout segment that a rooted view of any member lists (up to 16 at a time), so the reads grow with the distinct layout segments and not with the number of views or rows. The segment cache keeps each filter like any other block, so a later collection sends no GET for a filter that's still in the cache. A fork's inherited segments are its source's, so each member adds the filters of its own runs.
 - One listing of the pool's content prefix.

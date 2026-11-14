@@ -34,7 +34,7 @@ async fn pool<S: ObjectStore + Clone>(store: S, names: &[&str]) -> (PoolId, Vec<
     let pool_id = crate::test_support::NamespaceFixture::new(store.clone(), &members[0], &setup)
         .create()
         .await
-        .expect("create the first member")
+        .expect("create the namespace without a source")
         .pool_id;
     for pair in members.windows(2) {
         fork(store.clone(), &pair[0], &pair[1]).await;
@@ -299,19 +299,22 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_reti
     assert!(!exists(&store, &referenced).await);
 }
 
+/// Checks that the collection doesn't read a fork whose member entry isn't
+/// listed yet, as for a fork installed during the collection: the fork's
+/// content is the content of the source manifest that the source's snapshot
+/// keeps.
 #[tokio::test]
-async fn a_fork_snapshot_whose_target_has_no_manifest_is_skipped() {
+async fn a_fork_installed_during_the_collection_is_not_read() {
     let directory = tempdir().expect("directory");
-    let store = LocalFsStore::new(directory.path()).expect("store");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let (pool_id, members) = pool(&store, &["first", "fork"]).await;
     let first = &members[0];
-    // A fork snapshot whose target has no manifest. No fork call leaves one,
-    // and the collection skips it without a read of the target.
+    let pending = NamespaceId::parse("pending").expect("namespace");
     let namespace = crate::test_support::namespace_store(&store, first);
     namespace
         .create_snapshot_record(
             SnapshotOwner::Fork {
-                target_namespace_id: NamespaceId::parse("pending").expect("namespace"),
+                target_namespace_id: pending.clone(),
             },
             crate::test_support::folded_manifest(&namespace)
                 .await
@@ -322,7 +325,12 @@ async fn a_fork_snapshot_whose_target_has_no_manifest_is_skipped() {
         .expect("fork snapshot");
     let unreferenced = plant(&store, &pool_id, &ContentId::generate()).await;
     let aged = aged_context(&store, &members).await;
-    let report = collect_pool(&store, &pool_id, &aged).await;
+    let recording = RecordingStore::new(
+        Arc::clone(&store),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&pending)),
+    );
+    let report = collect_pool(&recording, &pool_id, &aged).await;
+    assert_eq!(recording.count(OperationSelector::Any), 0);
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
 }
@@ -330,8 +338,6 @@ async fn a_fork_snapshot_whose_target_has_no_manifest_is_skipped() {
 #[tokio::test]
 async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_temporary_objects()
 {
-    // The fork's snapshot is on the first member, and the grandchild's snapshot is on
-    // the fork.
     for corrupt in [0, 1, 2] {
         let directory = tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
@@ -386,11 +392,10 @@ async fn a_collection_past_the_pool_roots_budget_skips_the_content_sweep() {
 }
 
 #[tokio::test]
-async fn a_collection_fails_when_a_members_fork_targets_do_not_fit_the_read_memory() {
+async fn a_collection_fails_when_the_member_list_does_not_fit_the_read_memory() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let (pool_id, members) = pool(&store, &["first", "fork"]).await;
-    let fork = &members[1];
     let limit_bytes = 32 * 1024;
     gc_within(
         &store,
@@ -400,31 +405,18 @@ async fn a_collection_fails_when_a_members_fork_targets_do_not_fit_the_read_memo
     )
     .await
     .expect("the pool's roots fit the read memory");
-    // No target has a manifest. The walk keeps a copy of each target's
-    // 128-byte ID in its members and another in its queue, so the targets
-    // alone need more than the read memory.
+    // No listed namespace has a manifest. The collection keeps a copy of
+    // each listed 128-byte ID until it reads the namespace, so the listing
+    // alone needs more than the read memory.
     for index in 0..limit_bytes / 128 {
-        let target_namespace_id =
-            NamespaceId::parse(format!("pending-{index:0120}")).expect("namespace");
-        let namespace = crate::test_support::namespace_store(&store, fork);
-        namespace
-            .create_snapshot_record(
-                SnapshotOwner::Fork {
-                    target_namespace_id,
-                },
-                crate::test_support::folded_manifest(&namespace)
-                    .await
-                    .expect("fold the WAL tail"),
-                &context(1_000).clock(),
-            )
-            .await
-            .expect("fork snapshot");
+        let namespace_id = NamespaceId::parse(format!("pending-{index:0120}")).expect("namespace");
+        crate::test_support::write_member_entry(&store, &pool_id, &namespace_id).await;
     }
     let unreferenced = plant(&store, &pool_id, &ContentId::generate()).await;
     let aged = aged_context(&store, &members).await;
     let error = gc_within(&store, &pool_id, limit_bytes, &aged.clock())
         .await
-        .expect_err("the fork's targets don't fit the read memory");
+        .expect_err("the listed members don't fit the read memory");
     assert_matches!(
         error,
         CoreError::LiveSetExceedsReadMemory { limit, .. } if limit == limit_bytes
@@ -437,10 +429,10 @@ async fn a_collection_fails_when_a_members_fork_targets_do_not_fit_the_read_memo
     assert!(!exists(&store, &unreferenced).await);
 }
 
-/// Checks that a deleted first member that isn't eligible for retirement still
-/// protects its content, and that the walk still finds its forks.
+/// Checks that a deleted member that isn't eligible for retirement still
+/// protects its content, and that its fork's content stays too.
 #[tokio::test]
-async fn a_deleted_first_member_protects_its_content_and_its_forks_are_found() {
+async fn a_deleted_member_protects_its_content_until_it_is_retired() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let (pool_id, members) = pool(&store, &["first"]).await;
@@ -462,7 +454,7 @@ async fn a_deleted_first_member_protects_its_content_and_its_forks_are_found() {
         .engine()
         .delete_namespace(DeleteNamespaceOptions::default())
         .await
-        .expect("delete the first member");
+        .expect("delete the member");
     let unreferenced = plant(&store, &pool_id, &numbered_content_id(4)).await;
     let aged = aged_context(&store, &[first.clone(), fork_id.clone()]).await;
     let report = collect_pool(&store, &pool_id, &aged).await;
@@ -541,7 +533,7 @@ async fn a_forks_content_is_stored_in_its_sources_pool_and_only_the_pools_collec
 }
 
 #[tokio::test]
-async fn a_deleted_first_members_pool_sweeps_a_live_forks_sessions_by_the_forks_status() {
+async fn a_pool_sweeps_a_live_members_sessions_by_the_members_status() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let (pool_id, members) = pool(&store, &["first", "fork"]).await;
@@ -565,8 +557,8 @@ async fn a_deleted_first_members_pool_sweeps_a_live_forks_sessions_by_the_forks_
     let first_completed =
         plant_session(&store, &pool_id, first, base_ms, Some(completed(base_ms))).await;
 
-    // The fork's snapshot keeps the first member from retirement, so its own
-    // sessions stay, and the fork's sessions follow the fork's rules.
+    // The fork's snapshot keeps the deleted source from retirement, so the
+    // source's sessions stay, and the fork's sessions follow the fork's rules.
     collect_pool_at(&store, &pool_id, base_ms + GC_GRACE_WINDOW_MS).await;
     assert!(exists(&store, &upload_outcome(&pool_id, &fork_open.upload_id)).await);
     assert!(!exists(&store, &upload_outcome(&pool_id, &first_open.upload_id)).await);
@@ -632,20 +624,20 @@ async fn a_deleted_forks_sessions_stay_until_the_fork_is_retired() {
 async fn an_unreadable_member_leaves_the_sessions_of_unread_namespaces_undecided() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
-    // Each name is forked from the one before it, so the walk finds `c`
-    // only through the snapshots of `b`.
-    let (pool_id, members) = pool(&store, &["first", "a", "b", "c"]).await;
-    let b_manifest = crate::test_support::namespace_store(&store, &members[2])
+    // The collection reads the members in the order of their entries' keys,
+    // so it reads `a` and `b`, stops at `c`, and doesn't read `d`.
+    let (pool_id, members) = pool(&store, &["a", "b", "c", "d"]).await;
+    let c_manifest = crate::test_support::namespace_store(&store, &members[2])
         .load_current_manifest()
         .await
         .expect("current manifest");
     replace_object(
         &store,
-        &b_manifest.object_key,
+        &c_manifest.object_key,
         Bytes::from_static(b"not json"),
     )
     .await
-    .expect("corrupt the manifest of `b`");
+    .expect("corrupt the manifest of `c`");
     let mut sessions = Vec::new();
     for member in &members {
         sessions.push(plant_session(&store, &pool_id, member, 1_000, Some(completed(1_000))).await);
@@ -672,7 +664,7 @@ async fn a_session_completed_in_a_fork_installed_during_the_collection_keeps_its
     let first = &members[0];
     let fork_id = NamespaceId::parse("fork").expect("namespace");
     // The collection lists the temporary objects after it lists the upload
-    // sessions and walks the members.
+    // sessions and reads the members.
     let store = BlockingStore::new(
         inner,
         KeyPredicate::exact(temporary_prefix(&pool_id)),
@@ -720,7 +712,7 @@ async fn a_cached_completed_session_follows_its_members_status() {
         assert!(cache.get(&session.upload_id).is_some());
         // A retired fork's session is deleted at once. A live fork's session
         // is deleted after its completed-content grace, although the deleted
-        // first member is retained.
+        // source is retained.
         let later_ms = if retire_the_fork {
             delete_namespace(&store, fork, 1_000).await;
             collect(&store, fork, now_ms).await;

@@ -19,7 +19,7 @@
 
 use loonfs_types::format::control::{
     decode_control_object, BoundaryPayload, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
-    ManifestBoundary, ManifestRef, NamespaceStatus, PoolPayload, RebasedFrom, SnapshotOwner,
+    ManifestBoundary, ManifestRef, NamespaceStatus, PoolMemberPayload, RebasedFrom, SnapshotOwner,
     SnapshotPayload, UploadOutcome, UploadOutcomePayload, UploadSessionMode, UploadSessionPayload,
     WriterBlock,
 };
@@ -1122,13 +1122,12 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_pool.v1.json",
-        ControlObjectKind::Pool,
-        PoolPayload {
+        "control_pool_member.v1.json",
+        ControlObjectKind::PoolMember,
+        PoolMemberPayload {
             pool_id: loonfs_types::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x")
                 .expect("valid pool id"),
-            first_member_namespace_id: namespace_id(),
-            created_at_ms: 1_000,
+            namespace_id: namespace_id(),
         },
     );
     check_control_golden(

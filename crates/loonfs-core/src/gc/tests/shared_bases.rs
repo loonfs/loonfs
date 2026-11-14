@@ -93,11 +93,10 @@ async fn layout_manifest(
     (manifest.payload().clone(), keys)
 }
 
-/// Publishes `manifest` as a namespace's first manifest, with the record of
-/// the pool that the manifest records.
+/// Publishes `manifest` as a namespace's first manifest, with the
+/// namespace's member entry in the pool that the manifest records.
 async fn publish_layout_manifest(store: &impl ObjectStore, manifest: NamespaceManifestPayload) {
-    crate::test_support::write_pool_record(store, &manifest.pool_id, &manifest.namespace_id, 0)
-        .await;
+    crate::test_support::write_member_entry(store, &manifest.pool_id, &manifest.namespace_id).await;
     write_namespace_manifest(store, manifest)
         .await
         .expect("write manifest");

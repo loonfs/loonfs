@@ -933,7 +933,7 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
 }
 
 #[tokio::test]
-async fn a_repeated_collection_of_a_pool_without_members_lists_once_and_deletes_nothing() {
+async fn a_repeated_collection_of_an_emptied_pool_lists_once_and_returns_pool_not_found() {
     use loonfs_core::limits::GC_SAFETY_MARGIN_MS;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 
@@ -991,14 +991,13 @@ async fn a_repeated_collection_of_a_pool_without_members_lists_once_and_deletes_
         }
     );
     store.reset();
+    // Retirement deleted the member entry, and the first collection deleted
+    // the content, so nothing is under the pool's prefix.
     let repeated = pool
         .gc(None, &context.clock())
         .await
-        .expect("repeat collection");
-    assert_eq!(
-        repeated.deleted,
-        loonfs_types::PoolDeletedObjectCounts::default()
-    );
+        .expect_err("repeat collection");
+    assert_eq!(repeated.code(), crate::ErrorCode::PoolNotFound);
     assert_eq!(
         store.counts(),
         StoreCounts {
