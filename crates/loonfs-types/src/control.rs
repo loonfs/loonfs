@@ -100,6 +100,12 @@ pub enum ManifestBoundary {
         /// Positive number of the highest manifest at or below the boundary.
         manifest_no: ManifestNo,
     },
+    /// The namespace is retired, and every manifest number is at or below the
+    /// boundary. The boundary never leaves this state.
+    ///
+    /// The braces make serde reject a stray field, which a unit variant would
+    /// accept and discard.
+    Retired {},
 }
 
 /// One reference to a namespace manifest.

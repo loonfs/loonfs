@@ -699,7 +699,9 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .compactor_epoch(&claimed)
         .await
         .expect("claim the namespace");
-    for namespace in [&idle, &claimed, &retired] {
+    // The first collection of `retired` retires the deleted namespace, and
+    // the second deletes what is left under its prefix.
+    for namespace in [&idle, &claimed, &retired, &retired] {
         maintenance
             .gc(namespace)
             .await
@@ -723,19 +725,19 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     // A load of a namespace lists its manifests once, and a load of a live
     // namespace sends a HEAD request for the missing manifest after the
     // current one and a read of the manifest boundary in its check of the
-    // manifest. A collection
-    // lists each of its five families once, the snapshots included, and
-    // lists nothing under its pool's prefix, whether the namespace is live or
-    // deleted.
+    // manifest. A load of a retired namespace reads its boundary and lists
+    // nothing. A collection lists each of its five families once, the
+    // snapshots included, and lists nothing under its pool's prefix, whether
+    // the namespace is live or retired.
     let heads = 1;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
         (&idle, [5, heads, 1, 0], None, [5, heads, 6, 0], None),
         (&claimed, [5, heads, 1, 0], None, [5, heads, 6, 0], None),
         (
             &retired,
-            [3, 0, 1, 0],
+            [1, 0, 0, 0],
             Some(crate::ErrorCode::NamespaceDeleted),
-            [3, 0, 6, 0],
+            [1, 0, 5, 0],
             None,
         ),
         (

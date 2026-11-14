@@ -6,6 +6,7 @@ use crate::error::{CoreError, Result};
 use crate::manifest::load_namespace_manifest_envelope;
 use crate::merge::merge_start;
 use crate::metadata::MetadataView;
+use crate::namespace::control::NewestManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::snapshot::record::write_snapshot_record;
@@ -264,11 +265,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(ensure_live(snapshot, clock.now_ms())?.state)
     }
 
+    /// Returns whether this namespace, the target of the fork snapshot
+    /// `record`, keeps the snapshot: its newest manifest is a fork of that
+    /// snapshot. A target without a manifest, or a retired target, has no
+    /// roots and keeps nothing.
     pub(crate) async fn target_retains_snapshot(&self, record: &SnapshotPayload) -> Result<bool> {
-        let Some(target) = self.load_current_manifest_if_present().await? else {
+        let NewestManifest::Manifest(target) = self.find_newest_manifest().await? else {
             return Ok(false);
         };
-        let Some(basis) = target.payload().fork_basis.as_ref() else {
+        let Some(basis) = target.manifest.payload().fork_basis.as_ref() else {
             return Ok(false);
         };
         if basis.source_snapshot_id != record.snapshot_id {

@@ -2,6 +2,7 @@
 
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
+use crate::namespace::control::NewestManifest;
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::pool_record;
@@ -24,12 +25,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Deletes the pool record of a create that ended with `error` when the
     /// namespace's current manifest records another pool.
     ///
-    /// A failed reload or deletion is only logged, and the record stays.
+    /// A failed reload or deletion is only logged, and the record stays. So
+    /// does the record when the namespace is retired, because no manifest
+    /// then says which pool the namespace used.
     pub(crate) async fn delete_unused_pool_record(&self, record: &PoolPayload, error: &CoreError) {
-        let records_other_pool = match self.load_current_manifest_if_present().await {
-            Ok(current) => {
-                current.is_some_and(|current| current.payload().pool_id != record.pool_id)
+        let records_other_pool = match self.find_newest_manifest().await {
+            Ok(NewestManifest::Manifest(current)) => {
+                current.manifest.payload().pool_id != record.pool_id
             }
+            Ok(NewestManifest::Absent | NewestManifest::Retired) => false,
             Err(check_error) => {
                 tracing::warn!(
                     namespace_id = %self.namespace_id,

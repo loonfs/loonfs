@@ -192,7 +192,7 @@ async fn a_collection_that_stops_between_the_two_deletes_leaves_an_outcome_the_n
         [upload_outcome(&pool_id, &upload_id)],
         "the session record goes first"
     );
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+    assert!(read_upload_session(&store, &pool_id, &upload_id)
         .await
         .is_none());
 
@@ -430,7 +430,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     completion.expect("completion wins the blocked abort CAS");
     let report = report.expect("collection");
     assert_eq!(report.deleted.upload_sessions, 0);
-    let session = read_upload_session(&store, &namespace_id, &upload_id)
+    let session = read_upload_session(&store, &pool_id, &upload_id)
         .await
         .expect("completed session retained");
     assert_matches!(session.outcome, Some(UploadOutcome::Completed { .. }));
@@ -475,7 +475,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     assert_matches!(&error, CoreError::UploadNotFound { .. });
     assert_eq!(error.code(), crate::error::ErrorCode::UploadNotFound);
     report.expect("collection");
-    let session = read_upload_session(&store, &namespace_id, &upload_id)
+    let session = read_upload_session(&store, &pool_id, &upload_id)
         .await
         .expect("aborted session retained for a grace window");
     assert_matches!(session.outcome, Some(UploadOutcome::Aborted { .. }));

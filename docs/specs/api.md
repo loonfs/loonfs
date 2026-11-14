@@ -232,7 +232,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `method_not_allowed` | 405 | The path exists, but it doesn't serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it doesn't exist. |
 | `pool_not_found` | 404 | The pool has no pool record, so the pool's collection deletes nothing. |
-| `namespace_deleted` | 410 | The namespace ID is deleted, and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
+| `namespace_deleted` | 410 | The namespace ID is deleted or [retired](format.md#95-retirement), and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
 | `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, retrieve, fork, or extension found the snapshot expired. The snapshot inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
 | `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
@@ -823,7 +823,7 @@ The response includes the same `kind`, the addressed `namespace_id`, and the job
 
 A job that loses a race with another process, or whose work is superseded, reports that as an outcome in its result, not as an error.
 
-A deleted namespace accepts only `gc` jobs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
+A deleted namespace accepts only `gc` jobs, and other jobs return `namespace_deleted`. A retired namespace accepts `gc` jobs too. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
 
 A [pool](glossary.md#pool) has its own route, `POST /v0/maintenance/pools/{pool_id}/jobs`, which accepts one job, `gc`. A namespace's `gc` job collects the objects under the namespace's prefix, and a pool's `gc` job collects the content objects, upload records, and temporary objects under the pool's prefix (see [Garbage collection jobs](#garbage-collection-jobs)). The response includes the same `kind`, the addressed `pool_id`, and the collection result. A pool ID without a pool record returns `pool_not_found`. The pool's route has the same retry class as `run_maintenance_job`, and the reference server exempts it from its request deadline in the same way. For example, `POST /v0/maintenance/pools/pool_3s0drmj8em84yb4mnetqkz2j0x/jobs` with the body `{"kind":"gc"}` runs one collection of that pool.
 
@@ -889,7 +889,7 @@ A `gc` job on a namespace or on a pool deletes an unreferenced object once the o
 
 A namespace's job and a pool's job collect different objects:
 
-- A namespace's collection covers the namespace's manifests, WAL objects, metadata segments, extension segments, and snapshots. It makes no request under the pool's prefix, and it deletes no content, including when it retires the namespace. Retiring a fork deletes the fork snapshot on its source (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)).
+- A namespace's collection covers the namespace's manifests, WAL objects, metadata segments, extension segments, and snapshots. It makes no request under the pool's prefix, and it deletes no content, including when it retires the namespace. Retiring a namespace deletes a fork's fork snapshot on its source and raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)). A collection of a retired namespace deletes every manifest, WAL object, segment, and snapshot record under the namespace's prefix once the object is older than the grace window, and keeps the boundary object.
 - A pool's collection covers the pool's content objects, upload records, and temporary objects, with roots that it reads from every member of the [pool](glossary.md#pool).
 
 [One complete collection](format.md#111-one-complete-collection) defines both collections.
@@ -900,7 +900,7 @@ Each GC request runs one complete, stateless collection. `GcRequest` has no fiel
 
 Every GC call uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end. Before a namespace's call deletes manifests, it raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to the highest manifest number that it deletes (see [One complete collection](format.md#111-one-complete-collection)).
 
-A namespace's call reads the current manifest, lists the namespace's snapshots, and loads the manifests that the snapshots keep. If a manifest read fails, the call fails before it lists or deletes anything. [Reference roots](format.md#112-reference-roots) defines these roots.
+A namespace's call reads the current manifest, lists the namespace's snapshots, and loads the manifests that the snapshots keep. If a manifest read fails, the call fails before it lists or deletes anything. [Reference roots](format.md#112-reference-roots) defines these roots. A retired namespace has no roots, so the call reads no manifest. It returns an ordinary GC response with what it deleted, not `namespace_deleted`.
 
 A pool's call reads the pool record, lists the pool's upload sessions, and then reads the roots of every member of the pool. It protects content through the extent filters of the rooted layout segments, and it deletes no content objects if it couldn't read the roots of every member within the time that [Content roots](format.md#119-content-roots) allows, or couldn't read one member's roots. [Content roots](format.md#119-content-roots) defines these roots. A pool has no members when its first member is retired, or when its create call failed or lost to another create call for the same namespace ID. In the second case, the call deletes nothing while the pool record is inside its creation grace (the grace window after the record's `created_at_ms`), and after the creation grace it deletes the pool record and lists nothing else.
 
@@ -916,7 +916,7 @@ In a pool's response, the time is one of these:
 
 The value is the earliest of those future times that the collection examined. Fork snapshots have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
 
-A namespace's GC response also includes `retires_at_ms` when the current manifest is deleted. It's the retirement deadline defined in [Retirement](format.md#95-retirement), and it's included even when snapshots still block retirement. It's absent for an active namespace.
+A namespace's GC response also includes `retires_at_ms` when the current manifest is deleted. It's the retirement deadline defined in [Retirement](format.md#95-retirement), and it's included even when snapshots still block retirement. It's absent for an active namespace and for a retired namespace, which has no current manifest.
 
 A GC response includes `listed_bytes`: the bytes of every object that the collection listed, each object once, as the provider reported them, before the collection's deletes. A namespace's collection lists the objects under the namespace's prefix, except the manifest boundary and any extension object that isn't a segment. A pool's collection lists the content objects, upload records, and temporary objects under the pool's prefix, so the value leaves out the pool record. When a pool's collection deletes no content objects because it couldn't read every member's roots, it lists the content prefix once to measure the content. An application that meters storage samples a pool's value for the pool's content, and a namespace's value for the namespace's metadata.
 
@@ -1040,7 +1040,7 @@ An expired snapshot stays listed until GC deletes it, after its expiry plus the 
 
 An ordinary operation that finds that its namespace was deleted returns `namespace_deleted`. Cached readers follow the rules in [Deleting a namespace](format.md#94-deleting-a-namespace). Collection is asynchronous. It has no set completion time, and it doesn't guarantee physical erasure.
 
-[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement deletes. No retirement deletes content. A deleted namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member's roots refer to it. Purging the namespace's tombstone and manifest boundary is outside the scope of this API.
+[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement does. Retirement raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired, and later collections of the namespace delete its tombstone and every other object under its prefix except the boundary object. No retirement deletes content. A deleted namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member's roots refer to it, which is after the namespace is retired. The boundary object stays as the record that the ID was used, and purging it is outside the scope of this API.
 
 A deleted ancestor namespace keeps every object it published while a live descendant still depends on it.
 
@@ -1057,12 +1057,12 @@ Completed upload sessions in active namespaces keep their records for the comple
 
 GC needs to run repeatedly, including after a collection finds nothing left to delete. A presigned upload URL that was issued before the deletion can still write an object after the deletion, and a late write that one listing misses is found by the next collection. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, snapshot cleanup, or maintenance that isn't running.
 
-Once the current manifest is deleted, LoonFS refuses commits, requests for new presigned upload URLs, and upload completion, but it doesn't revoke presigned URLs that were already issued. A deleted namespace is retired the grace window (24 hours) after its deletion, which is longer than the presigned URL lifetime.
+Once the current manifest is deleted, LoonFS refuses commits, requests for new presigned upload URLs, and upload completion, but it doesn't revoke presigned URLs that were already issued. A deleted namespace is retired no earlier than the grace window (24 hours) after its deletion, which is longer than the presigned URL lifetime.
 
 The reference server's scheduler runs maintenance on two schedules:
 
 - Every maintenance interval (five seconds by default), the scheduler runs the due steps of each namespace session that the server keeps open. A collection step is due on the collection interval (one hour by default), once the session's published sequence has moved. A session's collection step collects the namespace and not the namespace's pool.
-- A "sweep" lists every namespace in the store, including deleted ones, and runs each listed namespace's due steps, including a collection. It then lists every pool in the store and runs a collection of each pool, with the same concurrency. A sweep runs when the server starts, and then on the sweep interval (24 hours by default).
+- A "sweep" lists every namespace in the store, including deleted and retired ones, and runs each listed namespace's due steps, including a collection. It then lists every pool in the store and runs a collection of each pool, with the same concurrency. A sweep runs when the server starts, and then on the sweep interval (24 hours by default).
 
 So the reference server collects a pool's content objects, upload records, and temporary objects in sweeps, and not between them. A failed collection of a pool is logged, and the next sweep runs the collection again. A pool that returns `pool_not_found` when the sweep collects the pool isn't a failure, because a create call can delete its pool record after the sweep's listing found the record.
 
@@ -1070,7 +1070,7 @@ The sweep also advances the retention floor of each namespace that isn't deleted
 
 The deletions that an advance reaches expire at once, and the next base compaction of each family group removes the rows that those deletions hide. The sweep advances the floor the way a `retention` job does. The advance creates a [floor object](glossary.md#floor-object) in the WAL, through the namespace's writer session in the server when the server has a session for the namespace, and then folds the namespace when no manifest records the new floor. The advance claims no writer epoch, so a writer session for the namespace in another process isn't fenced, and no request returns `writer_fenced` because of a sweep. A store can have more than one maintaining server. If two servers advance the same namespace's floor, each server creates a floor object, and the higher floor applies.
 
-A namespace that nobody writes to through this server process (including forks and deleted namespaces) waits for the next sweep. The sweep also covers objects left behind by a crashed process, and garbage that's still inside a grace window. An idle namespace costs no requests between sweeps.
+A namespace that nobody writes to through this server process (including forks, deleted namespaces, and retired namespaces) waits for the next sweep. The sweep also covers objects left behind by a crashed process, and garbage that's still inside a grace window. An idle namespace costs no requests between sweeps.
 
 LoonFS doesn't schedule GC when a namespace is deleted, when an upload expires, or when a fork retires and its source has more to collect. A host that doesn't run this scheduler runs GC itself on each namespace and on each pool. It collects a namespace with `POST /v0/maintenance/namespaces/{ns}/jobs` and the body `{"kind":"gc"}`, with `loonfs maintenance gc`, or with `Maintenance::gc`, and it collects a pool with `POST /v0/maintenance/pools/{pool_id}/jobs` and the same body, with `loonfs maintenance pool gc`, or with `Maintenance::gc_pool`. It can use `next_reclamation_at_ms` to decide when to run GC again.
 
@@ -1313,7 +1313,7 @@ A create request can leave out `namespace_id`, and a fork request can leave out 
 
 Route placeholders such as `{ns}`, `{source_ns}`, and an implementation-internal `:namespace` are path parameter names, and each one takes the same namespace ID value. v0 doesn't accept or return a namespace `name` alias.
 
-Create and fork first look for the namespace ID's newest manifest, and a call that finds one writes nothing. Otherwise the call writes manifest 1 with a conditional put and then reads the namespace's [manifest boundary](glossary.md#manifest-boundary). Between the lookup and manifest 1, a plain create writes the record of the pool that it generates (`pools/{pool_id}/pool.json`), so a create of an existing namespace writes no pool record. A fork writes no pool record. The conditional put of manifest 1, with the boundary read after it, determines whether the call created the namespace (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork for the ID of another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
+Create and fork first look for the namespace ID's newest manifest, and a call that finds one, or finds that the namespace is retired, writes nothing. Otherwise the call writes manifest 1 with a conditional put and then reads the namespace's [manifest boundary](glossary.md#manifest-boundary). Between the lookup and manifest 1, a plain create writes the record of the pool that it generates (`pools/{pool_id}/pool.json`), so a create of an existing namespace writes no pool record. A fork writes no pool record. The conditional put of manifest 1, with the boundary read after it, determines whether the call created the namespace (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork for the ID of another active namespace returns `namespace_exists` (409). A create or fork into a deleted or retired ID returns `namespace_deleted` (410). A namespace is never left partially created.
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
@@ -1325,7 +1325,7 @@ Returns the capability document described in [The capability document](#21-the-c
 
 ### 6.2 `GET /v0/namespaces/{ns}`
 
-Returns the metadata of one namespace, without listing every namespace. A missing namespace returns `404` with `namespace_not_found`, and a deleted namespace returns `410` with `namespace_deleted`.
+Returns the metadata of one namespace, without listing every namespace. A missing namespace returns `404` with `namespace_not_found`, and a deleted or retired namespace returns `410` with `namespace_deleted`.
 
 ```json
 {
@@ -1429,11 +1429,11 @@ The embedded `NamespaceStore::load_statistics` and `NamespaceStore::load_snapsho
 
 Deletes a namespace. In an ACL namespace, this operation requires an administrator subject. A request with no subject headers acts as the token holder.
 
-Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest after the namespace's content is reclaimed.
+Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest until the namespace is [retired](format.md#95-retirement), and these requests return `namespace_deleted` after the retirement too.
 
-The snapshot inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork snapshot's ID through the snapshot route still returns `snapshot_not_found`.
+The snapshot inventory and snapshot deletion are explicit exceptions, and they stay available after deletion until the namespace is retired. Deleting a fork snapshot's ID through the snapshot route still returns `snapshot_not_found`.
 
-Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement deletes. The namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member refers to it (see [Garbage collection jobs](#garbage-collection-jobs)).
+Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement does and what later collections delete. The namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member refers to it (see [Garbage collection jobs](#garbage-collection-jobs)).
 
 A deployment should run garbage collection repeatedly to catch late writes, and, on a provider where LoonFS uses multipart uploads, it should keep the provider's lifecycle rule for incomplete multipart uploads. Deleting an object key doesn't erase the physical versions kept by bucket versioning or retention locks.
 

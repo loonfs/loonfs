@@ -5,11 +5,12 @@
 use super::uploads::{ListedUpload, ListedUploadSession};
 use crate::error::{CoreError, Result};
 use crate::gc::charged_set::{ChargedMap, ChargedQueue, ChargedSet, CollectionMemory};
-use crate::gc::live_set::RetirementStatus;
+use crate::gc::live_set::{retirement_deadline_ms, RetirementStatus};
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::gc::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
 use crate::limits::POOL_ROOTS_READ_BUDGET_MS;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::basis::PublicationBasis;
+use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::read_anchor::project_anchor_tail;
 use crate::namespace::store::NamespaceStore;
 use crate::pool_store::PoolStore;
@@ -32,9 +33,10 @@ pub(crate) enum MemberState {
     /// The collection has read the member's roots, and its retirement status by the
     /// collection's clock.
     Read { status: RetirementStatus },
-    /// The member is the target of a fork snapshot, and it has no current
-    /// manifest, because its installation hasn't finished, or it failed. It
-    /// has no roots, and no commit can be published in it.
+    /// The member has no current manifest, because it's a fork snapshot's
+    /// target whose installation hasn't finished or failed, or because its
+    /// boundary is retired. It has no roots, and no commit can be published
+    /// in it.
     Absent,
 }
 
@@ -57,7 +59,7 @@ pub(super) struct MemberWalkReport {
     /// The pool's first member, and every fork snapshot target that the walk
     /// found, including a target whose installation hasn't finished.
     pub(super) members: usize,
-    /// The members whose roots the collection read. A fork snapshot target without a
+    /// The members whose roots the collection read. A member without a
     /// current manifest has no roots, and it counts as read.
     pub(super) members_read: usize,
 }
@@ -98,7 +100,7 @@ struct MemberRead {
 impl PoolRoots {
     /// Lists the pool's upload sessions, and then reads the roots of every
     /// member, starting from `first_member_namespace_id`, whose current manifest is
-    /// `first_current`.
+    /// `first_current`, or `None` when the first member is retired.
     ///
     /// The sessions, content IDs, layout segments, and members that the
     /// collection keeps are charged to the read working memory of the pool's
@@ -107,7 +109,7 @@ impl PoolRoots {
     pub(super) async fn load<S: ObjectStore>(
         pool: &PoolStore<S>,
         first_member_namespace_id: &NamespaceId,
-        first_current: Result<LoadedManifest>,
+        first_current: Result<Option<PublicationBasis>>,
         observed: Observation,
         session_cache: Option<&CompletedUploadSessionCache>,
         clock: &OperationClock,
@@ -184,13 +186,13 @@ impl PoolRoots {
     /// sweep and continues. A charge to the read working memory that fails
     /// ends the collection.
     ///
-    /// A first member that's eligible for retirement has no forks, and its
-    /// tombstone protects nothing, so the pool then has no member roots.
+    /// A retired first member has no roots and no forks, so the pool then
+    /// has no member roots.
     async fn load_members<S: ObjectStore>(
         &mut self,
         pool: &PoolStore<S>,
         first_member_namespace_id: &NamespaceId,
-        first_current: Result<LoadedManifest>,
+        first_current: Result<Option<PublicationBasis>>,
         observed: Observation,
         clock: &OperationClock,
     ) -> Result<()> {
@@ -201,16 +203,18 @@ impl PoolRoots {
         self.walk.members = 1;
         let walked = async {
             let first = pool.member(first_member_namespace_id.clone());
-            let read = self.read_member(&first, first_current?, observed).await?;
-            if read.status != RetirementStatus::Eligible {
-                self.protect_layout_segments(&read.current)?;
-            }
-            self.members.insert(
-                first_member_namespace_id.clone(),
-                MemberState::Read {
-                    status: read.status,
-                },
-            )?;
+            let state = match first_current? {
+                Some(current) => {
+                    let read = self.read_member(&first, current, observed).await?;
+                    self.protect_layout_segments(&read.current)?;
+                    MemberState::Read {
+                        status: read.status,
+                    }
+                }
+                None => MemberState::Absent,
+            };
+            self.members
+                .insert(first_member_namespace_id.clone(), state)?;
             self.walk.members_read += 1;
             while let Some(member_id) = self.member_queue.pop_front() {
                 if clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
@@ -251,19 +255,18 @@ impl PoolRoots {
     /// member's state.
     ///
     /// A fork snapshot's target has no current manifest until its installation
-    /// finishes, and it has no roots and no forks until then.
+    /// finishes, and it has no roots and no forks until then. A retired
+    /// target has no roots and no forks either.
     async fn load_member<S: ObjectStore>(
         &mut self,
         member: &NamespaceStore<S>,
         pool_id: &PoolId,
     ) -> Result<MemberState> {
         let observed = Observation::now(Arc::clone(&member.timer));
-        let current = match member.load_current_manifest().await {
-            Ok(current) => current,
-            Err(CoreError::NamespaceNotFound { .. }) => return Ok(MemberState::Absent),
-            Err(error) => return Err(error),
+        let NewestManifest::Manifest(current) = member.find_newest_manifest().await? else {
+            return Ok(MemberState::Absent);
         };
-        let recorded = &current.payload().pool_id;
+        let recorded = &current.manifest.payload().pool_id;
         if recorded != pool_id {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "fork `{}` of pool `{pool_id}` records pool `{recorded}`",
@@ -282,16 +285,20 @@ impl PoolRoots {
     /// of its fork snapshots, and returns the member's retirement status and
     /// current manifest.
     ///
+    /// A deleted member stays a member until its boundary is retired, so its
+    /// status is retained, with its retirement deadline while the deadline is
+    /// in the future.
+    ///
     /// A snapshot whose manifest is missing makes the member's roots unreadable,
     /// because only the member's own collection decides about its snapshots.
     async fn read_member<S: ObjectStore>(
         &mut self,
         member: &NamespaceStore<S>,
-        manifest: LoadedManifest,
+        current: PublicationBasis,
         observed: Observation,
     ) -> Result<MemberRead> {
         let anchor = member
-            .load_read_anchor_from_manifest(manifest, None, observed)
+            .load_read_anchor_from_manifest(current.manifest, current.boundary, observed)
             .await?;
         let head = anchor.manifest.payload();
         // A tombstone's runs cover its whole WAL, so it has no tail.
@@ -307,10 +314,8 @@ impl PoolRoots {
                 }
             }
         }
-        let mut has_snapshots = false;
         let mut snapshots = member.list_snapshot_manifests(head.manifest_no);
         while let Some(listed) = snapshots.try_next().await? {
-            has_snapshots = true;
             let ListedSnapshotKey::Snapshot(snapshot) = listed else {
                 continue;
             };
@@ -337,11 +342,14 @@ impl PoolRoots {
             }
         }
         drop(snapshots);
-        let status = RetirementStatus::of(
-            head.status.is_deleted().then_some(head),
-            has_snapshots,
-            self.now_ms,
-        );
+        let status = if head.status.is_deleted() {
+            RetirementStatus::Retained {
+                retires_at_ms: Some(retirement_deadline_ms(head))
+                    .filter(|deadline_ms| self.now_ms < *deadline_ms),
+            }
+        } else {
+            RetirementStatus::Active
+        };
         Ok(MemberRead {
             status,
             current: anchor.manifest,
@@ -388,10 +396,10 @@ impl PoolRoots {
     ///
     /// The collection can't decide the status of a member whose roots it hasn't
     /// read, or of a namespace that the walk didn't find when the walk
-    /// stopped early. A member without a current manifest, and a namespace
-    /// that a finished walk didn't find, are eligible, because no commit can
-    /// be published in the first, and only retirement deletes the fork snapshot
-    /// that would find the second. That holds for a namespace with a session that
+    /// stopped early. A member without a current manifest, which includes a
+    /// retired member, and a namespace that a finished walk didn't find, are
+    /// eligible, because no commit can be published in the first, and only
+    /// retirement deletes the fork snapshot that would find the second. That holds for a namespace with a session that
     /// the collection listed before the walk, because a namespace has a current
     /// manifest before it can create a session. A fork installed after the
     /// walk read its source's snapshots isn't found either, so a session that the

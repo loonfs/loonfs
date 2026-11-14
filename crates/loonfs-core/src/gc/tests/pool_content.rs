@@ -62,7 +62,7 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
     assert_eq!(report.deleted.upload_sessions, 0);
     assert_eq!(report.deleted.content_objects, 0);
     assert!(store.head(&content_key).await.expect("head").is_some());
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+    assert!(read_upload_session(&store, &pool_id, &upload_id)
         .await
         .is_some());
 }
@@ -97,7 +97,7 @@ async fn an_unpublished_completed_upload_loses_its_record_then_its_object() {
         report.deleted.content_objects, 0,
         "the collection read the record as a root before it removed it"
     );
-    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+    assert!(read_upload_session(&store, &pool_id, &upload_id)
         .await
         .is_none());
     assert!(store.head(&content_key).await.expect("head").is_some());

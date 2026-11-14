@@ -10,6 +10,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use futures::{stream, Stream, StreamExt, TryStreamExt};
+use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{GcResponse, ManifestNo};
@@ -20,23 +21,30 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// extension segments, and snapshots, and retires the namespace when its
     /// tombstone is eligible.
     ///
+    /// A retired namespace has no roots, so the collection reads no manifest
+    /// and deletes every manifest, WAL object, segment, and snapshot record
+    /// under the namespace's prefix once the object is old enough. It keeps
+    /// the boundary object, which is under none of those prefixes.
+    ///
     /// The collection lists nothing under its pool's prefix. The pool's own
     /// collection collects the content objects, upload records, and temporary
     /// objects there (see [`crate::PoolStore::gc`]).
     pub async fn gc(&self, clock: &OperationClock) -> Result<GcResponse> {
         let mut report = GcResponse::empty(self.namespace_id.clone());
-        let mut live = LiveSet::load(self, clock).await?;
-        report.retires_at_ms = live
-            .current_tombstone
-            .as_ref()
-            .map(|tombstone| live.deadline(tombstone));
-        report.next_reclamation_at_ms = match live.retirement_status() {
-            RetirementStatus::Retained { retires_at_ms } => retires_at_ms,
-            _ => None,
-        };
+        let live = LiveSet::load(self, clock).await?;
+        if let Some(live) = &live {
+            report.retires_at_ms = live
+                .current_tombstone
+                .as_ref()
+                .map(|tombstone| live.deadline(tombstone));
+            report.next_reclamation_at_ms = match live.retirement_status() {
+                RetirementStatus::Retained { retires_at_ms } => retires_at_ms,
+                _ => None,
+            };
+        }
         let sweep = Sweep {
             clock,
-            live: &live,
+            live: live.as_ref(),
             listed_bytes: AtomicU64::new(0),
         };
         for family in CandidateFamily::ALL {
@@ -48,14 +56,29 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .map_err(|error| CoreError::store(&prefix, &error))
                 .map_ok(|entry| sweep.candidate(family, entry))
                 .boxed();
-            if family == CandidateFamily::Manifests {
-                self.collect_manifests(decisions, &live.memory, &mut report)
-                    .await?;
-            } else {
-                apply_decisions(&self.store, decisions, &mut report).await?;
+            match &live {
+                Some(live) if family == CandidateFamily::Manifests => {
+                    self.collect_manifests(decisions, &live.memory, &mut report)
+                        .await?;
+                }
+                _ => apply_decisions(&self.store, decisions, &mut report).await?,
             }
         }
-        report.listed_bytes += sweep.listed_bytes.into_inner() + live.snapshot_listed_bytes;
+        if live.is_none() {
+            let prefix = snapshot_prefix(&self.namespace_id);
+            let decisions = self
+                .store
+                .list_entries_from_stream(&prefix, None)
+                .map_err(|error| CoreError::store(&prefix, &error))
+                .map_ok(|entry| sweep.retired_snapshot(entry))
+                .boxed();
+            apply_decisions(&self.store, decisions, &mut report).await?;
+        }
+        report.listed_bytes += sweep.listed_bytes.into_inner();
+        let Some(mut live) = live else {
+            return Ok(report);
+        };
+        report.listed_bytes += live.snapshot_listed_bytes;
         // The snapshots go after the objects that they protect, from the listing
         // that loaded their manifests.
         let snapshots = std::iter::from_fn(|| live.snapshot_decisions.pop_front()).map(Ok);

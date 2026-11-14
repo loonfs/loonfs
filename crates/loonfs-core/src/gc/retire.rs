@@ -1,4 +1,4 @@
-//! Fork snapshot cleanup for an eligible tombstone.
+//! The retirement of a namespace whose tombstone is eligible.
 
 use super::live_set::{LiveSet, RetirementStatus};
 use crate::error::Result;
@@ -7,9 +7,16 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::GcResponse;
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Deletes the fork snapshot that the tombstone's fork basis refers to, once
-    /// the namespace is eligible for retirement. A namespace created without a
-    /// source has no fork snapshot, so its retirement deletes nothing.
+    /// Retires the namespace once its tombstone is eligible (format spec,
+    /// "Retiring an eligible tombstone"): deletes the fork snapshot that the
+    /// tombstone's fork basis refers to, and then raises the manifest boundary
+    /// to retired. A namespace created without a source has no fork snapshot.
+    ///
+    /// The tombstone's fork basis is the record of which snapshot to delete,
+    /// and the tombstone stays until the boundary is retired. So a collection
+    /// that stops between the two steps leaves the next collection to start
+    /// again with the snapshot's delete, which succeeds when the snapshot is
+    /// missing.
     pub(super) async fn retire_namespace(
         &self,
         live: &LiveSet,
@@ -27,6 +34,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 report.deleted_snapshots_by_owner.fork += 1;
             }
         }
-        Ok(())
+        self.retire_boundary().await
     }
 }

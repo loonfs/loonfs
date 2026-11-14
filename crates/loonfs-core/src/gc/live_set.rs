@@ -7,7 +7,7 @@ use super::families::CandidateFamily;
 use super::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
 use crate::error::Result;
 use crate::limits::GC_GRACE_WINDOW_MS;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::read_working_memory;
 use crate::time::Observation;
@@ -79,7 +79,8 @@ pub(super) struct LiveSet {
 impl LiveSet {
     /// Loads the namespace's roots and the objects that they protect: the
     /// current manifest, the WAL tail above it, and the manifests that snapshots
-    /// keep, with their metadata and extension segments.
+    /// keep, with their metadata and extension segments. Returns `None` when
+    /// the namespace is retired, because a retired namespace has no roots.
     ///
     /// The object keys and snapshot decisions that the collection keeps are charged
     /// to the read working memory of the namespace's segment cache as they
@@ -87,10 +88,14 @@ impl LiveSet {
     pub(super) async fn load<S: ObjectStore>(
         namespace: &NamespaceStore<S>,
         clock: &OperationClock,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
         let namespace_id = &namespace.namespace_id;
         let observed = Observation::now(Arc::clone(&namespace.timer));
-        let current = namespace.load_current_basis().await?;
+        let current = match namespace.find_newest_manifest().await? {
+            NewestManifest::Absent => return Err(namespace.namespace_not_found()),
+            NewestManifest::Retired => return Ok(None),
+            NewestManifest::Manifest(current) => current,
+        };
         let anchor = namespace
             .load_read_anchor_from_manifest(current.manifest, current.boundary, observed)
             .await?;
@@ -124,7 +129,7 @@ impl LiveSet {
             complete = outcome.is_ok(),
             "read the live set's roots");
         outcome?;
-        Ok(live)
+        Ok(Some(live))
     }
 
     /// Protects the manifest of each listed snapshot, and keeps the collection's
@@ -236,7 +241,7 @@ impl LiveSet {
 
 /// Returns the earliest time at which the namespace of `tombstone` can be
 /// retired: the grace window after its deletion.
-fn retirement_deadline_ms(tombstone: &NamespaceManifestPayload) -> u64 {
+pub(super) fn retirement_deadline_ms(tombstone: &NamespaceManifestPayload) -> u64 {
     tombstone
         .status
         .deleted_at_ms()

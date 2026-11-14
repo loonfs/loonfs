@@ -1,5 +1,6 @@
 //! The manifest boundary: a collection raises it to the highest manifest in
-//! each batch of manifests that it deletes, before it deletes that batch.
+//! each batch of manifests that it deletes, before it deletes that batch, and
+//! raises it to retired to retire a deleted namespace.
 
 use super::*;
 use loonfs_objectstore::keys::boundary;
@@ -45,10 +46,23 @@ async fn stored_boundary<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) 
         .load_boundary()
         .await
         .expect("load the boundary")
-        .map(|loaded| {
-            let ManifestBoundary::Manifest { manifest_no } = loaded.state.boundary;
-            manifest_no.0
+        .map(|loaded| match loaded.state.boundary {
+            ManifestBoundary::Manifest { manifest_no } => manifest_no.0,
+            ManifestBoundary::Retired {} => panic!("the boundary is retired"),
         })
+}
+
+/// Returns the stored boundary of `namespace_id`, or `None` when the object
+/// is missing.
+async fn boundary_state<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Option<ManifestBoundary> {
+    crate::test_support::namespace_store(store, namespace_id)
+        .load_boundary()
+        .await
+        .expect("load the boundary")
+        .map(|loaded| loaded.state.boundary)
 }
 
 async fn manifest_exists<S: ObjectStore>(
@@ -304,4 +318,257 @@ async fn a_collection_that_stops_between_two_batches_leaves_the_rest_to_the_next
     assert_eq!(report.deleted.manifests, 100 - first_batch);
     assert_eq!(stored_boundary(&store, &namespace_id).await, Some(100));
     assert!(manifest_exists(&store, &namespace_id, 101).await);
+}
+
+/// Creates `source`, forks it as `target`, writes a file in `target`, and
+/// deletes `target`. Returns the fork snapshot on `source` and a time at which
+/// `target` is eligible for retirement.
+async fn deleted_fork<S: ObjectStore>(
+    store: &S,
+    source: &NamespaceId,
+    target: &NamespaceId,
+) -> (SnapshotId, WriterAt) {
+    let setup = context(1_000);
+    let fixture = crate::test_support::NamespaceFixture::new(store, source, &setup);
+    fixture.create().await.expect("create the source");
+    fixture
+        .engine()
+        .fork_namespace(
+            target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
+        .await
+        .expect("fork");
+    write_test_file(store, target, "/owned.txt", "target-write", &setup).await;
+    crate::test_support::NamespaceFixture::new(store, target, &setup)
+        .engine()
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete the target");
+    let tombstone = crate::test_support::namespace_store(store, target)
+        .load_current_manifest()
+        .await
+        .expect("tombstone");
+    let snapshot_id = tombstone
+        .payload()
+        .fork_basis
+        .as_ref()
+        .expect("fork basis")
+        .source_snapshot_id
+        .clone();
+    (snapshot_id, context(setup.now_ms + GC_GRACE_WINDOW_MS))
+}
+
+/// Checks that a collection retires an eligible fork by deleting its fork
+/// snapshot on the source and then raising the boundary to retired. A
+/// collection whose raise fails has deleted the snapshot and leaves the
+/// tombstone, and the next collection retires the namespace.
+#[tokio::test]
+async fn retirement_deletes_the_fork_snapshot_and_then_retires_the_boundary() {
+    let directory = tempdir().expect("directory");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("source");
+    let target = NamespaceId::parse("target").expect("target");
+    let (snapshot_id, eligible) = deleted_fork(&inner, &source, &target).await;
+    let store = FailStore::new(
+        inner,
+        KeyPredicate::exact(boundary(&target)),
+        OperationSelector::Put,
+        InjectedError::Transport("raise refused".to_owned()),
+    );
+    store.fail_all();
+
+    crate::test_support::namespace_store(&store, &target)
+        .gc(&eligible.clock())
+        .await
+        .expect_err("the raise to retired fails");
+    assert!(!snapshot_record_exists(&store, &source, &snapshot_id).await);
+    assert_eq!(boundary_state(&store, &target).await, None);
+    assert!(crate::test_support::namespace_store(&store, &target)
+        .load_current_manifest()
+        .await
+        .expect("the tombstone stays")
+        .payload()
+        .status
+        .is_deleted());
+
+    store.clear();
+    let report = collect(&store, &target, &eligible).await;
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
+    assert_eq!(
+        boundary_state(&store, &target).await,
+        Some(ManifestBoundary::Retired {})
+    );
+}
+
+/// Checks that retirement raises the boundary to retired, and not to the
+/// tombstone's number, and that a later raise or collection writes nothing to
+/// the boundary.
+#[tokio::test]
+async fn a_retired_boundary_stays_retired() {
+    let directory = tempdir().expect("directory");
+    let source = NamespaceId::parse("source").expect("source");
+    let target = NamespaceId::parse("target").expect("target");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(boundary(&target)),
+    );
+    let (_, eligible) = deleted_fork(&store, &source, &target).await;
+    collect(&store, &target, &eligible).await;
+    assert_eq!(
+        boundary_state(&store, &target).await,
+        Some(ManifestBoundary::Retired {})
+    );
+
+    store.reset();
+    crate::test_support::namespace_store(&store, &target)
+        .raise_boundary(ManifestNo(u64::MAX))
+        .await
+        .expect("raise a retired boundary");
+    let later = context(now_after_newest_object(&store, &target, GC_GRACE_WINDOW_MS + 1).await);
+    collect(&store, &target, &later).await;
+    assert_eq!(store.count(OperationSelector::Put), 0);
+    assert_eq!(
+        boundary_state(&store, &target).await,
+        Some(ManifestBoundary::Retired {})
+    );
+}
+
+/// Checks that a read, a commit through a writer session that committed
+/// before the deletion, a create with the ID, and a fork to the ID each
+/// return `namespace_deleted` once the namespace is retired, and that none
+/// of them writes anything.
+#[tokio::test]
+async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
+    let directory = tempdir().expect("directory");
+    let source = NamespaceId::parse("source").expect("source");
+    let target = NamespaceId::parse("target").expect("target");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let setup = context(1_000);
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture.create().await.expect("create the source");
+    let manifest = crate::test_support::folded_manifest(&fixture.namespace)
+        .await
+        .expect("fold the WAL tail");
+    fixture
+        .engine()
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            manifest.clone(),
+        )
+        .await
+        .expect("fork");
+    let mut session = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &target),
+        setup.writer_id.clone(),
+    );
+    let commit = |commit_id: &str| {
+        vec![CommitCandidate::new(
+            crate::test_support::create_directory_request(commit_id, commit_id),
+        )]
+    };
+    session
+        .publish_batch(commit("before"), &setup.clock())
+        .await
+        .results[0]
+        .as_ref()
+        .expect("commit before the deletion");
+    crate::test_support::NamespaceFixture::new(&store, &target, &setup)
+        .engine()
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete the target");
+    let eligible = context(setup.now_ms + GC_GRACE_WINDOW_MS);
+    collect(&store, &target, &eligible).await;
+    assert_eq!(
+        boundary_state(&store, &target).await,
+        Some(ManifestBoundary::Retired {})
+    );
+
+    store.reset();
+    assert_matches!(
+        crate::test_support::namespace_store(&store, &target)
+            .load_read_state()
+            .await,
+        Err(CoreError::NamespaceDeleted { .. })
+    );
+    assert_matches!(
+        session
+            .publish_batch(commit("after"), &eligible.clock())
+            .await
+            .results
+            .remove(0),
+        Err(CoreError::NamespaceDeleted { .. })
+    );
+    assert_matches!(
+        crate::test_support::NamespaceFixture::new(&store, &target, &setup)
+            .create()
+            .await,
+        Err(CoreError::NamespaceDeleted { .. })
+    );
+    assert_matches!(
+        fixture
+            .engine()
+            .fork_namespace(&target, &loonfs_test_support::test_actor(), manifest)
+            .await,
+        Err(CoreError::NamespaceDeleted { .. })
+    );
+    let counts = store.counts();
+    assert_eq!((counts.puts, counts.deletes), (0, 0));
+}
+
+/// Checks that the pool's collection keeps the content of a deleted first
+/// member whose tombstone is eligible for retirement until the member's
+/// boundary is retired, and deletes the content after the retirement.
+#[tokio::test]
+async fn the_pool_keeps_a_deleted_members_content_until_its_retirement() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("deleted-member").expect("namespace");
+    let (deadline, pool_id, keys) = retired_content_namespace(&store, &namespace_id).await;
+    let aged = context(
+        now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1)
+            .await
+            .max(deadline.now_ms),
+    );
+    let kept = collect_pool(&store, &pool_id, &aged).await;
+    assert_eq!(kept.deleted.content_objects, 0);
+    for key in &keys {
+        assert!(store.head(key).await.expect("content").is_some());
+    }
+
+    collect(&store, &namespace_id, &aged).await;
+    assert_eq!(
+        boundary_state(&store, &namespace_id).await,
+        Some(ManifestBoundary::Retired {})
+    );
+    let reclaimed = collect_pool(&store, &pool_id, &aged).await;
+    assert_eq!(reclaimed.deleted.content_objects, keys.len() as u64);
+}
+
+/// Checks that the source's snapshot cleanup deletes a fork snapshot whose
+/// target is retired, once the snapshot's creation grace has passed.
+#[tokio::test]
+async fn snapshot_cleanup_deletes_a_fork_snapshot_whose_target_is_retired() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("source");
+    let target = NamespaceId::parse("target").expect("target");
+    let (snapshot_id, eligible) = deleted_fork(&store, &source, &target).await;
+    crate::test_support::namespace_store(&store, &target)
+        .retire_boundary()
+        .await
+        .expect("retire the target");
+    assert!(snapshot_record_exists(&store, &source, &snapshot_id).await);
+
+    let report = collect(&store, &source, &eligible).await;
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
+    assert!(!snapshot_record_exists(&store, &source, &snapshot_id).await);
 }
