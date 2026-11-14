@@ -6,6 +6,7 @@ use crate::trace::phase_span;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
+use loonfs_core::control::{higher_boundary, LoadedBoundary};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::time::Observation;
 use loonfs_core::Phase;
@@ -87,13 +88,15 @@ impl ReadPositionSlot {
     /// A read's check of the position that the slot has now stays when the
     /// engine's own check is older. A check that found no successor of a
     /// manifest also confirms every later manifest, because each later
-    /// manifest was published after the check.
+    /// manifest was published after the check. The position keeps the
+    /// higher of the two manifest boundaries.
     pub(crate) fn prepare(&self, position: Option<WriterPosition>) -> Option<Arc<WriterPosition>> {
         let mut position = position?;
         if let Some(current) = self.current() {
             if current.basis_checked.age_ms() < position.basis_checked.age_ms() {
                 position.basis_checked = current.basis_checked.clone();
             }
+            position.boundary = higher_boundary(position.boundary, current.boundary.clone());
         }
         Some(Arc::new(position))
     }
@@ -141,19 +144,25 @@ impl ReadPositionSlot {
             read_basis: position.read_basis.clone(),
             basis_checked: position.basis_checked.clone(),
             head_confirmed: position.basis_checked.clone(),
+            boundary: position.boundary.clone(),
         });
         *self.lock() = None;
         true
     }
 
     /// Records that a check at `checked` found no successor of manifest
-    /// `manifest_no`.
+    /// `manifest_no`, and found the manifest above `boundary`.
     ///
     /// The check applies to the position that the slot has now if that
     /// position's manifest is `manifest_no` or a later one, as
     /// [`Self::prepare`] explains, unless the position has a later check
     /// already.
-    fn record_check(&self, checked: Observation, manifest_no: ManifestNo) {
+    fn record_check(
+        &self,
+        checked: Observation,
+        manifest_no: ManifestNo,
+        boundary: Option<LoadedBoundary>,
+    ) {
         let Some(current) = self.current() else {
             return;
         };
@@ -164,6 +173,7 @@ impl ReadPositionSlot {
         }
         let updated = Arc::new(WriterPosition {
             basis_checked: checked,
+            boundary: higher_boundary(current.boundary.clone(), boundary),
             ..WriterPosition::clone(&current)
         });
         let mut slot = self.lock();
@@ -189,10 +199,6 @@ impl RuntimeCore {
     /// read's maximum staleness, or else shares the next check or runs it
     /// (see [`SharedCheck`]). So a wave of concurrent reads costs at most two
     /// checks.
-    ///
-    /// A check is trusted only while its response arrives less than
-    /// `READ_REVALIDATION_BOUND_MS` after the position's last check (format
-    /// section 4.2), so a position past that bound is dropped without one.
     pub(crate) async fn checked_writer_position(
         &self,
         namespace_id: &NamespaceId,
@@ -212,10 +218,6 @@ impl RuntimeCore {
         let Some(position) = slot.current() else {
             return Ok(None);
         };
-        if !position.basis_checked.is_within_revalidation_bound() {
-            positions.drop_position(namespace_id).await;
-            return Ok(None);
-        }
         let fresh = |position: &WriterPosition| {
             max_staleness_ms
                 .is_some_and(|max_staleness_ms| position.basis_checked.age_ms() < max_staleness_ms)
@@ -255,10 +257,13 @@ impl RuntimeCore {
     /// hasn't read, such as another process's floor object, so it drops the
     /// position instead. The walk
     /// that ends on the newest manifest is that manifest's successor check,
-    /// so a position that moved onto it records the check. Anything else
-    /// the walk finds, or a response that arrives `READ_REVALIDATION_BOUND_MS`
-    /// or more after the position's last check, drops the position. A move
-    /// or a drop waits for a publish that has the engine locked.
+    /// so a position that moved onto it records the check. After the walk,
+    /// the check reads the manifest boundary (see
+    /// [`NamespaceStore::above_boundary`](loonfs_core::NamespaceStore::above_boundary)),
+    /// and a newest manifest at or below the boundary drops the position,
+    /// because a collection may have deleted the manifests above it.
+    /// Anything else the walk finds drops the position too. A move or a
+    /// drop waits for a publish that has the engine locked.
     async fn check_writer_position(
         &self,
         namespace_id: &NamespaceId,
@@ -285,24 +290,33 @@ impl RuntimeCore {
         } else {
             Some(Vec::new())
         };
-        let Some(moves) = moves.filter(|_| position.basis_checked.is_within_revalidation_bound())
-        else {
+        let checked = match moves {
+            Some(moves) => {
+                let newest = moves
+                    .last()
+                    .map_or(position.read_basis.basis.manifest_no(), |moved| {
+                        moved.manifest.manifest_no
+                    });
+                let (above, boundary) = namespace
+                    .above_boundary(newest, position.boundary.clone())
+                    .await?;
+                above.then_some((moves, newest, boundary))
+            }
+            None => None,
+        };
+        let Some((moves, newest, boundary)) = checked else {
             // The position becomes the cached head, which a successor or a
-            // late response makes out of date, so the head is dropped after it,
-            // and the next read loads the namespace by discovery.
+            // manifest at or below the boundary makes out of date, so the head
+            // is dropped after it, and the next read loads the namespace by
+            // discovery.
             positions.drop_position(namespace_id).await;
             self.invalidate_namespace_read_cache(namespace_id);
             return Ok(());
         };
-        let newest = moves
-            .last()
-            .map_or(position.read_basis.basis.manifest_no(), |moved| {
-                moved.manifest.manifest_no
-            });
         for published in moves {
             positions.move_position(namespace_id, published).await;
         }
-        slot.record_check(observed, newest);
+        slot.record_check(observed, newest, boundary);
         Ok(())
     }
 }

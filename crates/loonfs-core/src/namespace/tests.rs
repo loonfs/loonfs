@@ -569,7 +569,8 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_snapshot() {
 /// session's position onto the fold's manifest, so the attempt that
 /// publishes the tombstone takes the head from the position. Between the
 /// fold and the tombstone, the deletion reads no WAL object, and it reads
-/// the manifest boundary only right after the fold's put.
+/// the manifest boundary only right after the fold's put and after its probe
+/// for the fold's manifest.
 #[tokio::test]
 async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
     let directory = tempdir().expect("directory");
@@ -613,8 +614,11 @@ async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
     let (boundary, wal_prefix) = (boundary(&namespace_id), wal_prefix(&namespace_id));
     let between = &operations[fold + 1..tombstone];
     assert!(
-        between.first().is_some_and(|read| read.key() == boundary)
-            && !between[1..].iter().any(|operation| {
+        between.len() > 2
+            && [&between[0], &between[between.len() - 1]]
+                .iter()
+                .all(|read| read.key() == boundary)
+            && !between[1..between.len() - 1].iter().any(|operation| {
                 operation.key() == boundary || operation.key().starts_with(&wal_prefix)
             }),
         "{between:?}"

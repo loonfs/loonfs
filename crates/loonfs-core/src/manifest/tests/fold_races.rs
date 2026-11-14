@@ -4,15 +4,13 @@ use super::super::PublishedManifest;
 use super::fold::{FoldWalResponse, FoldedWalTail};
 use super::*;
 use crate::error::Result;
-use crate::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
+use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::namespace::control::LoadedManifest;
 use crate::publish::{InlineContent, WriterPosition};
-use crate::time::Observation;
 use crate::wal::WalPublishError;
 use crate::FoldWalOutcome;
 use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::layout::{parse_object_key, wal_no_of, DurableObjectFamily};
-use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{RecordedOperation, StoreCounts};
 use loonfs_types::{ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
 
@@ -454,85 +452,44 @@ async fn a_fold_whose_tail_is_already_folded_loses_its_one_manifest_put() {
     assert!(writer.wal_reads(&operations).is_empty(), "{operations:?}");
 }
 
-/// Checks that a fold from a session's position publishes on the position's
-/// manifest with its put and no request for the manifest boundary or the
-/// manifest's successor before the put, and reads the boundary once after
-/// the put.
+/// Checks that a fold from a session's position whose manifest is in the
+/// segment cache publishes on the position's manifest with its put and no
+/// request for the manifest, the manifest boundary or the manifest's
+/// successor before the put, and reads the boundary once after the put.
 #[tokio::test]
 async fn a_fold_from_a_fresh_position_puts_on_its_basis_with_no_request_first() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
-    let basis = writer
-        .engine
-        .writer_position()
-        .expect("tail")
+    let input = writer.engine.writer_position().expect("tail");
+    let next = input
         .read_basis
         .basis
-        .manifest_no();
-    let next = basis.successor().expect("next manifest number");
+        .manifest_no()
+        .successor()
+        .expect("next manifest number");
+    let namespace = crate::test_support::namespace_store_with_segment_cache(
+        &*writer.store,
+        &writer.namespace_id,
+    );
+    crate::manifest::load_manifest_segments(
+        &*writer.store,
+        Some(&namespace.segment_cache),
+        input.read_basis.basis.manifest(),
+    )
+    .await
+    .expect("the session's manifest");
     writer.store.reset();
-    let folded = writer.fold().await;
+    let folded = namespace
+        .fold_wal_tail(Some(input), &deadline())
+        .await
+        .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    let manifest = |number| metadata_manifest_object(&writer.namespace_id, &number);
     assert_eq!(
         control_requests(&writer.namespace_id, &writer.store.take()),
         vec![
-            // The session's basis, for its segments.
-            ("get", manifest(basis)),
-            ("put", manifest(next)),
+            ("put", metadata_manifest_object(&writer.namespace_id, &next)),
             ("get", boundary(&writer.namespace_id)),
         ]
-    );
-}
-
-/// Checks that a fold from a position whose last check is at the
-/// revalidation bound loads the tail from the store instead of reading the
-/// position's manifest, which garbage collection removes once the manifest
-/// is replaced and older than the grace window.
-#[tokio::test]
-async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
-    let mut writer = Writer::open().await;
-    writer.commit("first", Vec::new(), &["/a"]).await;
-    let mut held = writer.engine.writer_position().expect("tail");
-    let clock = Arc::new(ManualClock::new(0));
-    held.basis_checked = Observation::now(clock.clone());
-    let superseded =
-        metadata_manifest_object(&writer.namespace_id, &held.read_basis.basis.manifest_no());
-
-    // Another process folds the tail, and garbage collection removes the position's manifest, which the fold replaced,
-    // once that manifest is older than the grace window.
-    let other = writer.other_process();
-    let folded_by_other = crate::test_support::namespace_store(&other, &writer.namespace_id)
-        .fold_wal()
-        .await
-        .expect("the other process folds");
-    assert_eq!(folded_by_other.outcome, FoldWalOutcome::Published);
-    writer
-        .store
-        .delete(&superseded)
-        .await
-        .expect("remove the superseded manifest");
-    clock.advance_ms(READ_REVALIDATION_BOUND_MS);
-
-    writer.store.reset();
-    let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
-        .fold_wal_tail(Some(held), &deadline())
-        .await
-        .expect("a fold past the bound loads the tail from the store");
-    assert_eq!(folded.response.outcome, FoldWalOutcome::AlreadyCurrent);
-    assert_eq!(
-        folded.manifest.manifest.manifest_no,
-        folded_by_other.manifest_no
-    );
-    let requests = control_requests(&writer.namespace_id, &writer.store.take());
-    assert_eq!(
-        requests.first(),
-        Some(&("get", boundary(&writer.namespace_id))),
-        "the fold starts from the manifest boundary: {requests:?}"
-    );
-    assert!(
-        !requests.contains(&("get", superseded)),
-        "the fold never reads the position's manifest: {requests:?}"
     );
 }
 
@@ -549,6 +506,19 @@ async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_man
         &writer.namespace_id,
         &basis.successor().expect("next manifest number"),
     );
+    // The position's manifest is in the segment cache, so the fold builds on
+    // it without a check of the manifest boundary.
+    let namespace = crate::test_support::namespace_store_with_segment_cache(
+        &*writer.store,
+        &writer.namespace_id,
+    );
+    crate::manifest::load_manifest_segments(
+        &*writer.store,
+        Some(&namespace.segment_cache),
+        held.read_basis.basis.manifest(),
+    )
+    .await
+    .expect("the session's manifest");
     // Another process publishes two manifests, and a collection deletes the
     // first of them, the only manifest old enough.
     let other = writer.other_process();
@@ -569,7 +539,7 @@ async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_man
     .await
     .expect("collect");
     assert_eq!(report.deleted.manifests, 1);
-    let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+    let folded = namespace
         .fold_wal_tail(Some(held), &deadline())
         .await
         .expect("fold");
@@ -653,11 +623,29 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
         );
         writer.commit("second", Vec::new(), &["/b"]).await;
         let publish = request_counts(&writer.store);
+        // The writer keeps no manifest in its segment cache, so the commit
+        // checks the position's manifest against the manifest boundary once,
+        // before the commit reads the manifest.
         let boundary = boundary(&writer.namespace_id);
         let operations = writer.store.take();
-        assert!(!operations
+        let boundary_read = operations
             .iter()
-            .any(|operation| operation.key() == boundary));
+            .position(|operation| operation.key() == boundary)
+            .expect("one read of the manifest boundary");
+        assert!(
+            operations[boundary_read + 1..]
+                .iter()
+                .all(|operation| operation.key() != boundary),
+            "{operations:?}"
+        );
+        assert!(
+            operations[..boundary_read]
+                .iter()
+                .all(|operation| !operation
+                    .key()
+                    .starts_with(&metadata_manifest_prefix(&writer.namespace_id))),
+            "{operations:?}"
+        );
         writer.fold().await;
         let fold = request_counts(&writer.store);
         let operations = writer.store.take();
@@ -665,12 +653,13 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
         costs.push((publish, fold));
     }
     assert_eq!(costs[0], costs[1]);
-    // The receipt check reads the basis manifest and one segment; the commit
-    // is one WAL put.
+    // The receipt check reads the manifest boundary, the basis manifest and
+    // one segment, and the commit is one WAL put.
     assert_eq!(
         costs[1].0,
         StoreCounts {
             gets: 2,
+            gets_with_metadata: 1,
             puts: 1,
             create_if_absent_puts: 1,
             ..StoreCounts::default()

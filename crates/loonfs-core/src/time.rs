@@ -123,10 +123,9 @@ impl Observation {
         self.timer.monotonic_now_ms().saturating_sub(self.at_ms)
     }
 
-    /// Returns whether a response arriving now is still inside the revalidation bound of this check.
-    ///
-    /// An absent manifest successor confirms a view only if the response arrives less than
-    /// [`READ_REVALIDATION_BOUND_MS`] after the view's previous check (format section 4.2).
+    /// Returns whether this check is less than [`READ_REVALIDATION_BOUND_MS`]
+    /// old, which is how old a cached view's manifest check may be for an
+    /// eventual read to use the view without a request.
     pub fn is_within_revalidation_bound(&self) -> bool {
         self.age_ms() < READ_REVALIDATION_BOUND_MS
     }

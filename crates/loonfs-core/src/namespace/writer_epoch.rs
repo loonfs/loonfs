@@ -85,7 +85,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let acquired = update.response;
         let mut tip = clock.observe();
         let mut anchor = self
-            .load_read_anchor_from_manifest(update.current, clock.origin())
+            .load_read_anchor_from_manifest(
+                update.current.manifest,
+                update.current.boundary,
+                clock.origin(),
+            )
             .await?;
         // Only the publication budget bounds this loop, because a lost fence race means the
         // old writer wrote a WAL object, and stopping after a count would make the

@@ -180,8 +180,7 @@ impl NamespaceSession {
             .map(|last| last.seq)
     }
 
-    /// Whether the session has a writer position whose last check is within
-    /// the revalidation bound.
+    /// Whether the session has a writer position.
     pub(crate) fn has_current_writer_position(&self) -> bool {
         self.publisher.current_position().is_some()
     }
@@ -378,7 +377,7 @@ impl PublisherRegistry {
     ) {
         match change {
             NamespaceChange::Published(published) => {
-                self.record_manifest_published(namespace_id, published)
+                self.record_manifest_published(namespace_id, *published)
                     .await;
             }
             NamespaceChange::Unchanged => {}
@@ -500,10 +499,9 @@ impl PublisherRegistry {
         self.shared.drop_position(namespace_id).await;
     }
 
-    /// Returns the namespace's writer position while its last check is
-    /// within the revalidation bound (see
+    /// Returns the namespace's writer position (see
     /// [`NamespacePublisher::current_position`]), or `None` when this runtime
-    /// has no such position for the namespace.
+    /// has no position for the namespace.
     pub(crate) fn current_position(&self, namespace_id: &NamespaceId) -> Option<WriterPosition> {
         self.live_publisher(namespace_id)?.current_position()
     }
@@ -598,7 +596,7 @@ pub(crate) enum NamespaceChange {
     /// The mutation published this manifest. The publisher's position and
     /// the cached head move to it, or each one that can't move there is
     /// dropped.
-    Published(PublishedManifest),
+    Published(Box<PublishedManifest>),
     /// The mutation published no manifest, such as a garbage collection
     /// or a change to a snapshot. The publisher keeps its position, and the
     /// cached head stays confirmed, because the head didn't move.
@@ -615,6 +613,8 @@ impl NamespaceChange {
         report
             .published
             .clone()
-            .map_or(Self::Unchanged, Self::Published)
+            .map_or(Self::Unchanged, |published| {
+                Self::Published(Box::new(published))
+            })
     }
 }

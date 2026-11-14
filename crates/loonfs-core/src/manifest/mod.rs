@@ -22,7 +22,6 @@ pub(crate) mod validate;
 pub use self::error::ManifestLoadError;
 pub use self::extension::{ExtensionBasis, ExtensionPublication};
 pub use self::fold::{FoldWalOutcome, FoldWalResponse, FoldedWalTail};
-pub use self::load::load_position_basis;
 pub(crate) use self::published::move_read_basis;
 pub use self::published::{PublicationReport, PublishedManifest};
 pub use self::retention::{FloorObjectReport, RetentionPlan, RetentionTarget};

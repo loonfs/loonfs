@@ -137,8 +137,8 @@ impl PublisherRegistry {
     /// progress (see [`Self::snapshot_after_fold`]). Under [`FoldWhen::Always`], a
     /// fold that took its input after the call arrived serves the call. The
     /// fold's input is the position of the
-    /// namespace's writer session while the session isn't fenced and the
-    /// position is current (see [`NamespacePublisher::current_position`]),
+    /// namespace's writer session while the session isn't fenced and has a
+    /// position (see [`NamespacePublisher::current_position`]),
     /// and otherwise the fold loads the tail from the store. A check against
     /// the position takes no fold lock and no fold permit when nothing is
     /// due, and the check runs again under the fold lock, because a fold that
@@ -299,7 +299,7 @@ impl PublisherRegistry {
     /// Returns what a fold under `when` reports without folding, or `None`
     /// when a fold is due.
     ///
-    /// When `session` has a current position, the tail is the position's,
+    /// When `session` has a position, the tail is the position's,
     /// and its newest commit is the session's last publish, on the runtime's
     /// monotonic clock. Otherwise the check loads the current manifest and
     /// the tail from the store, and the tail's newest commit is dated on the
@@ -379,10 +379,7 @@ impl PublisherRegistry {
 }
 
 impl NamespacePublisher {
-    /// Returns the position that reads in this runtime start from while its
-    /// last check is within the revalidation bound. A fold from an older
-    /// position would load the tail from the store anyway, because another
-    /// writer may have committed since the check.
+    /// Returns the position that reads in this runtime start from.
     ///
     /// The position is the engine's as of the engine's last release, so a
     /// fold from it doesn't wait for a publication that the engine is
@@ -391,7 +388,6 @@ impl NamespacePublisher {
     pub(super) fn current_position(&self) -> Option<WriterPosition> {
         self.read_position
             .current()
-            .filter(|position| position.basis_checked.is_within_revalidation_bound())
             .map(|position| WriterPosition::clone(&position))
     }
 }

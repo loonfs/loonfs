@@ -6,6 +6,7 @@ use crate::control_object::{
 };
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
+use crate::heap_bytes::HeapBytes;
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::boundary;
@@ -17,7 +18,27 @@ use loonfs_types::format::control::{
 };
 use loonfs_types::{ManifestNo, NamespaceId};
 
-pub(crate) type LoadedBoundary = LoadedControl<BoundaryPayload>;
+/// A namespace's manifest boundary as a process last read it, with its ETag.
+pub type LoadedBoundary = LoadedControl<BoundaryPayload>;
+
+impl HeapBytes for LoadedBoundary {
+    fn heap_bytes(&self) -> usize {
+        self.object_key.heap_bytes() + self.etag.heap_bytes() + self.state.namespace_id.heap_bytes()
+    }
+}
+
+/// Returns the higher of two boundaries of one namespace, or the one that's
+/// an object when the other is `None`.
+pub fn higher_boundary(
+    left: Option<LoadedBoundary>,
+    right: Option<LoadedBoundary>,
+) -> Option<LoadedBoundary> {
+    if boundary_manifest_no(right.as_ref()) > boundary_manifest_no(left.as_ref()) {
+        right
+    } else {
+        left.or(right)
+    }
+}
 
 /// Returns the manifest number of `boundary`, or 0 when the boundary object
 /// is missing.
@@ -100,6 +121,31 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
         };
         Ok(Some(reloaded))
+    }
+
+    /// Returns whether `manifest_no` is above the namespace's manifest
+    /// boundary, with the boundary as it is now, where `kept` is the
+    /// boundary as the caller last read it (format spec, "Replaying the
+    /// visible WAL").
+    ///
+    /// When `kept` is at or above `manifest_no`, the call sends no request
+    /// and answers that the number is at or below the boundary, because the
+    /// boundary only rises. Otherwise the call reads the boundary with
+    /// [`Self::reload_boundary`], a conditional read when `kept` is an
+    /// object. The caller keeps the returned boundary for its next check.
+    pub async fn above_boundary(
+        &self,
+        manifest_no: ManifestNo,
+        kept: Option<LoadedBoundary>,
+    ) -> crate::error::Result<(bool, Option<LoadedBoundary>)> {
+        if boundary_manifest_no(kept.as_ref()) >= manifest_no {
+            return Ok((false, kept));
+        }
+        let boundary = self.reload_boundary(kept).await?;
+        Ok((
+            manifest_no > boundary_manifest_no(boundary.as_ref()),
+            boundary,
+        ))
     }
 
     /// Raises the namespace's manifest boundary to at least `manifest_no`
@@ -200,6 +246,54 @@ mod tests {
             .expect("raise to 3");
         assert_eq!(store.counts().puts, 0);
         assert_eq!(stored(&namespace).await, Some(ManifestNo(5)));
+    }
+
+    /// Checks that a check of a number against a kept boundary at or above it
+    /// sends no request, that a kept boundary below the number is read again
+    /// and the raised boundary returned, and that no kept boundary sends a
+    /// read too.
+    #[tokio::test]
+    async fn a_check_reads_the_boundary_unless_the_kept_one_answers() {
+        let directory = tempfile::tempdir().expect("directory");
+        let namespace_id = loonfs_test_support::ids::namespace_id("boundary-check");
+        let store = RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        );
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        namespace
+            .raise_boundary(ManifestNo(2))
+            .await
+            .expect("raise to 2");
+        store.reset();
+        let (above, kept) = namespace
+            .above_boundary(ManifestNo(3), None)
+            .await
+            .expect("check without a kept boundary");
+        assert!(above);
+        assert_eq!(boundary_manifest_no(kept.as_ref()), ManifestNo(2));
+        assert_eq!(store.take().len(), 1);
+
+        let (above, unchanged) = namespace
+            .above_boundary(ManifestNo(2), kept.clone())
+            .await
+            .expect("check at the kept boundary");
+        assert!(!above);
+        assert_eq!(unchanged, kept);
+        assert_eq!(store.take().len(), 0);
+
+        namespace
+            .raise_boundary(ManifestNo(4))
+            .await
+            .expect("raise to 4");
+        store.reset();
+        let (above, raised) = namespace
+            .above_boundary(ManifestNo(3), kept)
+            .await
+            .expect("check above the kept boundary");
+        assert!(!above);
+        assert_eq!(boundary_manifest_no(raised.as_ref()), ManifestNo(4));
+        assert_eq!(store.counts().gets_with_metadata, 1);
     }
 
     /// Checks that a raise whose compare-and-swap loses to a higher raise

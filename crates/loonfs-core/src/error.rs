@@ -292,8 +292,8 @@ pub enum CoreError {
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
     /// An operation on a control object used every attempt it was allowed.
-    /// Concurrent writers changed the object, a read found a newer manifest
-    /// or ran past its revalidation bound, or, on snapshot renewal, a
+    /// Concurrent writers changed the object, a read found a newer manifest,
+    /// or, on snapshot renewal, a
     /// transport failure left an attempt's outcome unconfirmed. Retrying can
     /// succeed.
     #[error("the operation on `{object_key}` used every attempt it was allowed")]

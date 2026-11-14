@@ -1,10 +1,10 @@
 # Read freshness
 
-This note describes where a process keeps a namespace's current [head](../specs/glossary.md#head), how a read uses it, and how recent the state that a read sees is. Each process keeps one view of a namespace, one procedure refreshes that view, and a read uses the view as it is unless the read asks for a confirmed head. A read sends no store request if it's `eventual` and its view was confirmed within the read's maximum staleness. Otherwise, it costs one refresh, or one HEAD in the writer's process. (In this note, a process means one LoonFS runtime. Two runtimes in one process keep separate views, even when they share a metadata cache.)
+This note describes where a process keeps a namespace's current [head](../specs/glossary.md#head), how a read uses it, and how recent the state that a read sees is. Each process keeps one view of a namespace, one procedure refreshes that view, and a read uses the view as it is unless the read asks for a confirmed head. A read sends no store request if it's `eventual` and its view was confirmed within the read's maximum staleness. Otherwise, it costs one refresh, or one HEAD and one conditional read of the manifest boundary in the writer's process. (In this note, a process means one LoonFS runtime. Two runtimes in one process keep separate views, even when they share a metadata cache.)
 
 ## The problem
 
-A read starts from a head, and the head moves each time a writer commits. Confirming that a head is current costs store requests. In a process without the writer session, a GET of the next WAL number finds new commits, and a HEAD of the next manifest number finds a newer manifest (a fold, a compaction, or another writer's claim). In the writer's process, the writer position includes every commit that the session made, so only the HEAD is needed, to find a manifest that another process published.
+A read starts from a head, and the head moves each time a writer commits. Confirming that a head is current costs store requests. In a process without the writer session, a GET of the next WAL number finds new commits, and a HEAD of the next manifest number finds a newer manifest (a fold, a compaction, or another writer's claim). In the writer's process, the writer position includes every commit that the session made, so only the HEAD and a read of the manifest boundary are needed, to find a manifest that another process published.
 
 If each read confirmed its own head, every warm read in a reader process would send a GET, so a reader that walks thousands of files would send a GET per file to confirm a head that moves a few times during the walk. Each read would also send its probes at a different time, so LoonFS would need rules for which response confirms what, for a response that arrives too late, for concurrent reads that share one probe, and for a successor manifest that the process published itself. In the writer's process, a read whose probe found a fold's manifest before the session recorded it would treat the fold as another process's publication and drop the writer position.
 
@@ -21,7 +21,7 @@ A cached view records two times:
 
 A position records its check time, which is also its confirmation time. The session's check sets it, when the check finds no successor or moves the position onto successors under the session's writer epoch. A new position takes its check time from the writer's last confirmation of its manifest (see [Publication and group commit](../specs/format.md#63-publication-and-group-commit)), or from a later check by the session. A publish doesn't confirm the position's head, because a successful put confirms the WAL tip and nothing about the manifest, and another writer has to publish a claim manifest before it can commit, so for a position the check is what confirms the head.
 
-No read starts from a view whose check time is [`READ_REVALIDATION_BOUND_MS`](../specs/glossary.md#revalidation-bound) old or older, because a successor published after the check might already have been deleted, so the check's answer is usable only within the bound (see [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal)). LoonFS reloads such a view by discovery. In the writer's process, the read drops the position first, and the session's next publish loads the namespace from the store. A view's manifest can also be replaced while the view is fresh, and garbage collection keeps only the segments of the current manifest and of manifests that snapshots keep. So a read on a replaced manifest can find a segment missing. An ordinary read then runs once more from the current manifest, and a read view returns `stale_head`, so the caller reads again from current state.
+Every check of a view's manifest sends the successor probe and then reads the [manifest boundary](../specs/glossary.md#manifest-boundary), because a successor published after the previous check might already have been deleted. Garbage collection raises the boundary before it deletes a manifest, so if the view's manifest is at or below the boundary, LoonFS reloads the view by discovery, however long ago the view was last checked (see [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal)). In the writer's process, the check drops the position first, and the session's next publish loads the namespace from the store. An `eventual` read doesn't use a cached view without a request once the view's check time is [`READ_REVALIDATION_BOUND_MS`](../specs/glossary.md#revalidation-bound) old, so the content that the view refers to stays until a download URL that the read issues expires. A view's manifest can also be replaced while the view is fresh, and garbage collection keeps only the segments of the current manifest and of manifests that snapshots keep. So a read on a replaced manifest can find a segment missing. An ordinary read then runs once more from the current manifest, and a read view returns `stale_head`, so the caller reads again from current state.
 
 While a session has a position, LoonFS doesn't copy the position into the read cache. When the session closes or drops its position, the position becomes the read cache's view, with both of the view's times set to the position's check time, so the next read starts from a head at least as new as any head that a read from the position returned.
 
@@ -30,10 +30,13 @@ While a session has a position, LoonFS doesn't copy the position into the read c
 A "refresh" confirms the view in a process without the writer session. A refresh:
 
 1. Takes its observation time before it sends anything.
-2. Sends the "successor probe", a HEAD of the manifest number after the view's manifest, if the view's check time is older than the manifest check interval (`manifest_revalidation_interval_ms`, 1,000 ms by default).
-3. If the successor probe found nothing, or wasn't due, sends the "WAL probe", a GET of the WAL number after the view's tip, and applies each WAL object it finds until a number is missing.
-4. Runs discovery instead if it finds a successor, a missing WAL number below a present one, a WAL object with another writer epoch, or a response that arrives `READ_REVALIDATION_BOUND_MS` or more after the view's check time. Discovery finds the newest manifest from the manifest boundary (see [Resolving the metadata basis](../specs/format.md#41-resolving-the-metadata-basis)) and replays the WAL above it.
-5. Otherwise, moves the confirmation time to its observation time, with the head at the last WAL object it applied, and moves the check time there too if it sent the successor probe.
+2. Sends the "WAL probe", a GET of the WAL number after the view's tip, and applies each WAL object it finds until a number is missing.
+3. If the view's check time is older than the manifest check interval (`manifest_revalidation_interval_ms`, 1,000 ms by default), sends the "successor probe", a HEAD of the manifest number after the view's manifest, after the WAL probe's responses arrive.
+4. If the successor probe found nothing, reads the manifest boundary, with a conditional read when the view keeps the boundary's version. If the read fails, the refresh returns the error to the read.
+5. Runs discovery instead if it finds a successor, a missing WAL number below a present one, a WAL object with another writer epoch, or a boundary at or above the view's manifest. Discovery finds the newest manifest from the manifest boundary (see [Resolving the metadata basis](../specs/format.md#41-resolving-the-metadata-basis)) and replays the WAL above it.
+6. Otherwise, moves the confirmation time to its observation time, with the head at the last WAL object it applied, and moves the check time there too if it sent the successor probe.
+
+The WAL probe comes first because a fold can move a WAL object above the view's tip into a newer manifest, and garbage collection can then delete that WAL object. A successor probe sent after the WAL probe finds that newer manifest, or the boundary read finds that garbage collection deleted that manifest too. If the successor probe came first, the WAL probe could find nothing where the deleted WAL object was, and the view would miss the commits in that WAL object.
 
 One refresh runs per namespace per process at a time. A read that needs a refresh while one is in flight waits for that refresh, because it might have sent its probes before the read started. After that, an `eventual` read takes the view if the refresh confirmed it within the read's maximum staleness, and any other read shares the next refresh, which every read that arrives during the first refresh shares. A refresh that finished before a `strong` read started doesn't serve that read, and a wave of concurrent `strong` reads costs at most two refreshes.
 
@@ -67,14 +70,16 @@ The position is a view like any other, and the same two rules cover it, with the
 The session's check:
 
 1. Takes its observation time, and sends one HEAD for the next manifest number.
-2. Drops the position if the response arrives `READ_REVALIDATION_BOUND_MS` or more after the position's check time.
-3. If the HEAD finds nothing, records the check, so the position's check time becomes the check's observation time.
-4. If the HEAD finds a successor, walks the manifests above the position's manifest. If the newest is an active manifest with the session's writer epoch, the check moves the position onto those manifests in order and records the check. Each of them describes a head that this session wrote, and the walk that ends on the newest manifest is that manifest's successor check.
-5. If the walk finds a manifest with a later writer epoch (another writer's claim), a namespace tombstone, or more than eight manifests above the position's, drops the position. The session's next publish then runs discovery, and after a claim, it finds the fence.
+2. If the HEAD finds a successor, walks the manifests above the position's manifest. If the newest is an active manifest with the session's writer epoch, the check moves the position onto those manifests in order. Each of them describes a head that this session wrote, and the walk that ends on the newest manifest is that manifest's successor check.
+3. If the walk finds a manifest with a later writer epoch (another writer's claim), a namespace tombstone, or more than eight manifests above the position's, drops the position. The session's next publish then runs discovery, and after a claim, it finds the fence.
+4. Otherwise, reads the manifest boundary, with a conditional read when the position keeps the boundary's version. If the position's manifest is at or below the boundary, drops the position, and if the read fails, returns the error to the read.
+5. Otherwise, records the check and the boundary, so the position's check time becomes the check's observation time.
+
+The check runs on a position of any age, and it doesn't drop a position because of the position's age.
 
 A position that the check drops doesn't stay as the read cache's view either, so the next read loads the namespace by discovery.
 
-So in the writer's process, a check costs one HEAD, or the walk when the HEAD finds a successor. A session with no reads sends no check, and a session under `eventual` reads sends one HEAD per maximum staleness, which is also the session's fencing check while it isn't publishing. No timer is involved, because a read runs the check, and the check ends with the HEAD or the walk.
+So in the writer's process, a check costs one HEAD and one conditional boundary read, or the walk and the boundary read when the HEAD finds a successor. A session with no reads sends no check, and a session under `eventual` reads sends one check per maximum staleness, which is also the session's fencing check while it isn't publishing. No timer is involved, because a read runs the check, and the check ends with the boundary read or a dropped position.
 
 For `eventual` reads in the old writer's process, the takeover window is the read's maximum staleness. For example, after another writer takes over, an `eventual` read there that starts within its maximum staleness of the position's last check returns the old writer's head. The first `eventual` read past that staleness waits for the check and finds the new writer's claim, and a `strong` read finds the claim on that read.
 
@@ -82,7 +87,7 @@ Why does an `eventual` read in the writer's process wait for the check only past
 
 ## Costs
 
-This table compares the store requests of common reads with those of the first design in [Alternatives considered](#alternatives-considered), where `strong` is the default and each read sends its own probes.
+This table compares the store requests of common reads with those of the first design in [Alternatives considered](#alternatives-considered), where `strong` is the default and each read sends its own probes. In both columns, each HEAD for a successor manifest is followed by one conditional read of the manifest boundary, which the table doesn't list.
 
 | Read | LoonFS | Probes on each read |
 | --- | ---: | ---: |
@@ -97,15 +102,15 @@ This table compares the store requests of common reads with those of the first d
 | A read after a takeover, in the old writer's process | `eventual`: sees the new writer's commits within the read's maximum staleness. `strong`: on that read | within one interval |
 | A read after a fold by another process, in the writer's process | the position moves at the session's next check | the position moves at the next read's probe |
 
-In the writer's process, `eventual` reads cost one HEAD per maximum staleness. With the default maximum staleness of 1,000 ms, the first `eventual` read after an idle second waits for one HEAD. The session runs one check at a time, so the reads that need a check share it.
+In the writer's process, `eventual` reads cost one check (a HEAD and a conditional boundary read) per maximum staleness. With the default maximum staleness of 1,000 ms, the first `eventual` read after an idle second waits for one check. The session runs one check at a time, so the reads that need a check share it.
 
 ## What the format and API specs say
 
-The format's requirements cover discovery, the WAL checks, the revalidation bound, the publisher's tip observation and basis confirmation, and the rule that drops a position at the revalidation bound. [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal) describes how the reference runtime applies them:
+The format's requirements cover discovery, the WAL checks, the boundary read after each successor probe, the revalidation bound, and the publisher's tip observation and basis confirmation. [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal) describes how the reference runtime applies them:
 
-- The two warm-read probes, which the runtime sends together as one refresh.
+- The two warm-read probes and the boundary read, which the runtime sends in that order as one refresh.
 - `eventual` warm reads, which send no probe while the tip's confirmation is younger than the read's maximum staleness.
-- Reads from the writer position, which the session checks with the successor probe, with the read's maximum staleness in place of the manifest check interval, and the walk that moves the position onto manifests with the session's writer epoch.
+- Reads from the writer position, which the session checks with the successor probe and the boundary read, with the read's maximum staleness in place of the manifest check interval, and the walk that moves the position onto manifests with the session's writer epoch.
 - The takeover example, in which a `strong` read finds the new writer's claim before it reads.
 
 [Reference-implementation sizing and admission defaults](../specs/format.md#c4-reference-implementation-sizing-and-admission-defaults) lists `max_staleness_ms` next to the manifest check interval, and says that the maximum staleness applies to the last successor check of a writer position.

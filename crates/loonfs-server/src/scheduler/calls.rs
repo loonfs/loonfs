@@ -81,7 +81,7 @@ impl Scheduler {
             .ok()
             .and_then(|report| report.next_due_at_ms);
         // A caught-up session whose position shows nothing due costs nothing
-        // to ask again. A step without a current position read the store, so
+        // to ask again. A step without a position read the store, so
         // it waits for the retry interval. A tail that waits for its idle
         // fold age is asked again at that age if it comes first.
         let positioned = entry.is_some_and(|entry| {

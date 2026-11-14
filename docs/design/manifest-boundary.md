@@ -105,6 +105,8 @@ A process that has a manifest in memory (a cached view or a [writer position](..
 1. Probes the next numbers after its manifest (the successor probe). If newer manifests exist, it loads the highest one found.
 2. Reads the boundary. If the manifest in hand is at or below the boundary, it drops the manifest and finds the newest manifest from the start (see [Finding the newest manifest](#finding-the-newest-manifest)). Otherwise the manifest in hand is the newest.
 
+A process that keeps a reference to its manifest, and has to read the manifest from the store again, does step 2 before that read. If the read finds the manifest missing, the process reads the boundary again. A manifest at or below the boundary sends the process to the newest manifest, and a missing manifest above the boundary is a corrupt store.
+
 Why read the boundary after the probe? Suppose a process has manifest 1, another process publishes manifests 2 and 3, and a collection raises the boundary to 2 and deletes manifest 2. The probe finds no manifest 2, and without the boundary read, the process would take manifest 1 as the newest. With the read, the answer doesn't depend on how long ago the process last checked.
 
 ### Creating and forking a namespace

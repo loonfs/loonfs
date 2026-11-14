@@ -949,14 +949,9 @@ async fn publish_once_within<S: ObjectStore + ?Sized>(
     deadline: &OperationClock,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
     let namespace_id = manifest.envelope().payload().namespace_id.clone();
-    let checked = deadline.observe();
-    let current = crate::test_support::namespace_store(store, &namespace_id)
-        .load_current_manifest()
+    let basis = crate::test_support::namespace_store(store, &namespace_id)
+        .load_current_basis()
         .await?;
-    let basis = crate::namespace::PublicationBasis {
-        manifest: current,
-        checked,
-    };
     crate::test_support::namespace_store(store, &manifest.envelope().payload().namespace_id)
         .publish_manifest_from(manifest, deadline, Some(&basis))
         .await

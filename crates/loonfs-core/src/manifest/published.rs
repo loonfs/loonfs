@@ -4,6 +4,7 @@
 //! of an earlier one.
 
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
+use crate::namespace::boundary::LoadedBoundary;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
@@ -34,10 +35,18 @@ pub struct PublishedManifest {
     /// for a manifest that a read found above the position, because the read
     /// records its own check.
     pub started: Option<Observation>,
+    /// The manifest boundary that the call read after it published the
+    /// manifest or found it current, which a position or a cached head that
+    /// moves onto the manifest keeps. `None` when the call read none.
+    pub boundary: Option<LoadedBoundary>,
 }
 
 impl PublishedManifest {
-    pub(crate) fn new(manifest: &NamespaceManifestEnvelope, started: Option<Observation>) -> Self {
+    pub(crate) fn new(
+        manifest: &NamespaceManifestEnvelope,
+        started: Option<Observation>,
+        boundary: Option<LoadedBoundary>,
+    ) -> Self {
         let payload = manifest.payload();
         Self {
             manifest: super::publish::manifest_ref_for(manifest),
@@ -46,6 +55,7 @@ impl PublishedManifest {
             folded_wal_no: payload.folded_wal_no,
             retention_floor_seq: payload.retention_floor_seq,
             started,
+            boundary,
         }
     }
 }

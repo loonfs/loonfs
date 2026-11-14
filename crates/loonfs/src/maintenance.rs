@@ -368,9 +368,10 @@ impl Maintenance {
             // A caller may drop the response, so its counts survive only when
             // this shared collection path records them here.
             self.core.instruments().gc.record_collection(&report);
-            // A collection publishes no manifest, and its grace covers the
-            // revalidation bound, so the session's position and the cached
-            // head stay (format.md sections 11.2 and 11.4).
+            // A collection publishes no manifest, so the session's position
+            // and the cached head stay, and their next check reads the
+            // manifest boundary that the collection raised (format.md
+            // sections 11.2 and 11.4).
             Ok(report)
         })
         .await
@@ -587,21 +588,15 @@ impl Maintenance {
     }
 
     /// Returns the manifest and the retention floor of the view that a
-    /// retention advance plans from: this runtime's writer position when it
-    /// has a current one, and otherwise the current manifest and the WAL
-    /// tail after that manifest.
+    /// retention advance plans from: this runtime's writer position when its
+    /// manifest is above the manifest boundary, and otherwise the current
+    /// manifest and the WAL tail after that manifest.
     async fn load_retention_view(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<(LoadedManifest, CommitSeq)> {
         if let Some(position) = self.publisher.current_position(namespace_id) {
-            let basis = loonfs_core::control::load_position_basis(
-                self.core.store(),
-                &self.core.metadata_segment_cache(),
-                &position,
-            )
-            .await?;
-            if let Some(basis) = basis {
+            if let Some(basis) = self.position_basis(namespace_id, &position).await? {
                 return Ok((basis.manifest, position.retention_floor_seq()));
             }
         }

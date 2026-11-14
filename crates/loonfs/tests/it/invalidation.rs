@@ -6,16 +6,15 @@ use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::{counter, writer};
 use loonfs::{
-    Commit, Error, LoonFs, LoonFsBuilder, MetadataCache, Namespace, NamespaceId, ReadOnly,
-    SharedObjectStore, Writable, WriterFence,
+    Commit, Error, LoonFs, LoonFsBuilder, MetadataCache, Namespace, NamespaceId, SharedObjectStore,
+    Writable, WriterFence,
 };
 use loonfs_core::control::NamespaceReadState;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
-    RecordingStore,
+    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::WalNo;
 use std::assert_matches;
@@ -214,29 +213,28 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         .expect("live writer is not fenced back");
 }
 
+/// Checks that a cached view whose manifest's successor was published and
+/// then deleted by a collection finds the manifest boundary above its
+/// manifest on its next check, and loads the newest manifest. The view's last
+/// check is older than the revalidation bound, so no time test decides it.
 #[tokio::test]
-async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
+async fn a_cached_view_at_the_boundary_loads_the_newest_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let namespace_id = NamespaceId::parse("revalidation-bound").expect("namespace");
+    let namespace_id = NamespaceId::parse("collected-successor").expect("namespace");
     let timer = Arc::new(ManualClock::new(0));
-    let interval_ms = 1_000;
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(timer.clone())
-        .config(loonfs::RuntimeConfig {
-            manifest_revalidation_interval_ms: interval_ms,
-            ..loonfs::RuntimeConfig::default()
-        })
         .build()
         .await
         .expect("reader");
     let namespace = reader.namespace(&namespace_id);
-    let writer = writer(store.clone(), "revalidation-writer").await;
+    let writer = writer(store.clone(), "collected-successor-writer").await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -244,71 +242,76 @@ async fn a_cached_view_older_than_the_revalidation_bound_rediscovers() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    namespace_writer
-        .put_file("/file.txt", b"file", &loonfs_test_support::test_actor())
-        .await
-        .expect("commit file");
+    let actor = loonfs_test_support::test_actor();
+    let put = |path: &'static str| namespace_writer.put_file(path, b"file", &actor);
+    put("/file.txt").await.expect("commit file");
     writer.drain().await.expect("drain");
     namespace
         .stat("/file.txt")
         .await
         .expect("warm the reader cache");
+    let manifest_no = loonfs_core::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("current manifest")
+        .manifest()
+        .manifest_no;
+
+    // Two folds publish two manifests above the view's, and a collection one
+    // grace window later deletes the older manifests and the folded WAL.
+    for path in ["/second.txt", "/third.txt"] {
+        put(path).await.expect(path);
+        writer.drain().await.expect("drain");
+        writer
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "collected-successor-writer",
+            ))
+            .fold_wal(&namespace_id)
+            .await
+            .expect("fold the WAL");
+    }
+    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
+        .await
+        .gc(&namespace_id)
+        .await
+        .expect("collect");
+    let successor = loonfs_objectstore::keys::metadata_manifest_object(
+        &namespace_id,
+        &manifest_no.successor().expect("next manifest number"),
+    );
+    assert!(store.head(&successor).await.expect("head").is_none());
 
     recording.reset();
-    timer.advance_ms(READ_REVALIDATION_BOUND_MS);
+    timer.advance_ms(READ_REVALIDATION_BOUND_MS + 1);
     namespace
-        .stat("/file.txt")
+        .stat("/third.txt")
         .await
-        .expect("rediscover at the revalidation bound");
+        .expect("the newest manifest has the file");
     let operations = recording.take();
+    let check = operations
+        .iter()
+        .position(
+            |operation| matches!(operation, RecordedOperation::Head { key } if *key == successor),
+        )
+        .expect("the successor check");
     assert_matches!(
-        operations.first(),
+        operations.get(check + 1),
         Some(RecordedOperation::GetWithMetadata { key, .. })
-            if key == &loonfs_objectstore::keys::boundary(&namespace_id)
-    );
-
-    timer.advance_ms(interval_ms);
-    namespace
-        .stat("/file.txt")
-        .await
-        .expect("revalidate a fresh cached view");
-    let operations = recording.take();
-    assert_matches!(
-        operations.as_slice(),
-        [
-            RecordedOperation::Head { key: manifest_key },
-            RecordedOperation::Get {
-                key: wal_key,
-                range: None,
-                result_bytes: 0,
-            },
-        ] if manifest_key.starts_with(
-            &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
-        ) && wal_key.starts_with(&loonfs_objectstore::keys::wal_prefix(&namespace_id))
+            if key == &loonfs_objectstore::keys::boundary(&namespace_id),
+        "{operations:?}"
     );
 }
 
-async fn read_across_a_held_successor_probe(
-    reader: &LoonFs<ReadOnly>,
-    store: &RecordingStore<BlockingStore<LocalFsStore>>,
-    timer: &ManualClock,
-    namespace_id: &NamespaceId,
-    pause_ms: u64,
-) {
-    let namespace = reader.namespace(namespace_id);
-    store.inner().block_next();
-    let (entry, ()) = futures::join!(namespace.stat("/file.txt"), async {
-        store.inner().wait_until_blocked().await;
-        timer.advance_ms(pause_ms);
-        store.inner().release();
-    });
-    entry.expect("read across the held successor probe");
-}
-
+/// Checks that a cached view's refresh sends its WAL probe before its
+/// manifest check. The view is at a manifest with a WAL object above its tip
+/// that it hasn't read. The refresh is parked after its WAL probe, at its
+/// manifest check, while a fold folds that WAL object into a newer manifest
+/// and a collection deletes the WAL object. The manifest check then finds
+/// the newer manifest, and the read returns the WAL object's commit.
 #[tokio::test]
-async fn warm_answers_are_measured_against_the_previous_check() {
+async fn a_refresh_probes_the_wal_before_the_manifest() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("probe-pause").expect("namespace");
+    let namespace_id = NamespaceId::parse("probe-order").expect("namespace");
     let blocking = BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
@@ -319,12 +322,10 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
     let timer = Arc::new(ManualClock::new(0));
-    let interval_ms = 1_000;
     let reader = LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(timer.clone())
         .config(loonfs::RuntimeConfig {
-            manifest_revalidation_interval_ms: interval_ms,
             max_staleness_ms: 0,
             ..loonfs::RuntimeConfig::default()
         })
@@ -332,7 +333,7 @@ async fn warm_answers_are_measured_against_the_previous_check() {
         .await
         .expect("reader");
     let namespace = reader.namespace(&namespace_id);
-    let writer = writer(store.clone(), "probe-pause-writer").await;
+    let writer = writer(store.clone(), "probe-order-writer").await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -340,62 +341,54 @@ async fn warm_answers_are_measured_against_the_previous_check() {
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
+    let actor = loonfs_test_support::test_actor();
     namespace_writer
-        .put_file("/file.txt", b"file", &loonfs_test_support::test_actor())
+        .put_file("/file.txt", b"file", &actor)
         .await
         .expect("commit file");
     writer.drain().await.expect("drain");
     namespace.stat("/file.txt").await.expect("cache a view");
-    let manifest_no = loonfs_core::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current manifest")
-        .manifest()
-        .manifest_no;
-    let next_wal_no = head_state(&store, &namespace_id)
+    let unread = head_state(&store, &namespace_id)
         .await
         .wal_no
         .successor()
         .expect("next WAL number");
-    let warm_check = [
-        RecordedOperation::Head {
-            key: loonfs_objectstore::keys::metadata_manifest_object(
-                &namespace_id,
-                &manifest_no.successor().expect("next manifest number"),
-            ),
-        },
-        crate::common::wal_probe(&namespace_id, next_wal_no),
-    ];
-
-    // The check falls due just inside the bound, and both answers arrive inside it.
-    timer.advance_ms(READ_REVALIDATION_BOUND_MS - 2);
-    recording.reset();
-    read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
-    assert_eq!(recording.take(), warm_check);
-
-    // That check replaced the first one, which is now past the bound. A read
-    // inside the interval still probes only the WAL.
-    timer.advance_ms(interval_ms - 2);
-    namespace
-        .stat("/file.txt")
+    namespace_writer
+        .put_file("/next.txt", b"file", &actor)
         .await
-        .expect("read inside the interval");
-    assert_eq!(
-        recording.take(),
-        [crate::common::wal_probe(&namespace_id, next_wal_no)]
-    );
+        .expect("commit above the view");
+    writer.drain().await.expect("drain");
 
-    // The next HEAD is sent just inside the bound of that check and answered
-    // at the bound. Both answers find nothing, and the view is not served.
-    timer.advance_ms(READ_REVALIDATION_BOUND_MS - interval_ms);
-    read_across_a_held_successor_probe(&reader, &recording, &timer, &namespace_id, 1).await;
+    timer.advance_ms(loonfs::RuntimeConfig::default().manifest_revalidation_interval_ms);
+    recording.reset();
+    recording.inner().block_next();
+    let (entry, ()) = futures::join!(namespace.stat("/next.txt"), async {
+        recording.inner().wait_until_blocked().await;
+        writer
+            .maintenance(loonfs_test_support::ids::writer_id("probe-order-writer"))
+            .fold_wal(&namespace_id)
+            .await
+            .expect("fold the WAL");
+        store
+            .delete(&crate::common::wal_key(&namespace_id, unread))
+            .await
+            .expect("collect the folded WAL object");
+        recording.inner().release();
+    });
+    entry.expect("the read returns the folded commit");
     let operations = recording.take();
-    assert_eq!(operations[..2], warm_check, "{operations:?}");
-    assert_matches!(
-        operations.get(2),
-        Some(RecordedOperation::GetWithMetadata { key, .. })
-            if key == &loonfs_objectstore::keys::boundary(&namespace_id),
-        "the late answer was trusted: {operations:?}"
+    let first = |prefix: String| {
+        operations
+            .iter()
+            .position(|operation| operation.key().starts_with(&prefix))
+            .expect("a request")
+    };
+    assert!(
+        first(loonfs_objectstore::keys::wal_prefix(&namespace_id))
+            < first(loonfs_objectstore::keys::metadata_manifest_prefix(
+                &namespace_id
+            )),
+        "{operations:?}"
     );
 }
 
@@ -470,70 +463,6 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
     ] {
         namespace.stat(path).await.expect(path);
     }
-}
-
-/// Checks that a warm read reloads its view when the view passes the
-/// revalidation bound while the WAL probe runs, even if the probe fails.
-#[tokio::test]
-async fn a_view_that_passes_the_bound_during_a_failed_wal_probe_is_reloaded() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("late-probe-error").expect("namespace");
-    let wal_keys = || KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace_id));
-    let blocking = Arc::new(BlockingStore::new(
-        FailStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("store"),
-            wal_keys(),
-            OperationSelector::Get,
-            InjectedError::Transport("injected WAL GET failure".to_owned()),
-        ),
-        wal_keys(),
-        OperationSelector::Get,
-    ));
-    let store: SharedObjectStore = blocking.clone();
-    let timer = Arc::new(ManualClock::new(0));
-    let reader = LoonFs::builder_with_store(store.clone())
-        .read_only()
-        .monotonic_timer(timer.clone())
-        .config(loonfs::RuntimeConfig {
-            max_staleness_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("reader");
-    let namespace = reader.namespace(&namespace_id);
-    let writer = writer(store.clone(), "late-probe-error-writer").await;
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace_writer = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let actor = loonfs_test_support::test_actor();
-    namespace_writer
-        .put_file("/cached.txt", b"file", &actor)
-        .await
-        .expect("first put");
-    writer.drain().await.expect("drain");
-    namespace.stat("/cached.txt").await.expect("cache a view");
-    namespace_writer
-        .put_file("/next.txt", b"file", &actor)
-        .await
-        .expect("put after the cached view");
-    writer.drain().await.expect("drain");
-
-    // Park the probe's first GET until the view is past the bound, and then
-    // fail it.
-    blocking.block_next();
-    blocking.inner().fail_next(1);
-    let (entry, ()) = futures::join!(namespace.stat("/next.txt"), async {
-        blocking.wait_until_blocked().await;
-        timer.advance_ms(READ_REVALIDATION_BOUND_MS);
-        blocking.release();
-    });
-    assert_eq!(blocking.inner().remaining(), 0, "the probe's GET failed");
-    entry.expect("reload the view instead of returning the probe's error");
 }
 
 /// Creates `other_id` from a writer of its own and gives it one 16 KiB

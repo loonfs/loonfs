@@ -105,18 +105,18 @@ pub(crate) struct StepRetry {
 /// Runs each open session's due steps every `maintenance_interval_ms`, and
 /// sweeps every namespace in the store every `sweep_interval_ms`.
 ///
-/// Every maintenance interval, a session that has a current writer position
+/// Every maintenance interval, a session that has a writer position
 /// gets a metadata step when the step's retry time has come: a fold of the
 /// WAL tail if one is due, then compaction units if one is due, through the
 /// namespace's one fold path and one compaction path, which the session's
 /// own fold and compaction also use. A step that the session's position
 /// shows to be not due costs no store requests. The scheduler then runs the
 /// first due step of collection, index, and close. A session without a
-/// current position gets no metadata step, because it isn't writing and the
+/// position gets no metadata step, because it isn't writing and the
 /// sweep maintains its namespace's metadata. The one exception is a step
 /// from the store once the session's tail reaches the idle fold age that its
 /// last step reported, or once it has committed since that step, so that the
-/// tail of a session whose position lapsed before the scheduler saw the
+/// tail of a session whose position was dropped before the scheduler saw the
 /// position is dated too. A metadata step that leaves work unfinished runs
 /// again `metadata_retry_interval_ms` later, or sooner when the step
 /// reported an earlier idle fold. A collection runs once the session's
@@ -135,7 +135,7 @@ pub(crate) struct StepRetry {
 ///
 /// A session closes after `idle_session_close_after_ms` without an open,
 /// when nothing else is due, its metadata step in the same run found its
-/// metadata caught up or it has no current position, and no caller has its
+/// metadata caught up or it has no position, and no caller has its
 /// handle. An open during close waits for its drain. A failing step keeps an
 /// idle session held, so the scheduler retries the step, until its backoff
 /// reaches [`MAX_STEP_BACKOFF_MS`]. A session that was closed or fenced, or

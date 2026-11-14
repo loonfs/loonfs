@@ -111,13 +111,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let compaction = self.namespace.start_clock();
         let basis = match basis {
             Some(basis) => basis,
-            None => {
-                let checked = compaction.observe();
-                PublicationBasis {
-                    manifest: self.namespace.load_current_manifest().await?,
-                    checked,
-                }
-            }
+            None => self.namespace.load_current_basis().await?,
         };
         let current = &basis.manifest;
         let payload = current.payload();

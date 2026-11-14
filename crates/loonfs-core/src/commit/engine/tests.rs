@@ -10,7 +10,7 @@ mod retention_floor;
 use super::*;
 use crate::cache::MetadataSegmentCache;
 use crate::error::ErrorCode;
-use crate::limits::{READ_REVALIDATION_BOUND_MS, WAL_PUBLISH_BUDGET_MS};
+use crate::limits::WAL_PUBLISH_BUDGET_MS;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::{CommitIntent, FilesystemOperation};
@@ -388,13 +388,13 @@ async fn a_successful_put_refreshes_the_observation_the_next_budget_runs_from() 
     // More than the budget has passed since the first observation, but only
     // 2 ms since the last successful put, so the third publish rediscovers
     // nothing. Its basis has gone more than a budget unconfirmed, so before
-    // its put it confirms its tip with a HEAD of the next WAL number and one
-    // of the next manifest number, and nothing else.
+    // its put it confirms its tip with a HEAD of the next WAL number, one of
+    // the next manifest number, and a read of the manifest boundary.
     let operations = store.take();
     assert!(
         !operations
             .iter()
-            .any(|operation| operation.key() == loonfs_objectstore::keys::boundary(&namespace_id)),
+            .any(|operation| matches!(operation, RecordedOperation::List { .. })),
         "the third publish rediscovered the namespace: {operations:?}"
     );
     let heads: Vec<_> = operations
@@ -424,52 +424,67 @@ async fn publish_one<S: ObjectStore>(
     published
 }
 
+/// Checks that a writer's tip confirmation doesn't confirm a position whose
+/// manifest's successors a collection deleted. The confirmation finds no
+/// WAL object and no manifest after the position, but the boundary is above
+/// the position's manifest, so the commit is planned again on the newest
+/// manifest. The newer manifests are compactor claims, so the session keeps
+/// its writer epoch and isn't fenced.
 #[tokio::test]
-async fn a_basis_check_answered_outside_the_bound_of_the_last_confirmation_reloads_instead() {
+async fn a_tip_confirmation_at_the_boundary_plans_on_the_newest_manifest() {
     let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::manifest(&namespace_id));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
-    publish_one(&mut engine, &writer, "beta").await;
-
-    // The third publish owes a basis check. Its answer arrives inside the
-    // revalidation bound of the attempt's start but outside the bound of
-    // the confirmation at zero, so it cannot be trusted: the view is
-    // reloaded, and the batch itself is then over its budget.
-    timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
-    store.reset();
-    store.inner().block_next();
-    let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
-    let (published, ()) = futures::join!(
-        engine.publish_batch(vec![create_dir("gamma", "gamma")], &deadline),
-        async {
-            store.inner().wait_until_blocked().await;
-            timer.advance_ms(READ_REVALIDATION_BOUND_MS - 1);
-            store.inner().release();
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = loonfs_test_support::stores::MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::manifest(&namespace_id),
+    );
+    let writer = context("writer-a");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &writer)
+        .create()
+        .await
+        .expect("bootstrap");
+    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        writer.writer_id.clone(),
+    );
+    publish_one(&mut engine, &writer, "alpha").await;
+    // Another process claims the compactor three times, and a collection one
+    // grace window later deletes the manifests below the newest claim.
+    for _ in 0..3 {
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &writer)
+            .engine()
+            .claim_compactor()
+            .await
+            .expect("another process claims the compactor");
+    }
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(&WriterAt {
+            now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+            ..writer.clone()
         }
+        .clock())
+        .await
+        .expect("collect old manifests");
+    let newest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("newest manifest")
+        .manifest();
+    timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
+    publish_one(&mut engine, &writer, "beta").await;
+    assert_eq!(
+        engine
+            .read_position()
+            .expect("position")
+            .read_basis
+            .basis
+            .manifest(),
+        &newest
     );
-    let error = published.results[0]
-        .as_ref()
-        .expect_err("a batch older than its budget writes nothing");
-    assert_matches!(
-        error,
-        CoreError::WalPublish(crate::wal::WalPublishError::PublishBudgetExceeded { .. }),
-        "unexpected error: {error:?}"
-    );
-    let operations = store.take();
-    let head = operations
-        .iter()
-        .position(|operation| matches!(operation, RecordedOperation::Head { .. }))
-        .expect("basis check");
-    assert!(
-        operations[head + 1..]
-            .iter()
-            .any(|operation| operation.key() == loonfs_objectstore::keys::boundary(&namespace_id)),
-        "the late check was trusted: {operations:?}"
-    );
-    // The retry plans against the reloaded view.
-    publish_one(&mut engine, &writer, "gamma").await;
 }
 
 type GatedStore = RecordingStore<BlockingStore<LocalFsStore>>;
@@ -610,14 +625,15 @@ async fn a_quiet_writer_confirms_its_tip_with_a_wal_head_and_then_a_manifest_hea
         ),
         "the manifest HEAD follows the WAL response: {heads:?}"
     );
-    // The tail contains a fence and four commits, and none of it is read
-    // again.
+    // The confirmation ends with a read of the manifest boundary. The tail
+    // contains a fence and four commits, and none of it is read again.
     let operations = store.take();
     assert!(
-        operations.len() == 3
+        operations.len() == 4
             && starts_with_tip_confirmation(&operations, &namespace_id)
+            && operations[2].key() == loonfs_objectstore::keys::boundary(&namespace_id)
             && matches!(
-                &operations[2],
+                &operations[3],
                 RecordedOperation::Put {
                     key,
                     mode: loonfs_objectstore::PutMode::CreateIfAbsent,
@@ -659,12 +675,10 @@ async fn a_quiet_writer_confirms_its_tip_with_a_wal_head_and_then_a_manifest_hea
 
 /// Checks that a writer that commits every few minutes for an hour, against
 /// a manifest that nothing replaces, confirms its tip with a HEAD of the
-/// next WAL number and one of the next manifest number on each commit whose
-/// basis was confirmed more than a budget earlier, and sends no other
-/// request before its put, so it never reads its WAL tail again.
-///
-/// Commits a whole budget apart check the basis when it's two budgets old,
-/// and the revalidation bound still trusts that check.
+/// next WAL number, one of the next manifest number, and a read of the
+/// manifest boundary on each commit whose basis was confirmed more than a
+/// budget earlier, and sends no other request before its put, so it never
+/// reads its WAL tail again.
 #[tokio::test]
 async fn a_steady_writer_checks_its_basis_once_a_budget_and_never_replays_its_tail() {
     const HOUR_MS: u64 = 60 * 60 * 1000;
@@ -686,7 +700,7 @@ async fn a_steady_writer_checks_its_basis_once_a_budget_and_never_replays_its_ta
             tail_reads += operations
                 .iter()
                 .filter(|operation| {
-                    operation.key() == loonfs_objectstore::keys::boundary(&namespace_id)
+                    matches!(operation, RecordedOperation::List { .. })
                         || (operation.key().starts_with(&wal_prefix(&namespace_id))
                             && !matches!(
                                 operation,
@@ -696,7 +710,7 @@ async fn a_steady_writer_checks_its_basis_once_a_budget_and_never_replays_its_ta
                 .count();
             let (put, probes) = operations.split_last().expect("the put");
             assert!(
-                probes.len() == 2 * usize::from(due)
+                probes.len() == 3 * usize::from(due)
                     && (!due || starts_with_tip_confirmation(probes, &namespace_id))
                     && matches!(
                         put,
@@ -806,7 +820,7 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
         let operations = store.take();
         let (put, probes) = operations.split_last().expect("the put");
         assert!(
-            probes.len() == 2 * usize::from(confirms)
+            probes.len() == 3 * usize::from(confirms)
                 && (!confirms || starts_with_tip_confirmation(probes, &namespace_id))
                 && matches!(
                     put,
@@ -1160,12 +1174,16 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     publish_one(&mut engine, &writer, "beta").await;
-    // A maintenance call folds the tail through beta. The writer then
-    // commits gamma on the manifest that the fold replaced.
-    let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(None, &OperationClock::start(0, timer.clone()))
-        .await
-        .expect("fold");
+    // A maintenance call in the writer's runtime, which shares the writer's
+    // segment cache, folds the tail through beta. The writer then commits
+    // gamma on the manifest that the fold replaced.
+    let folded = crate::NamespaceStore {
+        segment_cache: Arc::clone(&engine.namespace.segment_cache),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .fold_wal_tail(None, &OperationClock::start(0, timer.clone()))
+    .await
+    .expect("fold");
     let published = folded.published().expect("the fold publishes a manifest");
     publish_one(&mut engine, &writer, "gamma").await;
 
@@ -1342,64 +1360,6 @@ async fn a_confirmed_batch_without_a_put_keeps_the_attempt_observation() {
         store.take().as_slice(),
         [RecordedOperation::Put { .. }],
         "the exact budget boundary still trusts the confirmed tip"
-    );
-}
-
-#[tokio::test]
-async fn a_writer_quiet_for_the_revalidation_bound_rediscovers_without_probing() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-
-    timer.advance_ms(READ_REVALIDATION_BOUND_MS);
-    store.reset();
-    publish_one(&mut engine, &writer, "beta").await;
-    let operations = store.take();
-    assert_eq!(
-        operations.first().map(RecordedOperation::key),
-        Some(loonfs_objectstore::keys::boundary(&namespace_id).as_str()),
-        "{operations:?}"
-    );
-}
-
-#[tokio::test]
-async fn a_probe_answered_at_the_bound_after_the_last_confirmation_is_not_trusted() {
-    let directory = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::manifest(&namespace_id));
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-
-    // The attempt starts inside the bound of the last confirmation, and the
-    // manifest HEAD answers at the bound: the view is reloaded, although
-    // the answer came only a second after the attempt started.
-    timer.advance_ms(READ_REVALIDATION_BOUND_MS - 1_000);
-    store.reset();
-    store.inner().block_next();
-    let (_, ()) = futures::join!(publish_one(&mut engine, &writer, "beta"), async {
-        store.inner().wait_until_blocked().await;
-        timer.advance_ms(1_000);
-        store.inner().release();
-    });
-    assert!(engine.read_position().is_some());
-    let operations = store.take();
-    let successor = operations
-        .iter()
-        .position(|operation| {
-            is_head_under(
-                operation,
-                &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id),
-            )
-        })
-        .expect("successor check");
-    assert!(
-        successor == 1
-            && starts_with_tip_confirmation(&operations, &namespace_id)
-            && operations[successor + 1..]
-                .iter()
-                .any(|operation| operation.key()
-                    == loonfs_objectstore::keys::boundary(&namespace_id)),
-        "the late answer was trusted: {operations:?}"
     );
 }
 

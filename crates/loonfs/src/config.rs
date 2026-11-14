@@ -242,7 +242,7 @@ pub struct RuntimeConfig {
     /// Defaults to [`DEFAULT_IDLE_FOLD_AFTER_MS`], 15 minutes.
     /// [`Maintenance`](crate::Maintenance) measures the age from the writer
     /// session's last publish on the runtime's monotonic clock while the
-    /// session has a current writer position, and otherwise on the runtime's
+    /// session has a writer position, and otherwise on the runtime's
     /// wall clock from the newest commit's `committed_at_ms`. A writer
     /// session doesn't fold on age by itself. A host that sweeps its sessions
     /// reads when a tail reaches the age from
@@ -277,8 +277,8 @@ impl RuntimeConfig {
     /// Checks the settings against the limits of the runtime, and returns
     /// [`Error::Config`] for the first setting outside them.
     pub fn validate(&self) -> Result<()> {
-        // A reader reloads a view whose manifest check is as old as the
-        // revalidation bound, whatever the setting, so a longer interval or
+        // An eventual read checks a view whose manifest check is as old as
+        // the revalidation bound, whatever the setting, so a longer interval or
         // maximum staleness would promise something that the runtime doesn't
         // do.
         for (setting, interval_ms) in [

@@ -2947,16 +2947,12 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
         seed_bindings_workload(&store, &namespace).await;
         let current = current_manifest_number(&store, &namespace).await;
         let basis = match with_basis {
-            true => {
-                let checked = crate::test_support::observed_now();
-                Some(crate::namespace::PublicationBasis {
-                    manifest: crate::test_support::namespace_store(&store, &namespace)
-                        .load_current_manifest()
-                        .await
-                        .expect("current manifest"),
-                    checked,
-                })
-            }
+            true => Some(
+                crate::test_support::namespace_store(&store, &namespace)
+                    .load_current_basis()
+                    .await
+                    .expect("current manifest"),
+            ),
             false => None,
         };
         let next = current.successor().expect("next manifest number");

@@ -152,12 +152,11 @@ impl Namespace<Writable> {
         self.session().last_published_seq()
     }
 
-    /// Returns whether this session has a writer position whose last check
-    /// is within the revalidation bound.
+    /// Returns whether this session has a writer position.
     ///
     /// A session has no position before its first publish, and loses it
-    /// after a fork of its namespace, a change that it can't follow, or once
-    /// its last check passes the bound. A fold or a compaction that the
+    /// after a fork of its namespace, a change that it can't follow, or a
+    /// check that finds its manifest at or below the manifest boundary. A fold or a compaction that the
     /// session's position shows to be not due costs no store requests. Reads
     /// memory only. This is a hook for a host that runs its own maintenance
     /// sweep, such as the `loonfs-server` sweep.

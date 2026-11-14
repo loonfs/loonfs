@@ -1,6 +1,6 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
-use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
+use super::load::metadata_basis_from_manifest;
 use super::publish::ManifestChange;
 use super::published::{same_head, PublicationReport, PublishedManifest};
 use crate::commit::publish_view::WriterPosition;
@@ -10,6 +10,7 @@ use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataView;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
+use crate::namespace::boundary::LoadedBoundary;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -138,13 +139,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// floors of the floor objects that the fold covers (format spec,
     /// "Publishing a manifest"). A tail of floor objects and no commits is
     /// folded too, into a manifest with no new run. A writer session passes the tail
-    /// it keeps as `held`, and every other caller passes `None`, which loads the
-    /// tail from the store. A tail passed as `held` whose last check is at the revalidation
-    /// bound is discarded, and the tail is loaded from the store too: a check
-    /// within the bound found no manifest above the basis, so every manifest
-    /// above it was published after the check and is younger than the grace
-    /// window, and garbage collection hasn't deleted any of them (see
-    /// `update_manifest`). The publication's first attempt starts
+    /// it keeps as `held`, whatever its age, and every other caller passes
+    /// `None`, which loads the tail from the store. A `held` tail whose
+    /// manifest is at or below the manifest boundary is discarded, and the
+    /// tail is loaded from the store too (see `load_held_manifest`). The
+    /// publication's first attempt starts
     /// from the manifest that the tail was read above, and each later attempt
     /// starts from the manifest that the attempt before it found (see
     /// `update_manifest`).
@@ -159,19 +158,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
         held: Option<WriterPosition>,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
-        let held = held.filter(|held| held.basis_checked.is_within_revalidation_bound());
-        let projection = match held {
-            Some(held) => ManifestProjection {
-                manifest_segments: load_basis_metadata_segments(
-                    &self.store,
-                    Some(&self.segment_cache),
-                    &held.read_basis.basis,
-                )
+        let held = match held {
+            Some(held) => self
+                .load_held_manifest(held.read_basis.basis.manifest(), held.boundary.clone())
                 .await?
-                .segments,
+                .map(|segments| (held, segments)),
+            None => None,
+        };
+        let projection = match held {
+            Some((held, manifest_segments)) => ManifestProjection {
+                manifest_segments,
                 head: held.read_basis.head,
                 basis: held.read_basis.basis,
-                basis_checked: held.basis_checked,
+                boundary: held.boundary,
                 tail_state: held.tail,
             },
             None => self.load_fold_projection(clock.observe()).await?,
@@ -183,13 +182,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
             return Ok(FoldedWalTail::new(
                 &self.namespace_id,
                 projection.head.seq,
-                PublishedManifest::new(basis, None),
+                PublishedManifest::new(basis, None, projection.boundary.clone()),
                 FoldWalOutcome::AlreadyCurrent,
             ));
         }
         let publication_basis = PublicationBasis {
             manifest: projection.manifest_segments.loaded_manifest(),
-            checked: projection.basis_checked.clone(),
+            boundary: projection.boundary.clone(),
         };
         // Each attempt's future borrows the fold through this lock, because a
         // future that a closure returns can't borrow the closure's own state.
@@ -236,7 +235,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let tail_state = loaded_basis.project_tail(&anchor)?;
         Ok(ManifestProjection {
             basis: anchor.basis(),
-            basis_checked: anchor.checked,
+            boundary: anchor.boundary,
             head: anchor.read_state,
             manifest_segments: loaded_basis.segments,
             tail_state,
@@ -412,7 +411,7 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
             if same_head(
                 &self.projection.basis,
                 &self.projection.head,
-                &PublishedManifest::new(&current.envelope, None),
+                &PublishedManifest::new(&current.envelope, None, None),
             ) {
                 self.projection.basis = MetadataBasis::new(current.manifest());
                 self.projection.manifest_segments = metadata_basis_from_manifest(
@@ -461,8 +460,8 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
 pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     pub(super) basis: MetadataBasis,
-    /// When a store observation last confirmed `basis` current.
-    pub(super) basis_checked: Observation,
+    /// The manifest boundary as the check that confirmed `basis` read it.
+    pub(super) boundary: Option<LoadedBoundary>,
     pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.

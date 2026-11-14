@@ -65,9 +65,10 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .filter(|request| is_get(request, &boundary(&namespace_id)))
         .count();
     assert_eq!(
-        boundary_gets, 3,
-        "one search for the newest manifest reads the manifest boundary twice, and the \
-         claim's publication reads it once after its put; {requests:?}"
+        boundary_gets, 4,
+        "one search for the newest manifest reads the manifest boundary twice, the \
+         claim's publication reads it once after its put, and the check of the claim once \
+         more; {requests:?}"
     );
     for number in 1..=3 {
         let key = metadata_manifest_object(&namespace_id, &loonfs::ManifestNo(number));
@@ -82,7 +83,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     }
     assert_eq!(
         requests.len(),
-        10,
+        11,
         "one claim, one fence, and one semantic publish share discovery; {requests:?}"
     );
 
@@ -221,8 +222,9 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
             .iter()
             .filter(|request| is_get(request, &boundary(&namespace_id)))
             .count(),
-        2,
-        "the search for the newest manifest reads the manifest boundary twice; {requests:?}"
+        3,
+        "the search for the newest manifest reads the manifest boundary twice, and the \
+         check of the loaded manifest once more; {requests:?}"
     );
     assert_eq!(
         before_put

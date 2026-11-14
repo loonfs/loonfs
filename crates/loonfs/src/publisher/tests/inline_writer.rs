@@ -1657,7 +1657,7 @@ async fn wal_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count
 }
 
 /// Checks that a metadata maintenance step folds a tail at `FOLD_AT_WAL_BYTES` after
-/// the session's position passes the revalidation bound. The session's own
+/// the session's position is dropped. The session's own
 /// fold fails, and the step loads the tail from the store and counts the WAL
 /// bytes that it loaded.
 #[tokio::test]
@@ -1700,7 +1700,11 @@ async fn a_metadata_step_without_a_current_position_counts_the_wal_bytes_that_it
         .expect("usage");
     assert!(usage.wal_tail_bytes >= FOLD_AT_WAL_BYTES);
     assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get());
-    timer.advance_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS);
+    writer
+        .mode
+        .publisher
+        .drop_session_position(&namespace)
+        .await;
     assert!(writer.mode.publisher.current_position(&namespace).is_none());
     let step = writer
         .maintenance(loonfs_test_support::ids::writer_id("maintenance"))

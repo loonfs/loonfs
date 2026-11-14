@@ -1,8 +1,8 @@
 //! The manifest that reads and publications build on.
 
+use crate::namespace::boundary::LoadedBoundary;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
-use crate::time::Observation;
 use loonfs_types::format::control::ManifestRef;
 use loonfs_types::ManifestNo;
 
@@ -32,18 +32,16 @@ pub struct ReadBasis {
     pub basis: MetadataBasis,
 }
 
-/// A manifest that a publication builds on, and when this process last
-/// confirmed that the manifest was current.
+/// A manifest that a publication builds on, and the manifest boundary as
+/// this process last read it.
 ///
-/// A publication whose basis was checked less than
-/// [`READ_REVALIDATION_BOUND_MS`](crate::limits::READ_REVALIDATION_BOUND_MS)
-/// ago puts the basis's successor without a request first, and after a lost
-/// put it finds the current manifest above the basis instead of from the
-/// manifest boundary (format spec, "Publishing a manifest").
+/// A publication puts the basis's successor without a request first, and
+/// after its put it reads the boundary conditionally on `boundary` (format
+/// spec, "Publishing a manifest").
 #[derive(Debug, Clone)]
 pub struct PublicationBasis {
     pub manifest: LoadedManifest,
-    /// When a store observation last found no successor of `manifest`, or of
-    /// a manifest that `manifest` follows.
-    pub checked: Observation,
+    /// The manifest boundary as last read, or `None` when no boundary object
+    /// existed or none has been read.
+    pub boundary: Option<LoadedBoundary>,
 }

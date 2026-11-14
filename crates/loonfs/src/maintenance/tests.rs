@@ -722,14 +722,15 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 
     // A load of a namespace lists its manifests once, and a load of a live
     // namespace sends a HEAD request for the missing manifest after the
-    // current one in its check of the manifest's successor. A collection
+    // current one and a read of the manifest boundary in its check of the
+    // manifest. A collection
     // lists each of its five families once, the snapshots included, and
     // lists nothing under its pool's prefix, whether the namespace is live or
     // deleted.
     let heads = 1;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [4, heads, 1, 0], None, [4, heads, 6, 0], None),
-        (&claimed, [4, heads, 1, 0], None, [4, heads, 6, 0], None),
+        (&idle, [5, heads, 1, 0], None, [5, heads, 6, 0], None),
+        (&claimed, [5, heads, 1, 0], None, [5, heads, 6, 0], None),
         (
             &retired,
             [3, 0, 1, 0],
@@ -796,7 +797,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     assert_eq!(fenced.compaction, MetadataCompactionOutcome::Fenced);
     assert_eq!(
         requests(store.counts()),
-        [4, heads, 1, 0],
+        [5, heads, 1, 0],
         "the observed anchor already reports the fence"
     );
 }
@@ -844,25 +845,25 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
         (
             CommitSeq(1),
             [
-                (RetentionTarget::Seq(CommitSeq(0)), 5),
-                (RetentionTarget::Seq(CommitSeq(1)), 5),
+                (RetentionTarget::Seq(CommitSeq(0)), 6),
+                (RetentionTarget::Seq(CommitSeq(1)), 6),
                 // The scan reads commit 2 from the commits segment, and
                 // commit 2 is later than the cutoff.
-                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 6),
+                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 7),
             ],
         ),
         (
             CommitSeq(2),
             [
-                (RetentionTarget::Head, 5),
-                (RetentionTarget::Seq(CommitSeq(u64::MAX)), 5),
+                (RetentionTarget::Head, 6),
+                (RetentionTarget::Seq(CommitSeq(u64::MAX)), 6),
                 // No folded commit is above the head, so the scan reads no
                 // segment.
                 (
                     RetentionTarget::Cutoff {
                         cutoff_at_ms: u64::MAX,
                     },
-                    5,
+                    6,
                 ),
             ],
         ),
@@ -920,8 +921,9 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 (1, gets, 1),
                 "{target:?} loads the current manifest once and plans from the view after it \
                  (the manifest boundary, a listing of the manifests, the manifest, the \
-                 boundary again, a GET of the missing WAL number after the manifest, and a \
-                 HEAD request for the missing manifest after it): {operations:?}"
+                 boundary again, a GET of the missing WAL number after the manifest, a \
+                 HEAD request for the missing manifest after it, and the boundary once \
+                 more): {operations:?}"
             );
         }
     }

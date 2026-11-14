@@ -17,7 +17,7 @@ Sandbox-per-task agent workloads fork a namespace of a hundred thousand files, m
 
 An index whose postings identify `(inode_id, revision_no)` can't be shared with a fork, because after the fork point the fork and its source assign the same revision number to different content of the same inode. A shared index of revisions would attribute one namespace's content to the other.
 
-An index with its own log would also need a second copy of core's log machinery: numbered manifests, a manifest boundary, discovery with a revalidation bound, a publication budget, and a collector with its own grace rules. That copy would cost every grep step a parallel publication, every query a HEAD for a successor, and every deployment a second collector to run. It would also stop a fork from inheriting the index, because the fork snapshot that protects a fork's inherited state protects only what the core manifest lists.
+An index with its own log would also need a second copy of core's log machinery: numbered manifests, a manifest boundary that every check of a manifest reads, discovery, a publication budget, and a collector with its own grace rules. That copy would cost every grep step a parallel publication, every query a HEAD for a successor and a read of the boundary, and every deployment a second collector to run. It would also stop a fork from inheriting the index, because the fork snapshot that protects a fork's inherited state protects only what the core manifest lists.
 
 ## Indexing content, not revisions
 

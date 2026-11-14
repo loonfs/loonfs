@@ -77,9 +77,9 @@ impl Scheduler {
     /// collection, index, and close.
     ///
     /// The metadata step runs when its retry time has come and the session has
-    /// a current writer position, and once when the session's tail reaches the
+    /// a writer position, and once when the session's tail reaches the
     /// idle fold age that its last step reported, whatever the position (see
-    /// [`metadata_due`]). A session without a current position isn't writing,
+    /// [`metadata_due`]). A session without a position isn't writing,
     /// so otherwise the sweep maintains its namespace's metadata, as it does
     /// for a namespace without a session. Collection comes before the index
     /// step because it's due at most once per `gc_interval_ms`, and a session
@@ -298,7 +298,7 @@ impl Scheduler {
 }
 
 /// Returns whether a held session's metadata step is due at `now_ms`: its
-/// retry time has come, and the session has a current writer position, or
+/// retry time has come, and the session has a writer position, or
 /// its tail has reached the idle fold age that its last step reported, or
 /// the session has committed since its last step. A step without a position
 /// reads the store, so it runs only for that idle fold, or once to date a

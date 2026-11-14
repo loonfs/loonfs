@@ -223,88 +223,101 @@ async fn a_late_ambiguous_put_at_an_emptied_number_is_lost() {
     );
 }
 
-/// Checks that a publication whose basis was checked just now, and whose
-/// basis's successor a collection deleted, puts the deleted number, counts
-/// that put as lost because the number is at the boundary, and publishes
-/// after the newest manifest.
+/// Checks that a publication whose basis's successor a collection deleted
+/// puts the deleted number, counts that put as lost because the number is at
+/// the boundary, and publishes after the newest manifest. A put whose
+/// response is lost is read back, found at the boundary, and settled against
+/// the newest manifest too, so the next attempt builds on that manifest.
 #[tokio::test]
 async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("stale-basis").expect("namespace");
-    let store = MetadataMapStore::aged(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::manifest(&namespace_id),
-    );
-    let context = test_context();
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect("create");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context.writer_id)
-        .await
-        .expect("publish manifest 2");
-    let basis = crate::namespace::PublicationBasis {
-        manifest: crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
+    for ambiguous in [false, true] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("stale-basis").expect("namespace");
+        let store = MetadataMapStore::aged(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::manifest(&namespace_id),
+        );
+        let context = test_context();
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .create()
             .await
-            .expect("manifest 2"),
-        checked: crate::test_support::observed_now(),
-    };
-    // Other processes publish manifests 3 to 5, and a collection one grace
-    // window later deletes every manifest below 5.
-    for _ in 3..=5 {
+            .expect("create");
         crate::test_support::namespace_store(&store, &namespace_id)
             .acquire_writer_epoch(&context.writer_id)
             .await
-            .expect("another process publishes");
-    }
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&WriterAt {
-            now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
-            ..context.clone()
+            .expect("publish manifest 2");
+        let basis = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_basis()
+            .await
+            .expect("manifest 2");
+        // Other processes publish manifests 3 to 5, and a collection one grace
+        // window later deletes every manifest below 5.
+        for _ in 3..=5 {
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .acquire_writer_epoch(&context.writer_id)
+                .await
+                .expect("another process publishes");
         }
-        .clock())
-        .await
-        .expect("collect old manifests");
-    assert_eq!(report.deleted.manifests, 4);
-    let successor = metadata_manifest_object(&namespace_id, &ManifestNo(3));
-    assert!(store
-        .head(&successor)
-        .await
-        .expect("the basis's successor")
-        .is_none());
+        let report = crate::test_support::namespace_store(&store, &namespace_id)
+            .gc(&WriterAt {
+                now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+                ..context.clone()
+            }
+            .clock())
+            .await
+            .expect("collect old manifests");
+        assert_eq!(report.deleted.manifests, 4);
+        let successor = metadata_manifest_object(&namespace_id, &ManifestNo(3));
+        assert!(store
+            .head(&successor)
+            .await
+            .expect("the basis's successor")
+            .is_none());
 
-    let recorded = RecordingStore::new(store, KeyPredicate::any());
-    let ManifestUpdate {
-        current: published, ..
-    } = crate::test_support::namespace_store(&recorded, &namespace_id)
-        .update_manifest(
-            Some(basis),
-            &OperationClock::start(0, crate::test_support::std_timer()),
-            |current: crate::namespace::control::LoadedManifest| async move {
-                Ok(super::super::publish::ManifestChange::Next(
-                    Box::new(current.payload().clone()),
-                    (),
-                ))
-            },
+        let recorded = Arc::new(RecordingStore::new(store, KeyPredicate::any()));
+        let failing = FailStore::new(
+            recorded.clone(),
+            KeyPredicate::exact(successor),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost acknowledgement".to_owned()),
         )
-        .await
-        .expect("publish");
-    assert_eq!(published.manifest().manifest_no, ManifestNo(6));
-    let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
-    let boundary = boundary(&namespace_id);
-    assert_eq!(
-        control_requests(&namespace_id, &recorded.take()),
-        vec![
-            ("put", manifest(3)),
-            ("get", boundary.clone()),
-            ("get", boundary.clone()),
-            ("list", metadata_manifest_prefix(&namespace_id)),
-            ("get", manifest(5)),
-            ("get", boundary.clone()),
-            ("put", manifest(6)),
-            ("get", boundary),
-        ]
-    );
+        .apply_then_fail();
+        failing.fail_next(usize::from(ambiguous));
+        let ManifestUpdate {
+            current: published, ..
+        } = crate::test_support::namespace_store(&failing, &namespace_id)
+            .update_manifest(
+                Some(basis),
+                &OperationClock::start(0, crate::test_support::std_timer()),
+                |current: crate::namespace::control::LoadedManifest| async move {
+                    Ok(super::super::publish::ManifestChange::Next(
+                        Box::new(current.payload().clone()),
+                        (),
+                    ))
+                },
+            )
+            .await
+            .expect("publish");
+        assert_eq!(published.manifest.manifest().manifest_no, ManifestNo(6));
+        let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
+        let boundary = boundary(&namespace_id);
+        let read_back = ambiguous.then(|| ("get", manifest(3)));
+        assert_eq!(
+            control_requests(&namespace_id, &recorded.take()),
+            [("put", manifest(3))]
+                .into_iter()
+                .chain(read_back)
+                .chain([
+                    ("get", boundary.clone()),
+                    ("get", boundary.clone()),
+                    ("list", metadata_manifest_prefix(&namespace_id)),
+                    ("get", manifest(5)),
+                    ("get", boundary.clone()),
+                    ("put", manifest(6)),
+                    ("get", boundary),
+                ])
+                .collect::<Vec<_>>(),
+            "ambiguous: {ambiguous}"
+        );
+    }
 }

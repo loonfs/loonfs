@@ -3,8 +3,11 @@
 use super::*;
 use std::assert_matches;
 
+/// Checks that a manifest put that returns after its publication budget,
+/// at a number above the manifest boundary, is published: the boundary read
+/// after the put is the check of the put, and no budget check follows it.
 #[tokio::test]
-async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
+async fn a_manifest_put_returning_after_its_budget_is_published() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("manifest-return-budget").expect("namespace");
     let store = RecordingStore::new(
@@ -34,32 +37,20 @@ async fn a_manifest_put_returning_after_its_budget_has_an_unknown_outcome() {
             metadata
         },
     );
-    let error = publish_once_within(&store, manifest, &deadline)
+    let outcome = publish_once_within(&store, manifest, &deadline)
         .await
-        .expect_err("late put must not acknowledge publication");
-    assert_matches!(
-        error,
-        CoreError::OutcomeUnknown { object_key: actual_key, .. } if actual_key == object_key
-    );
-    assert_eq!(store.inner().counts().create_if_absent_puts, 1);
-    assert_eq!(store.inner().counts().compare_and_swaps, 0);
+        .expect("a late put above the boundary");
+    assert_matches!(outcome, ManifestPublicationOutcome::Published(_));
     let operations = store.inner().snapshot();
-    let last = operations.last().expect("numbered put");
-    assert_matches!(
-        last,
-        loonfs_test_support::stores::RecordedOperation::Put {
-            mode: loonfs_objectstore::PutMode::CreateIfAbsent,
-            ..
-        }
+    assert_eq!(
+        operations
+            .iter()
+            .rev()
+            .map(|operation| operation.key().to_owned())
+            .take(2)
+            .collect::<Vec<_>>(),
+        [boundary(&namespace_id), object_key]
     );
-    assert_eq!(last.key(), object_key);
-    assert!(store
-        .inner()
-        .inner()
-        .head(&object_key)
-        .await
-        .expect("written manifest")
-        .is_some());
 }
 
 #[tokio::test]
@@ -101,103 +92,93 @@ async fn a_manifest_put_that_writes_nothing_and_loses_its_answer_has_an_unknown_
         .is_none());
 }
 
+/// Checks that a manifest put whose response is lost, and whose read-back
+/// ends after the publication budget, is settled by the read-back: a fork's
+/// first manifest is its own, and a successor is covered by the manifest
+/// found at its number.
 #[tokio::test]
-async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
+async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
     use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
     use loonfs_test_support::clock::ManualClock;
     use loonfs_test_support::stores::MetadataMapStore;
     use loonfs_types::format::control::ForkBasis;
 
     for fork in [false, true] {
-        for elapsed_ms in [
-            METADATA_PUBLICATION_BUDGET_MS,
-            METADATA_PUBLICATION_BUDGET_MS + 1,
-        ] {
-            let directory = tempdir().expect("directory");
-            let source = NamespaceId::parse("source").expect("namespace");
-            let store = RecordingStore::new(
-                LocalFsStore::new(directory.path()).expect("store"),
-                KeyPredicate::any(),
-            );
-            crate::test_support::NamespaceFixture::new(&store, &source, &test_context())
-                .create()
-                .await
-                .expect("create");
-            let current = crate::test_support::namespace_store(&store, &source)
-                .load_current_manifest()
-                .await
-                .expect("current");
-            let mut payload = current.payload().clone();
-            if fork {
-                payload.namespace_id = NamespaceId::parse("fork").expect("namespace");
-                payload.fork_basis = Some(ForkBasis {
-                    manifest: current.manifest(),
-                    source_snapshot_id: SnapshotId::generate(ManifestNo(1)),
-                    rebased_from: None,
-                });
-            } else {
-                payload.manifest_no = ManifestNo(2);
-            }
-            let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
-            let timer = Arc::new(ManualClock::new(0));
-            let deadline = OperationClock::start(0, timer.clone());
-            store.reset();
-            let store =
-                MetadataMapStore::new(store, KeyPredicate::exact(&object_key), move |metadata| {
-                    timer.advance_ms(elapsed_ms);
-                    metadata
-                });
-            let store = FailStore::new(
-                store,
-                KeyPredicate::exact(&object_key),
-                OperationSelector::PutCreateIfAbsent,
-                InjectedError::Transport("lost acknowledgement".to_owned()),
-            )
-            .apply_then_fail();
-            store.fail_next(1);
-            // A fork's first manifest is created, and any other manifest
-            // is published over its predecessor.
-            let outcome = if fork {
-                let namespace = crate::test_support::namespace_store(&store, &payload.namespace_id);
-                async {
-                    namespace.ensure_namespace_absent().await?;
-                    namespace.publish_first_manifest(payload, &deadline).await
-                }
-                .await
-                .map(|()| None)
-            } else {
-                publish_once_within(&store, encode_manifest(payload), &deadline)
-                    .await
-                    .map(Some)
-            };
-            if elapsed_ms > METADATA_PUBLICATION_BUDGET_MS {
-                assert_matches!(
-                    outcome,
-                    Err(CoreError::OutcomeUnknown {
-                        object_key: actual_key,
-                        message,
-                    }) if actual_key == object_key && message == format!(
-                        "the publication took {elapsed_ms}ms, over its {METADATA_PUBLICATION_BUDGET_MS}ms budget"
-                    )
-                );
-            } else if fork {
-                assert_matches!(outcome, Ok(None));
-            } else {
-                assert_matches!(
-                    outcome,
-                    Ok(Some(ManifestPublicationOutcome::CoveredByCurrent(_)))
-                );
-            }
-            assert_eq!(store.remaining(), 0);
-            assert_eq!(store.inner().inner().counts().create_if_absent_puts, 1);
-            assert_eq!(store.inner().inner().counts().compare_and_swaps, 0);
-            assert!(store
-                .inner()
-                .inner()
-                .take_gets()
-                .iter()
-                .any(|(key, _)| key == &object_key));
+        let elapsed_ms = METADATA_PUBLICATION_BUDGET_MS + 1;
+        let directory = tempdir().expect("directory");
+        let source = NamespaceId::parse("source").expect("namespace");
+        let store = RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        );
+        crate::test_support::NamespaceFixture::new(&store, &source, &test_context())
+            .create()
+            .await
+            .expect("create");
+        let current = crate::test_support::namespace_store(&store, &source)
+            .load_current_manifest()
+            .await
+            .expect("current");
+        let mut payload = current.payload().clone();
+        if fork {
+            payload.namespace_id = NamespaceId::parse("fork").expect("namespace");
+            payload.fork_basis = Some(ForkBasis {
+                manifest: current.manifest(),
+                source_snapshot_id: SnapshotId::generate(ManifestNo(1)),
+                rebased_from: None,
+            });
+        } else {
+            payload.manifest_no = ManifestNo(2);
         }
+        let object_key = metadata_manifest_object(&payload.namespace_id, &payload.manifest_no);
+        let timer = Arc::new(ManualClock::new(0));
+        let deadline = OperationClock::start(0, timer.clone());
+        store.reset();
+        let store =
+            MetadataMapStore::new(store, KeyPredicate::exact(&object_key), move |metadata| {
+                timer.advance_ms(elapsed_ms);
+                metadata
+            });
+        let store = FailStore::new(
+            store,
+            KeyPredicate::exact(&object_key),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost acknowledgement".to_owned()),
+        )
+        .apply_then_fail();
+        store.fail_next(1);
+        // A fork's first manifest is created, and any other manifest
+        // is published over its predecessor.
+        let outcome = if fork {
+            let namespace = crate::test_support::namespace_store(&store, &payload.namespace_id);
+            async {
+                namespace.ensure_namespace_absent().await?;
+                namespace.publish_first_manifest(payload, &deadline).await
+            }
+            .await
+            .map(|()| None)
+        } else {
+            publish_once_within(&store, encode_manifest(payload), &deadline)
+                .await
+                .map(Some)
+        };
+        if fork {
+            assert_matches!(outcome, Ok(None));
+        } else {
+            assert_matches!(
+                outcome,
+                Ok(Some(ManifestPublicationOutcome::CoveredByCurrent(_)))
+            );
+        }
+        assert_eq!(store.remaining(), 0);
+        assert_eq!(store.inner().inner().counts().create_if_absent_puts, 1);
+        assert_eq!(store.inner().inner().counts().compare_and_swaps, 0);
+        assert!(store
+            .inner()
+            .inner()
+            .take_gets()
+            .iter()
+            .any(|(key, _)| key == &object_key));
     }
 }
 
@@ -477,13 +458,9 @@ async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
         .await
         .expect("bootstrap");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let current = namespace.load_current_manifest().await.expect("current");
-    let mut payload = current.payload().clone();
+    let basis = namespace.load_current_basis().await.expect("current");
+    let mut payload = basis.manifest.payload().clone();
     payload.manifest_no = ManifestNo(2);
-    let basis = crate::namespace::PublicationBasis {
-        manifest: current,
-        checked: crate::test_support::observed_now(),
-    };
     store.fail_next(1);
     let outcome = namespace
         .publish_manifest_from(

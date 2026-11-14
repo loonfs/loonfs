@@ -7,13 +7,15 @@
 use super::error::ManifestLoadError;
 use super::validate::{validate_manifest, validate_namespace_manifest};
 use crate::commit::publish_view::WriterPosition;
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
+use crate::namespace::boundary::LoadedBoundary;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
+use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::{
     DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey,
 };
@@ -124,27 +126,67 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
     Ok(metadata_basis_from_segments(segments))
 }
 
-/// Returns the manifest of a writer session's position as a basis that a
-/// publication can build on, loaded through `segment_cache`, or `None` when
-/// the position's last check is at the revalidation bound.
-pub async fn load_position_basis<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: &MetadataSegmentCache,
-    position: &WriterPosition,
-) -> crate::error::Result<Option<PublicationBasis>> {
-    if !position.basis_checked.is_within_revalidation_bound() {
-        return Ok(None);
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Loads `manifest`, which a holder keeps by reference with the manifest
+    /// boundary `kept`, through the segment cache, or returns `None` when the
+    /// manifest is at or below the boundary, so that the holder finds the
+    /// newest manifest from the start.
+    ///
+    /// A manifest in the segment cache is loaded without a request. Before a
+    /// manifest is read from the store, [`Self::above_boundary`] checks the
+    /// manifest against `kept`. A read that finds the manifest missing reads
+    /// the boundary again, and a missing manifest above the boundary is a
+    /// corrupt store.
+    pub(crate) async fn load_held_manifest(
+        &self,
+        manifest: &ManifestRef,
+        kept: Option<LoadedBoundary>,
+    ) -> crate::error::Result<Option<VerifiedMetadataSegments<'_, S>>> {
+        let object_key =
+            metadata_manifest_object(&manifest.owner_namespace_id, &manifest.manifest_no);
+        let kept = if self.segment_cache.holds_manifest(&object_key) {
+            kept
+        } else {
+            let (above, boundary) = self.above_boundary(manifest.manifest_no, kept).await?;
+            if !above {
+                return Ok(None);
+            }
+            boundary
+        };
+        let loaded = load_manifest_segments(&self.store, Some(&self.segment_cache), manifest).await;
+        if matches!(
+            loaded,
+            Err(CoreError::MetadataProjection(
+                MetadataProjectionLoadError::ManifestLoad(
+                    ManifestLoadError::MissingManifest { .. }
+                )
+            ))
+        ) && !self.above_boundary(manifest.manifest_no, kept).await?.0
+        {
+            return Ok(None);
+        }
+        loaded.map(Some)
     }
-    let segments = load_manifest_segments(
-        store,
-        Some(segment_cache),
-        position.read_basis.basis.manifest(),
-    )
-    .await?;
-    Ok(Some(PublicationBasis {
-        manifest: segments.loaded_manifest(),
-        checked: position.basis_checked.clone(),
-    }))
+
+    /// Returns the manifest of a writer session's position as a basis that a
+    /// publication can build on, with the manifest boundary that the position
+    /// keeps, or `None` when the manifest is at or below the boundary (see
+    /// [`Self::load_held_manifest`]).
+    pub async fn load_position_basis(
+        &self,
+        position: &WriterPosition,
+    ) -> crate::error::Result<Option<PublicationBasis>> {
+        let segments = self
+            .load_held_manifest(
+                position.read_basis.basis.manifest(),
+                position.boundary.clone(),
+            )
+            .await?;
+        Ok(segments.map(|segments| PublicationBasis {
+            manifest: segments.loaded_manifest(),
+            boundary: position.boundary.clone(),
+        }))
+    }
 }
 
 pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(

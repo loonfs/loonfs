@@ -13,25 +13,39 @@ use tracing::Instrument;
 /// A read that finds a segment missing returns what a new read of `source`
 /// would. A snapshot that still admits a read keeps the segment, so the
 /// original error stands as corruption.
+///
+/// A read at the head that finds its manifest missing does the same when
+/// the manifest is at or below the manifest boundary. A missing manifest
+/// above the boundary is a corrupt store, and the original error stands.
 pub(crate) async fn classify_read_result<T>(
     core: &RuntimeCore,
     context: &RuntimeReadContext,
     source: &ReadSource,
     result: Result<T>,
 ) -> Result<T> {
-    if !matches!(
-        &result,
+    let missing_manifest = match &result {
         Err(Error::Core(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::ManifestLoad(ManifestLoadError::MissingSegment { .. })
-        )))
-    ) {
-        return result;
-    }
+            MetadataProjectionLoadError::ManifestLoad(error),
+        ))) => match (error, source) {
+            (ManifestLoadError::MissingSegment { .. }, _) => false,
+            (ManifestLoadError::MissingManifest { .. }, ReadSource::Head) => true,
+            _ => return result,
+        },
+        _ => return result,
+    };
     let namespace = core.namespace_store(&context.read_basis.head.namespace_id);
     match source {
         ReadSource::Head => {
-            let current = namespace.load_current_manifest().await?;
             let replaced_manifest_no = context.read_basis.basis.manifest_no();
+            if missing_manifest
+                && namespace
+                    .above_boundary(replaced_manifest_no, None)
+                    .await?
+                    .0
+            {
+                return result;
+            }
+            let current = namespace.load_current_manifest().await?;
             let current_manifest_no = current.payload().manifest_no;
             if current_manifest_no > replaced_manifest_no {
                 return Err(CoreError::ManifestReplaced {

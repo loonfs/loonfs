@@ -395,14 +395,16 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
     assert_matches!(
         fixture.recording.take().as_slice(),
         [
-            RecordedOperation::Head { key: manifest_key },
             RecordedOperation::Get {
                 key: wal_key,
                 range: None,
                 result_bytes: 0,
             },
+            RecordedOperation::Head { key: manifest_key },
+            RecordedOperation::GetWithMetadata { key: boundary_key, .. },
         ] if manifest_key.starts_with(&metadata_manifest_prefix(&fixture.namespace_id))
             && wal_key.starts_with(&wal_prefix(&fixture.namespace_id))
+            && *boundary_key == loonfs_objectstore::keys::boundary(&fixture.namespace_id)
     );
     assert_eq!(
         fixture.cached_head_sources(),
@@ -673,9 +675,9 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
 async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::LoadChecks).await;
     let gate = fixture.recording.inner();
-    // Past the revalidation bound, the next read drops the position and
-    // loads the namespace from the store.
-    fixture.clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+    // A fork drops the position, and the next read loads the namespace from
+    // the store.
+    fixture.drop_position().await;
     gate.block_next();
     let (loaded, commit) = futures::join!(fixture.reader.stat("/small.txt"), async {
         gate.wait_until_blocked().await;
@@ -739,9 +741,9 @@ async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
 async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
     let fixture = writer_position_reads::fixture("spanning-load", Parked::LoadChecks).await;
     let gate = fixture.recording.inner();
-    // Past the revalidation bound, the next read drops the position and
-    // loads the namespace from the store.
-    fixture.clock.advance_ms(READ_REVALIDATION_BOUND_MS);
+    // A fork drops the position, and the next read loads the namespace from
+    // the store.
+    fixture.drop_position().await;
     gate.block_next();
     let (loaded, positioned) = futures::join!(fixture.reader.stat("/small.txt"), async {
         gate.wait_until_blocked().await;

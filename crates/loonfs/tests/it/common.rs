@@ -28,18 +28,6 @@ pub(crate) fn wal_key(namespace_id: &NamespaceId, wal_no: loonfs_types::WalNo) -
     loonfs_objectstore::keys::wal_object(namespace_id, &wal_no)
 }
 
-/// The GET of a WAL number that finds nothing.
-pub(crate) fn wal_probe(
-    namespace_id: &NamespaceId,
-    wal_no: loonfs_types::WalNo,
-) -> loonfs_test_support::stores::RecordedOperation {
-    loonfs_test_support::stores::RecordedOperation::Get {
-        key: wal_key(namespace_id, wal_no),
-        range: None,
-        result_bytes: 0,
-    }
-}
-
 /// Returns whether `operation` is a HEAD of one of the namespace's manifests,
 /// which is the request that the writer session's check of its position
 /// sends.
