@@ -214,7 +214,7 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         .diagnostics(&namespace_id)
         .await
         .expect("read diagnostics after fold");
-    assert_eq!(diagnostics.current_manifest_no, Some(ManifestNo(3)));
+    assert_eq!(diagnostics.current_manifest_no, Some(ManifestNo(4)));
     assert_root_paths(&fresh_reader(store.clone()).await, &namespace_id, &expected).await;
 
     for index in fold_threshold..(fold_threshold + 3) {

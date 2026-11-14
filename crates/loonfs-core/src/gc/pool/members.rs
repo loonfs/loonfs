@@ -1,6 +1,6 @@
-//! The roots of a pool's members, which protect the pool's content: the
+//! The roots of a pool's members, found through the pool's member list: the
 //! upload sessions, and each member's current manifest, WAL tail, and the
-//! manifests that its snapshots keep, read in the walk over fork snapshots that finds the members.
+//! manifests that its snapshots keep.
 
 use super::uploads::{ListedUpload, ListedUploadSession};
 use crate::error::{CoreError, Result};
@@ -17,32 +17,31 @@ use crate::pool_store::PoolStore;
 use crate::segment::cache::read_working_memory;
 use crate::time::{Observation, OperationClock};
 use futures::TryStreamExt;
-use loonfs_objectstore::keys::metadata_segment_object_key;
+use loonfs_objectstore::keys::{metadata_segment_object_key, pool_member, pool_members_prefix};
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner, SnapshotPayload};
+use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::{ContentId, NamespaceId, PoolId, UploadId};
 use std::sync::Arc;
 
-/// How far the collection has read one member of the pool.
+/// What the collection read of one member of the pool.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberState {
-    /// The member is the pool's first member, or the target of a fork snapshot
-    /// that the walk listed, and the collection hasn't read its roots.
-    Found,
     /// The collection has read the member's roots, and its retirement status by the
     /// collection's clock.
     Read { status: RetirementStatus },
-    /// The member has no current manifest, because no namespace has its ID or
-    /// because its boundary is retired. It has no roots, and no commit can be
-    /// published in it.
-    Absent,
+    /// The listed member is initializing, so it has no roots: LoonFS refuses
+    /// commits to it, so no commit can be published in it that refers to the
+    /// pool's content.
+    NoRoots,
 }
 
-/// How the collection's walk over the pool's members ended.
+/// How the collection's read of the pool's members ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum MemberWalkOutcome {
-    /// The collection read the roots of every member that the walk found.
+pub(super) enum MemberReadOutcome {
+    /// The collection read the roots of every member that the member list
+    /// listed.
     Complete,
     /// [`POOL_ROOTS_READ_BUDGET_MS`] passed before the collection read every
     /// member's roots.
@@ -53,13 +52,13 @@ pub(super) enum MemberWalkOutcome {
 
 /// What the collection read of the pool's members.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct MemberWalkReport {
-    pub(super) outcome: MemberWalkOutcome,
-    /// The pool's first member, and every fork snapshot target that the walk
-    /// found, including a target that's initializing.
+pub(super) struct MemberReadReport {
+    pub(super) outcome: MemberReadOutcome,
+    /// The member entries that the listing of the member list returned, up
+    /// to the entry at which the collection stopped.
     pub(super) members: usize,
-    /// The members whose roots the collection read. A member without a
-    /// current manifest has no roots, and it counts as read.
+    /// The listed entries that the collection read. An initializing member
+    /// and a deleted stale entry count as read.
     pub(super) members_read: usize,
 }
 
@@ -79,12 +78,15 @@ pub(super) struct PoolRoots {
     /// view refers to.
     pub(super) layout_segments: ChargedMap<String, MetadataSegmentRef>,
     pub(super) memory: CollectionMemory,
-    pub(super) walk: MemberWalkReport,
-    /// Every member that the walk has found.
+    pub(super) member_read: MemberReadReport,
+    /// The entries that the listings of the upload sessions and of the
+    /// member list returned.
+    pub(super) listed_objects: u64,
+    /// The bytes of the entries that the listing of the member list returned,
+    /// as the listing reported them.
+    pub(super) member_list_bytes: u64,
+    /// Every listed member that the collection has read.
     members: ChargedMap<NamespaceId, MemberState>,
-    /// The members whose roots the collection hasn't read yet, in the order that
-    /// the fork snapshot listings found them.
-    member_queue: ChargedQueue<NamespaceId>,
     now_ms: u64,
 }
 
@@ -97,9 +99,8 @@ struct MemberRead {
 }
 
 impl PoolRoots {
-    /// Lists the pool's upload sessions, and then reads the roots of every
-    /// member, starting from `first_member_namespace_id`, whose current manifest is
-    /// `first_current`, or `None` when the first member is retired.
+    /// Lists the pool's upload sessions and then the pool's member list, and
+    /// reads the roots of every listed member.
     ///
     /// The sessions, content IDs, layout segments, and members that the
     /// collection keeps are charged to the read working memory of the pool's
@@ -107,9 +108,6 @@ impl PoolRoots {
     /// a completed session that `session_cache` has.
     pub(super) async fn load<S: ObjectStore>(
         pool: &PoolStore<S>,
-        first_member_namespace_id: &NamespaceId,
-        first_current: Result<Option<PublicationBasis>>,
-        observed: Observation,
         session_cache: Option<&CompletedUploadSessionCache>,
         clock: &OperationClock,
     ) -> Result<Self> {
@@ -122,51 +120,45 @@ impl PoolRoots {
             completed_sessions: ChargedMap::new(&memory),
             uploads: ChargedQueue::new(&memory),
             layout_segments: ChargedMap::new(&memory),
-            walk: MemberWalkReport {
-                outcome: MemberWalkOutcome::Complete,
+            member_read: MemberReadReport {
+                outcome: MemberReadOutcome::Complete,
                 members: 0,
                 members_read: 0,
             },
+            listed_objects: 0,
+            member_list_bytes: 0,
             members: ChargedMap::new(&memory),
-            member_queue: ChargedQueue::new(&memory),
             memory,
             now_ms: clock.request_at_ms(),
         };
         let outcome = async {
             // Sessions are listed before any WAL tail is read. A session that
             // this collection misses is newer than the collection, or it ended
-            // before the tail read and the tail or a rooted manifest names
+            // before the tail read and the tail or a rooted manifest refers to
             // every commit of its content.
-            pool.load_upload_sessions(session_cache, |listed, session| {
-                match session {
-                    Some(ListedUploadSession::Completed { upload_id, session }) => {
-                        roots.content_ids.insert(session.content_id.clone())?;
-                        roots.completed_sessions.insert(upload_id, session)?;
+            roots.listed_objects += pool
+                .load_upload_sessions(session_cache, |listed, session| {
+                    match session {
+                        Some(ListedUploadSession::Completed { upload_id, session }) => {
+                            roots.content_ids.insert(session.content_id.clone())?;
+                            roots.completed_sessions.insert(upload_id, session)?;
+                        }
+                        Some(ListedUploadSession::Incomplete { content_id }) => {
+                            roots.content_ids.insert(content_id)?;
+                        }
+                        None => {}
                     }
-                    Some(ListedUploadSession::Incomplete { content_id }) => {
-                        roots.content_ids.insert(content_id)?;
-                    }
-                    None => {}
-                }
-                roots.uploads.push_back(listed)
-            })
-            .await?;
-            roots
-                .load_members(
-                    pool,
-                    first_member_namespace_id,
-                    first_current,
-                    observed,
-                    clock,
-                )
-                .await
+                    roots.uploads.push_back(listed)
+                })
+                .await?;
+            roots.load_members(pool, clock).await
         }
         .await;
         tracing::info!(pool_id = %pool.pool_id,
             content_id_bytes = roots.content_ids.reserved_bytes(),
             completed_session_bytes = roots.completed_sessions.reserved_bytes(),
             layout_segment_bytes = roots.layout_segments.reserved_bytes(),
-            member_bytes = roots.members.reserved_bytes() + roots.member_queue.reserved_bytes(),
+            member_bytes = roots.members.reserved_bytes(),
             live_set_bytes = roots.memory.held_bytes(),
             read_memory_limit_bytes = roots.memory.limit(),
             complete = outcome.is_ok(),
@@ -175,122 +167,116 @@ impl PoolRoots {
         Ok(roots)
     }
 
-    /// Reads the roots of the first member, and then of every other member in
-    /// the order that the walk over fork snapshots finds them.
+    /// Lists the pool's member list once, and reads the roots of each listed
+    /// member as the listing yields its entry.
     ///
-    /// The walk reads each member once, one member at a time. It stops at the
-    /// first member whose roots can't be read, and before a member that it
+    /// The collection reads each member once, one member at a time. It stops
+    /// at a member whose roots can't be read, and before a member that it
     /// would start after [`POOL_ROOTS_READ_BUDGET_MS`] has passed since the
     /// collection's clock started. Either way the collection skips the content
     /// sweep and continues. A charge to the read working memory that fails
-    /// ends the collection.
-    ///
-    /// A retired first member has no roots and no forks, so the pool then
-    /// has no member roots.
+    /// ends the collection, and so does a listing that fails. A key under the
+    /// member list's prefix that isn't a member entry is logged and left
+    /// alone.
     async fn load_members<S: ObjectStore>(
         &mut self,
         pool: &PoolStore<S>,
-        first_member_namespace_id: &NamespaceId,
-        first_current: Result<Option<PublicationBasis>>,
-        observed: Observation,
         clock: &OperationClock,
     ) -> Result<()> {
-        // The first member is found before its snapshot listing, so that a fork snapshot
-        // can't add it to the walk's queue.
-        self.members
-            .insert(first_member_namespace_id.clone(), MemberState::Found)?;
-        self.walk.members = 1;
-        let walked = async {
-            let first = pool.member(first_member_namespace_id.clone());
-            let state = match first_current? {
-                Some(current) => {
-                    let read = self.read_member(&first, current, observed).await?;
-                    self.protect_layout_segments(&read.current)?;
-                    MemberState::Read {
-                        status: read.status,
-                    }
-                }
-                None => MemberState::Absent,
+        let prefix = pool_members_prefix(&pool.pool_id);
+        let mut entries = std::pin::pin!(pool.store.list_entries_from_stream(&prefix, None));
+        while let Some(entry) = entries
+            .try_next()
+            .await
+            .map_err(|error| CoreError::store(&prefix, &error))?
+        {
+            self.listed_objects += 1;
+            self.member_list_bytes += entry.size_bytes;
+            let namespace_id = parse_object_key(&entry.key)
+                .filter(|parsed| parsed.family() == DurableObjectFamily::PoolMember)
+                .and_then(|parsed| parsed.identifier())
+                .and_then(|identifier| NamespaceId::parse(identifier).ok());
+            let Some(member_id) = namespace_id else {
+                tracing::warn!(pool_id = %pool.pool_id, key = %entry.key,
+                    "left alone a key under the pool's member list that isn't a member entry");
+                continue;
             };
-            self.members
-                .insert(first_member_namespace_id.clone(), state)?;
-            self.walk.members_read += 1;
-            while let Some(member_id) = self.member_queue.pop_front() {
-                if clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
-                    return Ok(MemberWalkOutcome::BudgetExceeded);
+            self.member_read.members += 1;
+            if clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
+                self.member_read.outcome = MemberReadOutcome::BudgetExceeded;
+                return Ok(());
+            }
+            let member = pool.member(member_id.clone());
+            match self.load_member(&member, &pool.pool_id).await {
+                Ok(Some(state)) => self.members.insert(member_id, state)?,
+                Ok(None) => {}
+                Err(error @ CoreError::LiveSetExceedsReadMemory { .. }) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        pool_id = %pool.pool_id,
+                        error = %error,
+                        "a pool member's roots couldn't be read; skipping the pool's content sweep"
+                    );
+                    self.member_read.outcome = MemberReadOutcome::UnreadableMember;
+                    return Ok(());
                 }
-                let member = pool.member(member_id.clone());
-                let state = self.load_member(&member, &pool.pool_id).await?;
-                self.members.insert(member_id, state)?;
-                self.walk.members_read += 1;
             }
-            // A member read that ends after the budget is as late as one that
-            // starts after it.
-            Ok::<_, CoreError>(
-                if self.walk.members > 1 && clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
-                    MemberWalkOutcome::BudgetExceeded
-                } else {
-                    MemberWalkOutcome::Complete
-                },
-            )
+            self.member_read.members_read += 1;
         }
-        .await;
-        self.walk.outcome = match walked {
-            Ok(outcome) => outcome,
-            Err(error @ CoreError::LiveSetExceedsReadMemory { .. }) => return Err(error),
-            Err(error) => {
-                tracing::warn!(
-                    pool_id = %pool.pool_id,
-                    error = %error,
-                    "a pool member's roots couldn't be read; skipping the pool's content sweep"
-                );
-                MemberWalkOutcome::UnreadableMember
-            }
-        };
+        // A member read that ends after the budget is as late as one that
+        // starts after it.
+        if self.member_read.members_read > 0 && clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
+            self.member_read.outcome = MemberReadOutcome::BudgetExceeded;
+        }
         Ok(())
     }
 
-    /// Reads the roots of `member`, a fork snapshot's target, and returns the
-    /// member's state.
+    /// Reads the roots of `member`, a namespace that the pool's member list
+    /// lists, and returns the member's state, or `None` for a namespace that
+    /// isn't a member.
     ///
-    /// A fork snapshot's target has manifest 1 before its fork snapshot exists.
-    /// The collection reads nothing of an initializing target beyond its newest
-    /// manifest, and counts it as an active member. Such a target has no roots
-    /// of its own: its manifest lists the source's segments, which the source's
-    /// snapshot keeps, and LoonFS refuses commits to it and forks of it, so it
-    /// has no WAL tail and no forks. A retired target has no roots and no forks.
+    /// An initializing namespace has no roots, and the collection reads
+    /// nothing of it beyond its newest manifest: LoonFS refuses commits to it,
+    /// and a fork's manifest lists the source's segments, which the source's
+    /// snapshot keeps. A retired namespace, an ID without a manifest, and a
+    /// namespace whose manifest records another pool aren't members. The
+    /// collection deletes their entries as the listing yields them and keeps
+    /// nothing of them, so stale entries take no read working memory.
     async fn load_member<S: ObjectStore>(
         &mut self,
         member: &NamespaceStore<S>,
         pool_id: &PoolId,
-    ) -> Result<MemberState> {
+    ) -> Result<Option<MemberState>> {
         let observed = Observation::now(Arc::clone(&member.timer));
-        let NewestManifest::Manifest(current) = member.find_newest_manifest().await? else {
-            return Ok(MemberState::Absent);
+        let reason = match member.find_newest_manifest().await? {
+            NewestManifest::Manifest(current) if current.manifest.payload().pool_id == *pool_id => {
+                if let NamespaceStatus::Initializing {} = current.manifest.payload().status {
+                    return Ok(Some(MemberState::NoRoots));
+                }
+                let read = self.read_member(member, current, observed).await?;
+                self.protect_layout_segments(&read.current)?;
+                return Ok(Some(MemberState::Read {
+                    status: read.status,
+                }));
+            }
+            NewestManifest::Manifest(_) => "other_pool",
+            NewestManifest::Retired => "retired",
+            NewestManifest::Absent => "absent",
         };
-        let recorded = &current.manifest.payload().pool_id;
-        if recorded != pool_id {
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "fork `{}` of pool `{pool_id}` records pool `{recorded}`",
-                member.namespace_id
-            )));
-        }
-        if let NamespaceStatus::Initializing {} = current.manifest.payload().status {
-            return Ok(MemberState::Read {
-                status: RetirementStatus::Active,
-            });
-        }
-        let read = self.read_member(member, current, observed).await?;
-        self.protect_layout_segments(&read.current)?;
-        Ok(MemberState::Read {
-            status: read.status,
-        })
+        let key = pool_member(pool_id, &member.namespace_id);
+        member
+            .store
+            .delete(&key)
+            .await
+            .map_err(|error| CoreError::store(&key, &error))?;
+        tracing::info!(pool_id = %pool_id, namespace_id = %member.namespace_id, reason,
+            "deleted the member entry of a namespace that isn't a member");
+        Ok(None)
     }
 
-    /// Adds the content IDs of the WAL tail above `current`, the layout
-    /// segments of the manifests that the member's snapshots keep, and the targets
-    /// of its fork snapshots, and returns the member's retirement status and
-    /// current manifest.
+    /// Adds the content IDs of the WAL tail above `current` and the layout
+    /// segments of the manifests that the member's snapshots keep, and returns
+    /// the member's retirement status and current manifest.
     ///
     /// A deleted member stays a member until its boundary is retired, so its
     /// status is retained, with its retirement deadline while the deadline is
@@ -326,16 +312,6 @@ impl PoolRoots {
             let ListedSnapshotKey::Snapshot(snapshot) = listed else {
                 continue;
             };
-            if let Some(SnapshotPayload {
-                owner:
-                    SnapshotOwner::Fork {
-                        target_namespace_id,
-                    },
-                ..
-            }) = &snapshot.record
-            {
-                self.add_fork_target(target_namespace_id)?;
-            }
             match &snapshot.manifest {
                 SnapshotManifest::Loaded(manifest) => self.protect_layout_segments(manifest)?,
                 SnapshotManifest::Rooted => {}
@@ -383,46 +359,33 @@ impl PoolRoots {
         Ok(())
     }
 
-    /// Adds `target_namespace_id`, the target of a fork snapshot, to the members
-    /// that the walk has found and to the back of the walk's queue, unless the
-    /// walk has found it already.
-    fn add_fork_target(&mut self, target_namespace_id: &NamespaceId) -> Result<()> {
-        if self.members.get(target_namespace_id).is_some() {
-            return Ok(());
-        }
-        self.members
-            .insert(target_namespace_id.clone(), MemberState::Found)?;
-        self.member_queue.push_back(target_namespace_id.clone())?;
-        self.walk.members += 1;
-        Ok(())
-    }
-
     /// Returns the retirement status of `namespace_id`, the namespace of an
     /// upload session that the collection sweeps, or `None` when the collection can't
     /// decide it.
     ///
-    /// The collection can't decide the status of a member whose roots it hasn't
-    /// read, or of a namespace that the walk didn't find when the walk
-    /// stopped early. A member without a current manifest, which includes a
-    /// retired member, and a namespace that a finished walk didn't find, are
-    /// eligible, because no commit can be published in the first, and only
-    /// retirement deletes the fork snapshot that would find the second. That holds for a namespace with a session that
-    /// the collection listed before the walk, because a namespace has a current
-    /// manifest before it can create a session. A fork installed after the
-    /// walk read its source's snapshots isn't found either, so a session that the
-    /// collection didn't list as completed before the walk can't rely on this status
-    /// to skip the completed-content grace.
+    /// The collection can't decide the status of a listed member whose roots
+    /// it hasn't read, so a namespace that it hasn't read has no status when
+    /// the collection stopped before reading every listed member. A listed
+    /// namespace without roots is eligible, because no commit that refers to
+    /// the pool's content can be published in it. A namespace that isn't in
+    /// the map has no member entry, because the listing didn't include it or
+    /// the collection deleted its entry: it was retired, it isn't in the pool,
+    /// or its entry was written after the listing, and it's eligible too. A session
+    /// that the collection listed before the member listing can't belong to a
+    /// namespace whose entry was written after, because a namespace has its
+    /// entry before it's active. A session that the collection didn't list as
+    /// completed before the member listing can't rely on this status to skip
+    /// the completed-content grace.
     pub(super) fn find_retirement_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Option<RetirementStatus> {
         match self.members.get(namespace_id) {
             Some(MemberState::Read { status }) => Some(*status),
-            Some(MemberState::Absent) => Some(RetirementStatus::Eligible),
-            Some(MemberState::Found) => None,
-            None => match self.walk.outcome {
-                MemberWalkOutcome::Complete => Some(RetirementStatus::Eligible),
-                MemberWalkOutcome::BudgetExceeded | MemberWalkOutcome::UnreadableMember => None,
+            Some(MemberState::NoRoots) => Some(RetirementStatus::Eligible),
+            None => match self.member_read.outcome {
+                MemberReadOutcome::Complete => Some(RetirementStatus::Eligible),
+                MemberReadOutcome::BudgetExceeded | MemberReadOutcome::UnreadableMember => None,
             },
         }
     }

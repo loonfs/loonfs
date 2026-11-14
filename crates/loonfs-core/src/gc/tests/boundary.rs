@@ -34,6 +34,10 @@ async fn publish_more<S: ObjectStore>(store: &S, namespace_id: &NamespaceId, new
         if current == ManifestNo(newest) {
             break;
         }
+        assert!(
+            current < ManifestNo(newest),
+            "manifest {current:?} is past {newest}"
+        );
         namespace
             .acquire_writer_epoch(&context(1_000).writer_id)
             .await
@@ -112,9 +116,10 @@ async fn a_collection_raises_the_boundary_before_it_deletes_a_manifest() {
 
 /// Checks that a collection deletes only the manifests that it chose, and not
 /// a manifest that another collection's raise passed: collection A finds
-/// manifest 1 as the newest and lists no snapshot, then a snapshot is created
-/// on manifest 1, manifests 2 and 3 are published, and collection B deletes
-/// manifest 2 and raises the boundary to 2 before A lists the manifests.
+/// manifest 2 as the newest and lists no snapshot, then a snapshot is created
+/// on manifest 2, manifests 3 and 4 are published, and collection B deletes
+/// manifests 1 and 3 and raises the boundary to 3 before A lists the
+/// manifests.
 #[tokio::test]
 async fn a_collection_deletes_only_the_manifests_that_it_chose() {
     let directory = tempdir().expect("directory");
@@ -123,7 +128,7 @@ async fn a_collection_deletes_only_the_manifests_that_it_chose() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::manifest(&namespace_id),
     ));
-    publish_manifests(&store, &namespace_id, 1).await;
+    publish_manifests(&store, &namespace_id, 2).await;
     // The collection's first listing of the manifests finds its newest
     // manifest, and the gate parks the second, which lists its candidates.
     let manifests = metadata_manifest_prefix(&namespace_id);
@@ -147,18 +152,18 @@ async fn a_collection_deletes_only_the_manifests_that_it_chose() {
         blocked.wait_until_blocked().await;
         let snapshot = create_snapshot(&store, &namespace_id, &context(1_000))
             .await
-            .expect("snapshot on manifest 1");
-        assert_eq!(snapshot.snapshot_id.manifest_no(), ManifestNo(1));
-        publish_more(&store, &namespace_id, 3).await;
+            .expect("snapshot on manifest 2");
+        assert_eq!(snapshot.snapshot_id.manifest_no(), ManifestNo(2));
+        publish_more(&store, &namespace_id, 4).await;
         let report_b = collect(&store, &namespace_id, &context(NOW_MS)).await;
-        assert_eq!(report_b.deleted.manifests, 1);
-        assert!(!manifest_exists(&store, &namespace_id, 2).await);
-        assert_eq!(stored_boundary(&store, &namespace_id).await, Some(2));
+        assert_eq!(report_b.deleted.manifests, 2);
+        assert!(!manifest_exists(&store, &namespace_id, 3).await);
+        assert_eq!(stored_boundary(&store, &namespace_id).await, Some(3));
         blocked.release();
     });
     let report_a = report_a.expect("collection A");
     assert_eq!(report_a.deleted.manifests, 0);
-    assert!(manifest_exists(&store, &namespace_id, 1).await);
+    assert!(manifest_exists(&store, &namespace_id, 2).await);
     assert_eq!(recorded.count(OperationSelector::Put), 0);
 }
 
@@ -171,7 +176,7 @@ async fn a_collection_deletes_only_the_manifests_that_it_chose() {
 async fn the_boundary_ends_at_the_highest_deleted_manifest() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("boundary-stops").expect("namespace");
-    let young_key = metadata_manifest_object(&namespace_id, &ManifestNo(5));
+    let young_key = metadata_manifest_object(&namespace_id, &ManifestNo(6));
     let store = Arc::new(MetadataMapStore::new(
         MetadataMapStore::aged(
             LocalFsStore::new(directory.path()).expect("store"),
@@ -183,28 +188,29 @@ async fn the_boundary_ends_at_the_highest_deleted_manifest() {
             metadata
         },
     ));
-    publish_manifests(&store, &namespace_id, 2).await;
-    // The snapshot's fold publishes manifest 3, and the snapshot keeps it.
+    publish_manifests(&store, &namespace_id, 3).await;
+    // The snapshot's fold publishes manifest 4, and the snapshot keeps it.
     let snapshot = create_snapshot(&store, &namespace_id, &context(1_000))
         .await
-        .expect("snapshot on manifest 3");
-    assert_eq!(snapshot.snapshot_id.manifest_no(), ManifestNo(3));
-    publish_more(&store, &namespace_id, 6).await;
+        .expect("snapshot on manifest 4");
+    assert_eq!(snapshot.snapshot_id.manifest_no(), ManifestNo(4));
+    publish_more(&store, &namespace_id, 7).await;
 
     let recorded = RecordingStore::new(
         Arc::clone(&store),
         KeyPredicate::exact(boundary(&namespace_id)),
     );
     let report = collect(&recorded, &namespace_id, &context(NOW_MS)).await;
-    assert_eq!(report.deleted.manifests, 3);
-    assert_eq!(stored_boundary(&store, &namespace_id).await, Some(4));
+    assert_eq!(report.deleted.manifests, 4);
+    assert_eq!(stored_boundary(&store, &namespace_id).await, Some(5));
     for (number, exists) in [
         (1, false),
         (2, false),
-        (3, true),
-        (4, false),
-        (5, true),
+        (3, false),
+        (4, true),
+        (5, false),
         (6, true),
+        (7, true),
     ] {
         assert_eq!(
             manifest_exists(&store, &namespace_id, number).await,

@@ -382,7 +382,7 @@ impl Maintenance {
     /// every member of the pool.
     ///
     /// Every call rebuilds the members' roots and keeps no cursor. A pool
-    /// without a pool record returns `pool_not_found`.
+    /// with nothing under its prefix returns `pool_not_found`.
     pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<crate::PoolGcResponse> {
         trace::in_operation(
             operation_span!(self.core, "gc_pool", pool_id = pool_id),

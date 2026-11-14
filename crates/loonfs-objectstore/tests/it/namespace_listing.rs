@@ -1,7 +1,7 @@
 //! What a namespace listing and a pool listing cost at the store.
 
 use bytes::Bytes;
-use loonfs_objectstore::keys::{boundary, content_blob, metadata_manifest_object, pool_record};
+use loonfs_objectstore::keys::{boundary, content_blob, metadata_manifest_object, pool_member};
 use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -69,7 +69,7 @@ async fn pool_listing_skips_other_names_and_costs_one_request_per_page() {
     pool_ids.sort();
     for pool_id in &pool_ids {
         for key in [
-            pool_record(pool_id),
+            pool_member(pool_id, &namespace_id("main")),
             content_blob(pool_id, &ContentId::generate()),
         ] {
             store

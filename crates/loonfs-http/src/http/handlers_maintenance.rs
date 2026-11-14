@@ -120,7 +120,7 @@ pub(super) struct PoolSegment {
         path = "/v0/maintenance/pools/{pool_id}/jobs",
         tag = "maintenance",
         summary = "Run one maintenance job on a pool",
-        description = "Runs one maintenance job for the pool. The body's `kind` selects the job, which is `gc`. The response includes the same `kind` and the job's result. A `gc` job reads the pool record, lists the pool's upload sessions, reads the roots of every member of the pool, and then sweeps the pool's content objects, upload records, and temporary objects to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from.",
+        description = "Runs one maintenance job for the pool. The body's `kind` selects the job, which is `gc`. The response includes the same `kind` and the job's result. A `gc` job lists the pool's upload sessions and member entries, reads the roots of every member of the pool, and then sweeps the pool's content objects, upload records, and temporary objects to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from.",
         params(("pool_id" = String, Path, description = "The pool ID.")),
         request_body(content = RunPoolMaintenanceJobRequest, description = "The maintenance job to run"),
         responses(

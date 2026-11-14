@@ -207,8 +207,8 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
 }
 
 /// Checks that a pool's `gc` run returns the pool's result, that a pool
-/// without a pool record is `pool_not_found`, and that an invalid pool ID is
-/// rejected as the path parameter.
+/// with nothing under its prefix is `pool_not_found`, and that an invalid
+/// pool ID is rejected as the path parameter.
 #[tokio::test]
 async fn a_pool_run_collects_the_pool_and_rejects_a_missing_or_invalid_pool() {
     let directory = tempdir().expect("tempdir");

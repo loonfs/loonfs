@@ -172,7 +172,7 @@ pub struct PoolGcResponse {
     /// The bytes of every object that the collection listed under the pool, each object once,
     /// before the collection's deletes.
     pub listed_bytes: u64,
-    /// The earliest future upload cleanup time, or the end of the pool record's creation grace.
+    /// The earliest future upload cleanup time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,

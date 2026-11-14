@@ -73,14 +73,19 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
 
 #[cfg(any(test, feature = "test-support"))]
 impl NamespaceReadState {
+    /// Returns the state of an active namespace without commits, for a test
+    /// that builds a head without a create call.
     pub fn initial(namespace_id: NamespaceId, created_at_ms: u64, created_by: ActorId) -> Self {
-        Self::from(&NamespaceManifestPayload::initial(
-            namespace_id,
-            PoolId::parse("pool_00000000000000000000000001")
-                .expect("a static pool ID should parse"),
-            created_at_ms,
-            created_by,
-            loonfs_types::NamespaceAccess::Unrestricted {},
-        ))
+        Self::from(
+            &NamespaceManifestPayload::initial(
+                namespace_id,
+                PoolId::parse("pool_00000000000000000000000001")
+                    .expect("a static pool ID should parse"),
+                created_at_ms,
+                created_by,
+                loonfs_types::NamespaceAccess::Unrestricted {},
+            )
+            .activated(),
+        )
     }
 }

@@ -1,18 +1,19 @@
 //! Forks a namespace: the fork publishes manifest 1 with the status
 //! `initializing`, built from a snapshot of the source, before it writes its
-//! fork snapshot on the source, and then publishes manifest 2 with the status
-//! `active`. A later fork call with the same request finishes a fork that
-//! stopped before manifest 2, and no segment or content object is copied.
+//! member entry and its fork snapshot on the source, and then publishes
+//! manifest 2 with the status `active`. A later fork call with the same
+//! request finishes a fork that stopped before manifest 2, and no segment or
+//! content object is copied.
 
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::OPERATION_SNAPSHOT_TTL_MS;
 use crate::manifest::load_namespace_manifest_envelope;
-use crate::manifest::publish::{ExistingNamespace, ManifestChange};
+use crate::manifest::publish::ExistingNamespace;
 use crate::merge::merge_start;
 use crate::metadata::MetadataView;
 use crate::namespace::basis::PublicationBasis;
-use crate::namespace::control::{LoadedManifest, NewestManifest};
+use crate::namespace::control::NewestManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::snapshot::record::write_snapshot_record;
@@ -20,7 +21,7 @@ use crate::snapshot::{ensure_live, load_snapshot_basis};
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{
-    ForkBasis, ManifestRef, NamespaceStatus, RebasedFrom, SnapshotOwner, SnapshotPayload,
+    ForkBasis, ManifestRef, RebasedFrom, SnapshotOwner, SnapshotPayload,
 };
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CommitSeq, NamespaceId, NamespaceMetadata, SnapshotId};
@@ -127,9 +128,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///    basis records the snapshot of step 2 and a generated fork snapshot
     ///    ID. When another call's manifest 1 won, the call continues as in
     ///    step 1.
-    /// 5. Checks that this namespace is active and that the snapshot of step
+    /// 5. Writes the fork's member entry in the pool that manifest 1 records.
+    /// 6. Checks that this namespace is active and that the snapshot of step
     ///    2 hasn't ended, writes the fork snapshot, and checks again.
-    /// 6. Publishes manifest 2 with the status `active`.
+    /// 7. Publishes manifest 2 with the status `active`.
     ///
     /// Manifest 1 records the fork snapshot's ID before the snapshot exists,
     /// so every fork snapshot has a namespace whose manifest records it, and
@@ -144,30 +146,49 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<NamespaceMetadata> {
         let clock = self.namespace.start_clock();
         let target = self.namespace.with_namespace(new_namespace_id.clone());
-        let manifest_1 = match target.find_existing_namespace().await? {
-            None => {
-                match self
-                    .publish_fork_manifest_1(&target, actor_id, &at, rebase, &clock)
-                    .await
-                {
-                    Ok(manifest_1) => manifest_1,
-                    Err(CoreError::NamespaceExists { .. }) => {
-                        match target.find_existing_namespace().await? {
-                            Some(existing) => self.matching_manifest_1(existing, &at, rebase)?,
-                            None => {
-                                return Err(CoreError::NamespaceCorrupt(format!(
-                                    "namespace `{new_namespace_id}` has no manifest after its manifest 1 put was refused"
-                                )))
-                            }
-                        }
-                    }
-                    Err(error) => return Err(error),
+        let existing = match target.find_existing_namespace().await? {
+            Some(existing) => existing,
+            None => match self
+                .publish_fork_manifest_1(&target, actor_id, &at, rebase, &clock)
+                .await
+            {
+                Ok(manifest_1) => return self.finish_fork(&target, manifest_1, &clock).await,
+                Err(CoreError::NamespaceExists { .. }) => {
+                    target.find_existing_namespace().await?.ok_or_else(|| {
+                        CoreError::NamespaceCorrupt(format!(
+                            "the manifest 1 put of namespace `{new_namespace_id}` lost to a manifest that isn't there"
+                        ))
+                    })?
                 }
-            }
-            Some(existing) => self.matching_manifest_1(existing, &at, rebase)?,
+                Err(error) => return Err(error),
+            },
         };
+        let manifest_1 = match existing {
+            ExistingNamespace::Initializing(manifest_1) => manifest_1,
+            ExistingNamespace::Active => {
+                return Err(CoreError::NamespaceExists {
+                    namespace_id: new_namespace_id.clone(),
+                })
+            }
+        };
+        self.ensure_fork_request_matches(manifest_1.manifest.payload(), &at, rebase)?;
+        self.finish_fork(&target, manifest_1, &clock).await
+    }
+
+    /// Writes the member entry and the fork snapshot that `manifest_1`
+    /// records, and publishes manifest 2 (steps 5 to 7 of
+    /// [`Self::install_fork`]).
+    async fn finish_fork(
+        &self,
+        target: &NamespaceStore<&S>,
+        manifest_1: PublicationBasis,
+        clock: &OperationClock,
+    ) -> Result<NamespaceMetadata> {
+        target
+            .write_member_entry(&manifest_1.manifest.payload().pool_id)
+            .await?;
         if let Err(error) = self
-            .write_fork_snapshot(manifest_1.manifest.payload(), &clock)
+            .write_fork_snapshot(manifest_1.manifest.payload(), clock)
             .await
         {
             // Another call that finished the fork may have used the same fork
@@ -183,24 +204,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 _ => Err(error),
             };
         }
-        let namespace_id = new_namespace_id.clone();
-        let update = target
-            .update_manifest(Some(manifest_1), &clock, |current: LoadedManifest| {
-                let changed = match current.payload().status {
-                    NamespaceStatus::Initializing {} => Ok(ManifestChange::Next(
-                        Box::new(current.payload().activated()),
-                        (),
-                    )),
-                    NamespaceStatus::Active {} => Ok(ManifestChange::Finished(())),
-                    NamespaceStatus::Deleted { .. } => Err(CoreError::NamespaceDeleted {
-                        namespace_id: namespace_id.clone(),
-                    }),
-                };
-                async move { changed }
-            })
-            .await?;
+        let active = target.publish_active_manifest(manifest_1, clock).await?;
         Ok(crate::namespace::status::created_namespace(
-            update.current.manifest.payload(),
+            active.manifest.payload(),
         ))
     }
 
@@ -268,30 +274,21 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         target.publish_first_manifest(manifest_1, clock).await
     }
 
-    /// Returns the manifest 1 of `existing`, an initializing fork that a call
-    /// with this request finishes, or `namespace_exists` for an active
-    /// namespace or a manifest 1 that the request doesn't match.
+    /// Checks that `manifest_1`, the manifest 1 of an initializing namespace,
+    /// is a fork that a call with this request finishes, and returns
+    /// `namespace_exists` otherwise.
     ///
     /// The request matches when manifest 1 records this namespace as the
     /// source, the snapshot that `at` identifies (any snapshot for a fork of
     /// the head), and the same rebased fork. The creator and the creation
     /// time aren't compared.
-    fn matching_manifest_1(
+    fn ensure_fork_request_matches(
         &self,
-        existing: ExistingNamespace,
+        manifest_1: &NamespaceManifestPayload,
         at: &ForkAt<'_>,
         rebase: Option<Rebase<'_>>,
-    ) -> Result<PublicationBasis> {
-        let current = match existing {
-            ExistingNamespace::Initializing(current) => current,
-            ExistingNamespace::Active(current) => {
-                return Err(CoreError::NamespaceExists {
-                    namespace_id: current.manifest.payload().namespace_id.clone(),
-                })
-            }
-        };
-        let payload = current.manifest.payload();
-        let matches = payload.fork_basis.as_ref().is_some_and(|fork_basis| {
+    ) -> Result<()> {
+        let matches = manifest_1.fork_basis.as_ref().is_some_and(|fork_basis| {
             let same_snapshot = match at {
                 ForkAt::Head(_) => true,
                 ForkAt::Snapshot(snapshot_id) => {
@@ -308,15 +305,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         });
         if !matches {
             return Err(CoreError::NamespaceExists {
-                namespace_id: payload.namespace_id.clone(),
+                namespace_id: manifest_1.namespace_id.clone(),
             });
         }
-        Ok(current)
+        Ok(())
     }
 
     /// Writes the fork snapshot that `manifest_1`, a fork's manifest 1,
     /// records, between two checks that this namespace is active and that the
-    /// snapshot the fork was built from hasn't ended (step 5 of
+    /// snapshot the fork was built from hasn't ended (step 6 of
     /// [`Self::install_fork`]).
     ///
     /// A fork snapshot that another call wrote counts as written.

@@ -400,8 +400,9 @@ impl NamespaceManifestPayload {
             .unwrap_or(self.head_seq)
     }
 
-    /// Constructs manifest 1 with no retention window and no fork basis, which
-    /// records `pool_id`.
+    /// Constructs manifest 1 of a namespace without a source, with the status
+    /// `initializing`, no retention window and no fork basis, which records
+    /// `pool_id`.
     pub fn initial(
         namespace_id: NamespaceId,
         pool_id: PoolId,
@@ -417,7 +418,7 @@ impl NamespaceManifestPayload {
             access,
             retention_window_ms: None,
             fork_basis: None,
-            status: NamespaceStatus::Active {},
+            status: NamespaceStatus::Initializing {},
             writer: None,
             manifest_no: ManifestNo(1),
             compactor_epoch: CompactorEpoch(0),
@@ -529,12 +530,7 @@ impl NamespaceManifestPayload {
         if self.manifest_no != ManifestNo(1) {
             return invalid("manifest_no");
         }
-        let status_matches_fork_basis = match self.status {
-            NamespaceStatus::Initializing {} => self.fork_basis.is_some(),
-            NamespaceStatus::Active {} => self.fork_basis.is_none(),
-            NamespaceStatus::Deleted { .. } => false,
-        };
-        if !status_matches_fork_basis {
+        if self.status != (NamespaceStatus::Initializing {}) {
             return invalid("status");
         }
         if self.writer.is_some() {
@@ -746,7 +742,8 @@ mod tests {
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
-        );
+        )
+        .activated();
         assert_eq!(maximum.checked_add(Default::default()), Some(maximum));
         let mut successor = initial.clone();
         successor.manifest_no = ManifestNo(2);
@@ -816,7 +813,8 @@ mod tests {
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
-        );
+        )
+        .activated();
         let mut next = initial.clone();
         next.manifest_no = ManifestNo(2);
         for (field, change) in [
@@ -901,7 +899,8 @@ mod tests {
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
-        );
+        )
+        .activated();
         let snapshot_id = |random: u8| {
             crate::SnapshotId::parse(format!(
                 "snp_00000000000000000001-0000000000000000000000000{random}"
@@ -960,13 +959,11 @@ mod tests {
 
         let mut active_fork = initializing.clone();
         active_fork.status = crate::control::NamespaceStatus::Active {};
-        let mut initializing_create = source.clone();
-        initializing_create.status = crate::control::NamespaceStatus::Initializing {};
-        for first in [active_fork, initializing_create] {
+        for first in [active_fork, source.clone()] {
             assert_eq!(
                 first
                     .ensure_first_manifest()
-                    .expect_err("the status should match the fork basis")
+                    .expect_err("manifest 1 should be initializing")
                     .field,
                 "status"
             );
@@ -981,7 +978,8 @@ mod tests {
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
-        );
+        )
+        .activated();
         let mut later = initial.clone();
         later.manifest_no = ManifestNo(4);
         later.head_seq = CommitSeq(3);

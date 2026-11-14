@@ -55,7 +55,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
         }
         keys.push(publish_inline(&store, namespace_id, index, &setup).await);
     }
-    let pool_id = pool_id.expect("the first member's pool");
+    let pool_id = pool_id.expect("the pool of the chain");
     let middle_snapshot = read_fork_record(&store, &namespaces[0]).await;
     let leaf_snapshot = read_fork_record(&store, &namespaces[1]).await;
     for namespace_id in &namespaces[..2] {
@@ -124,7 +124,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
                     .await
             );
         } else {
-            // The first member retires last, and then the pool has no members,
+            // The namespace created with the pool retires last, and then the pool has no members,
             // so the pool's collection deletes the aged content.
             assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
             let pool_report = collect_pool(&store, &pool_id, &aged).await;

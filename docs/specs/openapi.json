@@ -4545,7 +4545,7 @@
             "type": "integer"
           },
           "next_reclamation_at_ms": {
-            "description": "The earliest future upload cleanup time, or the end of the pool record's creation grace.",
+            "description": "The earliest future upload cleanup time.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -6010,7 +6010,7 @@
     },
     "/v0/maintenance/pools/{pool_id}/jobs": {
       "post": {
-        "description": "Runs one maintenance job for the pool. The body's `kind` selects the job, which is `gc`. The response includes the same `kind` and the job's result. A `gc` job reads the pool record, lists the pool's upload sessions, reads the roots of every member of the pool, and then sweeps the pool's content objects, upload records, and temporary objects to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from.",
+        "description": "Runs one maintenance job for the pool. The body's `kind` selects the job, which is `gc`. The response includes the same `kind` and the job's result. A `gc` job lists the pool's upload sessions and member entries, reads the roots of every member of the pool, and then sweeps the pool's content objects, upload records, and temporary objects to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from.",
         "operationId": "run_pool_maintenance_job",
         "parameters": [
           {

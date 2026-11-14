@@ -12,7 +12,7 @@ use loonfs_core::test_support::{
 };
 use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::keys::{
-    boundary, content_blob, metadata_manifest_object, metadata_manifest_prefix, pool_record,
+    boundary, content_blob, metadata_manifest_object, metadata_manifest_prefix, pool_member,
     snapshot_prefix, snapshot_record,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -408,7 +408,7 @@ async fn namespace_keys<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
+async fn a_created_namespace_reads_manifest_two_before_its_first_fold() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = default_writer();
@@ -423,8 +423,11 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
     assert_eq!(created.retention_floor_seq, CommitSeq(0));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![metadata_manifest_object(&namespace_id, &ManifestNo(1))],
-        "creation installs manifest one"
+        vec![
+            metadata_manifest_object(&namespace_id, &ManifestNo(1)),
+            metadata_manifest_object(&namespace_id, &ManifestNo(2)),
+        ],
+        "creation publishes manifests one and two"
     );
 
     let root_entry = resolve_path(&store, &namespace_id, "/")
@@ -438,7 +441,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .load_diagnostics()
         .await
         .expect("status");
-    assert_eq!(status.current_manifest_no, ManifestNo(1));
+    assert_eq!(status.current_manifest_no, ManifestNo(2));
     assert_eq!(status.retention_floor_seq, CommitSeq(0));
 
     NamespaceFixture::new(&store, &namespace_id, &context)
@@ -465,7 +468,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .expect("fold");
     assert!(
         store
-            .head(&metadata_manifest_object(&namespace_id, &ManifestNo(3)))
+            .head(&metadata_manifest_object(&namespace_id, &ManifestNo(4)))
             .await
             .expect("probe root")
             .is_some(),
@@ -482,7 +485,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .load_diagnostics()
         .await
         .expect("status after fold");
-    assert_eq!(status.current_manifest_no, ManifestNo(3));
+    assert_eq!(status.current_manifest_no, ManifestNo(4));
 }
 
 /// Checks that two forks with the same request into one target both succeed
@@ -1242,14 +1245,18 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     let namespace_id = namespace_id("demo");
     let context = default_writer();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    // Another writer's complete head for the same id, already durable.
-    let foreign = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
-        namespace_id.clone(),
-        loonfs_types::PoolId::generate(),
-        1_000,
-        loonfs_test_support::test_actor(),
-        loonfs_types::NamespaceAccess::Unrestricted {},
-    );
+    // Another create's manifest 1 for the same ID, with another retention
+    // window, already durable.
+    let foreign = loonfs_types::format::manifest::NamespaceManifestPayload {
+        retention_window_ms: std::num::NonZeroU64::new(7 * 24 * 60 * 60 * 1_000),
+        ..loonfs_types::format::manifest::NamespaceManifestPayload::initial(
+            namespace_id.clone(),
+            loonfs_types::PoolId::generate(),
+            1_000,
+            loonfs_test_support::test_actor(),
+            loonfs_types::NamespaceAccess::Unrestricted {},
+        )
+    };
     let foreign_bytes =
         loonfs_types::format::manifest::encode_namespace_manifest_json(foreign.clone())
             .map(|encoded| encoded.into_bytes())
@@ -1471,10 +1478,11 @@ fn request_order(
 }
 
 /// Checks that a create and a fork each look for the new namespace before
-/// their first write, then write the pool record or the temporary snapshot,
-/// and then publish manifest 1 with its put and one read of the manifest
-/// boundary. The fork then writes its fork snapshot and publishes manifest 2.
-/// A create or fork of a taken ID writes nothing.
+/// their first write, and then publish manifest 1 with its put and one read
+/// of the manifest boundary, write the member entry, and publish manifest 2.
+/// The fork writes the temporary snapshot before manifest 1 and its fork
+/// snapshot after the member entry. A create or fork of a taken ID writes
+/// nothing.
 #[tokio::test]
 async fn creation_and_fork_look_up_the_id_before_their_first_write() {
     let directory = tempdir().expect("tempdir");
@@ -1495,24 +1503,28 @@ async fn creation_and_fork_look_up_the_id_before_their_first_write() {
             ("get", boundary(namespace_id)),
         ]
     };
-    let pool = pool_record(&created.pool_id);
+    let source_entry = pool_member(&created.pool_id, &source);
     let source_manifest = metadata_manifest_object(&source, &ManifestNo(1));
+    let source_manifest_2 = metadata_manifest_object(&source, &ManifestNo(2));
     assert_eq!(
         request_order(
             store.take(),
             &[
                 boundary(&source),
                 metadata_manifest_prefix(&source),
-                pool.clone(),
+                source_entry.clone(),
                 source_manifest.clone(),
+                source_manifest_2.clone(),
             ],
             &snapshot_prefix(&source),
         ),
         [
             first_manifest(&source),
             vec![
-                ("put", pool),
                 ("put", source_manifest),
+                ("get", boundary(&source)),
+                ("put", source_entry),
+                ("put", source_manifest_2),
                 ("get", boundary(&source)),
             ],
         ]
@@ -1525,12 +1537,14 @@ async fn creation_and_fork_look_up_the_id_before_their_first_write() {
         .expect("fork");
     let target_manifest = metadata_manifest_object(&target, &ManifestNo(1));
     let target_manifest_2 = metadata_manifest_object(&target, &ManifestNo(2));
+    let target_entry = pool_member(&created.pool_id, &target);
     assert_eq!(
         request_order(
             store.take(),
             &[
                 boundary(&target),
                 metadata_manifest_prefix(&target),
+                target_entry.clone(),
                 target_manifest.clone(),
                 target_manifest_2.clone(),
             ],
@@ -1542,6 +1556,7 @@ async fn creation_and_fork_look_up_the_id_before_their_first_write() {
                 ("put", "snapshot".to_owned()),
                 ("put", target_manifest),
                 ("get", boundary(&target)),
+                ("put", target_entry),
                 ("put", "snapshot".to_owned()),
                 ("put", target_manifest_2),
                 ("get", boundary(&target)),
@@ -1739,18 +1754,15 @@ async fn a_creator_losing_manifest_one_leaves_no_extra_objects() {
     assert_eq!(winner.namespace_id, namespace_id);
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
-        vec![metadata_manifest_object(&namespace_id, &ManifestNo(1))]
+        vec![
+            metadata_manifest_object(&namespace_id, &ManifestNo(1)),
+            metadata_manifest_object(&namespace_id, &ManifestNo(2)),
+        ]
     );
     assert_eq!(
-        store
-            .list_prefix("pools/")
-            .await
-            .expect("pool records")
-            .into_iter()
-            .filter(|key| key.ends_with("/pool.json"))
-            .count(),
-        1,
-        "the losing create deletes its pool record"
+        store.list_prefix("pools/").await.expect("member entries"),
+        [pool_member(&winner.pool_id, &namespace_id)],
+        "the losing create writes no member entry"
     );
 }
 
@@ -1835,12 +1847,15 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .await
             .expect("retire leaf");
         assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
-        assert!(
+        assert_eq!(
             store
                 .snapshot()
                 .iter()
-                .all(|operation| !operation.key().starts_with("pools/")),
-            "a fork's collection makes no request under its pool's prefix"
+                .filter(|operation| operation.key().starts_with("pools/"))
+                .map(|operation| operation.key().to_owned())
+                .collect::<Vec<_>>(),
+            [pool_member(&pool_id, &leaf)],
+            "a fork's collection deletes its member entry and makes no other request under its pool's prefix"
         );
         assert!(store.head(&leaf_key).await.expect("leaf content").is_some());
         let report = pool_store(&store, &pool_id)

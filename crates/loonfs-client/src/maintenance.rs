@@ -169,7 +169,7 @@ impl Client {
 
     /// Runs one garbage collection of a pool.
     ///
-    /// A pool with no pool record returns `pool_not_found`. Retrying this
+    /// A pool with nothing under its prefix returns `pool_not_found`. Retrying this
     /// request starts a distinct attempt.
     pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<PoolGcResponse> {
         let response = self

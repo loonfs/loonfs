@@ -374,16 +374,17 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
     let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
     let content_prefix = loonfs_objectstore::keys::content_prefix(&pool_id);
     assert!(!keys_under(store.as_ref(), &content_prefix).await.is_empty());
-    // A pool that a listing finds without its pool record is skipped, as a
-    // pool whose create call deleted the record after the listing is.
-    let unrecorded = loonfs_objectstore::keys::content_blob(
+    // A pool with content and no member entry is collected like any pool
+    // without members: its content is deleted once it's older than the grace
+    // window.
+    let unlisted_member = loonfs_objectstore::keys::content_blob(
         &loonfs_types::PoolId::generate(),
         &loonfs_types::ContentId::generate(),
     );
     store
-        .put_if_absent(&unrecorded, bytes::Bytes::from_static(b"content"))
+        .put_if_absent(&unlisted_member, bytes::Bytes::from_static(b"content"))
         .await
-        .expect("an object of a pool without a record");
+        .expect("an object of a pool without a member entry");
 
     let server = SchedulerServer::start(store.clone(), &scheduler_config(None), now_ms).await;
     server.scheduler.run_sweep().await.expect("list namespaces");
@@ -391,6 +392,7 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
         !keys_under(store.as_ref(), &content_prefix).await.is_empty(),
         "content outlives the deletion until the grace window passes"
     );
+    assert!(store.head(&unlisted_member).await.expect("head").is_some());
 
     server
         .clock
@@ -414,9 +416,9 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
     assert_eq!(
         server.counter("loonfs.maintenance.sweep_failures", &[("call", "pool_gc")]),
         0,
-        "a pool without a record is not a failed call"
+        "a pool without a member entry is not a failed call"
     );
-    assert!(store.head(&unrecorded).await.expect("head").is_some());
+    assert!(store.head(&unlisted_member).await.expect("head").is_none());
     assert_eq!(
         server.counter("loonfs.maintenance.sweep_failures", &[("call", "metadata")]),
         0,
@@ -1051,15 +1053,16 @@ enum Grep {
 /// the two collections then check the manifest with a GET of the WAL number
 /// after it, a HEAD of the manifest number after it, and a read of the
 /// boundary, so each of them sends 7 requests before its own listings. The
-/// namespace's collection adds 5 listings, and the pool's collection adds a
-/// read of the pool record and 4 listings, so the four calls cost 7, 7, 12,
-/// and 12. A maintained grep index adds a call that finds the newest manifest
+/// namespace's collection adds 5 listings, and the pool's collection lists
+/// the upload sessions and the member entries before it reads the member,
+/// and then lists the member's snapshots, the content, and the temporary
+/// objects, so the four calls cost 7, 7, 12, and 12. A maintained grep index adds a call that finds the newest manifest
 /// (4), and an enabled one also reads the WAL number after it (5). The docs
 /// quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
-    (Grep::NotMaintained, 38, 13),
-    (Grep::Maintained, 42, 14),
-    (Grep::Enabled, 43, 14),
+    (Grep::NotMaintained, 38, 14),
+    (Grep::Maintained, 42, 15),
+    (Grep::Enabled, 43, 15),
 ];
 
 #[tokio::test(start_paused = true)]
@@ -1158,12 +1161,12 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
 /// boundary costs in a sweep, under the namespace's prefix, and how many of
 /// them are lists. The metadata call reads the boundary and stops at the
 /// retired boundary (1). The namespace's collection reads the boundary and
-/// lists the namespace's prefix (2). The pool's collection reads its first
-/// member's boundary to find the member (1). The sweep makes no grep index
-/// call and no retention advance for the namespace, so a maintained grep index
-/// adds nothing. A retired namespace can't enable grep, so the enabled case is
-/// left out.
-const RETIRED_SWEEP_REQUESTS: (usize, usize) = (4, 1);
+/// lists the namespace's prefix (2). The namespace's retirement deleted its
+/// member entry, so the pool's collection doesn't read the namespace. The
+/// sweep makes no grep index call and no retention advance for the
+/// namespace, so a maintained grep index adds nothing. A retired namespace
+/// can't enable grep, so the enabled case is left out.
+const RETIRED_SWEEP_REQUESTS: (usize, usize) = (3, 1);
 
 #[tokio::test(start_paused = true)]
 async fn a_retired_namespace_costs_a_sweep_a_fixed_number_of_requests_and_no_failure() {

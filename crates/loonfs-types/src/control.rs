@@ -1,5 +1,5 @@
 //! Durable control-object shapes: the manifest boundary,
-//! snapshots, upload session and outcome records, pool records, and their envelopes
+//! snapshots, upload session and outcome records, pool member entries, and their envelopes
 //! ([Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads)).
 
 use crate::envelope::EnvelopeCodecError;
@@ -24,8 +24,8 @@ pub enum ControlObjectKind {
     UploadSession,
     /// Records how one upload session ended.
     UploadOutcome,
-    /// Records the creation of one pool.
-    Pool,
+    /// Records one member of a pool.
+    PoolMember,
     /// Records the manifest number at or below which every manifest of a
     /// namespace is replaced.
     Boundary,
@@ -37,7 +37,7 @@ impl ControlObjectKind {
         Self::Snapshot,
         Self::UploadSession,
         Self::UploadOutcome,
-        Self::Pool,
+        Self::PoolMember,
         Self::Boundary,
     ];
 
@@ -52,7 +52,7 @@ impl ControlObjectKind {
             Self::Snapshot => 1,
             Self::UploadSession => 1,
             Self::UploadOutcome => 1,
-            Self::Pool => 1,
+            Self::PoolMember => 1,
             Self::Boundary => 1,
         }
     }
@@ -63,7 +63,7 @@ impl ControlObjectKind {
             Self::Snapshot => "snapshot",
             Self::UploadSession => "upload_session",
             Self::UploadOutcome => "upload_outcome",
-            Self::Pool => "pool",
+            Self::PoolMember => "pool_member",
             Self::Boundary => "boundary",
         }
     }
@@ -459,22 +459,23 @@ pub struct UploadOutcomePayload {
     pub outcome: UploadOutcome,
 }
 
-/// The record that a namespace's create call writes when the call generates
-/// a pool.
+/// The entry of one member in its pool's member list, stored at
+/// `pools/{pool_id}/members/{namespace_id}.json`.
 ///
-/// LoonFS writes the record once, with put-if-absent, before the namespace's
-/// manifest 1, and never changes the record.
+/// A create or fork call writes the entry once, with put-if-absent, after
+/// the namespace's manifest 1 and before its manifest 2, and the namespace's
+/// retirement deletes it. Both fields MUST match the key. The pool's
+/// collection finds the pool's members through their entries, by key, and
+/// doesn't read the payload.
 ///
-/// See [pools and pool records](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md#pools-and-pool-records).
+/// See [the pool's member list](https://github.com/loonfs/loonfs/blob/main/docs/design/namespace-creation.md#the-pools-member-list).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PoolPayload {
-    /// The pool that the record describes.
+pub struct PoolMemberPayload {
+    /// The pool whose member list contains the entry.
     pub pool_id: PoolId,
-    /// The namespace that was created with the pool, the pool's first member.
-    pub first_member_namespace_id: NamespaceId,
-    /// The create call's request clock, in unix milliseconds.
-    pub created_at_ms: u64,
+    /// The member.
+    pub namespace_id: NamespaceId,
 }
 
 /// Control state decoded through its checked durable codec.

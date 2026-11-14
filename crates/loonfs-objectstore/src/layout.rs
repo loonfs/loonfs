@@ -3,9 +3,10 @@
 
 use crate::keys::{
     namespace_prefix, pool_prefix, BOUNDARY_NAME, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY,
-    MANIFEST_DIRECTORY, MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, POOLS_DIRECTORY, POOL_RECORD_NAME,
-    SEGMENT_DIRECTORY, SEGMENT_SUFFIX, SNAPSHOT_DIRECTORY, SNAPSHOT_SUFFIX, TEMPORARY_DIRECTORY,
-    UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
+    MANIFEST_DIRECTORY, MANIFEST_SUFFIX, MEMBERS_DIRECTORY, MEMBER_ENTRY_SUFFIX,
+    NAMESPACES_DIRECTORY, POOLS_DIRECTORY, SEGMENT_DIRECTORY, SEGMENT_SUFFIX, SNAPSHOT_DIRECTORY,
+    SNAPSHOT_SUFFIX, TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX,
+    UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
 use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, PoolId, UploadId};
@@ -47,8 +48,8 @@ pub enum DurableObjectFamily {
     UploadSession,
     /// Classifies the record of how an upload session ended.
     UploadOutcome,
-    /// Classifies the record that a pool's create call writes.
-    Pool,
+    /// Classifies the entry of one member of a pool.
+    PoolMember,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
     /// Classifies a temporary object that an assembly writes and deletes.
@@ -65,7 +66,7 @@ pub enum KeyPrefix<'a> {
     /// namespace owns.
     Namespace(&'a str),
     /// The prefix of a pool (`pools/{pool_id}/`), which contains the pool's
-    /// pool record, content objects, upload records, and temporary objects.
+    /// member entries, content objects, upload records, and temporary objects.
     Pool(&'a str),
 }
 
@@ -83,7 +84,7 @@ impl<'a> ParsedObjectKey<'a> {
         self.family
     }
 
-    /// Returns the prefix that contains the key: the pool for a pool record,
+    /// Returns the prefix that contains the key: the pool for a member entry,
     /// a content object, an upload record, or a temporary object, the owner
     /// namespace for a metadata or extension segment, and the namespace
     /// itself for every other family.
@@ -104,11 +105,15 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        [POOLS_DIRECTORY, pool_id, POOL_RECORD_NAME] => Some(parsed(
-            DurableObjectFamily::Pool,
-            KeyPrefix::Pool(pool_id),
-            None,
-        )),
+        [POOLS_DIRECTORY, pool_id, MEMBERS_DIRECTORY, entry] => {
+            entry.strip_suffix(MEMBER_ENTRY_SUFFIX).map(|namespace_id| {
+                parsed(
+                    DurableObjectFamily::PoolMember,
+                    KeyPrefix::Pool(pool_id),
+                    Some(namespace_id),
+                )
+            })
+        }
         [POOLS_DIRECTORY, pool_id, CONTENT_DIRECTORY, content_id]
             if content_id.len() == CONTENT_ID_BYTES =>
         {
@@ -350,8 +355,7 @@ impl PoolPageCursor {
 /// the paging of [`list_namespace_ids`].
 ///
 /// A child of `pools/` whose name is not a pool id is skipped and counted in
-/// `skipped_entries`. A pool whose members are all retired is still listed,
-/// because its pool record stays.
+/// `skipped_entries`. A pool is listed while any object is under its prefix.
 pub async fn list_pool_ids<S: ObjectStore + ?Sized>(
     store: &S,
     start_after: Option<&PoolPageCursor>,
@@ -425,7 +429,7 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily, KeyPrefix};
     use crate::keys::{
         boundary, content_blob, extension_segment, metadata_manifest_object, metadata_segment,
-        metadata_segment_prefix, pool_record, snapshot_record, temporary_object, upload_outcome,
+        metadata_segment_prefix, pool_member, snapshot_record, temporary_object, upload_outcome,
         upload_session, wal_object, wal_prefix,
     };
     use loonfs_test_support::ids::numbered_pool_id;
@@ -520,7 +524,12 @@ mod tests {
                 namespace,
                 Some(snapshot_id.as_str()),
             ),
-            (pool_record(&pool_id), DurableObjectFamily::Pool, pool, None),
+            (
+                pool_member(&pool_id, &namespace_id),
+                DurableObjectFamily::PoolMember,
+                pool,
+                Some(namespace_id.as_str()),
+            ),
             (
                 upload_session(&pool_id, &upload_id),
                 DurableObjectFamily::UploadSession,
@@ -562,6 +571,11 @@ mod tests {
         assert_eq!(
             content_blob(&pool_id, &content_id),
             format!("pools/{pool_id}/content/{content_id}")
+        );
+        assert_eq!(
+            parse_object_key(&format!("pools/{pool_id}/members/{namespace_id}")),
+            None,
+            "a member entry key ends in .json"
         );
     }
 

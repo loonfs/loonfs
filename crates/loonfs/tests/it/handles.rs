@@ -429,7 +429,7 @@ fn manual_only_writer_folds_without_scheduling_maintenance() {
             .expect("status after writes");
         assert_eq!(
             status.current_manifest_no,
-            Some(ManifestNo(4)),
+            Some(ManifestNo(5)),
             "the writer should have folded twice on its own: {status:?}"
         );
         assert!(
@@ -800,7 +800,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .expect("status after the shutdown");
         assert_eq!(
             status.current_manifest_no,
-            Some(ManifestNo(2)),
+            Some(ManifestNo(3)),
             "a shut-down writer must not schedule folds: {status:?}"
         );
         assert_eq!(

@@ -83,7 +83,7 @@ For each namespace, a sweep advances the retention floor under the cutoff rule i
 
 Sweeps and session steps share `max_concurrent_maintenance` slots, and the scheduler keeps a claim on each namespace whose steps are running, so it never runs the steps of one namespace twice at once. If a namespace is busy, the sweep leaves it to the steps that are running, and those steps also make the sweep's retention advance once they finish. A sweep lists up to 1000 IDs per page, and it requests the next page when one of its slots is free and no listed ID is waiting. After a listing failure, the sweep starts the steps of no more namespaces, and the running steps finish before the sweep returns the error. A sweep whose namespace listing fails collects no pools, and a failure of the pool listing starts no more pool collections in the same way. The next sweep lists the store again.
 
-A pool has no entry and no retry state. The scheduler records a failed collection of a pool under the call name `pool_gc` and logs it, and the next sweep tries the collection again. A listed pool whose collection returns `pool_not_found` isn't a failure, because a create call can delete its pool record between the listing and the collection.
+A pool has no scheduler entry and no retry state. The scheduler records a failed collection of a pool under the call name `pool_gc` and logs it, and the next sweep tries the collection again. A listed pool whose collection returns `pool_not_found` isn't a failure, because the pool's prefix can empty between the listing and the collection.
 
 Sweeps and session steps run in separate loops. A long compaction uses one slot until it finishes, and the other free slots can keep working. The scheduler starts a session's steps without waiting for the steps that other sessions started at the interval before, so a session's long metadata step delays only that session: at each interval, the scheduler starts no steps for a session whose earlier steps are still pending or running, and starts the steps of every other session. All maintenance from one runtime shares that runtime's compactor claim and execution budget. Shutdown cancels both loops and stops new steps, and a running compaction stops at its next block, within the server's shutdown deadline.
 
@@ -123,9 +123,9 @@ A daily sweep costs one namespace listing per page, one pool listing per page, a
 
 | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- |
-| 25 GET or HEAD and 9 LIST | 29 GET or HEAD and 9 LIST | 30 GET or HEAD and 9 LIST |
+| 24 GET or HEAD and 14 LIST | 27 GET or HEAD and 15 LIST | 28 GET or HEAD and 15 LIST |
 
-Objects that are still inside their grace windows, work that's due, and the roots of each fork in a pool add more requests. Deleted namespaces are still listed, because their tombstone manifests are still stored. A retired namespace is listed too, because its manifest boundary object stays under its prefix after later collections delete everything else, and each retired namespace costs every sweep 3 requests under its prefix: the metadata call reads the boundary and returns `namespace_deleted`, and the namespace's collection reads the boundary and lists the prefix once. A retired namespace that is its pool's first member costs 4, because the pool's collection reads the boundary of the pool's first member. That cost grows with the number of retired namespaces in the store.
+Objects that are still inside their grace windows, work that's due, and the roots of each fork in a pool add more requests. Deleted namespaces are still listed, because their tombstone manifests are still stored. A retired namespace is listed too, because its manifest boundary object stays under its prefix after later collections delete everything else, and each retired namespace costs every sweep 3 requests under its prefix: the metadata call reads the boundary and returns `namespace_deleted`, and the namespace's collection reads the boundary and lists the prefix once. Retirement deletes the namespace's member entry, so the pool's collection doesn't list a retired namespace. That cost grows with the number of retired namespaces in the store.
 
 ## Recovery after a restart
 
@@ -135,7 +135,7 @@ After a restart, each kind of work starts again from durable state:
 | --- | --- |
 | WAL fold | The current manifest and the numbered WAL tail. |
 | Metadata compaction | The current manifest, the selected input descriptors, and a new runtime epoch claim. |
-| Core garbage collection | For a namespace, fresh discovery of the current manifest and a complete listing of snapshots. For a pool, the pool record, a complete listing of upload sessions, and fresh discovery of each member's current manifest. |
+| Core garbage collection | For a namespace, fresh discovery of the current manifest and a complete listing of snapshots. For a pool, a complete listing of the member entries and of the upload sessions, and fresh discovery of each member's current manifest. |
 | Grep indexing | Grep's entry in the current manifest, with its build or reorganization cursor. |
 
 A grep build records its progress durably in grep's entry, and steps whose changes hadn't been published when the process stopped run again. A core compaction or garbage collection has no equivalent durable cursor, so the next attempt repeats it from the start.

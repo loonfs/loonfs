@@ -477,7 +477,7 @@ Maintenance
       listed 734003200 bytes under the pool
       next reclamation at 2026-11-11 09:30:00Z
 
-    A pool with no pool record returns `pool_not_found`.
+    A pool with nothing under its prefix returns `pool_not_found`.
 
   loonfs maintenance snapshot list [--limit <n>] [--page-size <n>]
                              [--cursor <cursor>] [--all] [--jsonl]

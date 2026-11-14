@@ -10,9 +10,9 @@ use loonfs_test_support::clock::ManualClock;
 /// The probe window, as a count of manifest numbers.
 const MANIFEST_PROBE_WINDOW_U64: u64 = MANIFEST_PROBE_WINDOW as u64;
 
-/// Creates a namespace whose current manifest is a writer claim at
+/// Creates a namespace whose current manifest is the create's active
 /// manifest 2.
-async fn claimed_namespace(
+async fn created_namespace(
     directory: &std::path::Path,
 ) -> (RecordingStore<LocalFsStore>, NamespaceId) {
     let namespace_id = NamespaceId::parse("basis-publication").expect("namespace");
@@ -25,10 +25,6 @@ async fn claimed_namespace(
         .create()
         .await
         .expect("create");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .acquire_writer_epoch(&context.writer_id)
-        .await
-        .expect("claim manifest 2");
     store.reset();
     (store, namespace_id)
 }
@@ -79,7 +75,7 @@ fn manifests(namespace_id: &NamespaceId, first: u64, last: u64) -> Vec<String> {
 #[tokio::test]
 async fn a_publication_from_an_old_basis_puts_with_no_request_first() {
     let directory = tempdir().expect("directory");
-    let (store, namespace_id) = claimed_namespace(directory.path()).await;
+    let (store, namespace_id) = created_namespace(directory.path()).await;
     crate::test_support::namespace_store(store.inner(), &namespace_id)
         .raise_boundary(ManifestNo(1))
         .await
@@ -110,7 +106,7 @@ async fn a_publication_from_an_old_basis_puts_with_no_request_first() {
 #[tokio::test]
 async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest() {
     let directory = tempdir().expect("directory");
-    let (store, namespace_id) = claimed_namespace(directory.path()).await;
+    let (store, namespace_id) = created_namespace(directory.path()).await;
     let basis = current_basis(store.inner(), &namespace_id).await;
     let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
     let gate = BlockingStore::new(

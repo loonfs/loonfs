@@ -272,13 +272,13 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .expect("create snapshot");
     // The published manifest already covers the head: taking a snapshot writes a
     // record against it instead of materializing a new manifest.
-    assert_eq!(snapshot.manifest_no, ManifestNo(1));
+    assert_eq!(snapshot.manifest_no, ManifestNo(2));
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
     assert_eq!(
         materialization.manifest.manifest().manifest_no,
-        ManifestNo(1)
+        ManifestNo(2)
     );
     let record = crate::test_support::namespace_store(&store, &namespace_id)
         .load_snapshot_record(&snapshot.snapshot_id)
@@ -288,7 +288,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .state;
     assert!(SnapshotId::parse(record.snapshot_id.as_str()).is_ok());
     assert_eq!(record.head_seq, CommitSeq(0));
-    assert_eq!(record.snapshot_id.manifest_no(), ManifestNo(1));
+    assert_eq!(record.snapshot_id.manifest_no(), ManifestNo(2));
     assert!(metadata_states_equivalent(
         &materialization.metadata_state,
         &genesis.base_state

@@ -18,7 +18,7 @@ fn context() -> WriterAt {
 async fn deletion_budget_includes_writer_acquisition() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("deletion-budget").expect("namespace");
-    // The acquisition's check for a successor of its claim (manifest 2) is
+    // The acquisition's check for a successor of its claim (manifest 3) is
     // held while the clock passes the budget.
     let store = BlockingStore::new(
         RecordingStore::new(
@@ -27,7 +27,7 @@ async fn deletion_budget_includes_writer_acquisition() {
         ),
         KeyPredicate::exact(metadata_manifest_object(
             &namespace_id,
-            &loonfs_types::ManifestNo(3),
+            &loonfs_types::ManifestNo(4),
         )),
         OperationSelector::Head,
     );
@@ -61,7 +61,7 @@ async fn deletion_budget_includes_writer_acquisition() {
         .await
         .expect("manifest");
     assert!(!manifest.payload().status.is_deleted());
-    assert_eq!(manifest.payload().manifest_no, loonfs_types::ManifestNo(2));
+    assert_eq!(manifest.payload().manifest_no, loonfs_types::ManifestNo(3));
 }
 
 #[tokio::test]

@@ -8,15 +8,16 @@ use loonfs_types::GcResponse;
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Retires the namespace once its tombstone is eligible (format spec,
-    /// "Retiring an eligible tombstone"): deletes the fork snapshot that the
-    /// tombstone's fork basis refers to, and then raises the manifest boundary
-    /// to retired. A namespace created without a source has no fork snapshot.
+    /// "Retiring an eligible tombstone") in three steps: deletes the fork
+    /// snapshot that the tombstone's fork basis refers to, deletes the
+    /// namespace's member entry, and then raises the manifest boundary to
+    /// retired. A namespace created without a source has no fork snapshot.
     ///
-    /// The tombstone's fork basis is the record of which snapshot to delete,
-    /// and the tombstone stays until the boundary is retired. So a collection
-    /// that stops between the two steps leaves the next collection to start
-    /// again with the snapshot's delete, which succeeds when the snapshot is
-    /// missing.
+    /// The tombstone records the pool ID and the fork basis, which can't
+    /// change after manifest 1, and the tombstone stays until the boundary is
+    /// retired. So a collection that stops before the boundary is raised
+    /// leaves the next collection to start again at the first step, and
+    /// deleting a missing object succeeds.
     pub(super) async fn retire_namespace(
         &self,
         live: &LiveSet,
@@ -34,6 +35,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 report.deleted_snapshots_by_owner.fork += 1;
             }
         }
+        self.delete_member_entry(&tombstone.pool_id).await?;
         self.retire_boundary().await
     }
 }

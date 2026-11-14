@@ -88,7 +88,7 @@ impl<T> ManifestUpdate<T> {
 /// A namespace that a create or a fork found at its ID.
 pub(crate) enum ExistingNamespace {
     /// The namespace's newest manifest is active.
-    Active(PublicationBasis),
+    Active,
     /// The namespace's newest manifest is initializing.
     Initializing(PublicationBasis),
 }
@@ -253,7 +253,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
         match current.manifest.payload().status {
             NamespaceStatus::Initializing {} => Ok(Some(ExistingNamespace::Initializing(current))),
-            NamespaceStatus::Active {} => Ok(Some(ExistingNamespace::Active(current))),
+            NamespaceStatus::Active {} => Ok(Some(ExistingNamespace::Active)),
             NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
         }
     }

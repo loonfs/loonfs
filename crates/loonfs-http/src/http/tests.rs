@@ -690,7 +690,7 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
     assert_eq!(diagnostics.retention_floor_seq, CommitSeq(0));
     assert_eq!(
         diagnostics.current_manifest_no,
-        Some(loonfs_types::ManifestNo(2))
+        Some(loonfs_types::ManifestNo(3))
     );
     assert_eq!(diagnostics.wal_tail_objects, 2);
     assert_eq!(diagnostics.live_snapshots, 0);

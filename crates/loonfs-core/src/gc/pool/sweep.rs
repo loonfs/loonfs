@@ -33,6 +33,9 @@ pub(super) struct PoolSweep<'a, S: ObjectStore> {
     /// The bytes of the listed objects that reached this sweep, as the
     /// listings reported them.
     pub(super) listed_bytes: AtomicU64,
+    /// The content objects and temporary objects that the sweep's listings
+    /// returned.
+    pub(super) listed_objects: AtomicU64,
 }
 
 impl<S: ObjectStore> PoolSweep<'_, S> {
@@ -41,7 +44,7 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
         entry: ListedObject,
         reference: ContentReference,
     ) -> Decision<PoolGcResponse> {
-        self.add_listed_bytes(entry.size_bytes);
+        self.add_listed_object(entry.size_bytes);
         if content_id_of(&entry.key).is_none() {
             return self.retain(PoolRetainedReason::UnrecognizedKey, None);
         }
@@ -54,7 +57,7 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
     }
 
     pub(super) fn temporary_candidate(&self, entry: ListedObject) -> Decision<PoolGcResponse> {
-        self.add_listed_bytes(entry.size_bytes);
+        self.add_listed_object(entry.size_bytes);
         let family = parse_object_key(&entry.key).map(|parsed| parsed.family());
         if family != Some(DurableObjectFamily::TemporaryObject) {
             return self.retain(PoolRetainedReason::UnrecognizedKey, None);
@@ -97,9 +100,9 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
         outcome_listing: OutcomeListing,
     ) -> Result<Decision<PoolGcResponse>> {
         let sweep = match self.roots.completed_sessions.get(&upload_id) {
-            // The collection listed this session as completed before the walk, so its
-            // namespace's status decides it, including when a finished walk
-            // didn't find the namespace because it has been retired.
+            // The collection listed this session as completed before the member
+            // listing, so its namespace's status decides it, including when
+            // the listing didn't include the namespace because it has been retired.
             Some(session) => {
                 let sweep = self
                     .roots
@@ -179,5 +182,12 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
 
     fn add_listed_bytes(&self, size_bytes: u64) {
         self.listed_bytes.fetch_add(size_bytes, Ordering::Relaxed);
+    }
+
+    /// Adds one object that a listing of the content or temporary prefix
+    /// returned.
+    fn add_listed_object(&self, size_bytes: u64) {
+        self.add_listed_bytes(size_bytes);
+        self.listed_objects.fetch_add(1, Ordering::Relaxed);
     }
 }

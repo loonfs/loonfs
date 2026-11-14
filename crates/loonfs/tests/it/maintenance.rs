@@ -36,7 +36,7 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, CommitSeq(0));
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
     assert_eq!(status.wal_tail_objects, 0);
     assert_eq!(status.retention_floor_seq, CommitSeq(0));
 
@@ -53,7 +53,7 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, CommitSeq(1));
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
     assert_eq!(status.wal_tail_objects, 2);
     assert_eq!(status.retention_floor_seq, CommitSeq(0));
     let listings: Vec<_> = store
@@ -227,7 +227,7 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after wal fold");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(4)));
     assert_eq!(status.wal_tail_objects, 0);
 
     // Maintenance is record-less: folding the WAL must leave nothing
@@ -315,7 +315,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         .expect("fold an empty tail");
     assert_eq!(
         (folded.outcome, folded.manifest_no),
-        (FoldWalOutcome::AlreadyCurrent, ManifestNo(1)),
+        (FoldWalOutcome::AlreadyCurrent, ManifestNo(2)),
         "the wrapper folds a tail; it does not publish a manifest for a namespace with none"
     );
     assert_eq!(store.count(OperationSelector::Put), 0);
@@ -428,7 +428,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after delta wal fold");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(4)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(5)));
     assert_eq!(status.wal_tail_objects, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -691,7 +691,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
         Some(FoldWalResponse {
             outcome: FoldWalOutcome::AlreadyCurrent,
             target_head_seq: CommitSeq(1),
-            manifest_no: ManifestNo(3),
+            manifest_no: ManifestNo(4),
             ..
         })
     );
@@ -700,7 +700,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
         .diagnostics(&namespace_id)
         .await
         .expect("status after lost race");
-    assert_eq!(status.current_manifest_no, Some(ManifestNo(3)));
+    assert_eq!(status.current_manifest_no, Some(ManifestNo(4)));
     assert_eq!(status.wal_tail_objects, 0);
 }
 

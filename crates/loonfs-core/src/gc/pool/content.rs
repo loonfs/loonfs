@@ -1,7 +1,7 @@
 //! Content roots from the extent filters of the layout segments that the
 //! rooted manifests of a pool's members list.
 
-use super::members::MemberWalkOutcome;
+use super::members::MemberReadOutcome;
 use super::sweep::{ContentReference, PoolSweep};
 use crate::error::{CoreError, Result};
 use crate::gc::charged_set::Charge;
@@ -43,10 +43,10 @@ impl ContentFilters {
     ) -> Result<Option<Self>> {
         let roots = sweep.roots;
         let pool_id = &sweep.pool.pool_id;
-        let (members, members_read) = (roots.walk.members, roots.walk.members_read);
-        match roots.walk.outcome {
-            MemberWalkOutcome::Complete => {}
-            MemberWalkOutcome::BudgetExceeded => {
+        let (members, members_read) = (roots.member_read.members, roots.member_read.members_read);
+        match roots.member_read.outcome {
+            MemberReadOutcome::Complete => {}
+            MemberReadOutcome::BudgetExceeded => {
                 tracing::error!(pool_id = %pool_id, members, members_read,
                     "the pool's roots weren't all read within the budget; skipped content sweep");
                 report
@@ -54,7 +54,7 @@ impl ContentFilters {
                     .push(GcSkippedWork::ContentDeletionPoolBudget);
                 return Ok(None);
             }
-            MemberWalkOutcome::UnreadableMember => {
+            MemberReadOutcome::UnreadableMember => {
                 tracing::error!(pool_id = %pool_id, members, members_read,
                     "a pool member's roots couldn't be read; skipped content sweep");
                 report
@@ -122,13 +122,15 @@ impl ContentFilters {
 
 impl<S: ObjectStore> PoolStore<S> {
     /// Lists the pool's content prefix and returns the sum of the listed
-    /// object sizes.
-    pub(super) async fn list_content_bytes(&self) -> Result<u64> {
+    /// object sizes and the number of listed objects.
+    pub(super) async fn list_content_bytes(&self) -> Result<(u64, u64)> {
         let prefix = content_prefix(&self.pool_id);
         self.store
             .list_entries_from_stream(&prefix, None)
             .map_err(|error| CoreError::store(&prefix, &error))
-            .try_fold(0, |total, entry| future::ok(total + entry.size_bytes))
+            .try_fold((0, 0), |(bytes, objects), entry| {
+                future::ok((bytes + entry.size_bytes, objects + 1))
+            })
             .await
     }
 }
