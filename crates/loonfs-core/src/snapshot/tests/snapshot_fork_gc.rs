@@ -264,8 +264,11 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             gate.wait_until_blocked().await;
             assert_eq!(fixture.source_snapshot_keys().await.len(), 2);
             fixture.delete_snapshot().await;
+            // The deletion's clock starts at 0, so a collection two grace
+            // windows later finds the record's grace window passed, however
+            // long the deletion took, and deletes the record.
             crate::test_support::namespace_store(&fixture.store, &fixture.source)
-                .gc(&fixture.context.clock())
+                .gc(&writer_at("collector", 2 * crate::limits::GC_GRACE_WINDOW_MS).clock())
                 .await
                 .expect("the fork snapshot is a root during the check");
             fixture.assert_replaced_present(true).await;
