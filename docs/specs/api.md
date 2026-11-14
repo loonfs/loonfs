@@ -942,7 +942,7 @@ Every core GC response also includes `retained`, which counts the candidates the
 | `referenced` | Protected by current roots, including an extent filter of a rooted layout segment that matches the object (a false match keeps the object until no rooted view lists that segment), or needed for forward manifest discovery. |
 | `within_grace_window` | Unreferenced, but younger than the grace window by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreferenced, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
-| `unrecognized_key` | A key under a listed family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
+| `unrecognized_key` | A listed key that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
 | `snapshot_not_deletable` | A snapshot that's kept by its owner or by its grace window. |
 | `upload_session_window` | An upload session that's waiting for a window that ends at a known time. These are the same waits that `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session that's kept for a reason that doesn't end at a known time: a lost compare-and-swap, a record that disappeared during the collection, or a content cleanup failure. |

@@ -27,7 +27,9 @@ use std::sync::Mutex;
 use tokio::sync::SemaphorePermit;
 
 impl Scheduler {
-    /// Runs every step of one namespace for a sweep.
+    /// Runs the steps of one namespace for a sweep. A namespace whose
+    /// metadata call returns `namespace_deleted` or `namespace_not_found` gets
+    /// only its collection.
     pub(super) async fn sweep_namespace(&self, namespace_id: NamespaceId) {
         let inner = &self.inner;
         let Some((claim, _permit)) = self
@@ -39,15 +41,20 @@ impl Scheduler {
         let entry = inner.namespaces.entry(&namespace_id);
         let entry = entry.as_deref();
         let seq = entry.and_then(|entry| lock(entry).handle.last_published_seq());
-        // The call records its own failure, and the sweep makes the
-        // namespace's other calls whatever it returns.
-        let _ = self.maintain_metadata(&namespace_id, entry).await;
-        if let Some(grep) = &inner.grep {
-            self.maintain_index(grep, &namespace_id, entry, seq).await;
+        // The call records its own failure. The index call and the advance
+        // of a namespace that the call finds gone can only find it gone too.
+        let gone = self
+            .maintain_metadata(&namespace_id, entry)
+            .await
+            .is_err_and(|code| code.is_namespace_gone());
+        if !gone {
+            if let Some(grep) = &inner.grep {
+                self.maintain_index(grep, &namespace_id, entry, seq).await;
+            }
+            // The advance reads only folded commits, so it runs after the
+            // metadata call, which can fold an idle tail.
+            self.advance_retention(&namespace_id, entry).await;
         }
-        // The advance reads only folded commits, so it runs after the
-        // metadata call, which can fold an idle tail.
-        self.advance_retention(&namespace_id, entry).await;
         self.gc(&namespace_id, entry, seq).await;
         self.finish_claim(claim).await;
     }
