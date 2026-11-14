@@ -520,9 +520,11 @@ impl Maintenance {
     /// namespace without a window keeps its whole history.
     ///
     /// The call plans the floor from this runtime's writer position when it
-    /// has a current one, and otherwise from the current manifest and the
-    /// WAL tail after that manifest. A floor that moves is recorded in a
-    /// floor object at the next WAL number ([Advancing the retention
+    /// has a current one, and otherwise from the current manifest's floor and
+    /// head. A floor that moves is recorded in a floor object at the next WAL
+    /// number. The publication runs discovery before the put, and it writes
+    /// nothing when the view it finds already has a floor at or above the
+    /// planned floor, such as a floor object in the WAL tail ([Advancing the retention
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
     /// When this runtime has a writer session for the namespace, the floor
     /// object is one item of the session's queue, after the commits admitted
@@ -537,7 +539,9 @@ impl Maintenance {
     /// When no manifest records the floor of the view after the advance,
     /// including after an earlier advance whose fold failed, the call then
     /// folds the namespace, so the fold's manifest records the floor. The
-    /// response's floor is the view's.
+    /// response's floor is the floor of the view after the advance, or, when
+    /// the plan leaves the floor where it is, the floor that the call planned
+    /// from (without a writer position, the current manifest's floor).
     pub async fn advance_retention_floor_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -587,10 +591,10 @@ impl Maintenance {
         .await
     }
 
-    /// Returns the manifest and the retention floor of the view that a
-    /// retention advance plans from: this runtime's writer position when its
-    /// manifest is above the manifest boundary, and otherwise the current
-    /// manifest and the WAL tail after that manifest.
+    /// Returns the manifest and the retention floor that a retention advance
+    /// plans from: this runtime's writer position when its manifest is above
+    /// the manifest boundary, and otherwise the current manifest and that
+    /// manifest's floor.
     async fn load_retention_view(
         &self,
         namespace_id: &NamespaceId,
@@ -600,15 +604,14 @@ impl Maintenance {
                 return Ok((basis.manifest, position.retention_floor_seq()));
             }
         }
-        let anchor = self
+        let current = self
             .core
             .namespace_store(namespace_id)
-            .load_live_read_anchor(self.core.observation())
-            .await?;
-        Ok((
-            anchor.current_manifest().clone(),
-            anchor.retention_floor_seq(),
-        ))
+            .load_current_basis()
+            .await?
+            .manifest;
+        let retention_floor_seq = current.retention_floor_seq();
+        Ok((current, retention_floor_seq))
     }
 
     /// Loads the namespace's current manifest as the basis of an extension's

@@ -34,10 +34,10 @@ pub(super) const WINDOW_MS: u64 = 30 * DAY_MS;
 const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
 
 /// Requests the advance costs in a sweep of an idle namespace whose floor
-/// already reached its cutoff, or that has no window: one discovery of the
-/// current manifest and the WAL tail after it, and the check of that
-/// manifest. The docs quote this number.
-const IDLE_ADVANCE_REQUESTS: usize = 7;
+/// already reached its cutoff, or that has no window: the find of the
+/// current manifest, and no read of the WAL. The self-hosting guide quotes
+/// this number.
+const IDLE_ADVANCE_REQUESTS: usize = 4;
 
 /// A config with every default, and `window_ms` as its retention window.
 pub(super) fn retention_config(window_ms: Option<u64>) -> ServerConfig {
@@ -551,8 +551,8 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
             "{windows}: an idle sweep writes nothing: {sweep:?}"
         );
 
-        // The advance's share of the sweep is one discovery of the current
-        // manifest and the WAL tail after it.
+        // The advance's share of the sweep is the find of the current
+        // manifest.
         store.reset();
         let target = RetentionTarget::Window;
         server
