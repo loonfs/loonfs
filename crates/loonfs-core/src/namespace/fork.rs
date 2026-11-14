@@ -130,10 +130,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///    ID. When another call's manifest 1 won, the call continues as in
     ///    step 1.
     /// 5. Writes the fork's member entry in the pool that manifest 1 records.
-    /// 6. Checks that this namespace is active and that the snapshot of step
-    ///    2 hasn't ended, writes the fork snapshot, and checks again. Each
-    ///    check finds this namespace's newest manifest from the manifest that
-    ///    the call holds, and reads the snapshot record.
+    /// 6. Checks the call's publication budget, writes the fork snapshot, and
+    ///    then checks that this namespace is active and that the snapshot of
+    ///    step 2 hasn't ended. The check finds this namespace's newest
+    ///    manifest from the manifest that the call holds, and reads the
+    ///    snapshot record.
     /// 7. Publishes manifest 2 with the status `active`.
     ///
     /// Manifest 1 records the fork snapshot's ID before the snapshot exists,
@@ -336,13 +337,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Writes the fork snapshot that `manifest_1`, a fork's manifest 1,
-    /// records, between two checks that this namespace is active and that the
+    /// records, and then checks that this namespace is active and that the
     /// snapshot the fork was built from hasn't ended (step 6 of
     /// [`Self::install_fork`]).
     ///
-    /// Each check finds this namespace's newest manifest from the manifest
-    /// that the previous read found, starting at `source`, with a HEAD
-    /// request for the successor and a read of the manifest boundary (see
+    /// The write checks the call's publication budget first, as a manifest
+    /// put does, so the fork snapshot lands while the record of the snapshot
+    /// the fork was built from still keeps the source manifest: that record
+    /// is deleted no earlier than the grace window after the snapshot ends,
+    /// and the grace window is at least the publication completion bound. A
+    /// call that stalled past its budget writes nothing.
+    ///
+    /// The check finds this namespace's newest manifest from `source`, the
+    /// manifest that the call holds, with a HEAD request for the successor
+    /// and a read of the manifest boundary (see
     /// [`NamespaceStore::find_current_above`]). A fork snapshot that another
     /// call wrote counts as written.
     async fn write_fork_snapshot(
@@ -355,10 +363,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .fork_basis
             .as_ref()
             .expect("a fork's manifest 1 records its fork basis");
-        let source = self.namespace.find_current_above(&source).await?;
-        self.namespace
-            .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, clock)
-            .await?;
+        clock.ensure_metadata_publication_budget(&self.namespace.namespace_id)?;
         write_snapshot_record(
             &self.namespace.store,
             &SnapshotPayload {
