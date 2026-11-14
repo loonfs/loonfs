@@ -217,16 +217,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
         .await
     }
 
-    /// Returns the current manifest, found by probing above `basis` with
-    /// [`find_newest_manifest_above`], or `basis`'s manifest when no manifest
-    /// is above it, with the manifest boundary.
+    /// Returns the current manifest, with the manifest boundary, for a
+    /// caller that holds `basis`.
     ///
-    /// After the probe, the call reads the boundary (see
-    /// [`Self::above_boundary`]). When the manifest that the probe found, or
-    /// `basis`'s manifest, is at or below the boundary, a collection may have
-    /// deleted the manifests above it, so the call finds the newest manifest
-    /// from the boundary instead (format spec, "Publishing a manifest").
-    async fn find_current_above(&self, basis: &PublicationBasis) -> Result<PublicationBasis> {
+    /// The call first sends a HEAD request for the successor of `basis`'s
+    /// manifest. When the successor exists, the call probes above the
+    /// successor for the newest manifest (see [`find_newest_manifest_above`]),
+    /// and otherwise keeps `basis`'s manifest. The call then reads the
+    /// boundary (see [`Self::above_boundary`]). When the manifest that the
+    /// call kept is at or below the boundary, a collection may have deleted
+    /// the manifests above it, so the call finds the newest manifest from the
+    /// boundary instead (format spec, "Publishing a manifest").
+    pub(crate) async fn find_current_above(
+        &self,
+        basis: &PublicationBasis,
+    ) -> Result<PublicationBasis> {
         let manifest = self
             .find_newest_manifest_above(&basis.manifest)
             .await

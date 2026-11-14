@@ -1467,7 +1467,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("create snapshot");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
@@ -1485,7 +1485,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
                 &later_context.clock(),
             )
             .await
-            .map(crate::snapshot::snapshot_record_summary)
+            .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
             .expect("create snapshot");
         assert!(
             minted.insert(next.snapshot_id.clone()),
@@ -1544,7 +1544,7 @@ async fn an_expired_snapshot_serves_no_reads_but_stays_until_a_collection_delete
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect("create snapshot whose expiry has already passed");
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
         .load_snapshot_record(&already_expired.snapshot_id)
@@ -1679,7 +1679,7 @@ async fn snapshot_creation_deletes_its_record_when_the_floor_passed_its_manifest
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect_err("floor passed snapshot");
     assert_eq!(error.code(), ErrorCode::SnapshotUnavailable);
     assert!(store
@@ -1727,7 +1727,7 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
         .verify_snapshot_basis(&record)
         .await
         .expect("verification runs");
-    assert_eq!(
+    assert_matches!(
         verified,
         crate::snapshot::record::SnapshotBasisVerification::Invalid,
         "a tombstoned namespace cannot acquire a new snapshot dependency"
@@ -1767,7 +1767,7 @@ async fn snapshot_basis_verification_store_failure_deletes_the_record() {
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::snapshot_record_summary)
+        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect_err("verification failed");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(store

@@ -31,10 +31,10 @@ const CREATE_STORE_OPERATIONS: usize = 8;
 
 /// The store operations of the fork in
 /// `a_new_namespace_is_looked_up_before_its_first_write`, with the fold of
-/// the source's WAL tail before it: 16 for the fold, and 31 for the fork, of
-/// which 16 are the two checks of the snapshot that the fork is built from
-/// and 1 is the member entry.
-const FORK_STORE_OPERATIONS: usize = 47;
+/// the source's WAL tail before it: 16 for the fold, and 19 for the fork, of
+/// which 6 are the two checks of the snapshot that the fork is built from and
+/// 1 is the member entry.
+const FORK_STORE_OPERATIONS: usize = 35;
 
 /// The store operations of the deletion in
 /// `a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a_writer_session`.
@@ -1093,6 +1093,7 @@ async fn a_fork_request_that_differs_from_manifest_one_returns_namespace_exists(
             &context().clock(),
         )
         .await
+        .map(|(record, _)| record)
         .expect("take a named snapshot");
     let at_named = source_fixture
         .engine()

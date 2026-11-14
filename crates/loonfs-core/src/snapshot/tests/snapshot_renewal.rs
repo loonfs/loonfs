@@ -30,6 +30,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
                 &context.clock(),
             )
             .await
+            .map(|(record, _)| record)
             .expect("snapshot");
         let key = keys::snapshot_record(&namespace_id, &snapshot.snapshot_id);
         let failing = FailStore::new(
@@ -113,6 +114,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
                 &context.clock(),
             )
             .await
+            .map(|(record, _)| record)
             .expect("snapshot");
         let store = BlockingStore::new(
             inner.clone(),
@@ -181,6 +183,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
             &context.clock(),
         )
         .await
+        .map(|(record, _)| record)
         .expect("snapshot");
     let store = BlockingStore::new(
         inner.clone(),
