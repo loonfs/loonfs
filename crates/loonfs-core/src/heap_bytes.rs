@@ -735,6 +735,7 @@ impl HeapBytes for ForkBasis {
     fn heap_bytes(&self) -> usize {
         self.manifest.heap_bytes()
             + self.source_snapshot_id.heap_bytes()
+            + self.forked_from_snapshot_id.heap_bytes()
             + self.rebased_from.heap_bytes()
     }
 }

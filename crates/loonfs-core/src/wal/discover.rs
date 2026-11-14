@@ -32,7 +32,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
     let namespace_id = &manifest.payload().namespace_id;
     let mut head = NamespaceReadState::from(manifest.payload());
     let mut objects = Vec::new();
-    if head.status.is_deleted() {
+    if !head.status.is_active() {
         return Ok(DiscoveredTail {
             head,
             tail: ValidatedWalTail::new(objects),

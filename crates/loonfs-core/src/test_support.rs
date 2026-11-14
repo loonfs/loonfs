@@ -356,6 +356,100 @@ pub(crate) async fn write_pool_record<S: ObjectStore>(
         .expect("write the pool record");
 }
 
+/// Does what a fork of `source` into `target` does through manifest 1, and
+/// stops there: creates `source` when it has no manifest, folds it, takes the
+/// temporary snapshot of its head, and publishes the target's manifest 1 with
+/// a generated fork snapshot ID. Returns the temporary snapshot and manifest 1.
+#[cfg(test)]
+pub(crate) async fn half_done_fork<S: ObjectStore + Clone>(
+    store: S,
+    source: &NamespaceId,
+    target: &NamespaceId,
+    setup: &WriterAt,
+) -> (
+    loonfs_types::format::control::SnapshotPayload,
+    loonfs_types::format::manifest::NamespaceManifestPayload,
+) {
+    use loonfs_types::format::control::{ForkBasis, SnapshotOwner};
+    use loonfs_types::format::manifest::NamespaceManifestPayload;
+    let fixture = NamespaceFixture::new(store, source, setup);
+    let namespace = &fixture.namespace;
+    if let crate::namespace::control::NewestManifest::Absent = namespace
+        .find_newest_manifest()
+        .await
+        .expect("find the source")
+    {
+        fixture.create().await.expect("create the source");
+    }
+    let manifest = folded_manifest(namespace).await.expect("fold the WAL tail");
+    let clock = namespace.start_clock();
+    let temporary = namespace
+        .create_snapshot_record(
+            SnapshotOwner::User {
+                name: None,
+                expires_at_ms: Some(
+                    clock.request_at_ms() + crate::limits::OPERATION_SNAPSHOT_TTL_MS,
+                ),
+                deleted_at_ms: None,
+            },
+            manifest,
+            &clock,
+        )
+        .await
+        .expect("take the temporary snapshot");
+    let source_manifest = namespace
+        .load_manifest_by_no(temporary.snapshot_id.manifest_no())
+        .await
+        .expect("load the source manifest")
+        .expect("the snapshot keeps its manifest");
+    let manifest_1 = NamespaceManifestPayload::initial_fork(
+        target.clone(),
+        clock.request_at_ms(),
+        loonfs_test_support::test_actor(),
+        ForkBasis {
+            manifest: temporary.manifest(),
+            source_snapshot_id: loonfs_types::SnapshotId::generate(
+                temporary.snapshot_id.manifest_no(),
+            ),
+            forked_from_snapshot_id: temporary.snapshot_id.clone(),
+            rebased_from: None,
+        },
+        source_manifest.payload(),
+    );
+    namespace
+        .with_namespace(target.clone())
+        .publish_first_manifest(manifest_1.clone(), &clock)
+        .await
+        .expect("publish manifest 1");
+    (temporary, manifest_1)
+}
+
+/// Writes the fork snapshot that `manifest_1`, a fork's manifest 1, records,
+/// as a call that finished the fork would.
+#[cfg(test)]
+pub(crate) async fn write_fork_snapshot<S: ObjectStore>(
+    store: &S,
+    manifest_1: &loonfs_types::format::manifest::NamespaceManifestPayload,
+) {
+    use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
+    let basis = manifest_1.fork_basis.as_ref().expect("a fork basis");
+    crate::snapshot::record::write_snapshot_record(
+        store,
+        &SnapshotPayload {
+            snapshot_id: basis.source_snapshot_id.clone(),
+            namespace_id: basis.manifest.owner_namespace_id.clone(),
+            head_seq: basis.manifest.head_seq,
+            payload_checksum: basis.manifest.payload_checksum.clone(),
+            created_at_ms: manifest_1.created_at_ms,
+            owner: SnapshotOwner::Fork {
+                target_namespace_id: manifest_1.namespace_id.clone(),
+            },
+        },
+    )
+    .await
+    .expect("write the fork snapshot");
+}
+
 /// Returns the pool that the current manifest of `namespace_id` records, for a
 /// test that builds the key of a content object or an upload record.
 pub async fn load_pool_id<S: ObjectStore>(store: S, namespace_id: &NamespaceId) -> PoolId {

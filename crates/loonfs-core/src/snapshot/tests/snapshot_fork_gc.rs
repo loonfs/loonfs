@@ -5,7 +5,8 @@ use crate::authorize::{Authorizer, ReadAccess};
 use loonfs_objectstore::keys::{snapshot_prefix, snapshot_record};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{MetadataMapStore, OperationKind};
-use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
+use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner, SnapshotPayload};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::options::AttributeInclusion;
 use std::assert_matches;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -112,8 +113,8 @@ impl Fixture {
             target,
             snapshot,
             replaced,
-            // Old objects can be collected, but a fork snapshot created by this
-            // attempt is still inside its installation grace.
+            // The aged store reports every object as old, so a collection at
+            // this time can delete any object that no root keeps.
             context: writer_at("fork", crate::limits::GC_GRACE_WINDOW_MS + 1),
         }
     }
@@ -128,6 +129,35 @@ impl Fixture {
         .delete_snapshot(&self.snapshot.snapshot_id)
         .await
         .expect("delete snapshot");
+    }
+
+    /// Asserts that the target's only manifest is an initializing manifest 1,
+    /// and returns it.
+    async fn assert_target_initializing(&self) -> NamespaceManifestPayload {
+        assert!(self
+            .store
+            .head(&metadata_manifest_object(&self.target, &ManifestNo(2)))
+            .await
+            .expect("head manifest 2")
+            .is_none());
+        let manifest_1 = crate::test_support::namespace_store(self.store.as_ref(), &self.target)
+            .load_current_manifest()
+            .await
+            .expect("the target's manifest 1");
+        assert_eq!(manifest_1.payload().manifest_no, ManifestNo(1));
+        assert_eq!(
+            manifest_1.payload().status,
+            NamespaceStatus::Initializing {}
+        );
+        manifest_1.payload().clone()
+    }
+
+    /// Returns the keys of the source's snapshot records.
+    async fn source_snapshot_keys(&self) -> Vec<String> {
+        self.store
+            .list_prefix(&snapshot_prefix(&self.source))
+            .await
+            .expect("list the source's snapshots")
     }
 
     async fn assert_replaced_present(&self, present: bool) {
@@ -150,7 +180,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
     );
     let fork_gate = BlockingStore::new(
         fixture.store.clone(),
-        KeyPredicate::exact(metadata_manifest_object(&fixture.target, &ManifestNo(1))),
+        KeyPredicate::exact(metadata_manifest_object(&fixture.target, &ManifestNo(2))),
         OperationSelector::PutCreateIfAbsent,
     );
     gc_gate.block_next();
@@ -207,15 +237,21 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
     assert_eq!(later.code(), ErrorCode::PathNotFound);
 }
 
+/// Checks that a fork whose snapshot is deleted between the fork snapshot's
+/// write and its second check returns `snapshot_not_found`, leaves the target
+/// initializing, and keeps the fork snapshot, which keeps the snapshot's
+/// manifest for a collection of the source.
 #[tokio::test]
 async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification() {
     let fixture = Fixture::new().await;
     let key = snapshot_record(&fixture.source, &fixture.snapshot.snapshot_id);
     let reads = AtomicUsize::new(0);
+    // The third read of the snapshot is the check after the fork snapshot's
+    // write.
     let gate = BlockingStore::matching(fixture.store.clone(), move |operation| {
         operation.key() == key
             && matches!(operation.kind(), OperationKind::GetWithMetadata)
-            && reads.fetch_add(1, Ordering::SeqCst) == 1
+            && reads.fetch_add(1, Ordering::SeqCst) == 2
     });
     gate.block_next();
     let actor = loonfs_test_support::test_actor();
@@ -226,44 +262,40 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.snapshot_id),
         async {
             gate.wait_until_blocked().await;
-            assert_eq!(
-                fixture
-                    .store
-                    .list_prefix(&snapshot_prefix(&fixture.source))
-                    .await
-                    .expect("snapshot and tentative fork snapshot")
-                    .len(),
-                2
-            );
+            assert_eq!(fixture.source_snapshot_keys().await.len(), 2);
             fixture.delete_snapshot().await;
+            // The deletion's clock starts at 0, so a collection two grace
+            // windows later finds the record's grace window passed, however
+            // long the deletion took, and deletes the record.
             crate::test_support::namespace_store(&fixture.store, &fixture.source)
-                .gc(&fixture.context.clock())
+                .gc(&writer_at("collector", 2 * crate::limits::GC_GRACE_WINDOW_MS).clock())
                 .await
-                .expect("tentative snapshot remains a root during verification");
+                .expect("the fork snapshot is a root during the check");
             fixture.assert_replaced_present(true).await;
             gate.release();
         }
     );
     assert_matches!(fork, Err(CoreError::SnapshotNotFound { .. }));
-    assert!(fixture
-        .store
-        .list_prefix(&snapshot_prefix(&fixture.source))
-        .await
-        .expect("failed fork snapshot cleaned up")
-        .is_empty());
-    assert!(fixture
-        .store
-        .head(&metadata_manifest_object(&fixture.target, &ManifestNo(1)))
-        .await
-        .expect("no target installed")
-        .is_none());
+    let manifest_1 = fixture.assert_target_initializing().await;
+    let fork_snapshot_id = &manifest_1
+        .fork_basis
+        .as_ref()
+        .expect("a fork basis")
+        .source_snapshot_id;
+    assert_eq!(
+        fixture.source_snapshot_keys().await,
+        [snapshot_record(&fixture.source, fork_snapshot_id)]
+    );
     crate::test_support::namespace_store(&fixture.store, &fixture.source)
         .gc(&fixture.context.clock())
         .await
-        .expect("later collection sees no historical root");
-    fixture.assert_replaced_present(false).await;
+        .expect("a later collection keeps the fork snapshot's manifest");
+    fixture.assert_replaced_present(true).await;
 }
 
+/// Checks that a fork whose source is deleted while the fork snapshot's put
+/// waits returns `namespace_deleted`, leaves the target initializing, and
+/// keeps the fork snapshot.
 #[tokio::test]
 async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification() {
     let fixture = Fixture::new().await;
@@ -296,23 +328,18 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
         fork.expect_err("deleted source").code(),
         ErrorCode::NamespaceDeleted
     );
-    assert_eq!(
-        fixture
-            .store
-            .list_prefix(&snapshot_prefix(&fixture.source))
-            .await
-            .expect("snapshots"),
-        [snapshot_record(
-            &fixture.source,
-            &fixture.snapshot.snapshot_id
-        )]
-    );
-    assert!(fixture
-        .store
-        .head(&metadata_manifest_object(&fixture.target, &ManifestNo(1)))
-        .await
-        .expect("no target installed")
-        .is_none());
+    let manifest_1 = fixture.assert_target_initializing().await;
+    let fork_snapshot_id = &manifest_1
+        .fork_basis
+        .as_ref()
+        .expect("a fork basis")
+        .source_snapshot_id;
+    let mut expected = vec![
+        snapshot_record(&fixture.source, &fixture.snapshot.snapshot_id),
+        snapshot_record(&fixture.source, fork_snapshot_id),
+    ];
+    expected.sort();
+    assert_eq!(fixture.source_snapshot_keys().await, expected);
 }
 
 #[tokio::test]
@@ -340,12 +367,17 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         )
         .await
         .expect("snapshot");
-    // The fork's first read of the snapshot blocks, and the snapshot expires
-    // while it does.
-    let store = BlockingStore::new(
+    // The fork's second read of the snapshot, the check before the fork
+    // snapshot's write, blocks, and the snapshot expires while it does.
+    let key = snapshot_record(&source, &snapshot.snapshot_id);
+    let reads = AtomicUsize::new(0);
+    let store = BlockingStore::matching(
         RecordingStore::new(inner, KeyPredicate::prefix(snapshot_prefix(&source))),
-        KeyPredicate::exact(snapshot_record(&source, &snapshot.snapshot_id)),
-        OperationSelector::Read,
+        move |operation| {
+            operation.key() == key
+                && matches!(operation.kind(), OperationKind::GetWithMetadata)
+                && reads.fetch_add(1, Ordering::SeqCst) == 1
+        },
     );
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let actor = loonfs_test_support::test_actor();
@@ -369,5 +401,14 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         store.inner().counts().create_if_absent_puts,
         0,
         "the expiry check refuses before a fork snapshot is written"
+    );
+    let manifest_1 = crate::test_support::namespace_store(store.inner().inner(), &target)
+        .load_current_manifest()
+        .await
+        .expect("the target's manifest 1");
+    assert_eq!(manifest_1.payload().manifest_no, ManifestNo(1));
+    assert_eq!(
+        manifest_1.payload().status,
+        NamespaceStatus::Initializing {}
     );
 }

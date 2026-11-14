@@ -176,7 +176,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let manifest = self.load_current_manifest().await?;
         let kept = record.manifest();
         Ok(
-            if manifest.payload().status.is_deleted()
+            if !manifest.payload().status.is_active()
                 || manifest.manifest().manifest_no != kept.manifest_no
                 || manifest.manifest().payload_checksum != kept.payload_checksum
             {

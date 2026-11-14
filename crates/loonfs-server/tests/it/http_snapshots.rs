@@ -335,7 +335,9 @@ async fn http_user_and_maintenance_snapshot_listings_list_the_same_snapshot() {
     let records = records["snapshots"]
         .as_array()
         .expect("snapshot list is an array");
-    assert_eq!(records.len(), 3);
+    // The two user snapshots, the fork snapshot, and the temporary snapshot
+    // that the fork took of the head.
+    assert_eq!(records.len(), 4);
     let listed_snapshot = records
         .iter()
         .find(|item| item["snapshot_id"] == expiring.snapshot_id.as_str())
@@ -358,6 +360,17 @@ async fn http_user_and_maintenance_snapshot_listings_list_the_same_snapshot() {
     let mut snapshots = list_snapshots(&harness.server_url, namespace.as_str())
         .expect("list snapshots")
         .snapshots;
+    // The fork's temporary snapshot of the head is a user snapshot with no
+    // name, listed until it expires.
+    let temporary = snapshots
+        .iter()
+        .position(|snapshot| snapshot.name.is_none())
+        .expect("the fork's temporary snapshot is listed");
+    let temporary = snapshots.remove(temporary);
+    assert_eq!(
+        temporary.expires_at_ms,
+        Some(temporary.created_at_ms + loonfs_core::limits::OPERATION_SNAPSHOT_TTL_MS)
+    );
     snapshots.sort_by(|left, right| left.name.cmp(&right.name));
     assert_eq!(snapshots, vec![expiring, unexpiring]);
 

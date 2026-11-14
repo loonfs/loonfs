@@ -4,6 +4,7 @@ use crate::commit::publish_view::WriterPosition;
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::{ManifestChange, ManifestUpdate};
 use crate::manifest::PublicationReport;
+use crate::namespace::basis::PublicationBasis;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -44,7 +45,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             let acquired_writer = &acquired_writer;
             let position = &position;
             async move {
-                let mut payload = current.payload().clone();
                 let held = position
                     .lock()
                     .expect("the deletion's position lock should not be poisoned")
@@ -64,7 +64,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         });
                     }
                 }
-                if payload.folded_wal_no < head.wal_no {
+                if current.payload().folded_wal_no < head.wal_no {
                     clock.ensure_metadata_publication_budget(&self.namespace_id)?;
                     let folded = self.fold_wal_tail(held.clone(), clock).await?;
                     *position
@@ -73,15 +73,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         held.and_then(|mut held| held.move_to(&folded.manifest).then_some(held));
                     return Ok(ManifestChange::Again);
                 }
-                payload.status = NamespaceStatus::Deleted {
-                    deleted_at_ms: clock.request_at_ms(),
-                };
-                // A tombstone lists no extension segments, so they're
-                // collected once no snapshot keeps a manifest that lists them
-                // (format spec, "Extensions").
-                for entry in payload.extensions.values_mut() {
-                    entry.runs.clear();
-                }
+                let payload = current.payload().tombstone(clock.request_at_ms());
                 let response = DeleteNamespaceResponse {
                     namespace_id: self.namespace_id.clone(),
                     head_seq: payload.head_seq,
@@ -92,4 +84,45 @@ impl<S: ObjectStore> NamespaceStore<S> {
         .await
         .map(ManifestUpdate::into_report)
     }
+
+    /// Publishes the tombstone of a namespace whose newest manifest, `current`,
+    /// is initializing, as the next manifest, without a writer session: the
+    /// namespace has no writer and no WAL objects, so there is nothing to fence
+    /// or fold. The tombstone competes with manifest 2 for one number, so the
+    /// namespace becomes deleted or active, never both.
+    pub(crate) async fn tombstone_initializing_namespace(
+        &self,
+        current: PublicationBasis,
+        clock: &OperationClock,
+    ) -> Result<ManifestUpdate<TombstoneOutcome>> {
+        self.update_manifest(Some(current), clock, |current: LoadedManifest| {
+            let payload = current.payload();
+            let change = match payload.status {
+                NamespaceStatus::Initializing {} => ManifestChange::Next(
+                    Box::new(payload.tombstone(clock.request_at_ms())),
+                    TombstoneOutcome::Published(DeleteNamespaceResponse {
+                        namespace_id: self.namespace_id.clone(),
+                        head_seq: payload.head_seq,
+                    }),
+                ),
+                NamespaceStatus::Active {} => ManifestChange::Finished(TombstoneOutcome::Active),
+                NamespaceStatus::Deleted { .. } => {
+                    ManifestChange::Finished(TombstoneOutcome::Deleted)
+                }
+            };
+            async move { Ok(change) }
+        })
+        .await
+    }
+}
+
+/// How a tombstone publication for an initializing namespace ended.
+pub(crate) enum TombstoneOutcome {
+    /// The call published the tombstone.
+    Published(DeleteNamespaceResponse),
+    /// Manifest 2 with the status `active` was published first, so the
+    /// namespace is active.
+    Active,
+    /// The namespace was already deleted.
+    Deleted,
 }

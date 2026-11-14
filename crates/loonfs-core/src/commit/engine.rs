@@ -9,13 +9,15 @@ use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
 use crate::manifest::retention::verify_manifest_segments_exist;
 use crate::manifest::{FloorObjectReport, ManifestLoadError, PublishedManifest};
 use crate::namespace::boundary::higher_boundary;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{LoadedManifest, NewestManifest};
+use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::time::{Observation, OperationClock};
 use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::options::DeleteNamespaceOptions;
 use loonfs_types::{
     Commit, CommitId, CommitSeq, DeleteNamespaceResponse, ManifestNo, NamespaceId, WalNo, WriterId,
@@ -246,15 +248,61 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// and a takeover detected during manifest publication permanently fences the
     /// session. A deletion first folds the WAL tail under the namespace's run
     /// policy. Both publications build on the position's manifest.
+    ///
+    /// An initializing namespace has no writer session, so its deletion is a
+    /// plain manifest publication of its tombstone (see
+    /// [`NamespaceStore::tombstone_initializing_namespace`]). When manifest 2
+    /// with the status `active` wins that publication, the call deletes the
+    /// namespace with a writer session.
     pub async fn delete_namespace(
         &mut self,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
         let clock = self.namespace.start_clock();
-        let acquired_writer = self
+        let acquired_writer = match self
             .position
             .session_writer_epoch(&self.namespace, &self.writer_id)
-            .await?;
+            .await
+        {
+            Ok(acquired_writer) => acquired_writer,
+            Err(error @ CoreError::NamespaceNotFound { .. }) => {
+                let NewestManifest::Manifest(current) =
+                    self.namespace.find_newest_manifest().await?
+                else {
+                    return Err(error);
+                };
+                let payload = current.manifest.payload();
+                if !matches!(payload.status, NamespaceStatus::Initializing {}) {
+                    return Err(error);
+                }
+                if let Some(expected) = options.expected_head_seq {
+                    if payload.head_seq != expected {
+                        return Err(CoreError::StaleHeadPrecondition {
+                            expected,
+                            actual: payload.head_seq,
+                        });
+                    }
+                }
+                let update = self
+                    .namespace
+                    .tombstone_initializing_namespace(current, &clock)
+                    .await?;
+                match update.response {
+                    TombstoneOutcome::Published(response) => return Ok(response),
+                    TombstoneOutcome::Deleted => {
+                        return Err(CoreError::NamespaceDeleted {
+                            namespace_id: self.namespace.namespace_id.clone(),
+                        })
+                    }
+                    TombstoneOutcome::Active => {
+                        self.position
+                            .session_writer_epoch(&self.namespace, &self.writer_id)
+                            .await?
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
         let deleted = self
             .namespace
             .delete_namespace(options, acquired_writer, self.writer_position(), &clock)

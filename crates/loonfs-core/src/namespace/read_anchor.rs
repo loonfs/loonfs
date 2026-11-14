@@ -4,9 +4,9 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, PublishedManifest};
-use crate::namespace::basis::{MetadataBasis, PublicationBasis};
+use crate::namespace::basis::{MetadataBasis, PublicationBasis, ReadBasis};
 use crate::namespace::boundary::LoadedBoundary;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::MetadataSegmentCache;
@@ -14,7 +14,7 @@ use crate::wal::{
     discover_tail, wal_object_exists, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
 };
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::ManifestRef;
+use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 use loonfs_types::{CommitSeq, ManifestNo, WalNo, WriterEpoch};
 use std::sync::Arc;
 
@@ -89,6 +89,28 @@ impl<S: ObjectStore> NamespaceStore<S> {
             anchor.read_state.status,
         )?;
         Ok(anchor)
+    }
+
+    /// Returns the read basis of the namespace's newest manifest when that
+    /// manifest is initializing, or `None` otherwise, for the administrator
+    /// check of a deletion of a namespace that LoonFS otherwise treats as
+    /// missing.
+    ///
+    /// An initializing namespace has no WAL objects, so the basis's head is
+    /// the manifest's own.
+    pub async fn find_initializing_read_basis(&self) -> CoreResult<Option<ReadBasis>> {
+        let NewestManifest::Manifest(current) = self.find_newest_manifest().await? else {
+            return Ok(None);
+        };
+        let manifest = &current.manifest;
+        Ok(
+            matches!(manifest.payload().status, NamespaceStatus::Initializing {}).then(|| {
+                ReadBasis {
+                    head: NamespaceReadState::from(manifest.payload()),
+                    basis: MetadataBasis::new(manifest.manifest()),
+                }
+            }),
+        )
     }
 
     /// Loads the read anchor at `manifest`, where `boundary` is the manifest

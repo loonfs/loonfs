@@ -3,6 +3,7 @@
 //! grace window.
 
 use super::*;
+use crate::limits::OPERATION_SNAPSHOT_TTL_MS;
 use crate::manifest::tests::extensions::{extension_run, extension_segment};
 use loonfs_objectstore::keys::{extension_prefix, extension_segment_object_key};
 use loonfs_types::format::manifest::{ExtensionEntry, ExtensionSegmentRef};
@@ -124,7 +125,8 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
 /// Checks that a fork's first manifest lists the segments of its source's
 /// entry, and that a segment the fork inherited stays after the source
 /// stops listing it, because the fork snapshot keeps the source's manifest that
-/// lists it, and goes once the fork's retirement releases the snapshot.
+/// lists it, and goes once the fork's retirement releases the fork snapshot
+/// and the fork's temporary snapshot has expired.
 #[tokio::test]
 async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() {
     let directory = tempdir().expect("directory");
@@ -190,7 +192,21 @@ async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() 
         .await
         .expect("retire the fork");
     assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
-    let report = collect(&store, &source).await;
+    // The fork's temporary snapshot keeps the same source manifest until the
+    // grace window after its expiry, and the collection that deletes its
+    // record still keeps the manifest that it listed.
+    let expired = context(setup.now_ms + OPERATION_SNAPSHOT_TTL_MS + GC_GRACE_WINDOW_MS);
+    let aged = MetadataMapStore::aged(&store, KeyPredicate::any());
+    let source_namespace = crate::test_support::namespace_store(&aged, &source);
+    let released = source_namespace
+        .gc(&expired.clock())
+        .await
+        .expect("release the temporary snapshot");
+    assert_eq!(released.deleted_snapshots_by_owner.user, 1);
+    let report = source_namespace
+        .gc(&expired.clock())
+        .await
+        .expect("collection");
     assert_eq!(report.deleted.extension_segments, 1, "{report:?}");
     assert!(store
         .head(&inherited_key)

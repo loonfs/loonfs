@@ -296,7 +296,8 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
     let listed = collect_snapshot_records(&maintenance, &source)
         .await
         .expect("list snapshots on deleted namespace");
-    assert_eq!(listed.snapshots.len(), 2);
+    // The user snapshot, the fork snapshot, and the fork's temporary snapshot.
+    assert_eq!(listed.snapshots.len(), 3);
     assert!(listed
         .snapshots
         .iter()

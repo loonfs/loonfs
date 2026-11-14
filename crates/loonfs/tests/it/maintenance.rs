@@ -130,7 +130,9 @@ async fn namespace_diagnostics_count_unexpired_snapshots_only() {
         .diagnostics(&source)
         .await
         .expect("read diagnostics");
-    assert_eq!(diagnostics.live_snapshots, 2);
+    // The permanent snapshot, the one with a 60 s TTL, and the fork's
+    // temporary snapshot, which expires 5 minutes after the fork.
+    assert_eq!(diagnostics.live_snapshots, 3);
     writer.shutdown().await.expect("shutdown");
 }
 

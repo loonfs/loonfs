@@ -218,15 +218,20 @@ pub struct WriterBlock {
 
 /// Namespace lifecycle status.
 ///
-/// A namespace is either active or deleted. Missing and unknown
+/// A namespace is initializing, active, or deleted. Missing and unknown
 /// status values fail decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NamespaceStatus {
-    /// The namespace serves reads and accepts commits.
+    /// The namespace's manifest 1 is published, and no call has finished
+    /// writing the objects that the namespace needs outside its prefix.
+    /// LoonFS treats the namespace as missing, except for a create, a fork,
+    /// or a delete with its ID.
     ///
     /// The braces make serde reject a stray field; a unit variant would
     /// silently accept and discard one.
+    Initializing {},
+    /// The namespace serves reads and accepts commits.
     Active {},
     /// The namespace has been deleted.
     Deleted {
@@ -236,6 +241,10 @@ pub enum NamespaceStatus {
 }
 
 impl NamespaceStatus {
+    /// Returns whether the current namespace is active.
+    pub const fn is_active(&self) -> bool {
+        matches!(self, Self::Active {})
+    }
     /// Returns whether the current namespace is deleted.
     pub const fn is_deleted(&self) -> bool {
         matches!(self, Self::Deleted { .. })
@@ -244,7 +253,7 @@ impl NamespaceStatus {
     pub const fn deleted_at_ms(&self) -> Option<u64> {
         match self {
             Self::Deleted { deleted_at_ms, .. } => Some(*deleted_at_ms),
-            Self::Active {} => None,
+            Self::Initializing {} | Self::Active {} => None,
         }
     }
 }
@@ -256,8 +265,15 @@ pub struct ForkBasis {
     /// Source manifest used as the target's initial state. Its owner must
     /// differ from the target namespace.
     pub manifest: ManifestRef,
-    /// Fork snapshot that keeps the basis for as long as the target lives.
+    /// The fork snapshot on the source, which keeps `manifest` for as long as
+    /// the target lives. The fork call records its ID in manifest 1 and writes
+    /// the snapshot after.
     pub source_snapshot_id: SnapshotId,
+    /// The snapshot of the source that the fork was built from, which kept
+    /// `manifest` until the fork snapshot was written: the user snapshot that
+    /// the caller identified, or the temporary snapshot that the fork call took
+    /// of the source's head.
+    pub forked_from_snapshot_id: SnapshotId,
     /// The fork whose commits a rebase replays into the target, which only a
     /// rebase's new fork records.
     #[serde(default, skip_serializing_if = "Option::is_none")]

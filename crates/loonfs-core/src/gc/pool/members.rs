@@ -19,7 +19,7 @@ use crate::time::{Observation, OperationClock};
 use futures::TryStreamExt;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
+use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner, SnapshotPayload};
 use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::{ContentId, NamespaceId, PoolId, UploadId};
 use std::sync::Arc;
@@ -33,10 +33,9 @@ pub(crate) enum MemberState {
     /// The collection has read the member's roots, and its retirement status by the
     /// collection's clock.
     Read { status: RetirementStatus },
-    /// The member has no current manifest, because it's a fork snapshot's
-    /// target whose installation hasn't finished or failed, or because its
-    /// boundary is retired. It has no roots, and no commit can be published
-    /// in it.
+    /// The member has no current manifest, because no namespace has its ID or
+    /// because its boundary is retired. It has no roots, and no commit can be
+    /// published in it.
     Absent,
 }
 
@@ -57,7 +56,7 @@ pub(super) enum MemberWalkOutcome {
 pub(super) struct MemberWalkReport {
     pub(super) outcome: MemberWalkOutcome,
     /// The pool's first member, and every fork snapshot target that the walk
-    /// found, including a target whose installation hasn't finished.
+    /// found, including a target that's initializing.
     pub(super) members: usize,
     /// The members whose roots the collection read. A member without a
     /// current manifest has no roots, and it counts as read.
@@ -254,9 +253,12 @@ impl PoolRoots {
     /// Reads the roots of `member`, a fork snapshot's target, and returns the
     /// member's state.
     ///
-    /// A fork snapshot's target has no current manifest until its installation
-    /// finishes, and it has no roots and no forks until then. A retired
-    /// target has no roots and no forks either.
+    /// A fork snapshot's target has manifest 1 before its fork snapshot exists.
+    /// The collection reads nothing of an initializing target beyond its newest
+    /// manifest, and counts it as an active member. Such a target has no roots
+    /// of its own: its manifest lists the source's segments, which the source's
+    /// snapshot keeps, and LoonFS refuses commits to it and forks of it, so it
+    /// has no WAL tail and no forks. A retired target has no roots and no forks.
     async fn load_member<S: ObjectStore>(
         &mut self,
         member: &NamespaceStore<S>,
@@ -272,6 +274,11 @@ impl PoolRoots {
                 "fork `{}` of pool `{pool_id}` records pool `{recorded}`",
                 member.namespace_id
             )));
+        }
+        if let NamespaceStatus::Initializing {} = current.manifest.payload().status {
+            return Ok(MemberState::Read {
+                status: RetirementStatus::Active,
+            });
         }
         let read = self.read_member(member, current, observed).await?;
         self.protect_layout_segments(&read.current)?;
@@ -302,7 +309,7 @@ impl PoolRoots {
             .await?;
         let head = anchor.manifest.payload();
         // A tombstone's runs cover its whole WAL, so it has no tail.
-        if !head.status.is_deleted() {
+        if head.status.is_active() {
             let tail = project_anchor_tail(&member.store, &member.segment_cache, &anchor)?;
             for revision in tail.revisions() {
                 self.content_ids

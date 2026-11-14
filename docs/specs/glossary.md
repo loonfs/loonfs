@@ -6,11 +6,11 @@ This glossary defines the terms used in the LoonFS specs, grouped by topic. The 
 
 ### Namespace
 
-A directory tree with its own history, stored under its own prefix in object storage (`namespaces/{namespace_id}/`). Each namespace has its own manifests, WAL, and retention floor, and a fork can share stored objects with the namespace it was forked from. Each namespace is a member of one [pool](#pool), and the pool's prefix stores the namespace's content objects and upload records. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A directory tree with its own history, stored under its own prefix in object storage (`namespaces/{namespace_id}/`). Each namespace has its own manifests, WAL, and retention floor, and a fork can share stored objects with the namespace it was forked from. Each namespace is a member of one [pool](#pool), and the pool's prefix stores the namespace's content objects and upload records. A namespace whose newest manifest has the status `initializing` is a fork that no fork call has finished creating, and LoonFS treats it as missing except for a create, fork, or delete with its ID. See [Namespaces and identity](format.md#11-namespaces-and-identity).
 
 ### Manifest
 
-A numbered, immutable object that describes a namespace: its identity and status (active or deleted), which writer can commit, the metadata segments that make up its files and directories, and how much history it keeps (its [retention floor](#retention-floor)). The highest-numbered manifest is the current one, and LoonFS finds it by listing the manifests above the [manifest boundary](#manifest-boundary). Commits made after it was published are in the WAL objects that follow it. See [Manifests, runs, and segments](format.md#71-manifests-runs-and-segments).
+A numbered, immutable object that describes a namespace: its identity and status (initializing, active, or deleted), which writer can commit, the metadata segments that make up its files and directories, and how much history it keeps (its [retention floor](#retention-floor)). The highest-numbered manifest is the current one, and LoonFS finds it by listing the manifests above the [manifest boundary](#manifest-boundary). Commits made after it was published are in the WAL objects that follow it. See [Manifests, runs, and segments](format.md#71-manifests-runs-and-segments).
 
 ### Manifest boundary
 
@@ -250,14 +250,14 @@ The verified set of metadata runs, from the current manifest, that a read starts
 
 A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. Every snapshot has one of two owners:
 
-- A "user snapshot" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user snapshots. A user snapshot can have an expiry time, or none. An expired user snapshot can't be read, forked, retrieved, or listed, but the snapshot inventory shows it until garbage collection deletes its record. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits. A merge or a rebase also creates a user snapshot of the fork while it plans, and deletes the snapshot after its commit.
+- A "user snapshot" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user snapshots. A user snapshot can have an expiry time, or none. An expired user snapshot can't be read, forked, retrieved, or listed, but the snapshot inventory shows it until garbage collection deletes its record. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits. A merge or a rebase also creates a user snapshot of the fork while it plans, and deletes the snapshot after its commit. A fork of a namespace's head creates a user snapshot of the source with no name while it writes its fork snapshot. That snapshot expires after 5 minutes, and the fork doesn't delete it.
 - A "fork snapshot" is a snapshot whose owner is `fork`. It keeps the source manifest that a fork reads through, until the fork is retired. A read of the source accepts a fork snapshot's ID as `snapshot_id`, so a client can read the source as it was at the fork point.
 
 The maintenance API's snapshot inventory lists every snapshot of a namespace, user and fork, so an operator can see what keeps old manifests. See [Snapshots](format.md#8-snapshots).
 
 ### Fork
 
-A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a fork snapshot for the fork until the fork is retired. The fork is a member of its source's [pool](#pool), so it reads inherited content and writes new content under the pool's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a fork snapshot for the fork until the fork is retired. A fork's first manifest is published with the status `initializing` before its fork snapshot is written, and its second manifest makes it active. The fork is a member of its source's [pool](#pool), so it reads inherited content and writes new content under the pool's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
 
 ### Source
 

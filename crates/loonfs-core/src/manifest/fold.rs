@@ -11,7 +11,7 @@ use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataView;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::boundary::LoadedBoundary;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::runs::flatten_manifest_segments;
@@ -384,11 +384,7 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
     /// already folds the tail.
     async fn attempt(&mut self, current: LoadedManifest) -> Result<ManifestChange<FoldWalOutcome>> {
         let payload = current.payload();
-        if payload.status.is_deleted() {
-            return Err(CoreError::NamespaceDeleted {
-                namespace_id: self.namespace.namespace_id.clone(),
-            });
-        }
+        ensure_namespace_live(&self.namespace.namespace_id, payload.status)?;
         if covers_tail(payload, &self.projection.head) {
             return Ok(ManifestChange::Finished(FoldWalOutcome::AlreadyCurrent));
         }

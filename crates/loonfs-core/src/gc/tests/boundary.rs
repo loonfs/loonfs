@@ -554,7 +554,7 @@ async fn the_pool_keeps_a_deleted_members_content_until_its_retirement() {
 }
 
 /// Checks that the source's snapshot cleanup deletes a fork snapshot whose
-/// target is retired, once the snapshot's creation grace has passed.
+/// target is retired.
 #[tokio::test]
 async fn snapshot_cleanup_deletes_a_fork_snapshot_whose_target_is_retired() {
     let directory = tempdir().expect("directory");

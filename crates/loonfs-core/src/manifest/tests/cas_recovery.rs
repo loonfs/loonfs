@@ -125,8 +125,10 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
             payload.fork_basis = Some(ForkBasis {
                 manifest: current.manifest(),
                 source_snapshot_id: SnapshotId::generate(ManifestNo(1)),
+                forked_from_snapshot_id: SnapshotId::generate(ManifestNo(1)),
                 rebased_from: None,
             });
+            payload.status = loonfs_types::format::control::NamespaceStatus::Initializing {};
         } else {
             payload.manifest_no = ManifestNo(2);
         }
@@ -151,12 +153,10 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
         // is published over its predecessor.
         let outcome = if fork {
             let namespace = crate::test_support::namespace_store(&store, &payload.namespace_id);
-            async {
-                namespace.ensure_namespace_absent().await?;
-                namespace.publish_first_manifest(payload, &deadline).await
-            }
-            .await
-            .map(|()| None)
+            namespace
+                .publish_first_manifest(payload, &deadline)
+                .await
+                .map(|_| None)
         } else {
             publish_once_within(&store, encode_manifest(payload), &deadline)
                 .await

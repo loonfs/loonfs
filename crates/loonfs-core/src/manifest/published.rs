@@ -80,7 +80,7 @@ pub(crate) fn same_head(
     head: &NamespaceReadState,
     manifest: &PublishedManifest,
 ) -> bool {
-    !manifest.status.is_deleted()
+    manifest.status.is_active()
         && manifest.writer_epoch == head.writer_epoch
         && manifest.folded_wal_no == head.folded_wal_no
         && manifest.manifest.head_seq == basis.manifest().head_seq
@@ -126,7 +126,7 @@ pub(crate) fn move_read_basis(
 ) -> bool {
     let ReadBasis { head, basis } = read_basis;
     if !same_head(basis, head, manifest) {
-        if manifest.status.is_deleted()
+        if !manifest.status.is_active()
             || manifest.writer_epoch != head.writer_epoch
             || manifest.folded_wal_no <= head.folded_wal_no
             || manifest.folded_wal_no > head.wal_no

@@ -432,9 +432,10 @@ impl NamespaceManifestPayload {
         }
     }
 
-    /// Constructs manifest 1 of a fork of `source` at `fork_basis`, which lists
-    /// the runs and copies the extension entries of `source`, records the
-    /// pool of `source`, and starts its retention floor at the fork's head.
+    /// Constructs manifest 1 of a fork of `source` at `fork_basis`, with the
+    /// status `initializing`, which lists the runs and copies the extension
+    /// entries of `source`, records the pool of `source`, and starts its
+    /// retention floor at the fork's head.
     pub fn initial_fork(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -451,6 +452,7 @@ impl NamespaceManifestPayload {
             retention_floor_seq: fork_seq,
             runs: source.runs.clone(),
             extensions: source.extensions.clone(),
+            status: NamespaceStatus::Initializing {},
             ..Self::initial(
                 namespace_id,
                 source.pool_id.clone(),
@@ -459,6 +461,32 @@ impl NamespaceManifestPayload {
                 source.access.clone(),
             )
         }
+    }
+
+    /// Returns manifest 2 of an initializing namespace: this manifest with the
+    /// status `active`. The publication assigns the number.
+    pub fn activated(&self) -> Self {
+        Self {
+            status: NamespaceStatus::Active {},
+            ..self.clone()
+        }
+    }
+
+    /// Returns this manifest as the namespace's tombstone, deleted at
+    /// `deleted_at_ms`, which lists no extension segments. The publication
+    /// assigns the number.
+    pub fn tombstone(&self, deleted_at_ms: u64) -> Self {
+        let mut tombstone = Self {
+            status: NamespaceStatus::Deleted { deleted_at_ms },
+            ..self.clone()
+        };
+        // A tombstone lists no extension segments, so they're collected once
+        // no snapshot keeps a manifest that lists them (format spec,
+        // "Extensions").
+        for entry in tombstone.extensions.values_mut() {
+            entry.runs.clear();
+        }
+        tombstone
     }
 
     /// Returns the manifest after this one, which has the next manifest
@@ -501,7 +529,12 @@ impl NamespaceManifestPayload {
         if self.manifest_no != ManifestNo(1) {
             return invalid("manifest_no");
         }
-        if self.status.is_deleted() {
+        let status_matches_fork_basis = match self.status {
+            NamespaceStatus::Initializing {} => self.fork_basis.is_some(),
+            NamespaceStatus::Active {} => self.fork_basis.is_none(),
+            NamespaceStatus::Deleted { .. } => false,
+        };
+        if !status_matches_fork_basis {
             return invalid("status");
         }
         if self.writer.is_some() {
@@ -605,6 +638,25 @@ impl NamespaceManifestPayload {
         }
         if self.status.is_deleted() {
             return invalid("status");
+        }
+        match (self.status, successor.status) {
+            (_, NamespaceStatus::Initializing {}) => return invalid("status"),
+            // Manifest 2 of an initializing namespace changes only its status,
+            // so it's manifest 1 activated or manifest 1's tombstone.
+            (NamespaceStatus::Initializing {}, status) if next => {
+                let expected = match status {
+                    NamespaceStatus::Deleted { deleted_at_ms } => self.tombstone(deleted_at_ms),
+                    _ => self.activated(),
+                };
+                let expected = Self {
+                    manifest_no: successor.manifest_no,
+                    ..expected
+                };
+                if *successor != expected {
+                    return invalid("status");
+                }
+            }
+            _ => {}
         }
         // Activity only grows, and only when the head folds new commits.
         let (before, after) = (&self.activity, &successor.activity);
@@ -790,6 +842,10 @@ mod tests {
                             "snp_00000000000000000001-00000000000000000000000001",
                         )
                         .expect("snapshot"),
+                        forked_from_snapshot_id: crate::SnapshotId::parse(
+                            "snp_00000000000000000001-00000000000000000000000002",
+                        )
+                        .expect("snapshot"),
                         rebased_from: None,
                     })
                 }
@@ -835,6 +891,86 @@ mod tests {
                 .field,
             "status"
         );
+    }
+
+    #[test]
+    fn an_initializing_manifest_one_is_followed_only_by_its_activation_or_tombstone() {
+        let source = NamespaceManifestPayload::initial(
+            NamespaceId::parse("source").expect("namespace"),
+            pool_id(),
+            1_000,
+            crate::ActorId::parse("test").expect("actor"),
+            super::NamespaceAccess::Unrestricted {},
+        );
+        let snapshot_id = |random: u8| {
+            crate::SnapshotId::parse(format!(
+                "snp_00000000000000000001-0000000000000000000000000{random}"
+            ))
+            .expect("snapshot")
+        };
+        let fork_basis = crate::control::ForkBasis {
+            manifest: crate::control::ManifestRef {
+                owner_namespace_id: source.namespace_id.clone(),
+                manifest_no: ManifestNo(1),
+                head_seq: CommitSeq(0),
+                payload_checksum: crate::sha256_digest(b"source"),
+            },
+            source_snapshot_id: snapshot_id(1),
+            forked_from_snapshot_id: snapshot_id(2),
+            rebased_from: None,
+        };
+        let initializing = NamespaceManifestPayload::initial_fork(
+            NamespaceId::parse("fork").expect("namespace"),
+            2_000,
+            crate::ActorId::parse("test").expect("actor"),
+            fork_basis,
+            &source,
+        );
+        initializing
+            .ensure_first_manifest()
+            .expect("a fork's manifest 1 is initializing");
+        let numbered = |payload: NamespaceManifestPayload| NamespaceManifestPayload {
+            manifest_no: ManifestNo(2),
+            ..payload
+        };
+        let active = numbered(initializing.activated());
+        initializing
+            .ensure_successor(&active)
+            .expect("manifest 2 activates manifest 1");
+        initializing
+            .ensure_successor(&numbered(initializing.tombstone(3_000)))
+            .expect("manifest 2 deletes manifest 1");
+        let status_error = |predecessor: &NamespaceManifestPayload, successor| {
+            predecessor
+                .ensure_successor(&successor)
+                .expect_err("the successor's status should be refused")
+                .field
+        };
+        assert_eq!(
+            status_error(&initializing, numbered(initializing.clone())),
+            "status"
+        );
+        let mut advanced = active.clone();
+        advanced.head_seq = CommitSeq(1);
+        assert_eq!(status_error(&initializing, advanced), "status");
+        let mut initializing_after_active = active.clone();
+        initializing_after_active.manifest_no = ManifestNo(3);
+        initializing_after_active.status = crate::control::NamespaceStatus::Initializing {};
+        assert_eq!(status_error(&active, initializing_after_active), "status");
+
+        let mut active_fork = initializing.clone();
+        active_fork.status = crate::control::NamespaceStatus::Active {};
+        let mut initializing_create = source.clone();
+        initializing_create.status = crate::control::NamespaceStatus::Initializing {};
+        for first in [active_fork, initializing_create] {
+            assert_eq!(
+                first
+                    .ensure_first_manifest()
+                    .expect_err("the status should match the fork basis")
+                    .field,
+                "status"
+            );
+        }
     }
 
     #[test]
