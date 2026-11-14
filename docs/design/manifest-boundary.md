@@ -138,7 +138,7 @@ A request to a retired namespace returns `namespace_deleted`, as before the reti
 
 For example, `sandbox`, a fork of `main`, writes its last segments at 09:50 on Monday, is deleted at 10:00, and with the 24-hour grace window is eligible at 10:00 on Tuesday. The sweep at 03:00 on Wednesday deletes `sandbox`'s fork snapshot on `main` and its member entry, raises the boundary to retired, and deletes the manifests, the WAL objects, and the segments, which are all more than 24 hours old. Later sweeps list `sandbox`, read its boundary, and find nothing else under the prefix.
 
-Why is the fork snapshot deleted before the boundary is raised? The tombstone's fork basis is the record of which snapshot to delete, and the tombstone stays until the boundary is retired. If the boundary were raised first and the collection stopped, a later collection could delete the tombstone under the age rules. The fork snapshot would then stay on the source until the source's snapshot cleanup found that the snapshot's target has no manifest (see [Snapshot cleanup](../specs/format.md#117-snapshot-cleanup)).
+Why is the fork snapshot deleted before the boundary is raised? The tombstone's fork basis is the record of which snapshot to delete, and the tombstone stays until the boundary is retired. If the boundary were raised first and the collection stopped, a later collection could delete the tombstone under the age rules, and nothing would delete the fork snapshot, because the source's collection keeps every fork snapshot (see [Snapshot cleanup](../specs/format.md#117-snapshot-cleanup)).
 
 Why is the boundary raised to retired, and not to the tombstone's number? A boundary at the tombstone's number would leave no manifest above the boundary, and a reader would report a corrupt store.
 
@@ -148,7 +148,7 @@ Why is the boundary object kept? It's the record that the ID was used, which a c
 
 A [pool](../specs/glossary.md#pool)'s collection lists the pool's member entries and finds the newest manifest of each listed namespace (see [The pool's collection](namespace-creation.md#the-pools-collection)). A member's content references count as roots until its retirement deletes its member entry. A listed namespace whose boundary is retired has no roots, and the collection deletes its member entry.
 
-When a fork snapshot's target is retired, the target has no roots. The source's snapshot cleanup deletes the snapshot, as it does for a target that has no manifest.
+The source's collection keeps every fork snapshot and reads nothing under the target's prefix. The target's retirement deletes the fork snapshot in step 1.
 
 ### Time rules
 

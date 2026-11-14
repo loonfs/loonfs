@@ -749,3 +749,55 @@ async fn a_second_collection_reads_no_completed_session_record() {
     assert_eq!(first.retained.upload_session_window, 3);
     assert_eq!(second.retained.upload_session_window, 3);
 }
+
+/// Checks that a namespace collection of a source sends one request for each
+/// snapshot record whatever the number of its fork snapshots, and none under
+/// a fork's prefix, so a fork snapshot costs no read of its target.
+#[tokio::test]
+async fn a_source_collection_reads_no_fork_target() {
+    let actor = loonfs_test_support::test_actor();
+    let mut requests_beyond_the_records = Vec::new();
+    for forks in [1, 4] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::any(),
+        ));
+        let fs = open_runtime_async(store.clone(), "fork-targets").await;
+        let source = namespace(&fs).await;
+        let mut fork_prefixes = Vec::new();
+        for index in 0..forks {
+            let fork = namespace_id(&format!("fork-{index}"));
+            fs.writer
+                .fork_namespace(&source, &fork, &actor)
+                .await
+                .expect("fork");
+            fork_prefixes.push(loonfs_objectstore::keys::namespace_prefix(&fork));
+        }
+        let records = store
+            .inner()
+            .list_prefix(&loonfs_objectstore::keys::snapshot_prefix(&source))
+            .await
+            .expect("snapshot records")
+            .len();
+        store.reset();
+        let report = fs
+            .maintenance
+            .gc(&source)
+            .await
+            .expect("collect the source");
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
+        let operations = store.take();
+        assert!(
+            operations.iter().all(|operation| fork_prefixes
+                .iter()
+                .all(|prefix| !operation.key().starts_with(prefix.as_str()))),
+            "{forks} forks: {operations:?}"
+        );
+        requests_beyond_the_records.push(operations.len() - records);
+    }
+    assert_eq!(
+        requests_beyond_the_records[0],
+        requests_beyond_the_records[1]
+    );
+}

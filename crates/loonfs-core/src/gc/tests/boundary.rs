@@ -558,23 +558,3 @@ async fn the_pool_keeps_a_deleted_members_content_until_its_retirement() {
     let reclaimed = collect_pool(&store, &pool_id, &aged).await;
     assert_eq!(reclaimed.deleted.content_objects, keys.len() as u64);
 }
-
-/// Checks that the source's snapshot cleanup deletes a fork snapshot whose
-/// target is retired.
-#[tokio::test]
-async fn snapshot_cleanup_deletes_a_fork_snapshot_whose_target_is_retired() {
-    let directory = tempdir().expect("directory");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("source");
-    let target = NamespaceId::parse("target").expect("target");
-    let (snapshot_id, eligible) = deleted_fork(&store, &source, &target).await;
-    crate::test_support::namespace_store(&store, &target)
-        .retire_boundary()
-        .await
-        .expect("retire the target");
-    assert!(snapshot_record_exists(&store, &source, &snapshot_id).await);
-
-    let report = collect(&store, &source, &eligible).await;
-    assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
-    assert!(!snapshot_record_exists(&store, &source, &snapshot_id).await);
-}

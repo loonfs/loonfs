@@ -5,6 +5,7 @@ use super::charged_set::{ChargedQueue, ChargedSet, CollectionMemory};
 use super::deletes::Decision;
 use super::families::CandidateFamily;
 use super::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
+use super::snapshots::sweep_snapshot_record;
 use crate::error::Result;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
@@ -214,11 +215,7 @@ impl LiveSet {
                     }
                     decision
                 }
-                (_, Some(record)) => {
-                    namespace
-                        .sweep_snapshot_record(&snapshot.key, record, self, clock)
-                        .await?
-                }
+                (_, Some(record)) => sweep_snapshot_record(&snapshot.key, record, self, clock),
                 (_, None) => Decision::Gone,
             };
             self.snapshot_decisions.push_back(decision)?;
