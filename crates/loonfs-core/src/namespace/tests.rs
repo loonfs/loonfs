@@ -31,10 +31,10 @@ const CREATE_STORE_OPERATIONS: usize = 8;
 
 /// The store operations of the fork in
 /// `a_new_namespace_is_looked_up_before_its_first_write`, with the fold of
-/// the source's WAL tail before it: 16 for the fold, and 19 for the fork, of
-/// which 6 are the two checks of the snapshot that the fork is built from and
-/// 1 is the member entry.
-const FORK_STORE_OPERATIONS: usize = 35;
+/// the source's WAL tail before it: 16 for the fold, and 16 for the fork, of
+/// which 3 are the check of the snapshot that the fork is built from and 1 is
+/// the member entry.
+const FORK_STORE_OPERATIONS: usize = 32;
 
 /// The store operations of the deletion in
 /// `a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a_writer_session`.
@@ -1241,8 +1241,9 @@ async fn a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a
 
 /// Checks that a call that finishes a fork after the fork's temporary
 /// snapshot expired returns `snapshot_not_found`, publishes no manifest, and
-/// deletes no fork snapshot, whether or not a call wrote the fork snapshot
-/// before the snapshot expired.
+/// leaves one fork snapshot on the source, whether a call wrote the fork
+/// snapshot before the snapshot expired or this call writes it before its
+/// check fails.
 #[tokio::test]
 async fn a_finishing_fork_whose_snapshot_ended_returns_snapshot_not_found_and_leaves_the_namespace_initializing(
 ) {
@@ -1270,15 +1271,13 @@ async fn a_finishing_fork_whose_snapshot_ended_returns_snapshot_not_found_and_le
             .await;
         assert_matches!(finished, Err(CoreError::SnapshotNotFound { .. }));
         assert_eq!(manifest_payloads(&store, &target).await, [manifest_1]);
-        assert_eq!(
-            fork_snapshots(&store, &source).await.len(),
-            usize::from(fork_snapshot_written)
-        );
+        assert_eq!(fork_snapshots(&store, &source).await.len(), 1);
     }
 }
 
 /// Checks that a call that finishes a fork of a deleted source returns
-/// `namespace_deleted` and publishes no manifest.
+/// `namespace_deleted`, publishes no manifest, and leaves the fork snapshot
+/// that it wrote before its check found the source deleted.
 #[tokio::test]
 async fn a_finishing_fork_whose_source_was_deleted_returns_namespace_deleted() {
     let directory = tempdir().expect("directory");
@@ -1302,7 +1301,7 @@ async fn a_finishing_fork_whose_source_was_deleted_returns_namespace_deleted() {
         .await;
     assert_matches!(finished, Err(CoreError::NamespaceDeleted { .. }));
     assert_eq!(manifest_payloads(&store, &target).await, [manifest_1]);
-    assert!(fork_snapshots(&store, &source).await.is_empty());
+    assert_eq!(fork_snapshots(&store, &source).await.len(), 1);
 }
 
 /// Checks that a call that finishes a fork, and whose manifest 2 put loses to
