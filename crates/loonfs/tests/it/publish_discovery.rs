@@ -392,8 +392,8 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
 
 /// Returns the requests of a first commit whose claim builds on manifest 2
 /// of `namespace_id` without a request first: the claim's put and the
-/// boundary read after the put, the discovery of the tip (a WAL read, a
-/// successor check, and a boundary read), the fence, and the commit.
+/// boundary read after the put, a WAL read for the tip, the fence, the
+/// successor check and boundary read after the fence, and the commit.
 fn first_commit_requests(namespace_id: &NamespaceId) -> Vec<(&'static str, String)> {
     vec![
         (
@@ -402,12 +402,12 @@ fn first_commit_requests(namespace_id: &NamespaceId) -> Vec<(&'static str, Strin
         ),
         ("get", boundary(namespace_id)),
         ("get", "wal 1".to_owned()),
+        ("put", "wal 1".to_owned()),
         (
             "head",
             metadata_manifest_object(namespace_id, &ManifestNo(4)),
         ),
         ("get", boundary(namespace_id)),
-        ("put", "wal 1".to_owned()),
         ("put", "wal 2".to_owned()),
     ]
 }
