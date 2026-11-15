@@ -1110,7 +1110,6 @@ async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
         "put main-fork MetadataManifest 00000000000000000004",
         "get main-fork Boundary",
         "put main-fork Snapshot",
-        "get main-fork MetadataManifest 00000000000000000004",
         "head main-fork MetadataManifest 00000000000000000005",
         "get main-fork Boundary",
         "put main WalObject 00000000000000000005",
