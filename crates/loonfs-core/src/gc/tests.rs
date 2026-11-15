@@ -1304,56 +1304,6 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
 }
 
 #[tokio::test]
-async fn an_unreadable_or_corrupt_fork_target_keeps_its_snapshot_and_the_collection_continues() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let store = FailStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(loonfs_objectstore::keys::boundary(&clone)),
-        OperationSelector::Read,
-        InjectedError::Transport("target boundary timed out".to_owned()),
-    );
-    let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
-        .create()
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
-    fixture
-        .engine()
-        .fork_namespace(
-            &clone,
-            &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
-                .await
-                .expect("fold the WAL tail"),
-        )
-        .await
-        .expect("fork");
-    let fork_record = read_fork_record(store.inner(), &source).await;
-
-    let aged = context(setup.now_ms + GC_GRACE_WINDOW_MS);
-    store.fail_all();
-    let report = collect(&store, &source, &aged).await;
-    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
-    assert!(snapshot_record_exists(store.inner(), &source, &fork_record.snapshot_id).await);
-
-    store.clear();
-    replace_object(
-        &store,
-        &metadata_manifest_object(&clone, &ManifestNo(1)),
-        Bytes::from_static(b"not json"),
-    )
-    .await
-    .expect("corrupt target manifest");
-    let report = collect(&store, &source, &aged).await;
-    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
-    assert!(snapshot_record_exists(store.inner(), &source, &fork_record.snapshot_id).await);
-}
-
-#[tokio::test]
 async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1417,84 +1367,6 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .load_current_metadata_view()
         .await
         .expect("target readable after every collection")
-        .resolve_path(
-            "/docs/one.txt",
-            AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
-        )
-        .await
-        .expect("forked file readable");
-}
-
-async fn snapshot_count<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> usize {
-    store
-        .list_prefix(&snapshot_prefix(namespace_id))
-        .await
-        .expect("list snapshots")
-        .len()
-}
-
-/// Checks that snapshot cleanup deletes a fork snapshot whose target's
-/// manifest records another fork snapshot at the source's first collection,
-/// and keeps the fork's own fork snapshot and its temporary snapshot.
-#[tokio::test]
-async fn snapshot_cleanup_deletes_a_fork_snapshot_that_the_target_does_not_record() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let source = NamespaceId::parse("source").expect("namespace id");
-    let clone = NamespaceId::parse("clone").expect("namespace id");
-    let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
-        .create()
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    let namespace = crate::test_support::namespace_store(&store, &source);
-    let abandoned = namespace
-        .create_snapshot_record(
-            SnapshotOwner::Fork {
-                target_namespace_id: clone.clone(),
-            },
-            crate::test_support::folded_manifest(&namespace)
-                .await
-                .expect("fold the WAL tail"),
-            &setup.clock(),
-        )
-        .await
-        .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
-        .expect("a fork snapshot that the target won't record");
-
-    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
-    fixture
-        .engine()
-        .fork_namespace(
-            &clone,
-            &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
-                .await
-                .expect("fold the WAL tail"),
-        )
-        .await
-        .expect("fork");
-    assert_eq!(
-        snapshot_count(&store, &source).await,
-        3,
-        "the fork takes a temporary snapshot and its own fork snapshot"
-    );
-
-    let report = collect(&store, &source, &context(setup.now_ms + 1)).await;
-    assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
-    assert_eq!(report.deleted_snapshots_by_owner.user, 0);
-    assert!(!snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await);
-    assert_eq!(
-        snapshot_count(&store, &source).await,
-        2,
-        "the fork's own snapshots stay"
-    );
-    crate::test_support::namespace_store(&store, &clone)
-        .load_current_metadata_view()
-        .await
-        .expect("target readable after the collection")
         .resolve_path(
             "/docs/one.txt",
             AttributeInclusion::Omit,
@@ -2129,14 +2001,11 @@ async fn a_pool_without_members_retries_deletes_and_collects_late_writes() {
     );
 }
 
-/// Checks that expiry deletes user snapshots without a released state, and
-/// that a fork snapshot whose target has no manifest goes at the first
-/// collection.
+/// Checks that expiry deletes user snapshots without a released state.
 #[tokio::test]
-async fn expiry_and_an_absent_target_delete_snapshots_without_a_released_state() {
+async fn expiry_deletes_snapshots_without_a_released_state() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("snapshot-grace").expect("namespace");
-    let target = NamespaceId::parse("absent").expect("target");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let setup = context(1_000);
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
@@ -2160,9 +2029,6 @@ async fn expiry_and_an_absent_target_delete_snapshots_without_a_released_state()
             expires_at_ms: Some(2_000),
             deleted_at_ms: None,
         },
-        SnapshotOwner::Fork {
-            target_namespace_id: target.clone(),
-        },
     ] {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         snapshots.push(
@@ -2179,19 +2045,6 @@ async fn expiry_and_an_absent_target_delete_snapshots_without_a_released_state()
                 .expect("snapshot"),
         );
     }
-    let abandoned = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&context(1_000).clock())
-        .await
-        .expect("absent target");
-    assert_eq!(
-        abandoned.deleted_snapshots_by_owner,
-        loonfs_types::DeletedSnapshotsByOwner {
-            fork: 1,
-            ..Default::default()
-        }
-    );
-    assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[3].snapshot_id).await);
-    assert!(namespace_keys(&store, &target).await.is_empty());
     let before_expiry = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&context(2_000 + GC_GRACE_WINDOW_MS - 1).clock())
         .await
@@ -2288,11 +2141,10 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
     assert_eq!(store.counts().deletes, 0);
 }
 
-/// Checks that snapshot cleanup reads each fork snapshot's target with one
-/// listing of its manifests, writes nothing, and deletes only the fork
-/// snapshot whose target has no manifest.
+/// Checks that a collection of the source keeps every fork snapshot and
+/// sends no request under any target's prefix.
 #[tokio::test]
-async fn fork_snapshot_cleanup_reads_only_each_targets_manifest_discovery() {
+async fn a_source_collection_keeps_every_fork_snapshot_and_reads_no_target() {
     let directory = tempdir().expect("directory");
     let root = NamespaceId::parse("root").expect("root");
     let source = NamespaceId::parse("source").expect("source");
@@ -2305,8 +2157,8 @@ async fn fork_snapshot_cleanup_reads_only_each_targets_manifest_discovery() {
         .create()
         .await
         .expect("bootstrap");
-    // A fork's collection reads no other member's roots, so only snapshot cleanup reads
-    // the targets.
+    // A fork's collection reads no other member's roots, so a read under a
+    // target's prefix would come from snapshot cleanup.
     let fixture = crate::test_support::NamespaceFixture::new(&store, &root, &setup);
     fixture
         .engine()
@@ -2319,7 +2171,6 @@ async fn fork_snapshot_cleanup_reads_only_each_targets_manifest_discovery() {
         )
         .await
         .expect("fork the source");
-    let mut targets = Vec::new();
     for number in 0..6 {
         let target = NamespaceId::parse(format!("target-{number}")).expect("target");
         let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
@@ -2334,32 +2185,11 @@ async fn fork_snapshot_cleanup_reads_only_each_targets_manifest_discovery() {
             )
             .await
             .expect("fork");
-        targets.push(target);
-    }
-    write_test_file(&store, &targets[0], "/own.txt", "target-write", &setup).await;
-    for manifest_no in [1, 2] {
-        store
-            .inner()
-            .delete(&metadata_manifest_object(
-                &targets[5],
-                &ManifestNo(manifest_no),
-            ))
-            .await
-            .expect("absent target manifest");
     }
     store.reset();
     let report = collect(&store, &source, &context(setup.now_ms + 1)).await;
-    assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
-    let counts = store.counts();
-    // One listing of each target's manifests.
-    assert_eq!(counts.lists, 6);
-    assert_eq!(counts.puts, 0);
-    assert_eq!(counts.compare_and_swaps, 0);
-    assert_eq!(counts.deletes, 0);
-    assert!(store
-        .snapshot()
-        .iter()
-        .all(|operation| !operation.key().contains("/wal/")));
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
+    assert_eq!(store.snapshot(), Vec::new());
     assert_eq!(
         store
             .inner()
@@ -2367,8 +2197,8 @@ async fn fork_snapshot_cleanup_reads_only_each_targets_manifest_discovery() {
             .await
             .expect("fork snapshots")
             .len(),
-        // The fork snapshots of five targets, and six temporary snapshots.
-        11
+        // The fork snapshots of six targets, and six temporary snapshots.
+        12
     );
 }
 
