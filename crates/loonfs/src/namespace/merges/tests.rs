@@ -578,6 +578,48 @@ async fn a_retry_of_a_committed_merge_folds_nothing() {
     assert_eq!(family.manifest_nos().await, before);
 }
 
+/// Checks that a retry through one runtime of a merge that another runtime
+/// committed returns the original merge after the fork was deleted. Runtime
+/// A's writer session on `main` has a position from before runtime B's
+/// merge. The retry's receipt lookup confirms the position first, so the
+/// lookup reads B's merge and the retry never reads the deleted fork.
+#[tokio::test]
+async fn a_retry_of_a_merge_that_another_runtime_committed_finds_the_receipt_after_the_fork_is_deleted(
+) {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store: crate::SharedObjectStore =
+        Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let family = family_on(directory, store.clone()).await;
+    family.write_main("/later.txt").await;
+    let other = LoonFs::builder_with_store(store)
+        .writer_id(writer_id("other-merge-writer"))
+        .build()
+        .await
+        .expect("the other runtime");
+    let options = MergeForkOptions {
+        commit_id: Some(CommitId::parse("merge").expect("commit id")),
+        ..MergeForkOptions::default()
+    };
+    let other_main = other.open_namespace(family.main.id()).expect("open main");
+    let merged = other_main
+        .merge_fork_with_options(family.fork.id(), &actor(), &options)
+        .await
+        .expect("the merge in the other runtime");
+    other
+        .open_namespace(family.fork.id())
+        .expect("open the fork")
+        .delete()
+        .await
+        .expect("delete the fork");
+    let retried = family
+        .main
+        .merge_fork_with_options(family.fork.id(), &actor(), &options)
+        .await
+        .expect("the retry");
+    assert_eq!(retried.committed_seq, merged.committed_seq);
+    assert_eq!(retried.commit_id, merged.commit_id);
+}
+
 /// Checks that a merge's delete of a file expects the file's revision. `main`
 /// writes `/a.txt`, which the fork deleted, between the plan and the commit,
 /// the commit fails with `stale_revision`, and the next plan reports the
@@ -1041,13 +1083,15 @@ async fn recorded_family() -> (Family, Arc<RecordingStore<LocalFsStore>>) {
 }
 
 /// Checks the exact requests of a merge in a writer runtime with fresh
-/// positions on both namespaces. The receipt lookup and the checks before
-/// the plan read both positions as they are and send no request. The fork's
-/// fold publishes manifest 4, and the snapshot's verification after the
-/// record write is the fork's position check, so the fork's successor is
-/// checked once, and the plan reads the snapshot record from memory. The
-/// commit is one WAL put, and the release is one compare-and-swap against
-/// the version that the record's write stored.
+/// positions on both namespaces. The receipt lookup is a `strong` read of
+/// `main`, so it checks `main`'s position with a successor HEAD and a
+/// boundary read. The checks before the plan read the fork's position as it
+/// is and send no request. The fork's fold publishes manifest 4, and the
+/// snapshot's verification after the record write is the fork's position
+/// check, so the fork's successor is checked once, and the plan reads the
+/// snapshot record from memory. The commit is one WAL put, and the release
+/// is one compare-and-swap against the version that the record's write
+/// stored.
 #[tokio::test]
 async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
     let (family, store) = recorded_family().await;
@@ -1056,7 +1100,11 @@ async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
         .merge_fork(family.fork.id(), &actor())
         .await
         .expect("the merge");
-    let mut expected = vec!["assemble pool ContentBlob"];
+    let mut expected = vec![
+        "head main MetadataManifest 00000000000000000005",
+        "get main Boundary",
+        "assemble pool ContentBlob",
+    ];
     expected.extend(["put main-fork MetadataSegment"; 7]);
     expected.extend([
         "put main-fork MetadataManifest 00000000000000000004",

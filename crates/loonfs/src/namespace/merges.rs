@@ -236,10 +236,10 @@ impl Namespace<Writable> {
     /// read does: a view that a newer manifest replaced, whose segments a
     /// collection removed, is read once more from the current manifest, and
     /// the reservation that the first view took stays with the second. The
-    /// view is the writer position as it is (see [`HeadConfirmation::View`]),
-    /// because the commit goes through this runtime's writer session, whose
-    /// publish finds another writer's commit, and a plan that a commit made
-    /// stale fails at the commit and plans again.
+    /// read is `strong`, because the receipt lookup's result decides whether
+    /// the plan touches the fork at all. Another runtime may commit the merge
+    /// and then delete the fork. A retry of that merge through this runtime
+    /// has to find the receipt and not return `namespace_deleted`.
     pub(super) async fn plan_commit<R, Plan>(
         &self,
         request: &MergeRequest,
@@ -253,7 +253,7 @@ impl Namespace<Writable> {
     {
         let held = Mutex::new(reservation);
         self.core
-            .read(&self.namespace_id, HeadConfirmation::View, |target| async {
+            .read(&self.namespace_id, Consistency::Strong, |target| async {
                 if let Some(commit) = target.engine.find_merge(&target.context, request).await? {
                     return Ok(PlannedMerge::Committed(commit));
                 }
