@@ -248,9 +248,10 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, ExtensionSegmentRef>
     async fn load_index(
         &self,
         segment: ExtensionSegmentRef,
-    ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
+    ) -> Result<(Arc<Vec<SegmentIndexEntry>>, ExtensionSegmentRef)> {
         let object_key = self.object_key(&segment);
-        load_index_block(self.store, self.block_cache, &object_key, &segment).await
+        let index = load_index_block(self.store, self.block_cache, &object_key, &segment).await?;
+        Ok((index, segment))
     }
 
     async fn load_data_blocks(

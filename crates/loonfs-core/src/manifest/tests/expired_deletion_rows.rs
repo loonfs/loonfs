@@ -1016,7 +1016,7 @@ async fn compacted_rows<S: ObjectStore + ?Sized>(
 ) -> Vec<MetadataRow> {
     let mut rows = Vec::new();
     for descriptor in output_segments {
-        let index = index_block_load::load_segment_index_for_compaction(store, descriptor)
+        let (index, _) = index_block_load::load_segment_index_for_compaction(store, descriptor)
             .await
             .expect("load the output index");
         let blocks =

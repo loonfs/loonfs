@@ -8,7 +8,9 @@
 use super::block_memo::SessionBlockMemo;
 use super::cache::SegmentBlockKind;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache};
-use super::index_block_load::{load_section_bytes, segment_block_cache_key, segment_codec_error};
+use super::index_block_load::{
+    load_section_bytes, section_bytes, segment_block_cache_key, segment_codec_error,
+};
 use super::segment_block_cache::LoadedSegmentBlock;
 use crate::heap_bytes::data_block_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
@@ -86,6 +88,28 @@ pub(crate) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
         .into_iter()
         .map(|block| block.expect("every selected block should be resolved above"))
         .collect())
+}
+
+/// Decodes the data blocks of `entries` out of `object`, which is the whole
+/// segment object, in order. Nothing is fetched, and nothing goes into a memo
+/// or a block cache.
+pub(crate) fn decode_data_blocks_from_object(
+    descriptor: &MetadataSegmentRef,
+    object: &Bytes,
+    entries: &[SegmentIndexEntry],
+) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
+    let object_key = metadata_segment_object_key(descriptor);
+    entries
+        .iter()
+        .map(|entry| {
+            let stored = section_bytes(object, 0, &entry.block).ok_or_else(|| {
+                segment_codec_error(&object_key, "data block outside the segment object bounds")
+            })?;
+            decode_data_block(&stored, &entry.block)
+                .map(Arc::new)
+                .map_err(|err| segment_codec_error(&object_key, err))
+        })
+        .collect()
 }
 
 /// Loads the blocks of `span` through the block cache's single flight on the
