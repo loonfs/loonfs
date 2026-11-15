@@ -55,6 +55,20 @@ impl RetirementStatus {
             Self::Eligible
         }
     }
+
+    /// Returns whether the layout view of the namespace's current manifest is
+    /// a [content root](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#119-content-roots):
+    /// while the namespace is active, and while a deleted namespace's
+    /// retirement deadline is in the future.
+    pub(super) fn current_view_is_root(self) -> bool {
+        matches!(
+            self,
+            Self::Active
+                | Self::Retained {
+                    retires_at_ms: Some(_)
+                }
+        )
+    }
 }
 
 pub(super) struct LiveSet {

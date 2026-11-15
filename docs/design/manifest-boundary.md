@@ -146,7 +146,7 @@ Why is the boundary object kept? It's the record that the ID was used, which a c
 
 ### The pool's collection
 
-A [pool](../specs/glossary.md#pool)'s collection lists the pool's member entries and finds the newest manifest of each listed namespace (see [The pool's collection](namespace-creation.md#the-pools-collection)). A member's content references count as roots until its retirement deletes its member entry. A listed namespace whose boundary is retired has no roots, and the collection deletes its member entry.
+A [pool](../specs/glossary.md#pool)'s collection lists the pool's member entries and finds the newest manifest of each listed namespace (see [The pool's collection](namespace-creation.md#the-pools-collection)). The collection finds a member through the member list until the member's retirement deletes its member entry. A deleted member's tombstone is a content root until its retirement deadline, and the manifests that the member's snapshots keep are content roots until those snapshots are deleted. A listed namespace whose boundary is retired has no roots, and the collection deletes its member entry.
 
 The source's collection keeps every fork snapshot and reads nothing under the target's prefix. The target's retirement deletes the fork snapshot in step 1.
 

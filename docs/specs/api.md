@@ -925,7 +925,7 @@ A namespace's GC response groups related counts:
 
 A pool's GC response has no `deleted_snapshots_by_owner`, and its `deleted` contains these counts:
 
-- `content_objects` counts the content objects that no retained view of any member references, which the collection deleted once they were older than the grace window.
+- `content_objects` counts the content objects that no content root of any member references, which the collection deleted once they were older than the grace window.
 - `upload_sessions` counts the upload sessions whose records the collection deleted.
 - `temporary_objects` counts the pool's temporary objects that the collection deleted once they were older than the grace window.
 
@@ -1039,7 +1039,7 @@ An expired snapshot stays listed until GC deletes it, after its expiry plus the 
 
 An ordinary operation that finds that its namespace was deleted returns `namespace_deleted`. Cached readers follow the rules in [Deleting a namespace](format.md#94-deleting-a-namespace). Collection is asynchronous. It has no set completion time, and it doesn't guarantee physical erasure.
 
-[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement does. Retirement raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired, and later collections of the namespace delete its tombstone and every other object under its prefix except the boundary object. No retirement deletes content. A deleted namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member's roots refer to it, which is after the namespace is retired. The boundary object stays as the record that the ID was used, and purging it is outside the scope of this API.
+[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement does. Retirement raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired, and later collections of the namespace delete its tombstone and every other object under its prefix except the boundary object. No retirement deletes content. A deleted namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member's roots refer to it. The namespace's own references stop protecting its content at its retirement deadline, and the manifests that its snapshots keep protect content until those snapshots are deleted (see [Content roots](format.md#119-content-roots)). The boundary object stays as the record that the ID was used, and purging it is outside the scope of this API.
 
 A deleted ancestor namespace keeps every object it published while a live descendant still depends on it.
 
@@ -1056,7 +1056,7 @@ Completed upload sessions in active namespaces keep their records for the comple
 
 GC needs to run repeatedly, including after a collection finds nothing left to delete. A presigned upload URL that was issued before the deletion can still write an object after the deletion, and a late write that one listing misses is found by the next collection. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, snapshot cleanup, or maintenance that isn't running.
 
-Once the current manifest is deleted, LoonFS refuses commits, requests for new presigned upload URLs, and upload completion, but it doesn't revoke presigned URLs that were already issued. A runtime decides the upload requests from the namespace head that it holds, and it checks that head for a newer manifest at least every 20 minutes, so a runtime can still grant one of them up to 20 minutes after another process deletes the namespace. A deleted namespace is retired no earlier than the grace window (24 hours) after its deletion, which is longer than that delay and the presigned URL lifetime together.
+Once the current manifest is deleted, LoonFS refuses commits, requests for new presigned upload URLs, and upload completion, but it doesn't revoke presigned URLs that were already issued. A runtime decides the upload requests from the namespace head that it holds, and it checks that head for a newer manifest at least every 20 minutes, so a runtime can still grant one of them up to 20 minutes after another process deletes the namespace. The namespace's own content references protect its content until its retirement deadline, the grace window (24 hours) after the deletion, which is longer than that delay and the presigned URL lifetime (15 minutes, or one hour for a multipart part) together.
 
 The reference server's scheduler runs maintenance on two schedules:
 
