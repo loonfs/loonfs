@@ -166,7 +166,15 @@ impl PublisherRegistry {
                 return Ok(not_due);
             }
         }
-        let _turn = turns.fold.write().await;
+        let _turn = turns
+            .fold
+            .write()
+            .instrument(phase_span!(
+                self.shared.context.runtime_core,
+                Phase::WaitForFoldLock,
+                namespace_id
+            ))
+            .await;
         if let FoldWhen::Always = when {
             if let Some(folded) = turns.folded_after(arrival) {
                 return Ok(NamespaceFold::Folded(Box::new(folded)));
@@ -187,21 +195,33 @@ impl PublisherRegistry {
         turns: &NamespaceTurns,
     ) -> Result<FoldedWalTail> {
         let core = &self.shared.context.runtime_core;
-        let _permit = core.fold_permit().await;
+        let _permit = core
+            .fold_permit()
+            .instrument(phase_span!(core, Phase::WaitForFoldPermit, namespace_id))
+            .await;
         let round = turns.start_round();
         // Commits that the session published while the fold waited for its
         // permit are in the position now, so the fold folds them too.
         let input = session.and_then(NamespacePublisher::current_position);
         let started_at_ms = core.timer().monotonic_now_ms();
+        let fold_span = phase_span!(
+            core,
+            Phase::WalFold,
+            namespace_id,
+            outcome = tracing::field::Empty
+        );
         let result = core
             .namespace_store(namespace_id)
             .fold_wal_tail(
                 input,
                 &OperationClock::start(core.now_ms(), Arc::clone(core.timer())),
             )
-            .instrument(phase_span!(core, Phase::WalFold, namespace_id))
+            .instrument(fold_span.clone())
             .await
             .map_err(Error::from);
+        if let Ok(folded) = &result {
+            fold_span.record("outcome", tracing::field::debug(folded.response.outcome));
+        }
         core.instruments()
             .publisher
             .wal_fold_duration(elapsed_ms_from(
