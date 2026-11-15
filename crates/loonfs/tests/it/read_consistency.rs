@@ -675,8 +675,8 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
 async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
     let fixture = writer_position_reads::fixture("dropped-position", Parked::LoadChecks).await;
     let gate = fixture.recording.inner();
-    // A fork drops the position, and the next read loads the namespace from
-    // the store.
+    // Dropping the position makes the next read load the namespace from the
+    // store.
     fixture.drop_position().await;
     gate.block_next();
     let (loaded, commit) = futures::join!(fixture.reader.stat("/small.txt"), async {
@@ -741,8 +741,8 @@ async fn an_eventual_read_after_a_dropped_position_reads_the_current_head() {
 async fn a_load_that_spans_a_writer_session_does_not_restore_an_older_head() {
     let fixture = writer_position_reads::fixture("spanning-load", Parked::LoadChecks).await;
     let gate = fixture.recording.inner();
-    // A fork drops the position, and the next read loads the namespace from
-    // the store.
+    // Dropping the position makes the next read load the namespace from the
+    // store.
     fixture.drop_position().await;
     gate.block_next();
     let (loaded, positioned) = futures::join!(fixture.reader.stat("/small.txt"), async {

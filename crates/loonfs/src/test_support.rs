@@ -62,6 +62,20 @@ pub async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writabl
         .expect("build writer")
 }
 
+/// Drops `writer`'s views of the namespace (its writer session's position and
+/// its cached head) the way a change of unknown effect does, so the
+/// runtime's next read of the namespace loads it from the store.
+pub async fn drop_namespace_view(
+    writer: &LoonFs<Writable>,
+    namespace_id: &loonfs_types::NamespaceId,
+) {
+    writer
+        .mode
+        .publisher
+        .invalidate_namespace(namespace_id, crate::publisher::NamespaceChange::Unknown)
+        .await;
+}
+
 /// Builds a reader with nothing cached, so its first read loads the current
 /// manifest.
 pub async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {

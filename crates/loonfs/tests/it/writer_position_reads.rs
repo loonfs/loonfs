@@ -194,17 +194,11 @@ impl Fixture {
             || operation.key() == boundary(&self.namespace_id)
     }
 
-    /// Forks the namespace, which drops the session's position and the
-    /// cached head, so the next read loads the namespace from the store.
+    /// Drops the session's position and the cached head the way a change of
+    /// unknown effect does, so the next read loads the namespace from the
+    /// store.
     pub(crate) async fn drop_position(&self) {
-        self.writer
-            .fork_namespace(
-                &self.namespace_id,
-                &namespace_id(&format!("{}-dropped", self.namespace_id)),
-                &loonfs_test_support::test_actor(),
-            )
-            .await
-            .expect("fork");
+        loonfs::test_support::drop_namespace_view(&self.writer, &self.namespace_id).await;
     }
 
     fn tail_replays(&self) -> u64 {
@@ -685,19 +679,46 @@ async fn a_fenced_sessions_next_read_reads_the_store() {
 /// Checks that a change of unknown effect drops the runtime's view of the
 /// namespace, and that the next read loads the namespace by discovery, even
 /// an eventual read within its maximum staleness.
-///
-/// A fork of the current head folds the source's WAL tail without reporting
-/// the fold, so the runtime drops the source's position and the cached head
-/// that the position becomes.
 #[tokio::test]
 async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() {
     let fixture = fixture("unknown-change", Parked::WalPuts).await;
+    let commit = fixture.put("/next.txt").await.expect("commit");
+    fixture.drop_position().await;
+    let (positions, anchors) = fixture.head_sources();
+    fixture.recording.reset();
+    let entry = fixture
+        .reader
+        .stat("/next.txt")
+        .await
+        .expect("an eventual read after the drop");
+    assert_eq!(entry.head_seq, commit.committed_seq);
+    let operations = fixture.recording.take();
+    assert!(
+        matches!(
+            operations.first(),
+            Some(RecordedOperation::GetWithMetadata { key, .. })
+                if *key == boundary(&fixture.namespace_id)
+        ),
+        "the read loads the namespace from its manifest boundary: {operations:?}"
+    );
+    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+}
+
+/// Checks that a fork keeps the runtime's view of the source. The fork folds
+/// the source's tail through the runtime's fold path, which moves the
+/// position onto the fold's manifest, and the snapshot records that the fork
+/// writes aren't part of the view. So an eventual read after the fork starts
+/// from the position without a request, and the source's next commit sends
+/// its WAL put and nothing else.
+#[tokio::test]
+async fn a_fork_keeps_the_sources_position() {
+    let fixture = fixture("fork-keeps-position", Parked::WalPuts).await;
     let commit = fixture.put("/next.txt").await.expect("commit");
     fixture
         .writer
         .fork_namespace(
             &fixture.namespace_id,
-            &namespace_id("unknown-change-fork"),
+            &namespace_id("fork-keeps-position-fork"),
             &loonfs_test_support::test_actor(),
         )
         .await
@@ -712,26 +733,30 @@ async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() 
     assert_eq!(entry.head_seq, commit.committed_seq);
     let operations = fixture.recording.take();
     assert!(
-        matches!(
-            operations.first(),
-            Some(RecordedOperation::GetWithMetadata { key, .. })
-                if *key == boundary(&fixture.namespace_id)
-        ),
-        "the read loads the namespace from its manifest boundary: {operations:?}"
+        operations.is_empty(),
+        "the read starts from the position without a request: {operations:?}"
     );
-    assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+    assert_eq!(fixture.head_sources(), (positions + 1, anchors));
+    fixture
+        .put("/after.txt")
+        .await
+        .expect("a commit after the fork");
+    let operations = fixture.recording.take();
+    assert!(
+        matches!(operations.as_slice(), [RecordedOperation::Put { .. }]),
+        "the commit sends its WAL put and nothing else: {operations:?}"
+    );
 }
 
 /// Checks that a refresh that started before a change of unknown effect,
 /// and finishes after the runtime dropped its view for that change, installs
 /// nothing, so the next read loads the namespace by discovery.
 ///
-/// A fork drops the position, and a read loads the namespace into the read
-/// cache. A strong read's refresh of that view then
-/// waits at its WAL probe while a fork, whose fold of the source's tail
-/// isn't reported, drops the view. The refresh's head is from before the
-/// fork, so an eventual read after it would otherwise start from that head
-/// without a request.
+/// The test drops the position first, and a read loads the namespace into
+/// the read cache. A strong read's refresh of that view then waits at its
+/// WAL probe while a change of unknown effect drops the view. The refresh's
+/// head is from before the change, so an eventual read after it would
+/// otherwise start from that head without a request.
 #[tokio::test]
 async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
     let fixture = fixture("spanning-refresh", Parked::WalReads).await;
@@ -748,15 +773,7 @@ async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
         fixture.reader.stat_with_options("/small.txt", &options),
         async {
             gate.wait_until_blocked().await;
-            fixture
-                .writer
-                .fork_namespace(
-                    &fixture.namespace_id,
-                    &namespace_id("spanning-refresh-fork"),
-                    &loonfs_test_support::test_actor(),
-                )
-                .await
-                .expect("fork");
+            fixture.drop_position().await;
             gate.release();
         }
     );
