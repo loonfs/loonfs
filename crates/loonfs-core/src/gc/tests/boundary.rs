@@ -531,30 +531,36 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
 }
 
 /// Checks that the pool's collection keeps the content of a deleted first
-/// member whose tombstone is eligible for retirement until the member's
-/// boundary is retired, and deletes the content after the retirement.
+/// member until one millisecond before the member's retirement deadline, and
+/// deletes the content at the deadline while the member entry stays, and that
+/// the member's own collection then retires the member.
 #[tokio::test]
-async fn the_pool_keeps_a_deleted_members_content_until_its_retirement() {
+async fn the_pool_deletes_a_deleted_members_content_at_its_retirement_deadline() {
     let directory = tempdir().expect("directory");
-    let store = LocalFsStore::new(directory.path()).expect("store");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
     let namespace_id = NamespaceId::parse("deleted-member").expect("namespace");
     let (deadline, pool_id, keys) = retired_content_namespace(&store, &namespace_id).await;
-    let aged = context(
-        now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1)
-            .await
-            .max(deadline.now_ms),
-    );
-    let kept = collect_pool(&store, &pool_id, &aged).await;
+    let early = context(deadline.now_ms - 1);
+    let kept = collect_pool(&store, &pool_id, &early).await;
     assert_eq!(kept.deleted.content_objects, 0);
     for key in &keys {
         assert!(store.head(key).await.expect("content").is_some());
     }
 
-    collect(&store, &namespace_id, &aged).await;
+    let reclaimed = collect_pool(&store, &pool_id, &deadline).await;
+    assert_eq!(reclaimed.deleted.content_objects, keys.len() as u64);
+    for key in &keys {
+        assert!(store.head(key).await.expect("content").is_none());
+    }
+    let entry = loonfs_objectstore::keys::pool_member(&pool_id, &namespace_id);
+    assert!(store.head(&entry).await.expect("member entry").is_some());
+    collect(&store, &namespace_id, &deadline).await;
+    assert!(store.head(&entry).await.expect("member entry").is_none());
     assert_eq!(
         boundary_state(&store, &namespace_id).await,
         Some(ManifestBoundary::Retired {})
     );
-    let reclaimed = collect_pool(&store, &pool_id, &aged).await;
-    assert_eq!(reclaimed.deleted.content_objects, keys.len() as u64);
 }

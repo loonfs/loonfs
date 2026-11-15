@@ -1,6 +1,7 @@
 //! The roots of a pool's members, found through the pool's member list: the
-//! upload sessions, and each member's current manifest, WAL tail, and the
-//! manifests that its snapshots keep.
+//! upload sessions, and each member's current manifest (until a deleted
+//! member's retirement deadline), WAL tail, and the manifests that its
+//! snapshots keep.
 
 use super::uploads::{ListedUpload, ListedUploadSession};
 use crate::error::{CoreError, Result};
@@ -88,14 +89,6 @@ pub(super) struct PoolRoots {
     /// Every listed member that the collection has read.
     members: ChargedMap<NamespaceId, MemberState>,
     now_ms: u64,
-}
-
-/// What the collection read of one member.
-struct MemberRead {
-    status: RetirementStatus,
-    /// The member's current manifest, whose layout segments the caller
-    /// protects.
-    current: LoadedManifest,
 }
 
 impl PoolRoots {
@@ -253,11 +246,8 @@ impl PoolRoots {
                 if let NamespaceStatus::Initializing {} = current.manifest.payload().status {
                     return Ok(Some(MemberState::NoRoots));
                 }
-                let read = self.read_member(member, current, observed).await?;
-                self.protect_layout_segments(&read.current)?;
-                return Ok(Some(MemberState::Read {
-                    status: read.status,
-                }));
+                let status = self.read_member(member, current, observed).await?;
+                return Ok(Some(MemberState::Read { status }));
             }
             NewestManifest::Manifest(_) => "other_pool",
             NewestManifest::Retired => "retired",
@@ -274,13 +264,16 @@ impl PoolRoots {
         Ok(None)
     }
 
-    /// Adds the content IDs of the WAL tail above `current` and the layout
-    /// segments of the manifests that the member's snapshots keep, and returns
-    /// the member's retirement status and current manifest.
+    /// Adds the content IDs of the WAL tail above `current`, the layout
+    /// segments of the current manifest while its view is a root, and the
+    /// layout segments of the manifests that the member's snapshots keep, and
+    /// returns the member's retirement status.
     ///
     /// A deleted member stays a member until its boundary is retired, so its
     /// status is retained, with its retirement deadline while the deadline is
-    /// in the future.
+    /// in the future. The tombstone's own view stops being a root at the
+    /// deadline, and the manifests that the member's snapshots keep stay roots
+    /// until the snapshots are deleted.
     ///
     /// A snapshot whose manifest is missing makes the member's roots unreadable,
     /// because only the member's own collection decides about its snapshots.
@@ -289,7 +282,7 @@ impl PoolRoots {
         member: &NamespaceStore<S>,
         current: PublicationBasis,
         observed: Observation,
-    ) -> Result<MemberRead> {
+    ) -> Result<RetirementStatus> {
         let anchor = member
             .load_read_anchor_from_manifest(current.manifest, current.boundary, observed, None)
             .await?;
@@ -333,16 +326,14 @@ impl PoolRoots {
         } else {
             RetirementStatus::Active
         };
-        Ok(MemberRead {
-            status,
-            current: anchor.manifest,
-        })
+        if status.current_view_is_root() {
+            self.protect_layout_segments(&anchor.manifest)?;
+        }
+        Ok(status)
     }
 
-    /// Keeps the layout segments that `manifest` lists.
-    ///
-    /// A tombstone's layout segments are kept too, because a deleted member's
-    /// references protect content until the member is retired.
+    /// Keeps the layout segments that `manifest` lists, whose extent filters
+    /// root the content that the manifest's layout view refers to.
     fn protect_layout_segments(&mut self, manifest: &LoadedManifest) -> Result<()> {
         for segment in manifest
             .payload()

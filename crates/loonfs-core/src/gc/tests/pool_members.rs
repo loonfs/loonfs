@@ -319,8 +319,11 @@ async fn content_that_only_a_fork_tail_refers_to_stays() {
     assert!(exists(&store, &referenced).await);
 }
 
+/// Checks that the content that only a deleted fork's view refers to stays
+/// until the fork's retirement deadline, and is deleted at the deadline before
+/// the fork's own collection retires the fork.
 #[tokio::test]
-async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_retired() {
+async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_forks_deadline() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let (pool_id, members) = pool(&store, &["first", "fork"]).await;
@@ -328,23 +331,22 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_reti
     let content_id = ContentId::generate();
     let referenced = plant(&store, &pool_id, &content_id).await;
     publish_layout(&store, fork, &content_id).await;
-    crate::test_support::NamespaceFixture::new(&store, fork, &context(1_000))
-        .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
-        .await
-        .expect("delete the fork");
     let aged = aged_context(&store, &members).await;
-    let report = collect_pool(&store, &pool_id, &aged).await;
+    delete_namespace(&store, fork, aged.now_ms).await;
+    let deadline_ms = collect(&store, fork, aged.now_ms)
+        .await
+        .retires_at_ms
+        .expect("the fork's deadline");
+    let report = collect_pool_at(&store, &pool_id, deadline_ms - 1).await;
     assert_eq!(report.deleted.content_objects, 0);
     assert!(exists(&store, &referenced).await);
-    let retired = crate::test_support::namespace_store(&store, fork)
-        .gc(&aged.clock())
-        .await
-        .expect("the fork's retirement");
-    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
-    let report = collect_pool(&store, &pool_id, &aged).await;
+    let report = collect_pool_at(&store, &pool_id, deadline_ms).await;
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &referenced).await);
+    assert!(exists(&store, &pool_member(&pool_id, fork)).await);
+    let retired = collect(&store, fork, deadline_ms).await;
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
+    assert!(!exists(&store, &pool_member(&pool_id, fork)).await);
 }
 
 /// Checks that the collection doesn't read a fork whose member entry isn't
@@ -470,12 +472,18 @@ async fn stale_member_entries_are_deleted_as_they_are_listed_within_the_read_mem
     }
 }
 
-/// Checks that a deleted member that isn't eligible for retirement still
-/// protects its content, and that its fork's content stays too.
+/// Checks that the content a deleted member wrote after a fork point, which
+/// the fork doesn't refer to, stays until one millisecond before the member's
+/// retirement deadline and is deleted at the deadline, that the content the
+/// fork inherited or wrote stays, and that the deleted member keeps its member
+/// entry and fork snapshot until the fork is retired.
 #[tokio::test]
-async fn a_deleted_member_protects_its_content_until_it_is_retired() {
+async fn a_deleted_members_own_content_is_deleted_at_its_deadline_while_its_fork_lives() {
     let directory = tempdir().expect("directory");
-    let store = LocalFsStore::new(directory.path()).expect("store");
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
     let (pool_id, members) = pool(&store, &["first"]).await;
     let first = &members[0];
     let shared =
@@ -491,19 +499,23 @@ async fn a_deleted_member_protects_its_content_until_it_is_retired() {
         numbered_content_id(3),
     )
     .await;
-    crate::test_support::NamespaceFixture::new(&store, first, &context(1_000))
-        .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+    delete_namespace(&store, first, 1_000).await;
+    let deadline_ms = collect(&store, first, 1_000)
         .await
-        .expect("delete the member");
-    let unreferenced = plant(&store, &pool_id, &numbered_content_id(4)).await;
-    let aged = aged_context(&store, &[first.clone(), fork_id.clone()]).await;
-    let report = collect_pool(&store, &pool_id, &aged).await;
+        .retires_at_ms
+        .expect("the member's deadline");
+    let [shared, own, forked] =
+        [&shared, &own, &forked].map(|content| content_blob(&pool_id, &content.content_id));
+    let report = collect_pool_at(&store, &pool_id, deadline_ms - 1).await;
+    assert_eq!(report.deleted.content_objects, 0);
+    assert!(exists(&store, &own).await);
+
+    let report = collect_pool_at(&store, &pool_id, deadline_ms).await;
     assert_eq!(report.deleted.content_objects, 1);
     assert_eq!(report.skipped, []);
-    assert!(!exists(&store, &unreferenced).await);
-    for content in [&shared, &own, &forked] {
-        assert!(exists(&store, &content_blob(&pool_id, &content.content_id)).await);
+    assert!(!exists(&store, &own).await);
+    for key in [&shared, &forked] {
+        assert!(exists(&store, key).await, "`{key}`");
     }
     let bytes = crate::test_support::namespace_store(&store, &fork_id)
         .load_current_metadata_view()
@@ -517,6 +529,26 @@ async fn a_deleted_member_protects_its_content_until_it_is_retired() {
         .await
         .expect("the fork reads inherited content");
     assert_eq!(bytes.bytes, b"shared");
+    let report = collect(&store, first, deadline_ms).await;
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
+    assert!(exists(&store, &pool_member(&pool_id, first)).await);
+    let snapshots = store
+        .list_prefix(&snapshot_prefix(first))
+        .await
+        .expect("list snapshots");
+    assert_eq!(snapshots.len(), 1, "the fork snapshot stays");
+
+    delete_namespace(&store, &fork_id, deadline_ms).await;
+    let retired_ms = collect(&store, &fork_id, deadline_ms)
+        .await
+        .retires_at_ms
+        .expect("the fork's deadline");
+    let report = collect(&store, &fork_id, retired_ms).await;
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
+    collect(&store, first, retired_ms).await;
+    assert!(!exists(&store, &pool_member(&pool_id, first)).await);
+    let report = collect_pool_at(&store, &pool_id, retired_ms).await;
+    assert_eq!(report.deleted.content_objects, 2);
 }
 
 #[tokio::test]
