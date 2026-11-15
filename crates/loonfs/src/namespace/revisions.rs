@@ -119,8 +119,9 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 let absolute_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
+                let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
                 self.core
-                    .read(&self.namespace_id, consistency, |pinned| {
+                    .read_at_least(&self.namespace_id, consistency, cursor_head_seq, |pinned| {
                         let request = request.clone();
                         let absolute_path = absolute_path.clone();
                         async move {
@@ -185,8 +186,9 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_file_revisions_by_inode", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
+                let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
                 self.core
-                    .read(&self.namespace_id, consistency, |pinned| {
+                    .read_at_least(&self.namespace_id, consistency, cursor_head_seq, |pinned| {
                         let request = request.clone();
                         async move {
                             let page = pinned
