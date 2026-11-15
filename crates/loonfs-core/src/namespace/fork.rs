@@ -117,9 +117,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// 1. Finds the newest manifest of `new_namespace_id`. An active namespace
     ///    returns `namespace_exists`, and a tombstone or a retired ID returns
-    ///    `namespace_deleted`. An initializing namespace is finished from step
-    ///    5 when its manifest 1 matches the request, and returns
-    ///    `namespace_exists` otherwise.
+    ///    `namespace_deleted`. An initializing namespace whose manifest 1
+    ///    matches the request is finished from step 5, after the call finds
+    ///    this namespace active and the snapshot of step 2 live. An
+    ///    initializing namespace whose manifest 1 doesn't match returns
+    ///    `namespace_exists`.
     /// 2. Takes the snapshot that the fork is built from: the user snapshot
     ///    that `at` identifies, or a temporary snapshot of the head, which
     ///    expires `OPERATION_SNAPSHOT_TTL_MS` after the call starts.
@@ -130,10 +132,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///    ID. When another call's manifest 1 won, the call continues as in
     ///    step 1.
     /// 5. Writes the fork's member entry in the pool that manifest 1 records.
-    /// 6. Checks that this namespace is active and that the snapshot of step
-    ///    2 hasn't ended, writes the fork snapshot, and checks again. Each
-    ///    check finds this namespace's newest manifest from the manifest that
-    ///    the call holds, and reads the snapshot record.
+    /// 6. Checks the call's publication budget, writes the fork snapshot, and
+    ///    then checks that this namespace is active and that the snapshot of
+    ///    step 2 hasn't ended. The check finds this namespace's newest
+    ///    manifest from the manifest that the call holds, and reads the
+    ///    snapshot record.
     /// 7. Publishes manifest 2 with the status `active`.
     ///
     /// Manifest 1 records the fork snapshot's ID before the snapshot exists,
@@ -176,8 +179,18 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 })
             }
         };
-        self.ensure_fork_request_matches(manifest_1.manifest.payload(), &at, rebase)?;
+        let fork_basis =
+            self.ensure_fork_request_matches(manifest_1.manifest.payload(), &at, rebase)?;
         let source = self.namespace.load_current_basis().await?;
+        // The call that wrote manifest 1 found the snapshot of step 2 live
+        // after it started, and the budget of the fork snapshot write (step
+        // 6) runs from that observation. This call made no such observation,
+        // so it checks that this namespace is active and reads the snapshot
+        // before the write, and writes nothing for a deleted source or a
+        // snapshot that ended.
+        self.namespace
+            .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, &clock)
+            .await?;
         self.finish_fork(&target, manifest_1, source, &clock).await
     }
 
@@ -299,20 +312,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 
     /// Checks that `manifest_1`, the manifest 1 of an initializing namespace,
-    /// is a fork that a call with this request finishes, and returns
-    /// `namespace_exists` otherwise.
+    /// is a fork that a call with this request finishes, and returns its fork
+    /// basis, or `namespace_exists` otherwise.
     ///
     /// The request matches when manifest 1 records this namespace as the
     /// source, the snapshot that `at` identifies (any snapshot for a fork of
     /// the head), and the same rebased fork. The creator and the creation
     /// time aren't compared.
-    fn ensure_fork_request_matches(
+    fn ensure_fork_request_matches<'m>(
         &self,
-        manifest_1: &NamespaceManifestPayload,
+        manifest_1: &'m NamespaceManifestPayload,
         at: &ForkAt<'_>,
         rebase: Option<Rebase<'_>>,
-    ) -> Result<()> {
-        let matches = manifest_1.fork_basis.as_ref().is_some_and(|fork_basis| {
+    ) -> Result<&'m ForkBasis> {
+        let fork_basis = manifest_1.fork_basis.as_ref().filter(|fork_basis| {
             let same_snapshot = match at {
                 ForkAt::Head(_) => true,
                 ForkAt::Snapshot(snapshot_id) => {
@@ -327,22 +340,26 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 && same_snapshot
                 && rebased_fork == rebase.map(|rebase| rebase.source_namespace_id)
         });
-        if !matches {
-            return Err(CoreError::NamespaceExists {
-                namespace_id: manifest_1.namespace_id.clone(),
-            });
-        }
-        Ok(())
+        fork_basis.ok_or_else(|| CoreError::NamespaceExists {
+            namespace_id: manifest_1.namespace_id.clone(),
+        })
     }
 
     /// Writes the fork snapshot that `manifest_1`, a fork's manifest 1,
-    /// records, between two checks that this namespace is active and that the
+    /// records, and then checks that this namespace is active and that the
     /// snapshot the fork was built from hasn't ended (step 6 of
     /// [`Self::install_fork`]).
     ///
-    /// Each check finds this namespace's newest manifest from the manifest
-    /// that the previous read found, starting at `source`, with a HEAD
-    /// request for the successor and a read of the manifest boundary (see
+    /// The write checks the call's publication budget first, as a manifest
+    /// put does, so the fork snapshot lands while the record of the snapshot
+    /// the fork was built from still keeps the source manifest: that record
+    /// is deleted no earlier than the grace window after the snapshot ends,
+    /// and the grace window is at least the publication completion bound. A
+    /// call that stalled past its budget writes nothing.
+    ///
+    /// The check finds this namespace's newest manifest from `source`, the
+    /// manifest that the call holds, with a HEAD request for the successor
+    /// and a read of the manifest boundary (see
     /// [`NamespaceStore::find_current_above`]). A fork snapshot that another
     /// call wrote counts as written.
     async fn write_fork_snapshot(
@@ -355,10 +372,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .fork_basis
             .as_ref()
             .expect("a fork's manifest 1 records its fork basis");
-        let source = self.namespace.find_current_above(&source).await?;
-        self.namespace
-            .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, clock)
-            .await?;
+        clock.ensure_metadata_publication_budget(&self.namespace.namespace_id)?;
         write_snapshot_record(
             &self.namespace.store,
             &SnapshotPayload {

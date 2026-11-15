@@ -123,7 +123,7 @@ A daily sweep costs one namespace listing per page, one pool listing per page, a
 
 | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- |
-| 24 GET or HEAD and 14 LIST | 27 GET or HEAD and 15 LIST | 28 GET or HEAD and 15 LIST |
+| 18 GET or HEAD and 14 LIST | 21 GET or HEAD and 15 LIST | 22 GET or HEAD and 15 LIST |
 
 Objects that are still inside their grace windows, work that's due, and the roots of each fork in a pool add more requests. Deleted namespaces are still listed, because their tombstone manifests are still stored. A retired namespace is listed too, because its manifest boundary object stays under its prefix after later collections delete everything else, and each retired namespace costs every sweep 3 requests under its prefix: the metadata call reads the boundary and returns `namespace_deleted`, and the namespace's collection reads the boundary and lists the prefix once. Retirement deletes the namespace's member entry, so the pool's collection doesn't list a retired namespace. That cost grows with the number of retired namespaces in the store.
 

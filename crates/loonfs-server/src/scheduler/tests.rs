@@ -1051,19 +1051,21 @@ enum Grep {
 /// boundary, a listing of the manifests, a GET of the newest manifest, and a
 /// second read of the boundary. The retention advance plans from that
 /// manifest's floor, so it sends these 4 requests and nothing else. The
-/// metadata call and the two collections then check the manifest with a GET
-/// of the WAL number after it, a HEAD of the manifest number after it, and a
-/// read of the boundary, so each of them sends 7 requests before its own
-/// listings. The namespace's collection adds 5 listings, and the pool's
-/// collection lists the upload sessions and the member entries before it
-/// reads the member, and then lists the member's snapshots, the content, and
-/// the temporary objects, so the four calls cost 7, 4, 12, and 12. A maintained grep index adds a call that finds the newest manifest
+/// metadata call and the pool's collection then check the manifest with a
+/// GET of the WAL number after it, a HEAD of the manifest number after it,
+/// and a read of the boundary, so each of them sends 7 requests before its
+/// own listings. The namespace's collection takes its roots from the manifest
+/// that its find returns, so it sends the 4 requests of the find and then 5
+/// listings. The pool's collection lists the upload sessions and the member
+/// entries before it reads the member, and then lists the member's snapshots,
+/// the content, and the temporary objects, so the four calls cost 7, 4, 9,
+/// and 12. A maintained grep index adds a call that finds the newest manifest
 /// (4), and an enabled one also reads the WAL number after it (5). The docs
 /// quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
-    (Grep::NotMaintained, 35, 14),
-    (Grep::Maintained, 39, 15),
-    (Grep::Enabled, 40, 15),
+    (Grep::NotMaintained, 32, 14),
+    (Grep::Maintained, 36, 15),
+    (Grep::Enabled, 37, 15),
 ];
 
 #[tokio::test(start_paused = true)]

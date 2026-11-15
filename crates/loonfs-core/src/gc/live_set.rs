@@ -1,5 +1,5 @@
 //! The manifests, segments, and WAL objects of one namespace that its current
-//! manifest, its WAL tail, and its snapshots protect.
+//! manifest and its snapshots protect.
 
 use super::charged_set::{ChargedQueue, ChargedSet, CollectionMemory};
 use super::deletes::Decision;
@@ -11,9 +11,8 @@ use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::read_working_memory;
-use crate::time::Observation;
 use crate::time::OperationClock;
-use crate::wal::{live_folded_wal_no, object_is_required};
+use crate::wal::object_is_required;
 use futures::TryStreamExt;
 use loonfs_objectstore::keys::{extension_segment_object_key, metadata_segment_object_key};
 use loonfs_objectstore::layout::manifest_no_of;
@@ -21,7 +20,6 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{GcResponse, ManifestNo, RetainedReason, WalNo};
-use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RetirementStatus {
@@ -84,9 +82,13 @@ pub(super) struct LiveSet {
 
 impl LiveSet {
     /// Loads the namespace's roots and the objects that they protect: the
-    /// current manifest, the WAL tail above it, and the manifests that snapshots
-    /// keep, with their metadata and extension segments. Returns `None` when
-    /// the namespace is retired, because a retired namespace has no roots.
+    /// newest manifest that the call finds, the WAL objects that the manifest
+    /// hasn't folded, and the manifests that snapshots keep, with their
+    /// metadata and extension segments. Returns `None` when the namespace is
+    /// retired, because a retired namespace has no roots.
+    ///
+    /// The call reads no WAL object and doesn't check the manifest for a
+    /// successor (format spec, "One complete collection").
     ///
     /// A newest manifest that's initializing and older than the grace window
     /// belongs to an abandoned creation, so the call first publishes the
@@ -102,7 +104,6 @@ impl LiveSet {
         clock: &OperationClock,
     ) -> Result<Option<Self>> {
         let namespace_id = &namespace.namespace_id;
-        let observed = Observation::now(Arc::clone(&namespace.timer));
         let current = match namespace.find_newest_manifest().await? {
             NewestManifest::Absent => return Err(namespace.namespace_not_found()),
             NewestManifest::Retired => return Ok(None),
@@ -129,14 +130,11 @@ impl LiveSet {
         } else {
             current
         };
-        let anchor = namespace
-            .load_read_anchor_from_manifest(current.manifest, current.boundary, observed)
-            .await?;
         let memory = CollectionMemory::new(
             namespace_id.to_string(),
             read_working_memory(Some(namespace.segment_cache.as_ref())),
         );
-        let head = anchor.manifest.payload();
+        let head = current.manifest.payload();
         let mut live = Self {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             newest_manifest_no: head.manifest_no,
@@ -146,12 +144,12 @@ impl LiveSet {
             memory,
             has_snapshots: false,
             now_ms: clock.request_at_ms(),
-            live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
+            live_folded_wal_no: (!head.status.is_deleted()).then_some(head.folded_wal_no),
             tombstone_at_ms: matches!(head.status, NamespaceStatus::Initializing {})
                 .then(|| head.created_at_ms.saturating_add(GC_GRACE_WINDOW_MS)),
         };
         let outcome = async {
-            live.protect_manifest(&anchor.manifest)?;
+            live.protect_manifest(&current.manifest)?;
             live.load_snapshots(namespace, head.manifest_no, clock)
                 .await
         }

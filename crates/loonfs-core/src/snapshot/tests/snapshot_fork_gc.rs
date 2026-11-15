@@ -247,12 +247,12 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
     let fixture = Fixture::new().await;
     let key = snapshot_record(&fixture.source, &fixture.snapshot.snapshot_id);
     let reads = AtomicUsize::new(0);
-    // The third read of the snapshot is the check after the fork snapshot's
+    // The second read of the snapshot is the check after the fork snapshot's
     // write.
     let gate = BlockingStore::matching(fixture.store.clone(), move |operation| {
         operation.key() == key
             && matches!(operation.kind(), OperationKind::GetWithMetadata)
-            && reads.fetch_add(1, Ordering::SeqCst) == 2
+            && reads.fetch_add(1, Ordering::SeqCst) == 1
     });
     gate.block_next();
     let actor = loonfs_test_support::test_actor();
@@ -369,7 +369,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         .await
         .map(|(record, _)| record)
         .expect("snapshot");
-    // The fork's second read of the snapshot, the check before the fork
+    // The fork's second read of the snapshot, the check after the fork
     // snapshot's write, blocks, and the snapshot expires while it does.
     let key = snapshot_record(&source, &snapshot.snapshot_id);
     let reads = AtomicUsize::new(0);
@@ -401,8 +401,83 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     assert_matches!(fork, Err(CoreError::SnapshotNotFound { .. }));
     assert_eq!(
         store.inner().counts().create_if_absent_puts,
+        1,
+        "the fork snapshot is written before the expiry check refuses"
+    );
+    let manifest_1 = crate::test_support::namespace_store(store.inner().inner(), &target)
+        .load_current_manifest()
+        .await
+        .expect("the target's manifest 1");
+    assert_eq!(manifest_1.payload().manifest_no, ManifestNo(1));
+    assert_eq!(
+        manifest_1.payload().status,
+        NamespaceStatus::Initializing {}
+    );
+}
+
+/// Checks that a fork call that ran past its publication budget before the
+/// fork snapshot's write writes no fork snapshot, returns
+/// `MetadataPublicationBudgetExceeded`, and leaves the target initializing.
+#[tokio::test]
+async fn snapshot_fork_writes_no_fork_snapshot_after_its_publication_budget() {
+    let directory = tempdir().expect("directory");
+    let source = NamespaceId::parse("snapshot-source").expect("source");
+    let target = NamespaceId::parse("snapshot-target").expect("target");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let context = test_context();
+    bootstrap_namespace(&inner, &source, &context)
+        .await
+        .expect("bootstrap");
+    let namespace = crate::test_support::namespace_store(&inner, &source);
+    let snapshot = namespace
+        .create_snapshot_record(
+            SnapshotOwner::User {
+                name: Some("kept".into()),
+                expires_at_ms: None,
+                deleted_at_ms: None,
+            },
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
+            &context.clock(),
+        )
+        .await
+        .map(|(record, _)| record)
+        .expect("snapshot");
+    // The member entry's write, after manifest 1 and before the fork
+    // snapshot's write, blocks, and the call's budget passes while it does.
+    let store = BlockingStore::matching(
+        RecordingStore::new(inner, KeyPredicate::prefix(snapshot_prefix(&source))),
+        |operation| {
+            operation.key().contains("/members/")
+                && matches!(operation.kind(), OperationKind::Put { .. })
+        },
+    );
+    let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let actor = loonfs_test_support::test_actor();
+    store.block_next();
+    let namespace = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context);
+        fixture.namespace.timer = clock.clone();
+        fixture
+    }
+    .engine();
+    let (fork, ()) = tokio::join!(
+        namespace.fork_namespace_at_snapshot(&target, &actor, &snapshot.snapshot_id),
+        async {
+            store.wait_until_blocked().await;
+            clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+            store.release();
+        }
+    );
+    assert_matches!(
+        fork,
+        Err(CoreError::MetadataPublicationBudgetExceeded { .. })
+    );
+    assert_eq!(
+        store.inner().counts().create_if_absent_puts,
         0,
-        "the expiry check refuses before a fork snapshot is written"
+        "a call past its budget writes no fork snapshot"
     );
     let manifest_1 = crate::test_support::namespace_store(store.inner().inner(), &target)
         .load_current_manifest()
