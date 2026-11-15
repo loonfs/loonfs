@@ -42,13 +42,18 @@ impl<'d, S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor
     type Error = ManifestLoadError;
 
     fn data_block_count(&self, entries: &[SegmentIndexEntry], max_decoded_bytes: usize) -> usize {
-        if self.blocks_per_refill == BlocksPerRefill::One {
-            return entries.len().min(1);
-        }
-        let needed = index_blocks_for_key_range(entries, "", self.upper_bound);
+        let candidates = match self.blocks_per_refill {
+            BlocksPerRefill::One => return entries.len().min(1),
+            // Without a block cache, the blocks past the range would be
+            // fetched, decoded, and dropped.
+            BlocksPerRefill::ReadAhead if self.segment_cache.is_some() => entries,
+            BlocksPerRefill::KeyRange | BlocksPerRefill::ReadAhead => {
+                &entries[index_blocks_for_key_range(entries, "", self.upper_bound)]
+            }
+        };
         let mut stored_bytes = 0;
         let mut decoded_bytes = 0;
-        entries[needed]
+        candidates
             .iter()
             .take_while(|entry| {
                 let next_stored_bytes = stored_bytes + u64::from(entry.block.stored_bytes);
@@ -98,7 +103,7 @@ impl<'d, S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor
                 .await?;
                 (blocks, None)
             }
-            BlocksPerRefill::KeyRange => {
+            BlocksPerRefill::KeyRange | BlocksPerRefill::ReadAhead => {
                 let (entries, reservation) = self.reserve_refill(&entries);
                 let blocks = load_segment_data_block_span(
                     self.store,
@@ -131,7 +136,11 @@ impl<S: ObjectStore + ?Sized> ScanLoader<'_, S> {
     /// The scan keeps the reservation until it has consumed the prefix's
     /// blocks. The first block is reserved even above the limit, so the
     /// scans that share the read working memory exceed its limit by at most
-    /// one block for each segment that they have open.
+    /// one block for each segment that they have open. So `N` scans that
+    /// each have `S` segments open, over blocks of at most `B` decoded bytes,
+    /// exceed the limit by at most `N * S * B`. A read-ahead refill takes its
+    /// blocks past the scan's key range only from what the limit has left, so
+    /// it doesn't raise that bound.
     fn reserve_refill<'e>(
         &self,
         entries: &'e [SegmentIndexEntry],

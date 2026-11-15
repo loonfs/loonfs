@@ -70,7 +70,7 @@ LoonFS caches decoded index, filter, and data blocks in memory, up to a byte bud
 
 The implementation also combines reads when transferring some extra bytes is cheaper than another object-store round trip:
 
-- A scan fetches the next data blocks of its key range that no cache has in one ranged GET, up to 1 MiB of stored bytes and the decoded bytes that it can reserve from the read working memory (always at least one block), and inserts each block into the block cache, as [What a read fetches](block-cache.md#what-a-read-fetches) describes. A lookup of one key fetches one block.
+- A scan fetches the next data blocks of its key range that no cache has in one ranged GET, up to 1 MiB of stored bytes and the decoded bytes that it can reserve from the read working memory (always at least one block), and inserts each block into the block cache, as [What a read fetches](block-cache.md#what-a-read-fetches) describes. A scan of one directory's children reads ahead past the directory's rows, up to the same 1 MiB, because a recursive listing scans a tree's directories one after another, and the next directory's rows are often in the blocks that follow. A lookup of one key fetches one block.
 - On a cold read, the filter and the index after it can be fetched together. The extent filter of a `content_layouts` segment comes before the filter, so that fetch doesn’t include it.
 - A segment of at most 256 KiB stored is read in one GET and decoded section by section. A compaction reads such an input segment the same way, and it decodes each data block only when a refill asks for the block, so the decoded input limit still applies.
 
@@ -93,7 +93,7 @@ Block sizes, segment targets, the scan refill, and ordinary maintenance budgets 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Data-block target | 64 KiB decoded | A block is closed once it reaches its target. |
-| Scan refill | 1 MiB stored | A scan fetches the next blocks of its key range up to this size in one GET, reserves their decoded bytes from the read working memory until it has consumed them, and always takes the first block, even above the limit. |
+| Scan refill | 1 MiB stored | A scan fetches the next blocks of its key range (and, for a directory's scan, the blocks after them) up to this size in one GET, reserves their decoded bytes from the read working memory until it has consumed them, and always takes the first block, even above the limit. |
 | Segment byte target | 8 MiB decoded | A segment can exceed the target by its final row. |
 | Segment row target | 65,536 rows | Segments are also split by row count. |
 | Filter | 10 bits per key | A filter has at least 64 bits. |

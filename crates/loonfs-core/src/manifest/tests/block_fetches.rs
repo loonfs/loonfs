@@ -230,6 +230,69 @@ async fn a_bounded_scan_fetches_the_blocks_of_its_key_range_and_nothing_past_the
     }
 }
 
+/// Checks that a read-ahead scan of a key range inside one block fetches
+/// that block and the blocks after it, up to 1 MiB, in one GET, and that
+/// later scans of the key ranges in those blocks, through a fresh view, send
+/// no GET.
+#[tokio::test]
+async fn a_read_ahead_scan_fetches_the_blocks_after_its_key_range() {
+    let temp = tempdir().expect("tempdir");
+    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+    let expected = rows(0, 8_192, 1);
+    let (descriptor, index) = segment_with_block_target(&store, &expected, 12 * 1024).await;
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
+    let first = 10;
+    // The blocks from `first` that fit in one refill.
+    let mut stored_bytes = 0;
+    let end = first
+        + index[first..]
+            .iter()
+            .take_while(|entry| {
+                stored_bytes += u64::from(entry.block.stored_bytes);
+                stored_bytes <= crate::limits::MAX_SCAN_REFILL_BYTES
+            })
+            .count();
+    assert!(end > first + 4, "a refill reads ahead {first}..{end}");
+    let block_range = |block: usize| {
+        (
+            format!("{}\0", index[block - 1].last_row_key),
+            index[block].last_row_key.clone(),
+        )
+    };
+    let scan = |lower: &str, upper: &str, blocks_per_refill| {
+        let (lower, upper) = (lower.to_owned(), upper.to_owned());
+        let (store, cache, descriptor) = (&store, &cache, descriptor.clone());
+        async move {
+            scan::VerifiedMetadataSegments::from_runs(store, cache, one_segment_runs(descriptor))
+                .scan_range(
+                    FAMILY,
+                    &lower,
+                    Some(&upper),
+                    usize::MAX,
+                    None,
+                    blocks_per_refill,
+                )
+                .await
+                .expect("scan the key range")
+                .len()
+        }
+    };
+
+    let (lower, upper) = block_range(first);
+    store.reset();
+    assert!(scan(&lower, &upper, scan::BlocksPerRefill::ReadAhead).await > 0);
+    assert_eq!(
+        data_gets(&store, &descriptor),
+        vec![stored_range(&index, first..end)],
+        "one GET of the range's block and the blocks after it"
+    );
+    for block in first + 1..end {
+        let (lower, upper) = block_range(block);
+        assert!(scan(&lower, &upper, scan::BlocksPerRefill::KeyRange).await > 0);
+        assert_eq!(store.take_gets(), Vec::new(), "block {block} is cached");
+    }
+}
+
 /// Checks that a scan reserves each refill's decoded bytes from the read
 /// working memory: with all but four blocks' worth reserved by another read,
 /// every refill's GET covers at most four blocks, with no room left every
@@ -396,7 +459,7 @@ async fn a_cold_listing_page_fetches_its_blocks_in_one_get() {
                 string_prefix_upper_bound(&prefix).as_deref(),
                 page_rows,
                 None,
-                scan::BlocksPerRefill::KeyRange,
+                scan::BlocksPerRefill::ReadAhead,
             )
             .await
             .expect("list the directory");
