@@ -254,6 +254,54 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
     }
 }
 
+/// Checks that a pool's collection takes the manifest number of each snapshot
+/// from its key: it lists the member's snapshots once, reads no snapshot
+/// record, and keeps the content that only the snapshots' manifests refer to.
+#[tokio::test]
+async fn a_pool_collection_reads_no_snapshot_record() {
+    let directory = tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix("namespaces/snapshots/snapshots/"),
+    );
+    let (pool_id, members) = pool(&store, &["snapshots"]).await;
+    let member = &members[0];
+    assert_eq!(snapshot_prefix(member), "namespaces/snapshots/snapshots/");
+    let setup = context(1_000);
+    let mut referenced = Vec::new();
+    // Two snapshots keep the first manifest, and one snapshot keeps each of
+    // the next two.
+    for (number, snapshots) in [(1, 2), (2, 1), (3, 1)] {
+        let content_id = numbered_content_id(number);
+        referenced.push(plant(&store, &pool_id, &content_id).await);
+        publish_layout(&store, member, &content_id).await;
+        for _ in 0..snapshots {
+            create_snapshot(&store, member, &setup)
+                .await
+                .expect("snapshot");
+        }
+    }
+    // The current manifest refers to none of the snapshots' content.
+    let current = numbered_content_id(4);
+    referenced.push(plant(&store, &pool_id, &current).await);
+    publish_layout(&store, member, &current).await;
+    let unreferenced = plant(&store, &pool_id, &numbered_content_id(5)).await;
+    let aged = aged_context(&store, &members).await;
+    store.reset();
+    let report = collect_pool(&store, &pool_id, &aged).await;
+    assert_eq!(
+        store.take(),
+        [RecordedOperation::List {
+            prefix: snapshot_prefix(member)
+        }]
+    );
+    assert_eq!(report.deleted.content_objects, 1);
+    assert!(!exists(&store, &unreferenced).await);
+    for key in &referenced {
+        assert!(exists(&store, key).await, "`{key}`");
+    }
+}
+
 #[tokio::test]
 async fn content_that_only_a_fork_tail_refers_to_stays() {
     let directory = tempdir().expect("directory");

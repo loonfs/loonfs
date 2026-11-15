@@ -177,10 +177,10 @@ impl LiveSet {
         current_manifest_no: ManifestNo,
         clock: &OperationClock,
     ) -> Result<()> {
-        let mut snapshots = namespace.list_snapshot_manifests(current_manifest_no);
+        let mut snapshots = namespace.list_snapshot_records(current_manifest_no);
         while let Some(listed) = snapshots.try_next().await? {
             self.has_snapshots = true;
-            let snapshot = match listed {
+            let (snapshot, record) = match listed {
                 ListedSnapshotKey::Unrecognized { size_bytes } => {
                     self.snapshot_listed_bytes += size_bytes;
                     self.snapshot_decisions.push_back(Decision::retain(
@@ -190,13 +190,13 @@ impl LiveSet {
                     ))?;
                     continue;
                 }
-                ListedSnapshotKey::Snapshot(snapshot) => snapshot,
+                ListedSnapshotKey::Snapshot(snapshot, record) => (snapshot, record),
             };
             self.snapshot_listed_bytes += snapshot.size_bytes;
             if let SnapshotManifest::Loaded(manifest) = &snapshot.manifest {
                 self.protect_manifest(manifest)?;
             }
-            let decision = match (&snapshot.manifest, &snapshot.record) {
+            let decision = match (&snapshot.manifest, &record) {
                 // A failed snapshot installation can outlive both its basis and its
                 // cleanup attempt. Another collector can also remove a released
                 // snapshot's basis after this collection listed it. Every snapshot for a

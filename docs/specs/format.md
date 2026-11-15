@@ -1905,7 +1905,7 @@ Garbage collection considers every other content object under the pool's content
 
 The collection finds the pool's members through the pool's member list. Each namespace in the pool has a [member entry](glossary.md#member-entry) under the pool's prefix (`pools/{pool_id}/members/{namespace_id}.json`), which the namespace's create or fork call writes after manifest 1 (see [Creating a namespace](#91-creating-a-namespace)) and the namespace's retirement deletes (see [Retirement](#95-retirement)). The collection lists `pools/{pool_id}/members/` once, uses each entry's key, and doesn't read the entry's payload. For each listed namespace, it finds the newest manifest (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), and then:
 
-- **Active or deleted, and recording this pool.** The namespace is a member, and the collection reads its roots. It lists the member's snapshots after it finds the member's newest manifest, and that listing also finds the manifests that the member's snapshots keep.
+- **Active or deleted, and recording this pool.** The namespace is a member, and the collection reads its roots. It lists the member's snapshots after it finds the member's newest manifest, and that listing also finds the manifests that the member's snapshots keep. It takes each snapshot's manifest number from the snapshot key and doesn't read the snapshot records.
 - **Initializing.** The namespace has no roots.
 - **Retired, no manifest, or a manifest that records another pool.** The namespace isn't a member, so it has no roots, and the collection deletes its member entry.
 - **Unreadable.** The collection deletes no content objects in this pass, as described below.
