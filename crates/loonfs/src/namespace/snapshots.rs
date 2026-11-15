@@ -20,16 +20,17 @@ fn expires_at_ms(now_ms: u64, ttl_ms: NonZeroU64) -> u64 {
 
 impl<M: crate::Mode> Namespace<M> {
     /// Returns one snapshot, as the listing returns it. A missing id, or the id
-    /// of an expired or deleted snapshot, returns `snapshot_not_found`.
+    /// of an expired or deleted snapshot, returns `snapshot_not_found`. A
+    /// deleted namespace returns `namespace_deleted`.
     pub async fn get_snapshot(&self, snapshot_id: &SnapshotId) -> Result<Snapshot> {
         trace::in_operation(
             operation_span!(self.core, "get_snapshot", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.ensure_administrator().await?;
-                self.core
-                    .reader_engine(&self.namespace_id)
-                    .get_snapshot(snapshot_id)
+                let pinned = self.administrator_read().await?;
+                pinned
+                    .engine
+                    .get_snapshot(&pinned.context.read_basis.head, snapshot_id)
                     .await
                     .map_err(Error::from)
             },
@@ -38,7 +39,7 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Lists the snapshots that haven't expired or been deleted, in ascending
-    /// id order.
+    /// id order. A deleted namespace returns `namespace_deleted`.
     pub fn list_snapshots(&self) -> SnapshotsPager {
         loonfs_types::Pager::with_state(self.read_only(), |reader, request| async move {
             reader
@@ -55,11 +56,10 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_snapshots", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.ensure_administrator().await?;
-                let page = self
-                    .core
-                    .reader_engine(&self.namespace_id)
-                    .list_snapshots_page(request)
+                let pinned = self.administrator_read().await?;
+                let page = pinned
+                    .engine
+                    .list_snapshots_page(&pinned.context.read_basis.head, request)
                     .await
                     .map_err(Error::from)?;
                 Ok(ListSnapshotsResponse {

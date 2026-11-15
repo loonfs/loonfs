@@ -250,22 +250,32 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
         .expect("delete snapshot in filtered run");
     }
 
+    let head = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     let first =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_snapshots_page(PageRequest {
-                limit: page_limit(1),
-                cursor: None,
-            })
+            .list_snapshots_page(
+                &head,
+                PageRequest {
+                    limit: page_limit(1),
+                    cursor: None,
+                },
+            )
             .await
             .expect("first page");
     assert_eq!(first.items[0].snapshot_id, ids[0]);
 
     let second =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_snapshots_page(PageRequest {
-                limit: page_limit(1),
-                cursor: first.next_cursor,
-            })
+            .list_snapshots_page(
+                &head,
+                PageRequest {
+                    limit: page_limit(1),
+                    cursor: first.next_cursor,
+                },
+            )
             .await
             .expect("second page across deleted run");
     assert_eq!(second.items[0].snapshot_id, ids[6]);
@@ -282,10 +292,13 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
 
     let third =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_snapshots_page(PageRequest {
-                limit: page_limit(1),
-                cursor: second.next_cursor,
-            })
+            .list_snapshots_page(
+                &head,
+                PageRequest {
+                    limit: page_limit(1),
+                    cursor: second.next_cursor,
+                },
+            )
             .await
             .expect("third page");
     assert_eq!(third.items[0].snapshot_id, ids[7]);
@@ -527,6 +540,10 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
             .expect("create fork snapshot");
     }
 
+    let head = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     let mut listed = BTreeSet::new();
     let mut cursor = None;
     loop {
@@ -534,10 +551,13 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
             &store,
             &namespace_id,
         ))
-        .list_snapshots_page(PageRequest {
-            limit: page_limit(2),
-            cursor,
-        })
+        .list_snapshots_page(
+            &head,
+            PageRequest {
+                limit: page_limit(2),
+                cursor,
+            },
+        )
         .await
         .expect("list snapshots");
         for snapshot in page.items {
@@ -652,17 +672,24 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
         .expect("read snapshot");
         assert_eq!(&read, row);
     }
+    let head = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
     let reader =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
     assert_eq!(
-        code(reader.get_snapshot(&expiring).await),
+        code(reader.get_snapshot(&head, &expiring).await),
         ErrorCode::SnapshotNotFound
     );
     let live = reader
-        .list_snapshots_page(PageRequest {
-            limit: page_limit(2),
-            cursor: None,
-        })
+        .list_snapshots_page(
+            &head,
+            PageRequest {
+                limit: page_limit(2),
+                cursor: None,
+            },
+        )
         .await
         .expect("list snapshots");
     let live: Vec<_> = live.items.into_iter().map(|row| row.snapshot_id).collect();
@@ -696,7 +723,7 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
                 &store,
                 &namespace_id
             ))
-            .get_snapshot(&fork)
+            .get_snapshot(&head, &fork)
             .await
         ),
         ErrorCode::SnapshotNotFound

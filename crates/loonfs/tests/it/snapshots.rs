@@ -332,6 +332,67 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
     );
 }
 
+/// Checks that the snapshot retrieval and the snapshot listing of a deleted
+/// namespace return `namespace_deleted`, in the runtime that deleted the
+/// namespace and in a runtime that loads the tombstone, and that both return
+/// `namespace_not_found` for a namespace that was never created.
+#[tokio::test]
+async fn snapshot_lookups_refuse_a_deleted_namespace_and_a_missing_one() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = store(temp_dir.path());
+    let deleter = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "snapshot-lookup-deleter",
+        ))
+        .build()
+        .await
+        .expect("build deleting writer");
+    let source = namespace_id("source");
+    deleter
+        .create_namespace(&source, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = deleter.open_namespace(&source).expect("open namespace");
+    let snapshot = namespace
+        .create_snapshot()
+        .await
+        .expect("create a snapshot");
+    namespace.delete().await.expect("delete namespace");
+
+    let observer = LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "snapshot-lookup-observer",
+        ))
+        .build()
+        .await
+        .expect("build post-delete runtime");
+    for runtime in [deleter.read_only(), observer.read_only()] {
+        assert_core_error_kind(
+            runtime
+                .namespace(&source)
+                .get_snapshot(&snapshot.snapshot_id)
+                .await,
+            ErrorCode::NamespaceDeleted,
+        );
+        assert_core_error_kind(
+            list_snapshots(&runtime, &source).await,
+            ErrorCode::NamespaceDeleted,
+        );
+        let missing = namespace_id("never-created");
+        assert_core_error_kind(
+            runtime
+                .namespace(&missing)
+                .get_snapshot(&snapshot.snapshot_id)
+                .await,
+            ErrorCode::NamespaceNotFound,
+        );
+        assert_core_error_kind(
+            list_snapshots(&runtime, &missing).await,
+            ErrorCode::NamespaceNotFound,
+        );
+    }
+}
+
 /// Checks that an expired snapshot can't be read, forked, or retrieved, that
 /// the snapshot listing leaves it out, and that it stays in the snapshot
 /// inventory with its past expiry.

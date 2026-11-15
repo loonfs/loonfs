@@ -98,7 +98,8 @@ async fn snapshot_deletes_are_idempotent_and_the_snapshot_inventory_is_read_only
 }
 
 /// Checks that a snapshot without an expiry can still be deleted after its
-/// namespace is deleted, and that the ID of a fork snapshot returns
+/// namespace is deleted, that the snapshot listing and retrieval return
+/// `namespace_deleted` (410) then, and that the ID of a fork snapshot returns
 /// `snapshot_not_found` and leaves the snapshot in place.
 #[tokio::test]
 async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
@@ -163,6 +164,12 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+
+    for uri in [snapshots.clone(), format!("{snapshots}/{snapshot_id}")] {
+        let (status, body) = request(&router, Method::GET, &uri, json!({})).await;
+        assert_eq!(status, StatusCode::GONE, "{uri}: {body}");
+        assert_eq!(body["code"], ErrorCode::NamespaceDeleted.as_str());
+    }
 
     store.reset();
     let (status, body) = request(

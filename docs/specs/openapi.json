@@ -9787,7 +9787,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists snapshots in snapshot ID order. The list leaves out expired snapshots, deleted snapshots, and fork snapshots, which the maintenance snapshot inventory lists.",
+        "description": "Lists snapshots in snapshot ID order. The list leaves out expired snapshots, deleted snapshots, and fork snapshots, which the maintenance snapshot inventory lists. A deleted namespace returns `namespace_deleted`.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -9862,6 +9862,16 @@
               }
             },
             "description": "Namespace not found"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10067,7 +10077,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "get": {
-        "description": "Returns one snapshot, as the snapshot listing returns it. A missing ID, the ID of an expired or deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`.",
+        "description": "Returns one snapshot, as the snapshot listing returns it. A missing ID, the ID of an expired or deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`. A deleted namespace returns `namespace_deleted`.",
         "operationId": "get_snapshot",
         "parameters": [
           {
@@ -10129,6 +10139,16 @@
               }
             },
             "description": "Namespace or snapshot not found"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

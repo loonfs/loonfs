@@ -64,14 +64,13 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
             _ => None,
         })
         .collect();
-    // The diagnostics and the snapshot count each find the newest manifest
-    // with one listing of the manifests, and the count lists the snapshots.
-    let manifests = metadata_manifest_prefix(&namespace_id);
+    // The diagnostics find the newest manifest with one listing of the
+    // manifests, and the snapshot count lists the snapshots under the head
+    // that the diagnostics loaded.
     assert_eq!(
         listings,
         [
-            manifests.clone(),
-            manifests,
+            metadata_manifest_prefix(&namespace_id),
             loonfs_objectstore::keys::snapshot_prefix(&namespace_id),
         ]
     );
