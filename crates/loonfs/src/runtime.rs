@@ -32,8 +32,8 @@ use crate::{
     ForkNamespaceOptions, InlineContentPolicy, Maintenance, MetadataCache, Namespace, NamespaceId,
     Result, SharedObjectStore, StoreConfig,
 };
+use loonfs_core::control::PublicationBasis;
 use loonfs_core::NamespaceWriterEngine;
-use loonfs_types::format::control::ManifestRef;
 use loonfs_types::{
     u64_from_usize, CompactorEpoch, Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
     FEATURE_MERGES, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
@@ -461,10 +461,8 @@ impl LoonFs<Writable> {
                         self.finish_fork(source_namespace_id, result).await
                     }
                     None => {
-                        self.install_fork(source_namespace_id, |engine, manifest| async move {
-                            engine
-                                .fork_namespace(new_namespace_id, actor, manifest)
-                                .await
+                        self.install_fork(source_namespace_id, |engine, basis| async move {
+                            engine.fork_namespace(new_namespace_id, actor, basis).await
                         })
                         .await
                     }
@@ -507,7 +505,7 @@ impl LoonFs<Writable> {
     pub(crate) async fn install_fork<Fork>(
         &self,
         source_namespace_id: &NamespaceId,
-        mut fork: impl FnMut(NamespaceWriterEngine<SharedObjectStore>, ManifestRef) -> Fork,
+        mut fork: impl FnMut(NamespaceWriterEngine<SharedObjectStore>, PublicationBasis) -> Fork,
     ) -> Result<crate::NamespaceMetadata>
     where
         Fork: std::future::Future<Output = loonfs_core::Result<crate::NamespaceMetadata>>,
@@ -515,8 +513,8 @@ impl LoonFs<Writable> {
         let result = self
             .mode
             .publisher
-            .snapshot_after_fold(source_namespace_id, |manifest| {
-                fork(self.engine(source_namespace_id), manifest)
+            .snapshot_after_fold(source_namespace_id, |basis| {
+                fork(self.engine(source_namespace_id), basis)
             })
             .await;
         self.finish_fork(source_namespace_id, result).await

@@ -51,7 +51,14 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = setup.clock();
     let (creation, ()) = tokio::join!(
-        namespace.create_snapshot_record(owner, selected.manifest(), &clock),
+        namespace.create_snapshot_record(
+            owner,
+            crate::namespace::basis::PublicationBasis {
+                manifest: selected.clone(),
+                boundary: None,
+            },
+            &clock
+        ),
         async {
             store.wait_until_blocked().await;
             super::snapshot_verification::compact_and_collect_replaced_segments(

@@ -89,11 +89,10 @@ impl Fixture {
 /// deletion costs 2, whichever fold folded the tail.
 ///
 /// A creation folds from the session's position and finds nothing to fold,
-/// so it writes the snapshot and then verifies it: it loads the snapshot's
-/// manifest from the segment cache and checks that the manifest is still the
-/// newest with one HEAD for a successor and a read of the manifest boundary
-/// (3 requests). The fold's manifest is in the segment cache from its
-/// publication, so the first creation after an explicit fold costs the same.
+/// so it writes the snapshot and then verifies it: it checks that the fold's
+/// manifest is still the newest with one HEAD for a successor and a read of
+/// the manifest boundary (3 requests). The verification reads no manifest,
+/// so the first creation after an explicit fold costs the same.
 /// A read at a snapshot checks the writer position's manifest with one HEAD
 /// for a successor and a read of the manifest boundary, and loads the
 /// snapshot, and the segments of the

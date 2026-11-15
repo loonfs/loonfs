@@ -1,9 +1,10 @@
 //! Snapshot publication races and verification request counts.
 
 use super::*;
+use crate::namespace::basis::PublicationBasis;
 use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_test_support::stores::{MetadataMapStore, RecordedOperation};
+use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::SnapshotOwner;
 use std::assert_matches;
 
@@ -167,7 +168,10 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
                 expires_at_ms: None,
                 deleted_at_ms: None,
             },
-            current.manifest(),
+            PublicationBasis {
+                manifest: current,
+                boundary: None,
+            },
             &clock
         ),
         async {
@@ -196,13 +200,13 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
         .is_empty());
 }
 
-/// Checks that a snapshot's verification reads the snapshot's manifest, and
-/// then checks that the manifest is the newest with a HEAD request for its
-/// successor and a read of the manifest boundary. A record whose manifest is
-/// missing or has a different checksum is refused after the manifest read
-/// alone.
+/// Checks that a snapshot's verification reads no manifest. It checks the
+/// manifest that the fold returned with a HEAD request for the successor and
+/// one read of the manifest boundary, conditional on the boundary that the
+/// fold read. A manifest that gained a successor, or whose successor a
+/// collection deleted below a raised boundary, is refused.
 #[tokio::test]
-async fn snapshot_verification_reads_the_snapshot_manifest_then_its_successor_and_the_boundary() {
+async fn snapshot_verification_sends_a_successor_head_and_a_boundary_read_and_reads_no_manifest() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = RecordingStore::new(
@@ -213,75 +217,92 @@ async fn snapshot_verification_reads_the_snapshot_manifest_then_its_successor_an
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let snapshot = create_snapshot(&store, &namespace_id, &context)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    namespace
+        .raise_boundary(ManifestNo(1))
         .await
-        .expect("snapshot");
-    let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&snapshot.snapshot_id)
-        .await
-        .expect("load snapshot")
-        .expect("snapshot exists")
-        .state;
-    let manifest_no = record.snapshot_id.manifest_no();
-    let successor = manifest_no.successor().expect("next number");
-    let manifest_key = metadata_manifest_object(&namespace_id, &manifest_no);
-    let successor_key = metadata_manifest_object(&namespace_id, &successor);
-    let boundary_key = boundary(&namespace_id);
-    let mut changed_number = record.clone();
-    changed_number.snapshot_id = SnapshotId::generate(successor);
-    let mut changed_checksum = record.clone();
-    changed_checksum.payload_checksum = loonfs_types::sha256_digest(b"different");
-    store.reset();
-    for (label, record, verified, expected) in [
-        (
-            "verified",
-            record,
-            true,
-            vec![
-                ("get", manifest_key.clone()),
-                ("head", successor_key.clone()),
-                ("get", boundary_key),
-            ],
-        ),
-        (
-            "changed number",
-            changed_number,
-            false,
-            vec![("get", successor_key)],
-        ),
-        (
-            "changed checksum",
-            changed_checksum,
-            false,
-            vec![("get", manifest_key)],
-        ),
-    ] {
-        let verification = crate::test_support::namespace_store(&store, &record.namespace_id)
-            .verify_snapshot_basis(&record)
+        .expect("raise the boundary");
+    let write_and_fold = |path: &'static str| {
+        let store = &store;
+        let namespace_id = &namespace_id;
+        let context = &context;
+        async move {
+            crate::test_support::NamespaceFixture::new(store, namespace_id, context)
+                .write_file_bytes(path, b"data", None)
+                .await
+                .expect("write");
+            crate::test_support::folded_manifest(&crate::test_support::namespace_store(
+                store,
+                namespace_id,
+            ))
             .await
-            .expect("verification");
-        assert_eq!(
-            matches!(verification, record::SnapshotBasisVerification::Verified(_)),
-            verified,
-            "{label}: {verification:?}"
-        );
-        let mut requests = store.take();
-        loonfs_test_support::stores::sort_head_runs(&mut requests);
-        let requests = requests
-            .iter()
-            .map(|operation| {
-                let kind = match operation {
-                    RecordedOperation::Head { .. } => "head",
-                    RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => {
-                        "get"
-                    }
-                    _ => "other",
-                };
-                (kind, operation.key().to_owned())
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(requests, expected, "{label}");
-    }
+            .expect("fold the WAL tail")
+        }
+    };
+    let basis = write_and_fold("/one").await;
+    assert!(
+        basis.boundary.is_some(),
+        "the fold read the boundary object"
+    );
+    let manifest_no = basis.manifest.payload().manifest_no;
+    let successor = manifest_no.successor().expect("next number");
+    let successor_key = metadata_manifest_object(&namespace_id, &successor);
+
+    store.reset();
+    let verification = namespace
+        .verify_snapshot_basis(basis.clone())
+        .await
+        .expect("verification");
+    let record::SnapshotBasisVerification::Verified(verified) = verification else {
+        panic!("the fold's manifest is current: {verification:?}");
+    };
+    assert_eq!(verified.manifest.payload().manifest_no, manifest_no);
+    let requests = store.take();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(
+        control_requests(&namespace_id, &requests),
+        vec![
+            ("head", successor_key.clone()),
+            ("get", boundary(&namespace_id)),
+        ]
+    );
+
+    // A successor published after the fold makes the HEAD request find it.
+    write_and_fold("/two").await;
+    store.reset();
+    let verification = namespace
+        .verify_snapshot_basis(basis.clone())
+        .await
+        .expect("verification");
+    assert_matches!(verification, record::SnapshotBasisVerification::Invalid);
+    assert_eq!(
+        control_requests(&namespace_id, &store.take()).first(),
+        Some(&("head", successor_key.clone()))
+    );
+
+    // A collection raised the boundary to the successor and deleted it, so
+    // the HEAD request finds nothing and the boundary read refuses the
+    // manifest.
+    write_and_fold("/three").await;
+    namespace
+        .raise_boundary(successor)
+        .await
+        .expect("raise the boundary");
+    store
+        .delete(&successor_key)
+        .await
+        .expect("delete the successor");
+    store.reset();
+    let verification = namespace
+        .verify_snapshot_basis(basis)
+        .await
+        .expect("verification");
+    assert_matches!(verification, record::SnapshotBasisVerification::Invalid);
+    let requests = control_requests(&namespace_id, &store.take());
+    assert_eq!(
+        requests[..2],
+        [("head", successor_key), ("get", boundary(&namespace_id))]
+    );
 }
 
 #[tokio::test]

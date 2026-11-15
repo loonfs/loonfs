@@ -109,11 +109,11 @@ impl Namespace<Writable> {
                 self.ensure_administrator().await?;
                 self.mode
                     .publisher
-                    .snapshot_after_fold(&self.namespace_id, |manifest| {
+                    .snapshot_after_fold(&self.namespace_id, |basis| {
                         let engine = self.engine();
                         async move {
                             engine
-                                .create_snapshot(options.name.clone(), expires_at_ms, manifest)
+                                .create_snapshot(options.name.clone(), expires_at_ms, basis)
                                 .await
                         }
                     })

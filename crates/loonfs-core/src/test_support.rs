@@ -272,6 +272,7 @@ pub mod kept_inodes;
 pub mod ops;
 
 use crate::engine::NamespaceWriterEngine;
+use crate::namespace::basis::PublicationBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
@@ -470,14 +471,15 @@ pub async fn load_catalog<S: ObjectStore>(
 }
 
 /// Folds the namespace's WAL tail and returns the manifest that covers it,
-/// the manifest that a snapshot or a fork of the current head keeps.
+/// with the manifest boundary that the fold read: the basis that a snapshot
+/// or a fork of the current head keeps.
 pub async fn folded_manifest<S: ObjectStore>(
     namespace: &NamespaceStore<S>,
-) -> crate::Result<loonfs_types::format::control::ManifestRef> {
+) -> crate::Result<PublicationBasis> {
     let folded = namespace
         .fold_wal_tail(None, &namespace.start_clock())
         .await?;
-    Ok(folded.manifest.manifest)
+    Ok(folded.basis)
 }
 
 /// Returns the inode ID of the item visible at `absolute_path` in the
