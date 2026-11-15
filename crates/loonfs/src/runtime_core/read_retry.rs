@@ -4,7 +4,7 @@ use super::{HeadConfirmation, RuntimeCore};
 use crate::pinned_read::PinnedRead;
 use crate::read_view::ReadSource;
 use crate::trace::phase_span;
-use crate::{Consistency, CoreError, Error, NamespaceId, Result};
+use crate::{CommitSeq, Consistency, CoreError, Error, NamespaceId, Result};
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::Phase;
 use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
@@ -81,7 +81,33 @@ impl RuntimeCore {
         F: Fn(PinnedRead) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let confirmation = confirmation.into();
+        self.read_at_least(namespace_id, confirmation, None, read)
+            .await
+    }
+
+    /// Runs `read` as [`Self::read`] does, at a head that is at least
+    /// `min_head_seq` when the namespace has reached that sequence.
+    ///
+    /// `min_head_seq` is the sequence that the request already includes, such as
+    /// a cursor's `head_seq`, a change feed page's `after_seq`, or a diff's
+    /// `to_seq`. The caller learned that sequence from an earlier read, so a
+    /// cached head below the sequence is older than a head that the caller
+    /// has seen. When an `eventual` read's cached head is below
+    /// `min_head_seq`, the read confirms the head as a `strong` read does and
+    /// runs at the confirmed head. A sequence that is still above the
+    /// confirmed head reaches `read`, which returns the core's error for it.
+    pub(crate) async fn read_at_least<T, F, Fut>(
+        &self,
+        namespace_id: &NamespaceId,
+        confirmation: impl Into<HeadConfirmation>,
+        min_head_seq: Option<CommitSeq>,
+        read: F,
+    ) -> Result<T>
+    where
+        F: Fn(PinnedRead) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut confirmation = confirmation.into();
         if let HeadConfirmation::Consistency(Some(Consistency::Eventual {
             max_staleness_ms: Some(max_staleness_ms),
         })) = confirmation
@@ -96,10 +122,19 @@ impl RuntimeCore {
                 });
             }
         }
-        let pinned = self
+        let mut pinned = self
             .pinned_read(namespace_id, confirmation)
             .instrument(phase_span!(self, Phase::PinRead, namespace_id))
             .await?;
+        if min_head_seq.is_some_and(|seq| pinned.head_seq() < seq)
+            && self.reads_eventual(confirmation)
+        {
+            confirmation = HeadConfirmation::from(Consistency::Strong);
+            pinned = self
+                .pinned_read(namespace_id, confirmation)
+                .instrument(phase_span!(self, Phase::PinRead, namespace_id))
+                .await?;
+        }
         let context = pinned.context.clone();
         let result =
             classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await;
@@ -118,5 +153,18 @@ impl RuntimeCore {
             .await?;
         let context = pinned.context.clone();
         classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await
+    }
+
+    /// Returns whether a read confirmed as `confirmation` reads an `eventual`
+    /// head, with a read that sets no consistency taking the runtime's
+    /// default.
+    fn reads_eventual(&self, confirmation: HeadConfirmation) -> bool {
+        match confirmation {
+            HeadConfirmation::Consistency(consistency) => matches!(
+                consistency.unwrap_or(self.inner.config.consistency.into()),
+                Consistency::Eventual { .. }
+            ),
+            HeadConfirmation::View => false,
+        }
     }
 }

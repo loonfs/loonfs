@@ -84,7 +84,8 @@ impl<M: crate::Mode> Namespace<M> {
                 if matches!(options.at, ReadAt::Live(_)) {
                     reject_snapshot_directory_cursor(request.cursor.as_ref())?;
                 }
-                self.read_at(&options.at, |pinned, source| {
+                let cursor_head_seq = request.cursor.as_ref().map(ListPageCursor::head_seq);
+                self.read_at_least(&options.at, cursor_head_seq, |pinned, source| {
                     let request = request.clone();
                     let options = options.clone();
                     async move {

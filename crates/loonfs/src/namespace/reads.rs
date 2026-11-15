@@ -83,10 +83,28 @@ impl<M: crate::Mode> Namespace<M> {
         Read: Fn(PinnedRead, ReadSource) -> ReadFuture,
         ReadFuture: Future<Output = Result<T>>,
     {
+        self.read_at_least(at, None, read).await
+    }
+
+    /// Runs `read` as [`Self::read_at`] does. A live read whose request includes
+    /// `min_head_seq` reads a head at least that new when the namespace has
+    /// reached it (see [`RuntimeCore::read_at_least`](crate::runtime_core::RuntimeCore::read_at_least)).
+    /// A snapshot read ignores `min_head_seq`, because the read checks the
+    /// request's position against the snapshot.
+    pub(crate) async fn read_at_least<T, Read, ReadFuture>(
+        &self,
+        at: &ReadAt,
+        min_head_seq: Option<CommitSeq>,
+        read: Read,
+    ) -> Result<T>
+    where
+        Read: Fn(PinnedRead, ReadSource) -> ReadFuture,
+        ReadFuture: Future<Output = Result<T>>,
+    {
         match at {
             ReadAt::Live(consistency) => {
                 self.core
-                    .read(&self.namespace_id, *consistency, |pinned| {
+                    .read_at_least(&self.namespace_id, *consistency, min_head_seq, |pinned| {
                         read(pinned, ReadSource::Head)
                     })
                     .await
@@ -238,7 +256,8 @@ impl<M: crate::Mode> Namespace<M> {
                     reject_snapshot_directory_cursor(request.cursor.as_ref())?;
                 }
                 let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
-                self.read_at(&options.at, |pinned, source| {
+                let cursor_head_seq = request.cursor.as_ref().map(ListPageCursor::head_seq);
+                self.read_at_least(&options.at, cursor_head_seq, |pinned, source| {
                     let request = request.clone();
                     let options = options.clone();
                     let listed_path = listed_path.clone();
@@ -452,8 +471,9 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_trash", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
+                let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
                 self.core
-                    .read(&self.namespace_id, consistency, |pinned| {
+                    .read_at_least(&self.namespace_id, consistency, cursor_head_seq, |pinned| {
                         let request = request.clone();
                         async move {
                             let page = pinned
@@ -482,11 +502,11 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Lists the ordered change feed after `after_seq`, as `options` asks.
     ///
-    /// A page whose `after_seq` is above the head it reads returns
-    /// `invalid_request`. An eventual page can read an older head than the
-    /// read that the caller learned `after_seq` from, so a caller that gets
-    /// this error from an eventual page reads the page again with
-    /// [`Consistency::Strong`].
+    /// An eventual page whose `after_seq` is above the head that the page
+    /// would read confirms the head as a [`Consistency::Strong`] page does,
+    /// because the caller learned `after_seq` from a fresher read. An
+    /// `after_seq` that is still above the confirmed head returns
+    /// `invalid_request`.
     pub fn list_changes_with_options(
         &self,
         after_seq: CommitSeq,
@@ -527,7 +547,7 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_changes", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                self.read_at(at, |pinned, _| async move {
+                self.read_at_least(at, Some(position.after_seq), |pinned, _| async move {
                     pinned.changes_page(position, limit, splitting).await
                 })
                 .await
@@ -551,9 +571,10 @@ impl<M: crate::Mode> Namespace<M> {
     /// next page, pass the returned `to_seq` and `next_after_seq` as
     /// `options.to_seq` and `options.after_seq`. A `from_seq` below the
     /// retention floor of the head that a page reads returns
-    /// `below_retention_floor`. A `to_seq` above that head returns
-    /// `invalid_request`, so a caller that gets this error from an eventual
-    /// page reads the page again with [`Consistency::Strong`].
+    /// `below_retention_floor`. An eventual page whose `from_seq` or `to_seq`
+    /// is above that head confirms the head as a [`Consistency::Strong`] page
+    /// does, and a sequence that is still above the confirmed head returns
+    /// `invalid_request`.
     pub async fn diff_with_options(
         &self,
         from_seq: CommitSeq,
@@ -565,9 +586,10 @@ impl<M: crate::Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 let page = self
                     .core
-                    .read(
+                    .read_at_least(
                         &self.namespace_id,
                         options.consistency,
+                        Some(options.to_seq.unwrap_or(from_seq)),
                         |pinned| async move { pinned.diff_page(from_seq, options).await },
                     )
                     .await?;

@@ -8,10 +8,10 @@ use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::{counter, writer};
 use loonfs::{
-    CommitSeq, Consistency, DownloadOptions, Error, ListChangesOptions, ListFileRevisionsOptions,
-    ListOptions, ListTrashOptions, LoonFs, MetadataCache, Namespace, NamespaceId, ReadAt,
-    ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadOnly, SharedObjectStore,
-    StatOptions, Writable,
+    CommitSeq, Consistency, CoreError, DiffOptions, DownloadOptions, Error, ListChangesOptions,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, LoonFs, MetadataCache, Namespace,
+    NamespaceId, ReadAt, ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadOnly,
+    SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -896,4 +896,223 @@ async fn a_closed_sessions_position_becomes_the_cached_head() {
             result_bytes: 0,
         }] if key.starts_with(&wal_prefix(&fixture.namespace_id))
     );
+}
+
+/// Commits `/{name}` in the fixture's writer runtime and returns the
+/// commit's sequence.
+async fn commit(fixture: &Fixture, name: &str) -> CommitSeq {
+    fixture
+        .namespace
+        .put_file(
+            &format!("/{name}"),
+            name.as_bytes(),
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("commit")
+        .committed_seq
+}
+
+/// Checks that an eventual change feed page or diff whose position is ahead
+/// of the reader's cached head confirms the head and reads at the confirmed
+/// head, that a position at the cached head sends no request, and that a
+/// position still ahead of the confirmed head returns the core's error.
+#[tokio::test]
+async fn an_eventual_read_confirms_the_head_for_a_position_ahead_of_its_cached_head() {
+    let fixture = fixture("position-ahead").await;
+    let reader = &fixture.reader;
+    let cached = reader
+        .stat_with_options("/file.txt", &strong())
+        .await
+        .expect("strong stat")
+        .head_seq;
+    let head_seq = commit(&fixture, "next.txt").await;
+    fixture.recording.reset();
+    let page = reader
+        .list_changes(cached)
+        .page()
+        .await
+        .expect("a page at the cached head");
+    assert_eq!(page.head_seq, cached);
+    assert_eq!(fixture.recording.take(), []);
+
+    let page = reader
+        .list_changes(head_seq)
+        .page()
+        .await
+        .expect("a page at the writer's head");
+    assert_eq!((page.head_seq, page.changes.len()), (head_seq, 0));
+
+    let head_seq = commit(&fixture, "later.txt").await;
+    let diff = reader
+        .diff_with_options(
+            cached,
+            &DiffOptions {
+                to_seq: Some(head_seq),
+                ..DiffOptions::default()
+            },
+        )
+        .await
+        .expect("a diff to the writer's head");
+    assert_eq!(diff.to_seq, head_seq);
+
+    // A diff without a `to_seq` ends at the head that the page reads, so its
+    // `from_seq` is the position that the page has to reach.
+    let head_seq = commit(&fixture, "latest.txt").await;
+    let diff = reader
+        .diff_with_options(head_seq, &DiffOptions::default())
+        .await
+        .expect("a diff from the writer's head");
+    assert_eq!(diff.to_seq, head_seq);
+
+    let ahead = CommitSeq(head_seq.0 + 1);
+    assert_matches!(
+        reader.list_changes(ahead).page().await,
+        Err(Error::InvalidRequest {
+            param: "after_seq",
+            ..
+        })
+    );
+    assert_matches!(
+        reader
+            .diff_with_options(
+                cached,
+                &DiffOptions {
+                    to_seq: Some(ahead),
+                    ..DiffOptions::default()
+                },
+            )
+            .await,
+        Err(Error::Core(CoreError::InvalidDiffRange {
+            param: "to_seq",
+            ..
+        }))
+    );
+    assert_matches!(
+        reader
+            .diff_with_options(ahead, &DiffOptions::default())
+            .await,
+        Err(Error::Core(CoreError::InvalidDiffRange {
+            param: "from_seq",
+            ..
+        }))
+    );
+    fixture.shutdown().await;
+}
+
+/// Checks that an eventual page resumes a directory, revision, or trash
+/// cursor that the writer minted at a head newer than the reader's cached
+/// head, and that a cursor minted ahead of the confirmed head returns the
+/// core's error.
+#[tokio::test]
+async fn an_eventual_page_resumes_a_cursor_minted_at_a_newer_head() {
+    let fixture = fixture("cursor-ahead").await;
+    let (namespace, reader) = (&fixture.namespace, &fixture.reader);
+    let actor = loonfs_test_support::test_actor();
+    for name in ["a.txt", "b.txt"] {
+        commit(&fixture, name).await;
+    }
+    namespace
+        .append_file("/file.txt", b"more", &actor)
+        .await
+        .expect("a second revision");
+    for path in ["/a.txt", "/b.txt"] {
+        namespace.delete_path(path, &actor).await.expect("delete");
+    }
+    reader
+        .stat_with_options("/file.txt", &strong())
+        .await
+        .expect("strong stat");
+    let limit = page_limit(1);
+
+    let head_seq = commit(&fixture, "c.txt").await;
+    let page = namespace.list("/").page_limit(limit).page().await;
+    let directory_cursor = page.expect("a page").next_cursor.expect("a cursor");
+    let page = reader.list("/").page_limit(limit);
+    let page = page.cursor(Some(directory_cursor.clone())).page().await;
+    let page = page.expect("the reader resumes the listing");
+    assert_eq!((page.head_seq, page.entries.len()), (head_seq, 1));
+
+    let head_seq = commit(&fixture, "d.txt").await;
+    let page = namespace.list_file_revisions("/file.txt").page_limit(limit);
+    let cursor = page.page().await.expect("a page").next_cursor;
+    let page = reader.list_file_revisions("/file.txt").page_limit(limit);
+    let page = page
+        .cursor(cursor)
+        .page()
+        .await
+        .expect("the reader resumes");
+    assert_eq!((page.head_seq, page.revisions.len()), (head_seq, 1));
+
+    let head_seq = commit(&fixture, "e.txt").await;
+    let page = namespace.list_trash().page_limit(limit).page().await;
+    let cursor = page.expect("a page").next_cursor;
+    let page = reader.list_trash().page_limit(limit).cursor(cursor);
+    let page = page.page().await.expect("the reader resumes the trash");
+    assert_eq!((page.head_seq, page.entries.len()), (head_seq, 1));
+
+    let mut ahead: loonfs_types::DirectoryPageCursor =
+        loonfs_types::decode_cursor(&directory_cursor).expect("decode the cursor");
+    ahead.head_seq = CommitSeq(head_seq.0 + 1);
+    let ahead = loonfs_types::encode_cursor(&ahead).expect("encode");
+    let page = reader.list("/").page_limit(limit).cursor(Some(ahead));
+    assert_matches!(
+        page.page().await,
+        Err(Error::Core(CoreError::InvalidCursor(_)))
+    );
+    fixture.shutdown().await;
+}
+
+/// Returns the requests that the reader of a fixture named `name` sends for
+/// a change feed page, read as `consistency` asks, at the writer's head
+/// after the reader confirmed the head before the writer's last commit.
+async fn changes_page_at_the_writers_head_requests(
+    name: &str,
+    consistency: Option<Consistency>,
+) -> Vec<RecordedOperation> {
+    let fixture = fixture(name).await;
+    fixture
+        .reader
+        .stat_with_options("/file.txt", &strong())
+        .await
+        .expect("strong stat");
+    let head_seq = commit(&fixture, "next.txt").await;
+    fixture.recording.reset();
+    let options = ListChangesOptions {
+        at: ReadAt::Live(consistency),
+        ..ListChangesOptions::default()
+    };
+    let page = fixture.reader.list_changes_with_options(head_seq, &options);
+    let page = page.page().await.expect("a page at the writer's head");
+    assert_eq!(page.head_seq, head_seq);
+    let operations = fixture.recording.take();
+    fixture.shutdown().await;
+    operations
+}
+
+/// Returns `operations` with the size of each read that returned bytes set
+/// to 1, because a WAL object's compressed size depends on its random IDs.
+fn without_sizes(mut operations: Vec<RecordedOperation>) -> Vec<RecordedOperation> {
+    for operation in &mut operations {
+        if let RecordedOperation::Get { result_bytes, .. }
+        | RecordedOperation::GetWithMetadata { result_bytes, .. } = operation
+        {
+            *result_bytes = (*result_bytes).min(1);
+        }
+    }
+    operations
+}
+
+/// Checks that an eventual change feed page whose `after_seq` is ahead of
+/// the reader's cached head sends the requests of a strong page, and no
+/// more.
+#[tokio::test]
+async fn an_eventual_page_ahead_of_its_cached_head_sends_the_requests_of_a_strong_page() {
+    let name = "changes-ahead-requests";
+    let eventual = without_sizes(changes_page_at_the_writers_head_requests(name, None).await);
+    let strong = without_sizes(
+        changes_page_at_the_writers_head_requests(name, Some(Consistency::Strong)).await,
+    );
+    assert!(!strong.is_empty(), "a strong page confirms the head");
+    assert_eq!(eventual, strong);
 }
