@@ -11,7 +11,7 @@ use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::snapshot_record;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, SnapshotOwner, SnapshotPayload,
 };
@@ -23,24 +23,24 @@ pub(crate) fn encode_snapshot_record(record: &SnapshotPayload) -> Bytes {
         .expect("a snapshot record should encode")
 }
 
-/// Writes a record under its freshly generated [`SnapshotId`].
+/// Writes a record under its freshly generated [`SnapshotId`], and returns
+/// the version of the record that the write stored.
 pub(crate) async fn write_snapshot_record<S: ObjectStore + ?Sized>(
     store: &S,
     record: &SnapshotPayload,
-) -> Result<()> {
+) -> Result<ObjectMetadata> {
     let encoded = encode_snapshot_record(record);
     let object_key = snapshot_record(&record.namespace_id, &record.snapshot_id);
-    if let Err(error) = create_control_object_under_generated_id(store, &object_key, encoded).await
-    {
-        tracing::error!(
-            namespace_id = %record.namespace_id,
-            object_key = %object_key,
-            error = %error,
-            "snapshot record write failed"
-        );
-        return Err(error);
-    }
-    Ok(())
+    create_control_object_under_generated_id(store, &object_key, encoded)
+        .await
+        .inspect_err(|error| {
+            tracing::error!(
+                namespace_id = %record.namespace_id,
+                object_key = %object_key,
+                error = %error,
+                "snapshot record write failed"
+            );
+        })
 }
 
 pub(crate) type LoadedSnapshotRecord = LoadedControl<SnapshotPayload>;

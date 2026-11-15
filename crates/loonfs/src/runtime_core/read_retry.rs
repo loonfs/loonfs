@@ -1,6 +1,6 @@
 //! Read failure classification and one refresh of an ordinary read.
 
-use super::RuntimeCore;
+use super::{HeadConfirmation, RuntimeCore};
 use crate::pinned_read::PinnedRead;
 use crate::read_view::ReadSource;
 use crate::trace::phase_span;
@@ -65,7 +65,7 @@ pub(crate) async fn classify_read_result<T>(
 }
 
 impl RuntimeCore {
-    /// Runs `read` at the namespace's live head, confirmed as `consistency`
+    /// Runs `read` at the namespace's live head, confirmed as `confirmation`
     /// asks, and once more at a reloaded head if a newer manifest replaced
     /// the read's basis.
     ///
@@ -74,16 +74,17 @@ impl RuntimeCore {
     pub(crate) async fn read<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
-        consistency: Option<Consistency>,
+        confirmation: impl Into<HeadConfirmation>,
         read: F,
     ) -> Result<T>
     where
         F: Fn(PinnedRead) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        if let Some(Consistency::Eventual {
+        let confirmation = confirmation.into();
+        if let HeadConfirmation::Consistency(Some(Consistency::Eventual {
             max_staleness_ms: Some(max_staleness_ms),
-        }) = consistency
+        })) = confirmation
         {
             if max_staleness_ms > READ_REVALIDATION_BOUND_MS {
                 return Err(Error::InvalidRequest {
@@ -96,7 +97,7 @@ impl RuntimeCore {
             }
         }
         let pinned = self
-            .pinned_read(namespace_id, consistency)
+            .pinned_read(namespace_id, confirmation)
             .instrument(phase_span!(self, Phase::PinRead, namespace_id))
             .await?;
         let context = pinned.context.clone();
@@ -112,7 +113,7 @@ impl RuntimeCore {
         self.invalidate_namespace_read_cache(namespace_id);
         self.reload_namespace_head(namespace_id).await?;
         let pinned = self
-            .pinned_read(namespace_id, consistency)
+            .pinned_read(namespace_id, confirmation)
             .instrument(phase_span!(self, Phase::PinRead, namespace_id))
             .await?;
         let context = pinned.context.clone();

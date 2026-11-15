@@ -4,6 +4,7 @@
 //! An expired or deleted snapshot can't be used or retrieved, and the snapshot
 //! listing leaves it out, but its record stays until garbage collection deletes it.
 
+use super::create::CreatedSnapshot;
 use super::read_basis::load_snapshot_read_basis_from_record;
 use super::record::{encode_snapshot_record, LoadedSnapshotRecord};
 use crate::control_update::{retry_while_contended, CasOutcome};
@@ -16,7 +17,7 @@ use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::keys::snapshot_record;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-use loonfs_types::format::control::SnapshotOwner;
+use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
 use loonfs_types::{DeleteSnapshotResponse, Snapshot, SnapshotId};
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -38,13 +39,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
             });
         };
         let loaded = ensure_live(loaded, now_ms)?;
-        load_snapshot_read_basis_from_record(
-            &self.store,
-            &self.segment_cache,
-            live_head,
-            loaded.state,
-        )
-        .await
+        self.load_created_snapshot_read_basis(live_head, loaded.state)
+            .await
+    }
+
+    /// Resolves the read basis of the snapshot `record`, which this process
+    /// wrote, from the record in memory instead of a load of the record.
+    pub async fn load_created_snapshot_read_basis(
+        &self,
+        live_head: &NamespaceReadState,
+        record: SnapshotPayload,
+    ) -> Result<ReadBasis> {
+        load_snapshot_read_basis_from_record(&self.store, &self.segment_cache, live_head, record)
+            .await
     }
 }
 
@@ -168,46 +175,83 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
         let clock = self.namespace.start_clock();
-        let object_key = snapshot_record(&self.namespace.namespace_id, snapshot_id);
         retry_while_contended(|| async {
             let Some(loaded) = self.namespace.load_snapshot_record(snapshot_id).await? else {
                 return Ok(CasOutcome::Settled(()));
             };
-            let mut next = loaded.state.clone();
-            let SnapshotOwner::User { deleted_at_ms, .. } = &mut next.owner else {
-                return Err(CoreError::SnapshotNotFound {
-                    snapshot_id: snapshot_id.clone(),
-                });
-            };
-            if deleted_at_ms.is_some() {
-                return Ok(CasOutcome::Settled(()));
-            }
             // The clock is read after the load, as an extension reads it.
-            *deleted_at_ms = Some(clock.now_ms());
-            let encoded = encode_snapshot_record(&next);
-            match self
-                .namespace
-                .store
-                .compare_and_swap(&object_key, &loaded.etag, encoded)
+            self.mark_snapshot_deleted(loaded.state, &loaded.etag, clock.now_ms())
                 .await
-            {
-                Ok(_) => Ok(CasOutcome::Settled(())),
-                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
-                    CoreError::contention_exhausted(&object_key),
-                )),
-                // The next attempt loads the record again. If this write was
-                // applied, that attempt finds the delete time and writes
-                // nothing.
-                Err(error @ ObjectStoreError::Transport { .. }) => {
-                    Ok(CasOutcome::Contended(CoreError::store(&object_key, &error)))
-                }
-                Err(error) => Err(CoreError::store(&object_key, &error)),
-            }
         })
         .await??;
-        Ok(DeleteSnapshotResponse {
+        Ok(self.deleted_snapshot(snapshot_id))
+    }
+
+    /// Deletes the snapshot that this process wrote as `created`, with one
+    /// compare-and-swap against the version that the write stored. A record
+    /// that changed after the write, and a write that returned no version,
+    /// delete as [`Self::delete_snapshot`] does, which loads the record first.
+    pub async fn delete_created_snapshot(
+        &self,
+        created: &CreatedSnapshot,
+    ) -> Result<DeleteSnapshotResponse> {
+        let snapshot_id = &created.record.snapshot_id;
+        if let Some(etag) = &created.etag {
+            let now_ms = self.namespace.start_clock().now_ms();
+            if let CasOutcome::Settled(()) = self
+                .mark_snapshot_deleted(created.record.clone(), etag, now_ms)
+                .await?
+            {
+                return Ok(self.deleted_snapshot(snapshot_id));
+            }
+        }
+        self.delete_snapshot(snapshot_id).await
+    }
+
+    /// Records `now_ms` as the delete time of the user snapshot `record`, with
+    /// a compare-and-swap against `etag`, the version of the record that the
+    /// caller read or wrote. A record with a delete time already is left as
+    /// it is.
+    async fn mark_snapshot_deleted(
+        &self,
+        mut record: SnapshotPayload,
+        etag: &str,
+        now_ms: u64,
+    ) -> Result<CasOutcome<(), CoreError>> {
+        let object_key = snapshot_record(&self.namespace.namespace_id, &record.snapshot_id);
+        let SnapshotOwner::User { deleted_at_ms, .. } = &mut record.owner else {
+            return Err(CoreError::SnapshotNotFound {
+                snapshot_id: record.snapshot_id,
+            });
+        };
+        if deleted_at_ms.is_some() {
+            return Ok(CasOutcome::Settled(()));
+        }
+        *deleted_at_ms = Some(now_ms);
+        let encoded = encode_snapshot_record(&record);
+        match self
+            .namespace
+            .store
+            .compare_and_swap(&object_key, etag, encoded)
+            .await
+        {
+            Ok(_) => Ok(CasOutcome::Settled(())),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
+                CoreError::contention_exhausted(&object_key),
+            )),
+            // The next attempt loads the record again. If this write was
+            // applied, that attempt finds the delete time and writes nothing.
+            Err(error @ ObjectStoreError::Transport { .. }) => {
+                Ok(CasOutcome::Contended(CoreError::store(&object_key, &error)))
+            }
+            Err(error) => Err(CoreError::store(&object_key, &error)),
+        }
+    }
+
+    fn deleted_snapshot(&self, snapshot_id: &SnapshotId) -> DeleteSnapshotResponse {
+        DeleteSnapshotResponse {
             namespace_id: self.namespace.namespace_id.clone(),
             snapshot_id: snapshot_id.clone(),
-        })
+        }
     }
 }

@@ -11,12 +11,16 @@ use crate::{
 };
 use futures::future::BoxFuture;
 use loonfs_core::MergeRequest;
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::PutMode;
 use loonfs_test_support::ids::{namespace_id, writer_id};
+use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 use loonfs_types::{
     AbsolutePath, DeleteDirectoryBehavior, ManifestNo, MergeConflictKind, FEATURE_MERGES,
 };
 use std::assert_matches;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -35,8 +39,14 @@ fn actor() -> ActorId {
 /// writes `/b.txt` in the fork.
 async fn family() -> Family {
     let directory = tempfile::tempdir().expect("tempdir");
-    let main_id = namespace_id("main");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    family_on(directory, store).await
+}
+
+/// Creates the family of [`family`] in a runtime on `store`, which stores
+/// its objects in `directory`.
+async fn family_on(directory: TempDir, store: crate::SharedObjectStore) -> Family {
+    let main_id = namespace_id("main");
     let runtime = LoonFs::builder_with_store(store)
         .writer_id(writer_id("merge-writer"))
         .build()
@@ -478,7 +488,7 @@ async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
             .iter()
             .map(|snapshot| (snapshot.snapshot_id.clone(), snapshot.name.clone()))
             .collect::<Vec<_>>(),
-        vec![(planned.merge_snapshot.clone(), None)],
+        vec![(planned.merge_snapshot.record.snapshot_id.clone(), None)],
         "the plan takes a snapshot of the fork, with no name"
     );
     let mut replans = 0;
@@ -566,6 +576,48 @@ async fn a_retry_of_a_committed_merge_folds_nothing() {
         .expect("the retry");
     assert_eq!(retried, merged);
     assert_eq!(family.manifest_nos().await, before);
+}
+
+/// Checks that a retry through one runtime of a merge that another runtime
+/// committed returns the original merge after the fork was deleted. Runtime
+/// A's writer session on `main` has a position from before runtime B's
+/// merge. The retry's receipt lookup confirms the position first, so the
+/// lookup reads B's merge and the retry never reads the deleted fork.
+#[tokio::test]
+async fn a_retry_of_a_merge_that_another_runtime_committed_finds_the_receipt_after_the_fork_is_deleted(
+) {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store: crate::SharedObjectStore =
+        Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let family = family_on(directory, store.clone()).await;
+    family.write_main("/later.txt").await;
+    let other = LoonFs::builder_with_store(store)
+        .writer_id(writer_id("other-merge-writer"))
+        .build()
+        .await
+        .expect("the other runtime");
+    let options = MergeForkOptions {
+        commit_id: Some(CommitId::parse("merge").expect("commit id")),
+        ..MergeForkOptions::default()
+    };
+    let other_main = other.open_namespace(family.main.id()).expect("open main");
+    let merged = other_main
+        .merge_fork_with_options(family.fork.id(), &actor(), &options)
+        .await
+        .expect("the merge in the other runtime");
+    other
+        .open_namespace(family.fork.id())
+        .expect("open the fork")
+        .delete()
+        .await
+        .expect("delete the fork");
+    let retried = family
+        .main
+        .merge_fork_with_options(family.fork.id(), &actor(), &options)
+        .await
+        .expect("the retry");
+    assert_eq!(retried.committed_seq, merged.committed_seq);
+    assert_eq!(retried.commit_id, merged.commit_id);
 }
 
 /// Checks that a merge's delete of a file expects the file's revision. `main`
@@ -975,4 +1027,152 @@ async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
         .put_file("/after.txt", b"after", &actor())
         .await
         .expect("main still takes writes");
+}
+
+/// Lists `operations` as each request's kind and the object it addresses.
+/// A snapshot, segment, or content key is reduced to its family, and a
+/// manifest or WAL key keeps its number, so a sequence reads the same in
+/// every run.
+fn requests(operations: &[RecordedOperation]) -> Vec<String> {
+    operations
+        .iter()
+        .map(|operation| {
+            let kind = match operation {
+                RecordedOperation::Head { .. } => "head",
+                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
+                RecordedOperation::Put {
+                    mode: PutMode::CompareAndSwap { .. },
+                    ..
+                } => "swap",
+                RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. } => "put",
+                RecordedOperation::Assemble { .. } => "assemble",
+                RecordedOperation::Delete { .. } => "delete",
+                RecordedOperation::List { .. } => "list",
+            };
+            let Some(parsed) = parse_object_key(operation.key()) else {
+                return format!("{kind} {}", operation.key());
+            };
+            let owner = match parsed.prefix() {
+                KeyPrefix::Namespace(namespace) => namespace,
+                KeyPrefix::Pool(_) => "pool",
+            };
+            let family = parsed.family();
+            match (family, parsed.identifier()) {
+                (
+                    DurableObjectFamily::MetadataManifest | DurableObjectFamily::WalObject,
+                    Some(number),
+                ) => format!("{kind} {owner} {family:?} {number}"),
+                _ => format!("{kind} {owner} {family:?}"),
+            }
+        })
+        .collect()
+}
+
+/// Returns the family of [`family`] on a store that records every request,
+/// with the log cleared. The runtime's writer sessions on `main` and the fork
+/// have positions that their own commits checked moments ago.
+async fn recorded_family() -> (Family, Arc<RecordingStore<LocalFsStore>>) {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let family = family_on(directory, store.clone()).await;
+    store.reset();
+    (family, store)
+}
+
+/// Checks the exact requests of a merge in a writer runtime with fresh
+/// positions on both namespaces. The receipt lookup is a `strong` read of
+/// `main`, so it checks `main`'s position with a successor HEAD and a
+/// boundary read. The checks before the plan read the fork's position as it
+/// is and send no request. The fork's fold publishes manifest 4, and the
+/// snapshot's verification after the record write is the fork's position
+/// check, so the fork's successor is checked once, and the plan reads the
+/// snapshot record from memory. The commit is one WAL put, and the release
+/// is one compare-and-swap against the version that the record's write
+/// stored.
+#[tokio::test]
+async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
+    let (family, store) = recorded_family().await;
+    family
+        .main
+        .merge_fork(family.fork.id(), &actor())
+        .await
+        .expect("the merge");
+    let mut expected = vec![
+        "head main MetadataManifest 00000000000000000005",
+        "get main Boundary",
+        "assemble pool ContentBlob",
+    ];
+    expected.extend(["put main-fork MetadataSegment"; 7]);
+    expected.extend([
+        "put main-fork MetadataManifest 00000000000000000004",
+        "get main-fork Boundary",
+        "put main-fork Snapshot",
+        "head main-fork MetadataManifest 00000000000000000005",
+        "get main-fork Boundary",
+        "put main WalObject 00000000000000000005",
+        "swap main-fork Snapshot",
+    ]);
+    assert_eq!(requests(&store.take()), expected);
+}
+
+/// Checks that the next-range query in a writer runtime with fresh
+/// positions checks each position once, with a successor HEAD and a
+/// boundary read, as a `strong` read of a position does.
+#[tokio::test]
+async fn the_next_merge_range_with_fresh_positions_checks_each_position() {
+    let (family, store) = recorded_family().await;
+    family
+        .main
+        .next_merge_range(family.fork.id())
+        .await
+        .expect("the next range");
+    assert_eq!(
+        requests(&store.take()),
+        [
+            "head main MetadataManifest 00000000000000000005",
+            "get main Boundary",
+            "head main-fork MetadataManifest 00000000000000000004",
+            "get main-fork Boundary",
+        ]
+    );
+}
+
+/// Checks that a merge whose snapshot was extended between the plan and the
+/// commit still deletes the snapshot. The extension changes the record's
+/// version, so the release's compare-and-swap against the version from the
+/// snapshot's creation fails, and the release loads the record and swaps
+/// again.
+#[tokio::test]
+async fn a_merge_releases_its_snapshot_after_an_extension() {
+    let family = family().await;
+    let request = family.request("merge");
+    let planned = family.plan(&request).await;
+    family
+        .fork
+        .extend_snapshot(
+            &planned.merge_snapshot.record.snapshot_id,
+            NonZeroU64::new(600_000).expect("ttl"),
+        )
+        .await
+        .expect("extend the merge's snapshot");
+    family
+        .commit(&request, planned, |_, _| {
+            Box::pin(async { panic!("the plan commits") })
+        })
+        .await
+        .expect("the merge");
+    let released = family
+        .fork
+        .list_snapshots()
+        .page()
+        .await
+        .expect("the fork's snapshots after the merge");
+    assert!(
+        released.snapshots.is_empty(),
+        "the merge releases its snapshot: {:?}",
+        released.snapshots
+    );
 }
