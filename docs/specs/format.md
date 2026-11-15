@@ -1289,10 +1289,9 @@ To create a snapshot from the current head, LoonFS:
 
 1. Folds the observed WAL tail as the namespace's [maintainer](glossary.md#maintainer), under the current compactor epoch, and selects a verified current manifest.
 2. Writes a new snapshot with put-if-absent.
-3. Loads the current manifest again.
-4. Checks that the manifest number and payload checksum are the same, that the namespace is active, and that its retention floor is no later than the snapshot's head sequence.
+3. Checks that the namespace is active in the manifest that it selected. It then checks that manifest for a successor and reads the manifest boundary, as [Replaying the visible WAL](#42-replaying-the-visible-wal) describes for a process with a manifest in memory. If a successor exists or the manifest is at or below the boundary, another manifest became current, and the snapshot is invalid.
 
-If another manifest became current in the meantime, LoonFS deletes the candidate snapshot and retries from a fresh basis. A deletion, a store failure, or running out of contention retries prevents acknowledgement. The creator deletes a snapshot whose write or verification fails. That deletion is best effort. If it fails, the creator still returns the error that failed the creation, and garbage collection applies the rules in [Snapshot cleanup](#117-snapshot-cleanup) to the snapshot. Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same sequence.
+If another manifest became current in the meantime, LoonFS deletes the candidate snapshot and retries from a fresh basis. A deletion, a store failure, or running out of contention retries prevents acknowledgement. The creator deletes a snapshot whose write or verification fails. That deletion is best effort. If it fails, the creator still returns the error that failed the creation, and garbage collection applies the rules in [Snapshot cleanup](#117-snapshot-cleanup) to the snapshot. Verification has no time limit of its own. A successor makes the snapshot invalid even when the successor has the same sequence.
 
 A put whose outcome is unknown can succeed after its creator stopped waiting (see [Required operations](#31-required-operations)), even after the creator's delete. A snapshot created that way was never returned to a caller. It appears in the snapshot listing and is collected like any other snapshot, so a user snapshot without an expiry stays until someone deletes it and garbage collection collects it.
 

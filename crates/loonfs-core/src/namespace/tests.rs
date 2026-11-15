@@ -3,6 +3,7 @@
 use crate::commit::engine::NamespaceCommitEngine;
 use crate::limits::OPERATION_SNAPSHOT_TTL_MS;
 use crate::manifest::tests::control_requests;
+use crate::namespace::basis::PublicationBasis;
 use crate::test_support::WriterAt;
 use crate::wal::tests::publish;
 use crate::CoreError;
@@ -31,10 +32,10 @@ const CREATE_STORE_OPERATIONS: usize = 8;
 
 /// The store operations of the fork in
 /// `a_new_namespace_is_looked_up_before_its_first_write`, with the fold of
-/// the source's WAL tail before it: 16 for the fold, and 16 for the fork, of
-/// which 3 are the check of the snapshot that the fork is built from and 1 is
+/// the source's WAL tail before it: 16 for the fold, and 15 for the fork, of
+/// which 2 are the check of the snapshot that the fork is built from and 1 is
 /// the member entry.
-const FORK_STORE_OPERATIONS: usize = 32;
+const FORK_STORE_OPERATIONS: usize = 31;
 
 /// The store operations of the deletion in
 /// `a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a_writer_session`.
@@ -1135,11 +1136,10 @@ async fn an_initializing_namespace_is_not_found_except_by_create_fork_and_delete
         .create_snapshot(
             None,
             None,
-            namespace
-                .load_current_manifest()
-                .await
-                .expect("current")
-                .manifest(),
+            PublicationBasis {
+                manifest: namespace.load_current_manifest().await.expect("current"),
+                boundary: None,
+            },
         )
         .await;
     assert_matches!(snapshot, Err(CoreError::SnapshotUnavailable(_)));
@@ -1284,9 +1284,14 @@ async fn a_finishing_fork_whose_source_was_deleted_returns_namespace_deleted() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let (source, target) = source_and_target();
-    let (temporary, manifest_1) =
+    let (_, manifest_1) =
         crate::test_support::half_done_fork(&store, &source, &target, &context()).await;
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
+    let source_basis = fixture
+        .namespace
+        .load_current_basis()
+        .await
+        .expect("the source's basis");
     fixture
         .engine()
         .delete_namespace(Default::default())
@@ -1294,11 +1299,7 @@ async fn a_finishing_fork_whose_source_was_deleted_returns_namespace_deleted() {
         .expect("delete the source");
     let finished = fixture
         .engine()
-        .fork_namespace(
-            &target,
-            &loonfs_test_support::test_actor(),
-            temporary.manifest(),
-        )
+        .fork_namespace(&target, &loonfs_test_support::test_actor(), source_basis)
         .await;
     assert_matches!(finished, Err(CoreError::NamespaceDeleted { .. }));
     assert_eq!(manifest_payloads(&store, &target).await, [manifest_1]);
@@ -1326,9 +1327,14 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
         crate::test_support::half_done_fork(&store, &source, &target, &context()).await;
     crate::test_support::write_fork_snapshot(&store, &manifest_1).await;
     let written = snapshot_records(&store, &source).await;
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
+    let head = fixture
+        .namespace
+        .load_current_basis()
+        .await
+        .expect("the source's basis");
     store.inner().reset();
     store.block_next();
-    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
     let finisher = fixture.engine();
     let other_finisher = async {
         store.wait_until_blocked().await;
@@ -1352,12 +1358,6 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
         store.release();
     };
     let actor = loonfs_test_support::test_actor();
-    let head = manifest_1
-        .fork_basis
-        .as_ref()
-        .expect("a fork basis")
-        .manifest
-        .clone();
     let (finished, ()) = tokio::join!(
         finisher.fork_namespace(&target, &actor, head),
         other_finisher

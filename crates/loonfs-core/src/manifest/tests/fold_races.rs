@@ -824,6 +824,7 @@ async fn a_fold_moves_the_position_only_to_a_fold_of_its_own_head_and_epoch() {
                 folded_wal_no: WalNo(folded.manifest.folded_wal_no.0 + wal_after),
                 ..folded.manifest.clone()
             },
+            basis: folded.basis.clone(),
         });
         // As the publisher does, a fold that ended reports the manifest that
         // covers its tail, and a fold that failed reports nothing.

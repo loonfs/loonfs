@@ -175,21 +175,25 @@ impl<S: ObjectStore> NamespaceStore<S> {
             },
             None => self.load_fold_projection(clock.observe()).await?,
         };
-        let basis = projection.manifest_segments.manifest();
-        if basis.payload().folded_wal_no == projection.head.wal_no {
+        let publication_basis = PublicationBasis {
+            manifest: projection.manifest_segments.loaded_manifest(),
+            boundary: projection.boundary.clone(),
+        };
+        if publication_basis.manifest.folded_wal_no() == projection.head.wal_no {
             // No store observation confirms the basis here, so the manifest has
             // no start observation.
             return Ok(FoldedWalTail::new(
                 &self.namespace_id,
                 projection.head.seq,
-                PublishedManifest::new(basis, None, projection.boundary.clone()),
+                PublishedManifest::new(
+                    &publication_basis.manifest.envelope,
+                    None,
+                    projection.boundary.clone(),
+                ),
+                publication_basis,
                 FoldWalOutcome::AlreadyCurrent,
             ));
         }
-        let publication_basis = PublicationBasis {
-            manifest: projection.manifest_segments.loaded_manifest(),
-            boundary: projection.boundary.clone(),
-        };
         // Each attempt's future borrows the fold through this lock, because a
         // future that a closure returns can't borrow the closure's own state.
         let fold = tokio::sync::Mutex::new(FoldAttempts {
@@ -218,6 +222,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             &self.namespace_id,
             fold.into_inner().projection.head.seq,
             update.current_manifest(),
+            update.current,
             update.response,
         ))
     }
@@ -342,6 +347,9 @@ pub struct FoldedWalTail {
     /// The manifest that covers the tail after the call: the one it
     /// published, or the current one that already covered it.
     pub manifest: PublishedManifest,
+    /// The same manifest as loaded, with the manifest boundary that the call
+    /// read. A snapshot of the manifest is verified from this basis.
+    pub basis: PublicationBasis,
 }
 
 impl FoldedWalTail {
@@ -349,6 +357,7 @@ impl FoldedWalTail {
         namespace_id: &NamespaceId,
         target_head_seq: CommitSeq,
         manifest: PublishedManifest,
+        basis: PublicationBasis,
         outcome: FoldWalOutcome,
     ) -> Self {
         Self {
@@ -360,6 +369,7 @@ impl FoldedWalTail {
                 outcome,
             },
             manifest,
+            basis,
         }
     }
 

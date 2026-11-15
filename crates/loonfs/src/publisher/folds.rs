@@ -12,7 +12,6 @@ use loonfs_core::limits::{FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::time::OperationClock;
 use loonfs_core::{FoldedWalTail, MetadataCompactionCancellation, Phase};
-use loonfs_types::format::control::ManifestRef;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, RwLockReadGuard};
@@ -115,7 +114,7 @@ pub(crate) enum NamespaceFold {
         observed: Option<PublicationBasis>,
     },
     /// The call folded the tail, or found it folded.
-    Folded(FoldedWalTail),
+    Folded(Box<FoldedWalTail>),
 }
 
 impl NamespaceFold {
@@ -123,7 +122,7 @@ impl NamespaceFold {
     pub(crate) fn folded(self) -> Option<FoldedWalTail> {
         match self {
             Self::NotDue { .. } => None,
-            Self::Folded(folded) => Some(folded),
+            Self::Folded(folded) => Some(*folded),
         }
     }
 }
@@ -170,7 +169,7 @@ impl PublisherRegistry {
         let _turn = turns.fold.write().await;
         if let FoldWhen::Always = when {
             if let Some(folded) = turns.folded_after(arrival) {
-                return Ok(NamespaceFold::Folded(folded));
+                return Ok(NamespaceFold::Folded(Box::new(folded)));
             }
         }
         if let Some(not_due) = self.fold_not_due(namespace_id, when, session).await? {
@@ -178,7 +177,7 @@ impl PublisherRegistry {
         }
         self.fold_under_turn(namespace_id, session, &turns)
             .await
-            .map(NamespaceFold::Folded)
+            .map(|folded| NamespaceFold::Folded(Box::new(folded)))
     }
 
     async fn fold_under_turn(
@@ -238,7 +237,7 @@ impl PublisherRegistry {
     pub(crate) async fn snapshot_after_fold<T, SnapshotFuture>(
         &self,
         namespace_id: &NamespaceId,
-        mut create: impl FnMut(ManifestRef) -> SnapshotFuture,
+        mut create: impl FnMut(PublicationBasis) -> SnapshotFuture,
     ) -> Result<T>
     where
         SnapshotFuture: Future<Output = loonfs_core::Result<T>>,
@@ -247,10 +246,10 @@ impl PublisherRegistry {
         let mut attempts = 1;
         loop {
             let arrival = turns.started();
-            let (manifest, turn) = self
+            let (basis, turn) = self
                 .fold_for_snapshot(namespace_id, &turns, arrival)
                 .await?;
-            let created = create(manifest).await;
+            let created = create(basis).await;
             drop(turn);
             match created {
                 Err(CoreError::SnapshotUnavailable(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
@@ -266,10 +265,10 @@ impl PublisherRegistry {
         namespace_id: &NamespaceId,
         turns: &'a NamespaceTurns,
         arrival: u64,
-    ) -> Result<(ManifestRef, RwLockReadGuard<'a, ()>)> {
+    ) -> Result<(PublicationBasis, RwLockReadGuard<'a, ()>)> {
         let shared = turns.fold.read().await;
         if let Some(folded) = turns.folded_after(arrival) {
-            return Ok((folded.manifest.manifest, shared));
+            return Ok((folded.basis, shared));
         }
         drop(shared);
         // The fold lock is released from exclusive mode, not downgraded to
@@ -288,7 +287,7 @@ impl PublisherRegistry {
         let folded = turns
             .folded_after(arrival)
             .expect("a fold after the arrival should have completed under the fold lock");
-        Ok((folded.manifest.manifest, shared))
+        Ok((folded.basis, shared))
     }
 
     fn unfenced_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {

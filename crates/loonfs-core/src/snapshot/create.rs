@@ -9,7 +9,7 @@ use crate::namespace::basis::PublicationBasis;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ManifestRef, SnapshotOwner, SnapshotPayload};
+use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
 use loonfs_types::{Snapshot, SnapshotId};
 
 /// Longest accepted snapshot name. A label bound, not a durable format
@@ -17,8 +17,9 @@ use loonfs_types::{Snapshot, SnapshotId};
 const MAX_SNAPSHOT_NAME_CHARS: usize = 128;
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Creates a snapshot of `manifest`, the manifest that the caller's fold
-    /// of the WAL tail published or found current.
+    /// Creates a snapshot of `basis`, the manifest that the caller's fold of
+    /// the WAL tail published or found current, with the manifest boundary
+    /// that the fold read.
     ///
     /// Every call generates a fresh `SnapshotId`, and `name` is an optional
     /// label, not a key. A manifest that stopped being current before the
@@ -30,7 +31,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         name: Option<String>,
         expires_at_ms: Option<u64>,
-        manifest: ManifestRef,
+        basis: PublicationBasis,
     ) -> Result<Snapshot> {
         self.namespace
             .create_snapshot_record(
@@ -39,7 +40,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     expires_at_ms,
                     deleted_at_ms: None,
                 },
-                manifest,
+                basis,
                 &self.namespace.start_clock(),
             )
             .await
@@ -48,21 +49,23 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Creates a verified snapshot of `manifest` for `owner`.
+    /// Creates a verified snapshot of `basis`'s manifest for `owner`.
     ///
-    /// `manifest` is the manifest that the caller's fold published or found
-    /// current. The call returns `snapshot_unavailable` when the manifest
-    /// stopped being current before the snapshot's verification, so the caller
-    /// can fold and take a snapshot again. Returns the snapshot record with
+    /// `basis` is the manifest that the caller's fold published or found
+    /// current, with the manifest boundary that the fold read. The call
+    /// returns `snapshot_unavailable` when the manifest stopped being current
+    /// before the snapshot's verification, so the caller can fold and take a
+    /// snapshot again. Returns the snapshot record with
     /// the newest manifest and the manifest boundary that the verification
     /// read.
     pub(crate) async fn create_snapshot_record(
         &self,
         owner: SnapshotOwner,
-        manifest: ManifestRef,
+        basis: PublicationBasis,
         clock: &OperationClock,
     ) -> Result<(SnapshotPayload, PublicationBasis)> {
         validate_snapshot_owner(&owner)?;
+        let manifest = basis.manifest.manifest();
         let snapshot_id = SnapshotId::generate(manifest.manifest_no);
         let record = SnapshotPayload {
             snapshot_id: snapshot_id.clone(),
@@ -74,7 +77,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
         let verification = async {
             write_snapshot_record(&self.store, &record).await?;
-            self.verify_snapshot_basis(&record).await
+            self.verify_snapshot_basis(basis).await
         }
         .await;
         let error = match verification {

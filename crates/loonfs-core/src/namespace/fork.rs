@@ -20,9 +20,7 @@ use crate::snapshot::record::write_snapshot_record;
 use crate::snapshot::{ensure_live, load_snapshot_basis};
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{
-    ForkBasis, ManifestRef, RebasedFrom, SnapshotOwner, SnapshotPayload,
-};
+use loonfs_types::format::control::{ForkBasis, RebasedFrom, SnapshotOwner, SnapshotPayload};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CommitSeq, NamespaceId, NamespaceMetadata, SnapshotId};
 use std::sync::Arc;
@@ -39,15 +37,16 @@ struct Rebase<'a> {
 /// The state that a fork keeps.
 enum ForkAt<'a> {
     /// The manifest that the caller's fold of the WAL tail published or
-    /// found current.
-    Head(ManifestRef),
+    /// found current, with the manifest boundary that the fold read.
+    Head(PublicationBasis),
     /// An unexpired snapshot of this namespace.
     Snapshot(&'a SnapshotId),
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Creates a new namespace at `manifest`, the manifest that the caller's
-    /// fold of this namespace's WAL tail published or found current.
+    /// Creates a new namespace at `basis`, the manifest that the caller's
+    /// fold of this namespace's WAL tail published or found current, with
+    /// the manifest boundary that the fold read.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
     /// Returns the target's state after manifest 2. A manifest that stopped
@@ -57,9 +56,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
-        manifest: ManifestRef,
+        basis: PublicationBasis,
     ) -> Result<NamespaceMetadata> {
-        self.install_fork(new_namespace_id, actor_id, ForkAt::Head(manifest), None)
+        self.install_fork(new_namespace_id, actor_id, ForkAt::Head(basis), None)
             .await
     }
 
@@ -80,7 +79,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await
     }
 
-    /// Creates a new namespace at `manifest` for a rebase of
+    /// Creates a new namespace at `basis` for a rebase of
     /// `source_namespace_id`, a fork of this namespace made at
     /// `fork_point_seq`, as [`Self::fork_namespace`] does
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
@@ -96,7 +95,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &loonfs_types::ActorId,
         source_namespace_id: &NamespaceId,
         fork_point_seq: CommitSeq,
-        manifest: ManifestRef,
+        basis: PublicationBasis,
     ) -> Result<NamespaceMetadata> {
         let rebase = Rebase {
             source_namespace_id,
@@ -105,7 +104,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         self.install_fork(
             new_namespace_id,
             actor_id,
-            ForkAt::Head(manifest),
+            ForkAt::Head(basis),
             Some(rebase),
         )
         .await
@@ -245,7 +244,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         clock: &OperationClock,
     ) -> Result<(PublicationBasis, PublicationBasis)> {
         let (built_from, source) = match at {
-            ForkAt::Head(manifest) => {
+            ForkAt::Head(basis) => {
                 let owner = SnapshotOwner::User {
                     name: None,
                     expires_at_ms: Some(
@@ -256,7 +255,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     deleted_at_ms: None,
                 };
                 self.namespace
-                    .create_snapshot_record(owner, manifest.clone(), clock)
+                    .create_snapshot_record(owner, basis.clone(), clock)
                     .await?
             }
             ForkAt::Snapshot(snapshot_id) => {
