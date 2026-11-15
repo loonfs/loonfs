@@ -497,9 +497,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     }
 
     /// Counts a conflict, keeps it as the first when its inode has the
-    /// smallest ID so far, and adds it to a replay commit's report and its
-    /// bytes to the planned bytes, because the replay commit's merge record
-    /// stores the report. `theirs` is the merged-into namespace's version
+    /// smallest ID so far, and adds it to a replay commit's report, with its
+    /// bytes checked against the allowance as a plan's are, because the
+    /// replay commit's merge record stores the report. `theirs` is the
+    /// merged-into namespace's version
     /// that the conflict reports. An inode's later conflicts change nothing.
     pub(super) async fn conflict(
         &mut self,
@@ -534,6 +535,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             self.planned_bytes = self
                 .planned_bytes
                 .saturating_add(conflict_bytes(&conflict, replay.report.is_empty()));
+            self.memory.check_planned(self.planned_bytes)?;
             replay.report.push(conflict.clone());
         }
         if first {
