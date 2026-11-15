@@ -48,15 +48,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// the rebase runs. A replay commit skips its conflicting changes and the
     /// changes that depend on them. The plan returns `merge_too_large` when
     /// the plans so far stop fitting one WAL object or `allowance` during
-    /// the classification, or when the ordered commit, with the temporary
-    /// moves that the ordering adds and a replay commit's conflict report,
-    /// doesn't fit them. Either refusal has the split hint that the fork's
-    /// net change over shorter ranges gives (see [`with_split_hint`]). A
-    /// replay commit's conflicts count toward the classification's planned
-    /// bytes as it finds them. Each check grows the merge's reservation of
-    /// the allowance to cover the planned bytes and the memory that the plan
-    /// uses (see [`PlanningMemory`]), and returns `server_busy` when other
-    /// merges' reservations leave no room for the growth.
+    /// the classification, the target check or the skipped conflicts, or
+    /// when the ordered commit, with the temporary moves that the ordering
+    /// adds and a replay commit's conflict report, doesn't fit them. Every
+    /// refusal has the split hint that the fork's net change over shorter
+    /// ranges gives (see [`with_split_hint`]). A replay commit's conflicts
+    /// count toward the planned bytes as it finds them. Each check grows the
+    /// merge's reservation of the allowance to cover the planned bytes and
+    /// the memory that the plan uses (see [`PlanningMemory`]), and returns
+    /// `server_busy` when other merges' reservations leave no room for the
+    /// growth.
     #[allow(
         clippy::too_many_arguments,
         reason = "a merge and a replay commit share every input, and a replay commit adds the snapshot"
@@ -134,9 +135,23 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             allowance,
         )
         .await?;
-        let holders = classifier.check_targets().await?;
+        let holders = with_split_hint(
+            classifier.check_targets().await,
+            fork_view,
+            range,
+            fields_bytes,
+            allowance,
+        )
+        .await?;
         if classifier.replay.is_some() {
-            classifier.skip_conflicts(&holders).await?;
+            with_split_hint(
+                classifier.skip_conflicts(&holders).await,
+                fork_view,
+                range,
+                fields_bytes,
+                allowance,
+            )
+            .await?;
         }
         let MergeOperations {
             operations,
