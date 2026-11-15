@@ -534,14 +534,16 @@ impl LoonFs<Writable> {
         new_namespace_id: &NamespaceId,
         result: Result<crate::NamespaceMetadata>,
     ) -> Result<crate::NamespaceMetadata> {
-        // The runtime drops its view of the source after a fork, as it does
-        // after a creation or a deletion (see the read freshness design
-        // note), so the source's publisher drops its position instead of
-        // moving onto the fork's fold.
+        // The fork folded the source through this runtime's fold path, which
+        // moved the source's views onto the fold's manifest, and then wrote
+        // snapshot records on the source, which no view tracks. So the
+        // source's views stay, as they do after a user snapshot. The runtime
+        // has no view of the new namespace, and drops what a read loaded of
+        // it while the fork ran.
         let result = self
             .mode
             .publisher
-            .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unknown)
+            .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unchanged)
             .await;
         if result.is_ok() {
             self.mode

@@ -135,14 +135,15 @@ async fn snapshot_calls_after_a_fold_cost_a_snapshot_record_and_its_verification
 }
 
 /// Checks that creating a snapshot of a namespace with 32 fork snapshots costs
-/// the same 11 store requests as creating one with none, so the cost doesn't
-/// grow with the number of snapshots.
+/// the same 4 store requests as creating one with none, so the cost doesn't
+/// grow with the number of snapshots. The forks keep the runtime's view of
+/// the source, so the snapshot after them starts warm, like the ones before.
 ///
 /// (A count of the namespace's live snapshots before and after the snapshot
-/// write, which loads every snapshot twice, would make this call cost 86
-/// requests.)
+/// write, which loads every snapshot twice, would add at least 64 requests
+/// to this call.)
 #[tokio::test]
-async fn a_snapshot_of_a_namespace_with_32_fork_snapshots_costs_11_requests() {
+async fn a_snapshot_of_a_namespace_with_32_fork_snapshots_costs_4_requests() {
     for fold in [Fold::Session, Fold::Explicit] {
         let fixture = fixture(fold).await;
         let actor = loonfs_test_support::test_actor();
@@ -165,6 +166,6 @@ async fn a_snapshot_of_a_namespace_with_32_fork_snapshots_costs_11_requests() {
             .await;
         created.expect("create");
         fixture.namespace.wait_for_fold().await.expect("settle");
-        fixture.assert_requests(&format!("{fold:?}: create with 32 fork snapshots"), 11);
+        fixture.assert_requests(&format!("{fold:?}: create with 32 fork snapshots"), 4);
     }
 }
