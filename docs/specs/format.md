@@ -2266,6 +2266,9 @@ A [merge's](glossary.md#merge) commit includes a merge record (`merge`), and eve
 | `source_namespace_id` | The fork whose commits the merge applied. |
 | `source_after_seq` | The fork's commits above this sequence were applied. For a fork's first merge, this is the fork point. |
 | `source_through_seq` | The fork's commits at or below this sequence were applied. |
+| `conflicts` | The changes that a [rebase's](glossary.md#rebase) replay commit left out, as its conflict report, in the API's `MergeConflict` shape. It's left out when it's empty, and it defaults to an empty list when absent. |
+
+A replay commit stores its conflict report in `conflicts`, so a retry with the replay commit's commit ID returns the same report. A merge stores no report, because a merge that conflicts commits nothing. The report counts toward the commit's size like the rest of the record.
 
 The range follows the change feed's cursor convention, so a consumer that reads the fork's change feed after `source_after_seq`, through `source_through_seq`, reads the commits that the merge applied. For example, a first merge of a fork made at sequence 100, which applies the fork's commits 101 through 120, records 100 and 120. Encoding and decoding refuse a merge record whose `source_after_seq` isn't below its `source_through_seq`, or whose `source_namespace_id` is the WAL object's own `namespace_id` (`InvalidWalMerge`).
 

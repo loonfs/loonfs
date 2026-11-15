@@ -8,8 +8,8 @@ use crate::publisher::MergeReservation;
 use crate::runtime_core::HeadConfirmation;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, Commit, CommitId, Consistency, Error, MergeForkOptions, Mode, Namespace, NamespaceId,
-    NextMergeRangeResponse, Result, Writable,
+    ActorId, Commit, CommitId, Consistency, Error, MergeConflict, MergeForkOptions, Mode,
+    Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::OPERATION_SNAPSHOT_TTL_MS;
@@ -25,8 +25,12 @@ const MAX_MERGE_PLANS: usize = 4;
 /// A merge request, or a rebase's replay commit request, at one view of the
 /// namespace that it commits into.
 pub(crate) enum PlannedMerge<R = ()> {
-    /// The namespace committed a merge under the request's commit ID.
-    Committed(Commit),
+    /// The namespace committed a merge under the request's commit ID, with
+    /// the conflict report that its merge record stores.
+    Committed {
+        commit: Commit,
+        conflicts: Vec<MergeConflict>,
+    },
     /// The commit that makes the merge.
     Candidate(Box<PlannedCommit<R>>),
 }
@@ -47,8 +51,12 @@ pub(crate) struct PlannedCommit<R = ()> {
 /// How the commit of a merge, or of a replay commit, ended.
 pub(crate) enum MergeOutcome<R = ()> {
     /// The namespace had committed a merge under the request's commit ID
-    /// before this request committed one.
-    Found(Commit),
+    /// before this request committed one. `conflicts` is the conflict report
+    /// that the merge record stores, which is empty for a merge.
+    Found {
+        commit: Commit,
+        conflicts: Vec<MergeConflict>,
+    },
     /// This request committed the merge, from a plan that reported `report`.
     Committed { commit: Commit, report: R },
 }
@@ -154,8 +162,8 @@ impl Namespace<Writable> {
                     message: options.message.clone(),
                 };
                 let planned = self.plan_merge(&request, None).await?;
-                let (MergeOutcome::Found(commit) | MergeOutcome::Committed { commit, .. }) = self
-                    .commit_merge(&request, planned, |request, reservation| {
+                let (MergeOutcome::Found { commit, .. } | MergeOutcome::Committed { commit, .. }) =
+                    self.commit_merge(&request, planned, |request, reservation| {
                         Box::pin(async move { self.plan_merge(&request, Some(reservation)).await })
                     })
                     .await?;
@@ -254,8 +262,10 @@ impl Namespace<Writable> {
         let held = Mutex::new(reservation);
         self.core
             .read(&self.namespace_id, Consistency::Strong, |target| async {
-                if let Some(commit) = target.engine.find_merge(&target.context, request).await? {
-                    return Ok(PlannedMerge::Committed(commit));
+                if let Some((commit, conflicts)) =
+                    target.engine.find_merge(&target.context, request).await?
+                {
+                    return Ok(PlannedMerge::Committed { commit, conflicts });
                 }
                 let reservation = match lock_reservation(&held).take() {
                     Some(reservation) => reservation,
@@ -303,7 +313,9 @@ impl Namespace<Writable> {
                 report,
                 merge_snapshot,
             } = match planned {
-                PlannedMerge::Committed(commit) => return Ok(MergeOutcome::Found(commit)),
+                PlannedMerge::Committed { commit, conflicts } => {
+                    return Ok(MergeOutcome::Found { commit, conflicts })
+                }
                 PlannedMerge::Candidate(planned) => *planned,
             };
             let committed = self.submit_merge(candidate, &reservation).await;

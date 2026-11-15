@@ -538,6 +538,7 @@ fn sample_merge() -> MergeRecord {
         source_namespace_id: NamespaceId::parse("demo-fork").expect("valid namespace id"),
         source_after_seq: CommitSeq(12),
         source_through_seq: CommitSeq(30),
+        conflicts: Vec::new(),
     }
 }
 

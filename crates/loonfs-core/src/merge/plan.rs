@@ -25,14 +25,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// The commit of a merge or of a replay commit, as one plan made it, with
-/// the conflicts that its classification found.
+/// the conflicts that its classification found. A replay commit's record
+/// stores its conflict report.
 pub(super) struct PlannedMergeCommit {
     pub(super) candidate: CommitCandidate,
     pub(super) record: MergeRecord,
     /// The number of conflicting inodes, and the one with the smallest ID.
     pub(super) first_conflict: Option<(u64, MergeConflict)>,
-    /// A replay commit's conflict report, or `None` for a merge.
-    pub(super) report: Option<Vec<MergeConflict>>,
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
@@ -49,13 +48,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// the rebase runs. A replay commit skips its conflicting changes and the
     /// changes that depend on them. The plan returns `merge_too_large` when
     /// the plans so far stop fitting one WAL object or `allowance` during
-    /// the classification, or when the ordered commit, with the temporary
-    /// moves that the ordering adds, doesn't fit them. Either refusal has
-    /// the split hint that the fork's net change over shorter ranges gives
-    /// (see [`with_split_hint`]). Each check grows the merge's reservation of
-    /// the allowance to cover the planned bytes and the memory that the plan
-    /// uses (see [`PlanningMemory`]), and returns `server_busy` when other
-    /// merges' reservations leave no room for the growth.
+    /// the classification, the target check or the skipped conflicts, or
+    /// when the ordered commit, with the temporary moves that the ordering
+    /// adds and a replay commit's conflict report, doesn't fit them. Every
+    /// refusal has the split hint that the fork's net change over shorter
+    /// ranges gives (see [`with_split_hint`]). A replay commit's conflicts
+    /// count toward the planned bytes as it finds them. Each check grows the
+    /// merge's reservation of the allowance to cover the planned bytes and
+    /// the memory that the plan uses (see [`PlanningMemory`]), and returns
+    /// `server_busy` when other merges' reservations leave no room for the
+    /// growth.
     #[allow(
         clippy::too_many_arguments,
         reason = "a merge and a replay commit share every input, and a replay commit adds the snapshot"
@@ -73,7 +75,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<PlannedMergeCommit> {
         let fork_head = fork_view.head();
         let source_namespace_id = &fork_head.namespace_id;
-        let record = MergeRecord {
+        let mut record = MergeRecord {
             source_namespace_id: source_namespace_id.clone(),
             source_after_seq,
             source_through_seq: through_seq(
@@ -82,6 +84,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 source_after_seq,
                 request.through_seq,
             )?,
+            conflicts: Vec::new(),
         };
         let intent = self.merge_intent(request, Vec::new(), Vec::new());
         let fields_bytes = commit_fields_bytes(
@@ -132,9 +135,23 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             allowance,
         )
         .await?;
-        let holders = classifier.check_targets().await?;
+        let holders = with_split_hint(
+            classifier.check_targets().await,
+            fork_view,
+            range,
+            fields_bytes,
+            allowance,
+        )
+        .await?;
         if classifier.replay.is_some() {
-            classifier.skip_conflicts(&holders).await?;
+            with_split_hint(
+                classifier.skip_conflicts(&holders).await,
+                fork_view,
+                range,
+                fields_bytes,
+                allowance,
+            )
+            .await?;
         }
         let MergeOperations {
             operations,
@@ -180,8 +197,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             })
             .collect();
         let report = classifier.replay.take().map(|replay| replay.report);
-        // The classifier borrows the record, which the commit takes.
+        // The classifier borrows the record, which the commit takes with the
+        // replay commit's report, so the size checks below cover the report.
         drop(classifier);
+        record.conflicts = report.unwrap_or_default();
         let candidate = CommitCandidate::prepared(
             self.merge_intent(request, operations, preconditions),
             proofs,
@@ -200,7 +219,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             candidate,
             record,
             first_conflict,
-            report,
         })
     }
 }

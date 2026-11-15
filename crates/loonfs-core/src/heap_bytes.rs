@@ -34,7 +34,7 @@ use loonfs_types::{
     MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PoolId, PrincipalId,
     PrincipalScope, SnapshotId, Subject, SubjectId, UploadId, WriterId,
 };
-use loonfs_types::{DiffEntry, FilesystemEvent};
+use loonfs_types::{DiffEntry, FilesystemEvent, MergeConflict, MergeConflictVersion};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 
@@ -548,7 +548,23 @@ impl HeapBytes for WalCommitPayload {
 
 impl HeapBytes for MergeRecord {
     fn heap_bytes(&self) -> usize {
-        self.source_namespace_id.heap_bytes()
+        self.source_namespace_id.heap_bytes() + self.conflicts.heap_bytes()
+    }
+}
+
+impl HeapBytes for MergeConflict {
+    fn heap_bytes(&self) -> usize {
+        self.base.heap_bytes() + self.ours.heap_bytes() + self.theirs.heap_bytes()
+    }
+}
+
+impl HeapBytes for MergeConflictVersion {
+    fn heap_bytes(&self) -> usize {
+        self.path.heap_bytes()
+            + self
+                .revision
+                .as_ref()
+                .map_or(0, |revision| revision.content_ref.heap_bytes())
     }
 }
 

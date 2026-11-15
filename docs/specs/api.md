@@ -3030,7 +3030,7 @@ The response contains the new fork's namespace object (`namespace`, see [`GET /v
 
 To make the replay commit, the server:
 
-1. Looks up the commit receipt of `commit_id` in the new fork, and returns the new fork without a conflict report if a replay commit with that ID was committed.
+1. Looks up the commit receipt of `commit_id` in the new fork, and if a replay commit with that ID was committed, returns the new fork and that replay commit's conflict report.
 2. Reserves part of the merge allowance, as a merge does.
 3. Checks that the new fork's `rebased_from` identifies the fork, and finds where the range starts: after the new fork's previous replay commit, or after `resume_after_seq` for the first replay commit. It refuses a start below the fork's own retention floor, or a new fork whose retention floor is above the new fork's own fork point, with `below_retention_floor`.
 4. Folds the fork and takes a snapshot of it, as a merge does, computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` if the replay commit doesn't fit, as a merge does.
@@ -3039,7 +3039,7 @@ To make the replay commit, the server:
 
 A replay commit that fails leaves the new fork in place, because a later replay commit continues into it. Steps 1 to 5 read one view of the new fork's head and one of the fork's, and read a replaced manifest once more from the current one, as a merge does.
 
-The conflict report exists only in the response to the request that committed the replay commit, because a change that the replay commit left out leaves no trace in the new fork. A retry whose `commit_id` identifies a replay commit that was committed returns the new fork without `conflicts`. A client that lost the report deletes the new fork and rebases the fork again into another new fork.
+The replay commit stores its conflict report in its merge record (see [WAL records](format.md#a5-wal-records)), so every request with the replay commit's `commit_id` returns the same report. For example, if the response to a replay commit that left out one file is lost, the client retries with the same `commit_id` and gets the new fork and that one conflict entry. `conflicts` is an empty list when the replay commit left nothing out. The report counts toward the replay commit's size, so a replay commit whose report doesn't fit one WAL object or the merge allowance returns `merge_too_large` with a split hint, like a replay commit with too many changes.
 
 A range that's too large for one replay commit is replayed in pieces. The client replays through the `split_at_seq` of the `merge_too_large` error, and then replays the rest into the same new fork. The next replay commit continues where the previous one stopped.
 

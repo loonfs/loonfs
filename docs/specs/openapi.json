@@ -3161,6 +3161,7 @@
         "type": "string"
       },
       "MergeConflict": {
+        "additionalProperties": false,
         "description": "One inode whose change a merge can't apply, because the namespace being merged into changed\nthe inode after the fork point, hides it, or has the name that the change needs.",
         "properties": {
           "base": {
@@ -3191,7 +3192,7 @@
         "type": "object"
       },
       "MergeConflictKind": {
-        "description": "Which check of the conflict rule a merge's change failed.\n\nA newer server can return a kind that isn't listed here.",
+        "description": "Which check of the conflict rule a merge's change failed.",
         "enum": [
           "content",
           "binding",
@@ -4075,7 +4076,7 @@
         "description": "The result of a replay commit: the new fork, and the changes that the replay commit left out.",
         "properties": {
           "conflicts": {
-            "description": "The replay commit's conflict report, with one entry for each inode whose change the replay\ncommit didn't apply. It's absent when the request's commit ID identifies a replay commit\nthat an earlier request committed, because only the response that committed the replay\ncommit has its report.",
+            "description": "The replay commit's conflict report, with one entry for each inode whose change the replay\ncommit didn't apply. It's empty when the replay commit left nothing out. The replay\ncommit's merge record stores the report, so a retry with the same commit ID returns the\nsame report.",
             "items": {
               "$ref": "#/components/schemas/MergeConflict"
             },
@@ -4087,7 +4088,8 @@
           }
         },
         "required": [
-          "namespace"
+          "namespace",
+          "conflicts"
         ],
         "type": "object"
       },
@@ -9662,7 +9664,7 @@
     },
     "/v0/namespaces/{namespace_id}/replays": {
       "post": {
-        "description": "Replays a fork's unmerged commits into the namespace, a rebase's new fork for the fork, as one replay commit, which applies the changes that don't conflict with the new fork and reports the ones that do. Each request continues after the new fork's previous replay commit. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
+        "description": "Replays a fork's unmerged commits into the namespace, a rebase's new fork for the fork, as one replay commit, which applies the changes that don't conflict with the new fork and reports the ones that do. Each request continues after the new fork's previous replay commit. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork with the same conflict report. The report counts toward the replay commit's size, so a report that doesn't fit returns `merge_too_large` with a split hint.",
         "operationId": "replay_fork",
         "parameters": [
           {

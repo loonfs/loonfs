@@ -60,7 +60,8 @@ async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
         Answer::Namespace {
             rebased_from: Some(sandbox()),
         },
-        // The new fork never merged, so its conflict reports are lost.
+        // The new fork never merged, and the lost state had the commit IDs
+        // of its replay commits, so the session rebases again.
         Answer::range(10, 12),
         Answer::range(10, 20),
     ]);

@@ -2,8 +2,8 @@
 //! loop, and the requests that each transition sends.
 
 use crate::scripted_mechanics::{
-    conflict, deletes, merges, recover, run_to_end, sandbox, Answer, RecordingResolver,
-    ScriptedMechanics, Sent,
+    conflict, merges, recover, run_to_end, sandbox, Answer, RecordingResolver, ScriptedMechanics,
+    Sent,
 };
 use loonfs_merge::{
     DefaultResolver, MergeError, MergeFailure, MergeSession, MergeSessionOutcome,
@@ -100,9 +100,9 @@ async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
         Answer::too_large(15),
         // The new fork exists for every later replay commit.
         Answer::refused(ErrorCode::NamespaceExists),
-        Answer::Replayed(Some(vec![conflict("/a.txt")])),
+        Answer::Replayed(vec![conflict("/a.txt")]),
         Answer::refused(ErrorCode::NamespaceExists),
-        Answer::Replayed(Some(vec![conflict("/b.txt")])),
+        Answer::Replayed(vec![conflict("/b.txt")]),
         Answer::range(40, 43),
         Answer::Committed(50),
         Answer::Deleted,
@@ -177,133 +177,6 @@ async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
 }
 
 #[tokio::test]
-async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_reports() {
-    let mechanics = ScriptedMechanics::new([
-        Answer::ForkSnapshots(Vec::new()),
-        Answer::range(10, 20),
-        Answer::refused(ErrorCode::MergeConflict),
-        Answer::Forked,
-        Answer::Replayed(None),
-        Answer::Forked,
-        Answer::Replayed(Some(vec![conflict("/a.txt")])),
-        // After the caller abandons the session, it deletes both new forks.
-        Answer::Deleted,
-        Answer::Deleted,
-    ]);
-    let mut session = recover(&mechanics, DefaultResolver).await;
-    for _ in 0..4 {
-        session.step().await.expect("step");
-    }
-
-    let MergeSessionStatus::Failed {
-        fork_id,
-        failure,
-        reports,
-    } = session.state().status.clone()
-    else {
-        panic!(
-            "the default resolver fails the session: {:?}",
-            session.state().status
-        );
-    };
-    assert!(matches!(failure, MergeFailure::Unresolved { .. }));
-    assert_eq!(reports.len(), 1);
-    let [lost_id, replacement_id] = session
-        .state()
-        .new_fork_ids
-        .clone()
-        .try_into()
-        .expect("two new forks");
-    assert_eq!(
-        fork_id, replacement_id,
-        "the failure identifies the new fork to inspect"
-    );
-    let sent = mechanics.sent();
-    let Sent::Replay { new_fork_id, .. } = &sent[6] else {
-        panic!("the session rebases again: {:?}", sent[6]);
-    };
-    assert_eq!(*new_fork_id, replacement_id);
-    assert!(
-        matches!(session.step().await, Ok(None)),
-        "a failed session waits for the caller"
-    );
-
-    session.abandon().expect("abandon");
-    let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
-
-    assert_eq!(state.status, MergeSessionStatus::Abandoned);
-    assert!(state.new_fork_ids.is_empty());
-    assert_eq!(
-        deletes(&mechanics.sent()),
-        [lost_id, replacement_id],
-        "the session deletes the new fork whose report was lost only once it ends"
-    );
-    assert_eq!(outcomes.len(), 2, "one step deletes each new fork");
-}
-
-#[tokio::test]
-async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
-    let mechanics = ScriptedMechanics::new([
-        Answer::ForkSnapshots(Vec::new()),
-        Answer::range(10, 20),
-        Answer::refused(ErrorCode::MergeConflict),
-        Answer::Forked,
-        // The run stops after this answer, before it saves the step's state.
-        Answer::Replayed(None),
-        // The resumed run sends the same rebase into the same new fork,
-        // which exists.
-        Answer::refused(ErrorCode::NamespaceExists),
-        Answer::Replayed(None),
-        Answer::Forked,
-        Answer::Replayed(Some(vec![conflict("/a.txt")])),
-        Answer::range(40, 43),
-        Answer::Committed(50),
-        Answer::Deleted,
-        Answer::Deleted,
-    ]);
-    let resolver = RecordingResolver::default();
-    let mut session = recover(&mechanics, resolver.clone()).await;
-    session.step().await.expect("merge");
-    let saved = session.state().clone();
-    let lost = session.step().await.expect("rebase");
-    assert!(
-        matches!(lost, Some(MergeSessionOutcome::ReportLost { .. })),
-        "{lost:?}"
-    );
-    assert!(
-        deletes(&mechanics.sent()).is_empty(),
-        "the step keeps the new fork that the saved state rebases into"
-    );
-
-    let session = MergeSession::resume(mechanics.clone(), resolver.clone(), saved);
-    let (_, state) = run_to_end(&mechanics, &resolver, session).await;
-
-    assert_eq!(state.status, MergeSessionStatus::Merged);
-    let sent = mechanics.sent();
-    let rebases: Vec<_> = sent
-        .iter()
-        .filter_map(|sent| match sent {
-            Sent::Replay {
-                new_fork_id,
-                options,
-                ..
-            } => Some((new_fork_id.clone(), options.commit_id.clone())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        rebases[0], rebases[1],
-        "the resumed run sends the same rebase"
-    );
-    let [(lost_id, _), _, (replacement_id, _)] = rebases.try_into().expect("three rebases");
-    assert_eq!(
-        merges(&sent).last().map(|(fork_id, _)| fork_id),
-        Some(&replacement_id)
-    );
-    assert_eq!(deletes(&sent), [lost_id, replacement_id]);
-}
-
-#[tokio::test]
 async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() {
     let mechanics = ScriptedMechanics::new([
         Answer::ForkSnapshots(Vec::new()),
@@ -312,9 +185,9 @@ async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() 
         Answer::Forked,
         Answer::too_large(15),
         Answer::refused(ErrorCode::NamespaceExists),
-        Answer::Replayed(Some(Vec::new())),
+        Answer::Replayed(Vec::new()),
         Answer::refused(ErrorCode::NamespaceExists),
-        Answer::Replayed(Some(Vec::new())),
+        Answer::Replayed(Vec::new()),
         Answer::range(40, 43),
         Answer::Committed(50),
         Answer::Deleted,
@@ -341,7 +214,7 @@ async fn a_new_fork_whose_range_starts_below_its_floor_fails_with_the_reports() 
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::Forked,
-        Answer::Replayed(Some(vec![conflict("/a.txt")])),
+        Answer::Replayed(vec![conflict("/a.txt")]),
         Answer::RangeOutcome {
             source_head_seq: 43,
             outcome: NextMergeRangeOutcome::RangeStartBelowFloor {

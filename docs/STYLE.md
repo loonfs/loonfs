@@ -192,7 +192,7 @@ Design and measure in round trips to object storage first, then bytes, then CPU.
 
 `docs/specs/format.md` and `docs/specs/api.md` define the durable formats and the API. These rules describe how the code expresses them.
 
-- **Reject unknown fields everywhere except in wire responses.** Wire requests, durable families, and config structs reject them. Wire responses accept them, so that an older client keeps working when the server adds a field. The one exception is a type that's both wire and durable (`ContentRef`, `Checksum`, `ContentToken`, `ContentRefKind`, `ChecksumAlgorithm`, and `AccessRight`), which rejects unknown fields and has no `Unknown` variant, because LoonFS rejects an unknown value in durable state.
+- **Reject unknown fields everywhere except in wire responses.** Wire requests, durable families, and config structs reject them. Wire responses accept them, so that an older client keeps working when the server adds a field. The one exception is a type that's both wire and durable (`ContentRef`, `Checksum`, `ContentToken`, `ContentRefKind`, `ChecksumAlgorithm`, `AccessRight`, `MergeConflict`, `MergeConflictKind`, `MergeConflictVersion`, and `MergeConflictRevision`), which rejects unknown fields and has no `Unknown` variant, because LoonFS rejects an unknown value in durable state.
 
 - **Tag enums with `kind`, or with a domain word such as `status` where that reads better, and write field names in `snake_case`.** ID fields end in `_id`, and actor fields end in `_by` and are paired with an `_at_ms` field.
 

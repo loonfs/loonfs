@@ -27,6 +27,7 @@ fn merge(after_seq: u64, through_seq: u64) -> MergeRecord {
         source_namespace_id: fork(),
         source_after_seq: CommitSeq(after_seq),
         source_through_seq: CommitSeq(through_seq),
+        conflicts: Vec::new(),
     }
 }
 
@@ -584,6 +585,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
             source_namespace_id: fork.clone(),
             source_after_seq: fork_point_seq,
             source_through_seq: written.committed_seq,
+            conflicts: Vec::new(),
         },
         fork_point_seq,
         BTreeMap::from([(0, inode_id)]),

@@ -489,6 +489,7 @@ mod tests {
                 source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
                 source_after_seq: loonfs_types::CommitSeq(3),
                 source_through_seq: loonfs_types::CommitSeq(7),
+                conflicts: Vec::new(),
             },
             loonfs_types::CommitSeq(3),
             std::collections::BTreeMap::from([(

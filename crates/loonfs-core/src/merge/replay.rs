@@ -28,12 +28,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 pub struct ReplayPlan {
     candidate: CommitCandidate,
     record: MergeRecord,
-    conflicts: Vec<MergeConflict>,
 }
 
 impl ReplayPlan {
     /// Returns the replay commit's merge record, with the range of the
-    /// fork's commits that the replay commit examines.
+    /// fork's commits that the replay commit examines and the conflict
+    /// report.
     pub fn record(&self) -> &MergeRecord {
         &self.record
     }
@@ -41,7 +41,7 @@ impl ReplayPlan {
     /// Returns the conflict report, with one entry for each inode whose
     /// change the replay commit leaves out.
     pub fn conflicts(&self) -> &[MergeConflict] {
-        &self.conflicts
+        &self.record.conflicts
     }
 
     /// Returns the replay commit.
@@ -146,7 +146,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// subtree check through the snapshot, and the rest from this namespace. It
     /// fails with `merge_too_large` when the commit wouldn't fit one WAL
     /// object or `allowance`, skips each conflicting change and each change
-    /// that depends on a skipped one, and reports them. Like a merge's
+    /// that depends on a skipped one, and reports them in the replay
+    /// commit's merge record, whose size counts toward those bounds. Like a merge's
     /// commit, a replay commit that deletes or moves a directory, or moves an
     /// inode through a temporary name, expects this namespace's head,
     /// because another writer can commit into a rebase's new fork while the
@@ -201,7 +202,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         Ok(ReplayPlan {
             candidate: planned.candidate,
             record: planned.record,
-            conflicts: planned.report.unwrap_or_default(),
         })
     }
 }

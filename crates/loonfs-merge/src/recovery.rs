@@ -28,10 +28,11 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     /// namespace, or that was itself rebased, is one that the lost session
     /// continued with, so the session merges the last fork that it continued
     /// with. When that fork was rebased into new forks that never merged and
-    /// weren't rebased, their conflict reports are lost, so the session
-    /// rebases the fork again into another new fork, which repeats the
-    /// classification. The session deletes every new fork that it found once
-    /// it's `merged` or `abandoned`.
+    /// weren't rebased, the session doesn't have the commit IDs of their
+    /// replay commits, which the lost state recorded, so it can't read their
+    /// conflict reports. It rebases the fork again into another new fork,
+    /// which repeats the classification. The session deletes every new fork
+    /// that it found once it's `merged` or `abandoned`.
     ///
     /// The session merges the original fork through `options.through_seq`,
     /// or through its head, and a new fork through its head. When the next

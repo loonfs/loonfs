@@ -3,11 +3,11 @@
 use crate::path::write::CommitIntent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{
-    cbor_map_bytes, cbor_string_bytes, MergeRecord, WalCommitDelta, WalInlineContent,
-    MAX_WAL_OBJECT_BYTES,
+    cbor_map_bytes, cbor_string_bytes, conflict_report_cbor_bytes, MergeRecord, WalCommitDelta,
+    WalInlineContent, MAX_WAL_OBJECT_BYTES,
 };
 use loonfs_types::{
-    AbsolutePath, AccessRight, ActorId, CommitId, ContentRef, FilesystemOperation,
+    AbsolutePath, AccessRight, ActorId, CommitId, ContentRef, FilesystemOperation, MergeConflict,
     MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ACTOR_ID_BYTES,
     MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES,
     MAX_NAME_KEY_BYTES,
@@ -256,9 +256,16 @@ pub(crate) fn commit_fields_bytes(
     ]) + merge.map_or(0, merge_bytes)
 }
 
-/// Bounds a merge record and its field name in the commit record.
+/// Bounds a merge record and its field name in the commit record, with a
+/// replay commit's conflict report.
 fn merge_bytes(merge: &MergeRecord) -> usize {
-    cbor_string_bytes("merge".len())
+    let conflicts_bytes = if merge.conflicts.is_empty() {
+        0
+    } else {
+        cbor_string_bytes("conflicts".len())
+            .saturating_add(conflict_report_cbor_bytes(&merge.conflicts))
+    };
+    (cbor_string_bytes("merge".len())
         + cbor_map_bytes(&[
             (
                 "source_namespace_id",
@@ -266,7 +273,21 @@ fn merge_bytes(merge: &MergeRecord) -> usize {
             ),
             ("source_after_seq", INTEGER_BYTES),
             ("source_through_seq", INTEGER_BYTES),
-        ])
+        ]))
+    .saturating_add(conflicts_bytes)
+}
+
+/// Bounds one entry of a replay commit's conflict report, with the report's
+/// field name when the entry is the report's first, for the merge planner's
+/// running bound. The entries added up this way bound at least what
+/// [`merge_bytes`] counts for the whole report.
+pub(crate) fn conflict_bytes(conflict: &MergeConflict, first: bool) -> usize {
+    let field_bytes = if first {
+        cbor_string_bytes("conflicts".len())
+    } else {
+        0
+    };
+    field_bytes.saturating_add(conflict_report_cbor_bytes(std::slice::from_ref(conflict)))
 }
 
 pub(crate) fn estimated_wal_record_bytes(

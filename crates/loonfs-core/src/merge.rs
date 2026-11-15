@@ -197,7 +197,9 @@ impl MergePlan {
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns the merge that this namespace committed under the request's
-    /// commit ID, or `None` when it has no commit with that ID.
+    /// commit ID, with the conflict report that its merge record stores (empty
+    /// for a merge, and for a replay commit that left nothing out), or `None`
+    /// when it has no commit with that ID.
     ///
     /// A merge's range comes from the merge index, so a retry after a merge
     /// committed would plan the next range under the same commit ID. Looking
@@ -210,7 +212,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         context: &RuntimeReadContext,
         request: &MergeRequest,
-    ) -> Result<Option<Commit>> {
+    ) -> Result<Option<(Commit, Vec<MergeConflict>)>> {
         let view = self.namespace.load_metadata_view(context).await?;
         let metadata = view.metadata_view();
         let Some(receipt) = metadata.find_commit_receipt(&request.commit_id).await? else {
@@ -232,6 +234,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 .through_seq
                 .or(committed.as_ref().map(|merge| merge.source_through_seq))
                 .unwrap_or(CommitSeq(0)),
+            conflicts: Vec::new(),
         };
         let namespace_id = &self.namespace.namespace_id;
         let identity = merge_fingerprint(
@@ -239,9 +242,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             &self.merge_intent(request, Vec::new(), Vec::new()),
             &record,
         );
-        commit_response_from_commit_receipt(metadata, namespace_id, &receipt, &identity)
-            .await
-            .map(Some)
+        let commit =
+            commit_response_from_commit_receipt(metadata, namespace_id, &receipt, &identity)
+                .await?;
+        let conflicts = committed.map(|merge| merge.conflicts).unwrap_or_default();
+        Ok(Some((commit, conflicts)))
     }
 
     /// Plans a merge of `fork`, read at `fork_context`, into this namespace,
