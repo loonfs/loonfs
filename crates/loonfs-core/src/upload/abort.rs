@@ -5,6 +5,7 @@ use super::records::{create_upload_outcome, OutcomeCreation};
 use super::session::{authorize_upload_subject, ensure_session_subject, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{
@@ -20,14 +21,18 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// idempotent: repeating it succeeds and returns the original abort
     /// timestamp, and it refuses a session that already completed, whose
     /// content may be published.
-    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
-        let catalog = self.namespace.load_catalog_entry().await?;
+    pub async fn abort_upload(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        upload_id: &UploadId,
+    ) -> Result<UploadSession> {
+        let catalog = self.own_catalog(catalog);
         let clock = self.namespace.start_clock();
         let namespace_id = catalog.namespace_id();
         authorize_upload_subject(namespace_id, catalog.access(), self.subject.as_ref())?;
         let loaded = self
             .namespace
-            .load_upload_session_state(&catalog, upload_id)
+            .load_upload_session_state(catalog, upload_id)
             .await?;
         ensure_session_subject(&loaded.session, self.subject.as_ref())?;
         let aborted_at_ms = match &loaded.outcome {

@@ -27,12 +27,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// sessions always use separate object identities.
     pub async fn upload_content(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadSession> {
         let _permit = self.namespace.content_writes.acquire().await;
         self.namespace
             .upload_proxied_content(
+                self.own_catalog(catalog),
                 upload_id,
                 self.subject.as_ref(),
                 ProxiedPayload::Bytes(bytes),
@@ -45,12 +47,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// hashing it on the way through instead of keeping it in memory.
     pub async fn upload_content_stream(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         body: ByteStream,
     ) -> Result<UploadSession> {
         let _permit = self.namespace.content_writes.acquire().await;
         self.namespace
             .upload_proxied_content(
+                self.own_catalog(catalog),
                 upload_id,
                 self.subject.as_ref(),
                 ProxiedPayload::Stream(body),
@@ -72,16 +76,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// checksums differ.
     pub(crate) async fn upload_proxied_content(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         subject: Option<&Subject>,
         payload: ProxiedPayload<'_>,
         clock: &OperationClock,
     ) -> Result<UploadSession> {
-        let catalog = self.ensure_upload_namespace_available().await?;
         let pool_id = catalog.pool_id();
         authorize_upload_subject(&self.namespace_id, catalog.access(), subject)?;
         let loaded = self
-            .load_open_proxied_session(&catalog, upload_id, subject, clock)
+            .load_open_proxied_session(catalog, upload_id, subject, clock)
             .await?;
         let content_id = loaded.session.content_id.clone();
         let owner = ContentKeyOwner::ProxiedSession(upload_id);
@@ -98,14 +102,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     content_id,
                     body,
                     owner,
-                    self.ensure_session_still_open(&catalog, upload_id, clock),
+                    self.ensure_session_still_open(catalog, upload_id, clock),
                 )
                 .await?
             }
         };
         // An abort during the write deletes the object it was writing, so the
         // bytes are reported as uploaded only if the session is still open.
-        let state = self.load_upload_session_state(&catalog, upload_id).await?;
+        let state = self.load_upload_session_state(catalog, upload_id).await?;
         ensure_session_open(&state, clock.request_at_ms())?;
         Ok(session_response(
             &state,

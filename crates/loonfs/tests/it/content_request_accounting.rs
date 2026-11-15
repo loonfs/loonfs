@@ -99,6 +99,16 @@ impl RequestLog {
         self.content.reset();
         self.other.reset();
     }
+
+    /// Returns the keys and list prefixes of the recorded requests that
+    /// aren't content requests.
+    fn other_keys(&self) -> Vec<String> {
+        self.other
+            .snapshot()
+            .iter()
+            .map(|operation| operation.key().to_owned())
+            .collect()
+    }
 }
 
 struct TestHarness {
@@ -408,6 +418,91 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .expect("publish uploaded content");
 
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+/// Checks the requests of each proxied upload call on a writer with an open
+/// session: the calls take the namespace's catalog from the writer position,
+/// so no call reads a manifest, lists the manifests, or reads the manifest
+/// boundary, and each call sends only the requests of its session records and
+/// its content.
+#[tokio::test]
+async fn proxied_upload_calls_take_the_catalog_from_the_writer_position() {
+    let harness = TestHarness::new("proxied-upload-catalog").await;
+    let namespace = harness
+        .writer
+        .open_namespace(&harness.namespace_id)
+        .expect("open namespace");
+    let namespace_prefix = format!("namespaces/{}/", harness.namespace_id.as_str());
+    let assert_call = |content: OperationCounts, other: OperationCounts| {
+        let counts = harness.recording.snapshot();
+        assert_eq!(counts.operations(KeyClass::Content), content);
+        assert_eq!(counts.operations(KeyClass::Other), other);
+        let namespace_keys: Vec<_> = harness
+            .recording
+            .other_keys()
+            .into_iter()
+            .filter(|key| key.starts_with(&namespace_prefix))
+            .collect();
+        assert_eq!(namespace_keys, Vec::<String>::new());
+        harness.recording.reset();
+    };
+    // The harness dropped its namespace handle after the warm-up commit,
+    // which ended that writer session and its position. This handle's
+    // session has a position for reads to start from after its first
+    // commit, so the test commits once before it counts.
+    namespace
+        .create_directory("/position", &loonfs_test_support::test_actor())
+        .await
+        .expect("commit through the session");
+    harness.recording.reset();
+
+    // The session record's create.
+    let begin = namespace.create_upload().await.expect("begin upload");
+    assert_call(
+        OperationCounts::default(),
+        OperationCounts {
+            head: 0,
+            get: 0,
+            put: 1,
+        },
+    );
+
+    // The two records' reads before and after the content put.
+    namespace
+        .put_upload_content(&begin.upload_id, b"service proxied upload")
+        .await
+        .expect("upload content");
+    assert_call(
+        OperationCounts {
+            head: 0,
+            get: 0,
+            put: 1,
+        },
+        OperationCounts {
+            head: 0,
+            get: 4,
+            put: 0,
+        },
+    );
+
+    // The two records' reads, the content HEAD, the outcome's create, and the
+    // session record's HEAD after it.
+    namespace
+        .complete_upload(&begin.upload_id, CompleteUploadBody::ServiceProxied {})
+        .await
+        .expect("complete upload");
+    assert_call(
+        OperationCounts {
+            head: 1,
+            get: 0,
+            put: 0,
+        },
+        OperationCounts {
+            head: 1,
+            get: 2,
+            put: 1,
+        },
+    );
 }
 
 #[tokio::test]

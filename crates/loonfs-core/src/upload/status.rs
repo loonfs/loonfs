@@ -5,6 +5,7 @@ use super::proxied::find_proxied_content_ref;
 use super::session::{authorize_upload_subject, ensure_session_subject, session_response};
 use crate::engine::NamespaceEngine;
 use crate::error::Result;
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::content_admission::CompletedUploadEvidence;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
@@ -14,9 +15,13 @@ use loonfs_types::{UploadId, UploadSession};
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns an upload session. Completed uploads include new evidence so
     /// the caller can retry publication without uploading the content again.
-    pub async fn get_upload(&self, upload_id: &UploadId) -> Result<UploadSessionView> {
+    pub async fn get_upload(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        upload_id: &UploadId,
+    ) -> Result<UploadSessionView> {
         let now_ms = self.now_ms();
-        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        let catalog = self.own_catalog(catalog);
         authorize_upload_subject(
             &self.namespace.namespace_id,
             catalog.access(),
@@ -24,7 +29,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         )?;
         let loaded = self
             .namespace
-            .load_upload_session_state(&catalog, upload_id)
+            .load_upload_session_state(catalog, upload_id)
             .await?;
         ensure_session_subject(&loaded.session, self.subject.as_ref())?;
         let evidence = match &loaded.outcome {

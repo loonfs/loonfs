@@ -1055,7 +1055,7 @@ Completed upload sessions in active namespaces keep their records for the comple
 
 GC needs to run repeatedly, including after a collection finds nothing left to delete. A presigned upload URL that was issued before the deletion can still write an object after the deletion, and a late write that one listing misses is found by the next collection. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, snapshot cleanup, or maintenance that isn't running.
 
-Once the current manifest is deleted, LoonFS refuses commits, requests for new presigned upload URLs, and upload completion, but it doesn't revoke presigned URLs that were already issued. A deleted namespace is retired no earlier than the grace window (24 hours) after its deletion, which is longer than the presigned URL lifetime.
+Once the current manifest is deleted, LoonFS refuses commits, requests for new presigned upload URLs, and upload completion, but it doesn't revoke presigned URLs that were already issued. A runtime decides the upload requests from the namespace head that it holds, and it checks that head for a newer manifest at least every 20 minutes, so a runtime can still grant one of them up to 20 minutes after another process deletes the namespace. A deleted namespace is retired no earlier than the grace window (24 hours) after its deletion, which is longer than that delay and the presigned URL lifetime together.
 
 The reference server's scheduler runs maintenance on two schedules:
 

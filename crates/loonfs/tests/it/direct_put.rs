@@ -7,7 +7,7 @@ use loonfs::{
     CommitId, CommitSeq, CompleteUploadBody, DestinationBehavior, ErrorCode, MetadataCache,
     NamespaceId, PutFileOptions, SharedObjectStore, UploadMode,
 };
-use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::Checksum;
 use loonfs_types::{UploadContentClaim, UploadSessionStatus};
@@ -659,15 +659,13 @@ fn begin_upload_validates_controls_without_replay_reads() {
         .expect("second begin upload");
 
     assert_eq!(raw_store.wal_get_count(), 0);
-    assert!(raw_store.manifest_get_count() > 0);
+    assert_eq!(raw_store.manifest_get_count(), 0);
 }
 
 #[test]
-fn begin_upload_rejects_missing_and_unreadable_namespaces() {
+fn begin_upload_rejects_a_missing_namespace() {
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = open_runtime(object_store, "begin-upload-missing-partial-test");
+    let fs = open_runtime(store(temp_dir.path()), "begin-upload-missing-test");
     let namespace_id = namespace_id("demo");
 
     assert_core_error_kind(
@@ -679,16 +677,6 @@ fn begin_upload_rejects_missing_and_unreadable_namespaces() {
         .expect("create namespace");
     fs.begin_upload_blocking(&namespace_id)
         .expect("a live namespace admits uploads");
-
-    for key in block_on(raw_store.list_prefix(&metadata_manifest_prefix(&namespace_id)))
-        .expect("list manifests")
-    {
-        block_on(raw_store.delete(&key)).expect("delete a manifest");
-    }
-    assert_core_error_kind(
-        fs.begin_upload_blocking(&namespace_id),
-        ErrorCode::NamespaceNotFound,
-    );
 }
 
 #[test]
@@ -756,4 +744,89 @@ fn a_mutation_request_appears_in_change_feed() {
     assert_eq!(changes.head_seq, response.committed_seq);
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(changes.changes[0].commit_id, commit_id);
+}
+
+/// Checks that a writer refuses the upload calls of a deleted namespace with
+/// `namespace_deleted` and writes or deletes nothing, and that an abort still
+/// ends a session there.
+#[tokio::test]
+async fn a_deleted_namespace_refuses_upload_calls_but_still_aborts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        loonfs_test_support::stores::FakeMultipartStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        ),
+        KeyPredicate::any(),
+    ));
+    let writer = loonfs::LoonFs::builder_with_store(recording.clone() as SharedObjectStore)
+        .writer_id(loonfs_test_support::ids::writer_id("deleted-uploads"))
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = namespace_id("demo");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let staged = namespace.create_upload().await.expect("begin upload");
+    namespace
+        .put_upload_content(&staged.upload_id, b"staged")
+        .await
+        .expect("upload content");
+    let completed = namespace.create_upload().await.expect("begin upload");
+    namespace
+        .put_upload_content(&completed.upload_id, b"completed")
+        .await
+        .expect("upload content");
+    namespace
+        .complete_upload(&completed.upload_id, CompleteUploadBody::ServiceProxied {})
+        .await
+        .expect("complete upload");
+    let multipart = namespace
+        .create_direct_multipart_upload_target()
+        .await
+        .expect("begin multipart upload");
+    namespace.delete().await.expect("delete namespace");
+    recording.reset();
+
+    let refusals = [
+        namespace.create_upload().await.map(|_| ()),
+        namespace
+            .put_upload_content(&staged.upload_id, b"staged")
+            .await
+            .map(|_| ()),
+        namespace
+            .complete_upload(&staged.upload_id, CompleteUploadBody::ServiceProxied {})
+            .await
+            .map(|_| ()),
+        namespace
+            .sign_upload_parts(
+                &multipart.session.upload_id,
+                &[loonfs_types::UploadPartChecksumClaim {
+                    part_number: 1,
+                    checksum: Checksum::crc64nvme(b"part"),
+                }],
+            )
+            .await
+            .map(|_| ()),
+        namespace.get_upload(&completed.upload_id).await.map(|_| ()),
+    ];
+    for refusal in refusals {
+        assert_eq!(
+            refusal.expect_err("deleted namespace").code(),
+            ErrorCode::NamespaceDeleted
+        );
+    }
+    assert_eq!(recording.counts().puts, 0);
+    assert_eq!(recording.counts().deletes, 0);
+
+    let aborted = namespace
+        .abort_upload(&staged.upload_id)
+        .await
+        .expect("abort in a deleted namespace");
+    assert_matches!(aborted.status, UploadSessionStatus::Aborted { .. });
+    writer.shutdown().await.expect("shutdown");
 }

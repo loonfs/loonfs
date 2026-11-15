@@ -712,6 +712,20 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let view = self.namespace.load_metadata_view(context).await?;
         crate::diff::diff_page(&view, from_seq, options).await
     }
+
+    /// Verifies that a runtime-supplied catalog belongs to this engine's
+    /// namespace. A mismatch indicates an internal integration error.
+    pub(crate) fn own_catalog<'c>(
+        &self,
+        catalog: &'c VerifiedNamespaceCatalogEntry,
+    ) -> &'c VerifiedNamespaceCatalogEntry {
+        assert_eq!(
+            catalog.namespace_id(),
+            &self.namespace.namespace_id,
+            "a runtime should give an engine its own namespace's catalog"
+        );
+        catalog
+    }
 }
 
 /// The views of one per-subject read, with the authorization that the read
@@ -777,20 +791,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     {
         NamespaceCommitEngine::new(self.namespace.clone(), self.mode.writer_id.clone())
     }
-
-    /// Verifies that a runtime-supplied catalog belongs to this engine's
-    /// namespace. A mismatch indicates an internal integration error.
-    pub(crate) fn own_catalog<'c>(
-        &self,
-        catalog: &'c VerifiedNamespaceCatalogEntry,
-    ) -> &'c VerifiedNamespaceCatalogEntry {
-        assert_eq!(
-            catalog.namespace_id(),
-            &self.namespace.namespace_id,
-            "a runtime should give an engine its own namespace's catalog"
-        );
-        catalog
-    }
 }
 
 #[cfg(test)]
@@ -843,7 +843,12 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = NamespaceFixture::new(&store, &namespace_id, &writer_at("writer-a", 1_000));
         writer.create().await.expect("bootstrap namespace");
-        let begun = writer.engine().begin_upload().await.expect("begin upload");
+        let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
+        let begun = writer
+            .engine()
+            .begin_upload(&catalog)
+            .await
+            .expect("begin upload");
 
         let reader = NamespaceEngine::reader(namespace_store(&store, &namespace_id));
         let crate::UploadSessionView {
@@ -851,7 +856,7 @@ mod tests {
             evidence,
             ..
         } = reader
-            .get_upload(&begun.upload_id)
+            .get_upload(&catalog, &begun.upload_id)
             .await
             .expect("reader engine reads upload status");
 

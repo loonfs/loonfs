@@ -5,6 +5,7 @@ use super::session::{authorize_upload_subject, ensure_session_open, ensure_sessi
 use crate::engine::NamespaceEngine;
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{UploadSessionMode, UploadSessionPayload};
@@ -32,11 +33,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Part state remains client-managed. This method writes no durable state.
     pub async fn direct_multipart_part_targets(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         requested: &[UploadPartChecksumClaim],
     ) -> Result<MultipartPartTargets> {
         let now_ms = self.now_ms();
-        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        let catalog = self.own_catalog(catalog);
         authorize_upload_subject(
             &self.namespace.namespace_id,
             catalog.access(),
@@ -54,7 +56,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
         let state = self
             .namespace
-            .load_upload_session_state(&catalog, upload_id)
+            .load_upload_session_state(catalog, upload_id)
             .await?;
         ensure_session_subject(&state.session, self.subject.as_ref())?;
         ensure_session_open(&state, now_ms)?;

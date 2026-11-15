@@ -10,6 +10,7 @@ use super::session::{
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, COMPLETED_UPLOAD_RECEIPT_WINDOW_MS};
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content::{verify_durable_content_checksum, DurableContentValidationError};
 use crate::storage::content_admission::{CompletedUploadEvidence, PreparedContent};
@@ -34,11 +35,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// outcome is created first, the completion finds it and fails.
     pub async fn complete_upload(
         &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         completion: CompleteUploadBody,
     ) -> Result<CompletedUpload> {
         let clock = self.namespace.start_clock();
-        let catalog = self.namespace.ensure_upload_namespace_available().await?;
+        let catalog = self.own_catalog(catalog);
         authorize_upload_subject(
             &self.namespace.namespace_id,
             catalog.access(),
@@ -47,7 +49,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let now_ms = clock.request_at_ms();
         let loaded = self
             .namespace
-            .load_upload_session_state(&catalog, upload_id)
+            .load_upload_session_state(catalog, upload_id)
             .await?;
         ensure_session_subject(&loaded.session, self.subject.as_ref())?;
         if !matches!(loaded.outcome, Some(UploadOutcome::Completed { .. })) {
