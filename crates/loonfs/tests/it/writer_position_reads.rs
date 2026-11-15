@@ -800,7 +800,7 @@ async fn a_position_at_the_boundary_is_dropped_by_its_check() {
     // window later deletes the manifests below the newest claim.
     for _ in 0..2 {
         loonfs_core::NamespaceEngine::writer(namespace(), writer_id("position-boundary-peer"))
-            .claim_compactor()
+            .claim_compactor(None)
             .await
             .expect("another process claims the compactor");
     }
@@ -854,7 +854,7 @@ async fn collected_position(name: &str) -> (Fixture, ManifestNo) {
         .manifest_no;
     for _ in 0..2 {
         loonfs_core::NamespaceEngine::writer(namespace(), writer_id(&format!("{name}-peer")))
-            .claim_compactor()
+            .claim_compactor(None)
             .await
             .expect("another process claims the compactor");
     }

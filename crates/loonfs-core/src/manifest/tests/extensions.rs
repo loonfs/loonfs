@@ -150,7 +150,7 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
         entry,
         "the entry after a compaction"
     );
-    fixture.engine().claim_compactor().await.expect("claim");
+    fixture.engine().claim_compactor(None).await.expect("claim");
     assert_eq!(
         current_entry(&store, &namespace_id).await,
         entry,
@@ -260,7 +260,7 @@ impl EntryCopy {
                 .expect("advance");
             }
             Self::CompactorClaim => {
-                fixture.engine().claim_compactor().await.expect("claim");
+                fixture.engine().claim_compactor(None).await.expect("claim");
             }
         }
     }

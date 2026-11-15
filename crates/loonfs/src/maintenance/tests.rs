@@ -366,11 +366,11 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     assert_eq!(store.counts().puts, 0);
     let cloned = maintenance.clone();
     let (first, second) = tokio::join!(
-        maintenance.compactor_epoch(&namespace),
-        cloned.compactor_epoch(&namespace)
+        maintenance.compactor_epoch(&namespace, None),
+        cloned.compactor_epoch(&namespace, None)
     );
-    let epoch = first.expect("first claim");
-    assert_eq!(second.expect("shared claim"), epoch);
+    let epoch = first.expect("first claim").0;
+    assert_eq!(second.expect("shared claim").0, epoch);
     assert_eq!(store.counts().create_if_absent_puts, 1);
     let mut expected = before.clone();
     expected.manifest_no = before.manifest_no.successor().expect("next manifest");
@@ -386,15 +386,20 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .expect("other process")
         .maintenance(loonfs_test_support::ids::writer_id("other"));
     assert_eq!(
-        other.compactor_epoch(&namespace).await.expect("new claim"),
+        other
+            .compactor_epoch(&namespace, None)
+            .await
+            .expect("new claim")
+            .0,
         loonfs_types::CompactorEpoch(epoch.0 + 1)
     );
     store.reset();
     assert_eq!(
         maintenance
-            .compactor_epoch(&namespace)
+            .compactor_epoch(&namespace, None)
             .await
-            .expect("remembered claim"),
+            .expect("remembered claim")
+            .0,
         epoch
     );
     assert_eq!(
@@ -494,7 +499,7 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
-        .compactor_epoch(&namespace)
+        .compactor_epoch(&namespace, None)
         .await
         .expect("claim the namespace before the races start");
 
@@ -550,7 +555,7 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
         .await
         .expect("another process")
         .maintenance(loonfs_test_support::ids::writer_id("other"))
-        .compactor_epoch(&namespace)
+        .compactor_epoch(&namespace, None)
         .await
         .expect("another process claims the namespace");
     let fenced = current_manifest_payload(store.as_ref(), &namespace).await;
@@ -567,6 +572,93 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
         current_manifest_payload(store.as_ref(), &namespace).await,
         fenced,
         "a fenced loop stops instead of claiming the namespace back"
+    );
+}
+
+/// Returns the kind and key of each request for `namespace_id`'s manifest
+/// boundary and manifests in `operations`, in order.
+fn control_requests(
+    namespace_id: &NamespaceId,
+    operations: &[loonfs_test_support::stores::RecordedOperation],
+) -> Vec<(&'static str, String)> {
+    use loonfs_test_support::stores::RecordedOperation;
+    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(namespace_id);
+    let boundary = loonfs_objectstore::keys::boundary(namespace_id);
+    operations
+        .iter()
+        .filter(|operation| operation.key() == boundary || operation.key().starts_with(&manifests))
+        .map(|operation| {
+            let kind = match operation {
+                RecordedOperation::Head { .. } => "head",
+                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
+                RecordedOperation::List { .. } => "list",
+                _ => "write",
+            };
+            (kind, operation.key().to_owned())
+        })
+        .collect()
+}
+
+/// Checks that the first compaction of a runtime without a writer session
+/// finds the newest manifest once, claims over it, and plans from the
+/// claim's manifest with no request first.
+#[tokio::test]
+async fn a_compaction_without_a_session_finds_the_newest_manifest_once() {
+    use loonfs_objectstore::keys::{boundary, metadata_manifest_object, metadata_manifest_prefix};
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let namespace = namespace_id("first-compaction");
+    let writer = writer(store.clone(), "writer").await;
+    let folds = writer.maintenance(loonfs_test_support::ids::writer_id("folds"));
+    writer
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    for index in 0..loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS.get() + 2 {
+        write_and_fold(&writer, &folds, &namespace, &format!("/file-{index}")).await;
+    }
+    writer.shutdown().await.expect("shut down the writer");
+    let maintenance = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
+        .build()
+        .await
+        .expect("maintenance")
+        .maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+
+    // The find, the claim's put and boundary read, then the unit's put and
+    // boundary read.
+    let current = current_manifest_payload(store.as_ref(), &namespace)
+        .await
+        .manifest_no;
+    let claim = current.successor().expect("the claim's number");
+    let unit = claim.successor().expect("the unit's number");
+    store.reset();
+    let report = maintenance
+        .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
+        .await
+        .expect("compact");
+    let MetadataCompactionOutcome::Published { manifest_no, .. } = report.compaction else {
+        panic!("the first compaction publishes, got {report:?}");
+    };
+    assert_eq!(manifest_no, unit);
+    let boundary_key = boundary(&namespace);
+    assert_eq!(
+        control_requests(&namespace, &store.take()),
+        vec![
+            ("get", boundary_key.clone()),
+            ("list", metadata_manifest_prefix(&namespace)),
+            ("get", metadata_manifest_object(&namespace, &current)),
+            ("get", boundary_key.clone()),
+            ("write", metadata_manifest_object(&namespace, &claim)),
+            ("get", boundary_key.clone()),
+            ("write", metadata_manifest_object(&namespace, &unit)),
+            ("get", boundary_key),
+        ]
     );
 }
 
@@ -588,7 +680,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
-        .compactor_epoch(&namespace)
+        .compactor_epoch(&namespace, None)
         .await
         .expect("claim the namespace first, so each later manifest is one unit");
 
@@ -696,7 +788,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             .expect("fold the tail");
     }
     maintenance
-        .compactor_epoch(&claimed)
+        .compactor_epoch(&claimed, None)
         .await
         .expect("claim the namespace");
     // The first collection of `retired` retires the deleted namespace, and
@@ -791,7 +883,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .expect("another process");
     other
         .maintenance(loonfs_test_support::ids::writer_id("other"))
-        .compactor_epoch(&claimed)
+        .compactor_epoch(&claimed, None)
         .await
         .expect("another process claims the namespace");
     store.reset();

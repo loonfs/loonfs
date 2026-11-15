@@ -270,25 +270,38 @@ impl MetadataCompactionCancellation {
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Claims the namespace compactor epoch for a maintenance runtime. The
-    /// report includes the manifest that records the claim.
-    pub async fn claim_compactor(&self) -> Result<PublicationReport<CompactorEpoch>> {
+    /// Claims the namespace compactor epoch for a maintenance runtime, and
+    /// returns the manifest that records the claim, with the manifest
+    /// boundary that the claim read after its put. That manifest's compactor
+    /// epoch is the claimed epoch, so a compaction unit can plan from it.
+    ///
+    /// The claim builds on `basis` without a request first, and without
+    /// `basis` it finds the newest manifest from the manifest boundary. A
+    /// claim over a stale basis loses its put and tries again over the
+    /// manifest that won (format spec, "Publishing a manifest").
+    pub async fn claim_compactor(
+        &self,
+        basis: Option<PublicationBasis>,
+    ) -> Result<PublicationReport<PublicationBasis>> {
         let clock = self.namespace.start_clock();
         let update = self
             .namespace
             .update_live_manifest(
-                None,
+                basis,
                 &clock,
                 |mut payload: NamespaceManifestPayload| async move {
                     payload.compactor_epoch =
                         CompactorEpoch(payload.compactor_epoch.0.checked_add(1).expect(
                             "compactor epoch should be bounded by the manifest number write stop",
                         ));
-                    let epoch = payload.compactor_epoch;
-                    Ok(ManifestChange::Next(Box::new(payload), epoch))
+                    Ok(ManifestChange::Next(Box::new(payload), ()))
                 },
             )
             .await?;
-        Ok(update.into_report())
+        let published = update.published.then(|| update.current_manifest());
+        Ok(PublicationReport {
+            response: update.current,
+            published,
+        })
     }
 }

@@ -754,10 +754,12 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .claim_compactor()
+    .claim_compactor(None)
     .await
     .expect("claim")
-    .response;
+    .response
+    .manifest
+    .compactor_epoch();
     assert_eq!(epoch, loonfs_types::CompactorEpoch(2));
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()

@@ -457,7 +457,7 @@ async fn a_tip_confirmation_at_the_boundary_plans_on_the_newest_manifest() {
     for _ in 0..3 {
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &writer)
             .engine()
-            .claim_compactor()
+            .claim_compactor(None)
             .await
             .expect("another process claims the compactor");
     }
@@ -1253,7 +1253,7 @@ async fn a_manifest_published_over_another_process_fold_moves_the_position() {
         fixture
     }
     .engine()
-    .claim_compactor()
+    .claim_compactor(None)
     .await
     .expect("claim the compactor")
     .published
@@ -1299,7 +1299,7 @@ async fn a_claim_over_a_manifest_without_runs_keeps_the_root_directory() {
         fixture
     }
     .engine()
-    .claim_compactor()
+    .claim_compactor(None)
     .await
     .expect("claim the compactor")
     .published

@@ -35,7 +35,7 @@ impl Rival {
                     &crate::test_support::writer_at("test-writer", 0),
                 )
                 .engine()
-                .claim_compactor()
+                .claim_compactor(None)
                 .await
                 .expect("claim the compactor");
             }
