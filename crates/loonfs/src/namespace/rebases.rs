@@ -51,21 +51,17 @@ impl LoonFs<Writable> {
                         .fork_point_for_rebase(&main.context, &fork.engine, &fork.context)
                         .await?
                 };
-                self.install_fork(
-                    namespace_id,
-                    new_namespace_id,
-                    |engine, manifest| async move {
-                        engine
-                            .fork_namespace_for_rebase(
-                                new_namespace_id,
-                                actor,
-                                source_namespace_id,
-                                fork_point_seq,
-                                manifest,
-                            )
-                            .await
-                    },
-                )
+                self.install_fork(namespace_id, |engine, manifest| async move {
+                    engine
+                        .fork_namespace_for_rebase(
+                            new_namespace_id,
+                            actor,
+                            source_namespace_id,
+                            fork_point_seq,
+                            manifest,
+                        )
+                        .await
+                })
                 .await
             },
         )

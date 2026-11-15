@@ -1,6 +1,6 @@
 //! Store requests made by writer acquisition and the first publish after a fold.
 
-use loonfs::{CreateNamespaceOptions, LoonFs, NamespaceId};
+use loonfs::{LoonFs, ManifestNo, NamespaceId};
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_objectstore::keys::{
     boundary, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
@@ -31,8 +31,10 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .await
         .expect("namespace");
     creator.shutdown().await.expect("shutdown creator");
-    // The writer's timer doesn't move, so no check for a newer manifest
-    // starts while the test counts requests.
+    // The writer is a new runtime without a cached head of the namespace, so
+    // its claim searches for the newest manifest first. The writer's timer
+    // doesn't move, so no check for a newer manifest starts while the test
+    // counts requests.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .config(loonfs::RuntimeConfig {
@@ -128,6 +130,131 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that the first commit after a create in the same runtime builds
+/// its claim on the manifest 2 that the create published, so the commit
+/// sends seven requests and no search for the newest manifest.
+#[tokio::test]
+async fn the_first_commit_after_a_create_claims_on_the_created_manifest() {
+    let directory = tempfile::tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("created").expect("namespace");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    store.reset();
+    namespace
+        .create_directory("/first", &test_actor())
+        .await
+        .expect("first publish");
+    writer.drain().await.expect("drain");
+    let requests = store.take();
+    assert_eq!(
+        requests.iter().map(kind_and_key).collect::<Vec<_>>(),
+        first_commit_requests(&namespace_id),
+        "{requests:?}"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that the first read after a create in the same runtime starts from
+/// the manifest 2 that the create installed as the namespace's cached head,
+/// with no store request: the head's checks are younger than the read's
+/// maximum staleness, its WAL tail is empty, and the create wrote the
+/// manifest through the segment cache.
+#[tokio::test]
+async fn the_first_read_after_a_create_sends_no_request() {
+    let directory = tempfile::tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("created").expect("namespace");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    store.reset();
+    namespace.stat("/").await.expect("stat the root");
+    let requests = store.take();
+    assert_eq!(
+        requests.iter().map(kind_and_key).collect::<Vec<_>>(),
+        Vec::<(&str, String)>::new(),
+        "{requests:?}"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that the first commit on a fork's new namespace in the runtime
+/// that forked it builds its claim on the fork's manifest 2, with the same
+/// seven requests as the first commit after a create. The commit's planning
+/// reads the source's segments from the segment cache, because the fork's
+/// fold of the source's WAL tail wrote them in this runtime.
+#[tokio::test]
+async fn the_first_commit_after_a_fork_claims_on_the_forked_manifest() {
+    let directory = tempfile::tempdir().expect("directory");
+    let source_id = NamespaceId::parse("source").expect("source");
+    let fork_id = NamespaceId::parse("fork").expect("fork");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&source_id, &test_actor())
+        .await
+        .expect("source");
+    writer
+        .open_namespace(&source_id)
+        .expect("open source")
+        .create_directory("/inherited", &test_actor())
+        .await
+        .expect("source commit");
+    writer
+        .fork_namespace(&source_id, &fork_id, &test_actor())
+        .await
+        .expect("fork");
+    let fork = writer.open_namespace(&fork_id).expect("open fork");
+    store.reset();
+    fork.create_directory("/inherited/child", &test_actor())
+        .await
+        .expect("first publish");
+    writer.drain().await.expect("drain");
+    let requests = store.take();
+    assert_eq!(
+        requests.iter().map(kind_and_key).collect::<Vec<_>>(),
+        first_commit_requests(&fork_id),
+        "{requests:?}"
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test]
 async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropped() {
     let directory = tempfile::tempdir().expect("directory");
@@ -186,19 +313,9 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
             _ => None,
         })
         .expect("WAL above the folded number");
-    // Creating an existing namespace with allow_existing succeeds without a
-    // manifest put, and finish_namespace_mutation drops the writer's projection.
-    writer
-        .create_namespace_with_options(
-            &namespace_id,
-            &test_actor(),
-            &CreateNamespaceOptions {
-                allow_existing: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("drop projection during fold");
+    // Dropping the writer's views drops the session's projection while the
+    // fold runs.
+    loonfs::test_support::drop_namespace_view(&writer, &namespace_id).await;
     store.inner().release();
     namespace_writer.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");
@@ -271,6 +388,45 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         .await
         .expect("durable child");
     writer.shutdown().await.expect("shutdown");
+}
+
+/// Returns the requests of a first commit whose claim builds on manifest 2
+/// of `namespace_id` without a request first: the claim's put and the
+/// boundary read after the put, the discovery of the tip (a WAL read, a
+/// successor check, and a boundary read), the fence, and the commit.
+fn first_commit_requests(namespace_id: &NamespaceId) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "put",
+            metadata_manifest_object(namespace_id, &ManifestNo(3)),
+        ),
+        ("get", boundary(namespace_id)),
+        ("get", "wal 1".to_owned()),
+        (
+            "head",
+            metadata_manifest_object(namespace_id, &ManifestNo(4)),
+        ),
+        ("get", boundary(namespace_id)),
+        ("put", "wal 1".to_owned()),
+        ("put", "wal 2".to_owned()),
+    ]
+}
+
+/// Returns the request's kind and key, with a conditional read counted as a
+/// read and a WAL object's key written as `wal N`.
+fn kind_and_key(request: &RecordedOperation) -> (&'static str, String) {
+    let kind = match request {
+        RecordedOperation::Head { .. } => "head",
+        RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
+        RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. } => "put",
+        RecordedOperation::List { .. } => "list",
+        _ => "other",
+    };
+    let key = match loonfs_objectstore::layout::wal_no_of(request.key()) {
+        Some(wal_no) => format!("wal {}", wal_no.0),
+        None => request.key().to_owned(),
+    };
+    (kind, key)
 }
 
 fn is_get(request: &RecordedOperation, expected_key: &str) -> bool {

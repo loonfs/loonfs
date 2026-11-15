@@ -3226,7 +3226,7 @@ async fn wal_recording_writer(
 /// Checks that a writer session keeps its WAL tail out of the read cache
 /// while it publishes, folds, and publishes again, and that a read in the
 /// writer's runtime after the fold starts from the position's tail, with no
-/// tail lookup and no WAL GET.
+/// tail lookup by the read and no WAL GET.
 #[tokio::test]
 async fn a_writer_keeps_its_tail_out_of_the_read_cache() {
     let temp_dir = tempdir().expect("tempdir");
@@ -3261,7 +3261,13 @@ async fn a_writer_keeps_its_tail_out_of_the_read_cache() {
     commit("after-fold").await.expect("commit after the fold");
 
     let stats = writer.metadata_cache().stats();
-    assert_eq!(stats.wal_tails.misses, heads.wal_tails.misses, "{stats:?}");
+    // The fold moves the cached head that the create installed. The move
+    // looks up that head's tail once, finds none, and drops the head.
+    assert_eq!(
+        stats.wal_tails.misses,
+        heads.wal_tails.misses + 1,
+        "{stats:?}"
+    );
     assert_eq!(stats.wal_tails.inserts, 0, "{stats:?}");
     assert_eq!(stats.wal_tails.evictions, 0, "{stats:?}");
     assert_eq!(

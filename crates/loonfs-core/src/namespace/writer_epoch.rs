@@ -4,6 +4,7 @@ use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::{PublicationReport, PublishedManifest};
+use crate::namespace::basis::PublicationBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -54,12 +55,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// number (format spec, "Writer ownership").
     ///
     /// A writer session acquires its epoch here before its first publication.
+    /// The claim builds on the manifest of the namespace's cached head when no
+    /// writer has claimed the namespace at that head (see
+    /// [`Self::unclaimed_head_basis`]), and otherwise finds the newest
+    /// manifest first.
     pub(crate) async fn acquire_writer(&self, writer_id: &WriterId) -> Result<WriterAcquisition> {
         let clock = self.start_clock();
         let acquired_at_ms = clock.request_at_ms();
+        let basis = self.unclaimed_head_basis().await?;
         let update = self
             .update_live_manifest(
-                None,
+                basis,
                 &clock,
                 |mut payload: NamespaceManifestPayload| async move {
                     payload.writer_epoch = payload.writer_epoch.successor().map_err(|_| {
@@ -121,6 +127,33 @@ impl<S: ObjectStore> NamespaceStore<S> {
             tip = clock.observe();
             anchor = self.load_read_anchor(clock.observe()).await?;
         }
+    }
+
+    /// Returns the manifest of the namespace's cached head, with the manifest
+    /// boundary that the head keeps, when the head is active and no writer has
+    /// claimed the namespace at that head, such as the head that a create or a
+    /// fork installs (see [`Self::install_active_head`]). Returns `None` when
+    /// there's no such head, or when the manifest is at or below the boundary.
+    ///
+    /// A claim builds on this manifest without a request first. If another
+    /// process published past the manifest, the claim's put is lost and the
+    /// claim builds on the manifest that won (format spec, "Publishing a
+    /// manifest").
+    async fn unclaimed_head_basis(&self) -> Result<Option<PublicationBasis>> {
+        let Some(head) = self.head_and_wal_tail_cache.get_head(&self.namespace_id) else {
+            return Ok(None);
+        };
+        let state = &head.read_basis.head;
+        if state.writer.is_some() || !state.status.is_active() {
+            return Ok(None);
+        }
+        let segments = self
+            .load_held_manifest(head.read_basis.basis.manifest(), head.boundary.clone())
+            .await?;
+        Ok(segments.map(|segments| PublicationBasis {
+            manifest: segments.loaded_manifest(),
+            boundary: head.boundary.clone(),
+        }))
     }
 }
 
