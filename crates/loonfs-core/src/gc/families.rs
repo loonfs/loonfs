@@ -7,6 +7,8 @@ use loonfs_objectstore::keys::{
     extensions_prefix, metadata_manifest_prefix, metadata_segment_prefix, wal_prefix,
 };
 use loonfs_objectstore::layout::{manifest_no_of, parse_object_key, DurableObjectFamily};
+use loonfs_objectstore::ListedObject;
+use loonfs_types::format::wal::MAX_FENCE_OR_FLOOR_OBJECT_BYTES;
 use loonfs_types::{GcResponse, NamespaceId};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,14 @@ impl CandidateFamily {
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
             Self::ExtensionSegments => family == DurableObjectFamily::ExtensionSegment,
         }
+    }
+
+    /// Reports whether a listed object of this family is a fence or a floor
+    /// object, which no collection deletes. A WAL object stored in
+    /// [`MAX_FENCE_OR_FLOOR_OBJECT_BYTES`] or fewer is one, because the
+    /// encoder pads every commit object above that size.
+    pub(super) fn is_fence_or_floor_object(self, entry: &ListedObject) -> bool {
+        self == Self::WalObjects && entry.size_bytes <= MAX_FENCE_OR_FLOOR_OBJECT_BYTES as u64
     }
 
     /// Returns how old an unreferenced object of this family has to be before

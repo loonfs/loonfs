@@ -458,6 +458,26 @@ pub async fn load_pool_id<S: ObjectStore>(store: S, namespace_id: &NamespaceId) 
         .clone()
 }
 
+/// Lists the keys of the WAL objects of `namespace_id` that are commit
+/// objects, which a collection deletes once they're folded and old enough.
+/// The fences and floor objects that the listing leaves out stay.
+pub async fn commit_wal_keys<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<String> {
+    use futures::TryStreamExt;
+    store
+        .list_entries_from_stream(&loonfs_objectstore::keys::wal_prefix(namespace_id), None)
+        .try_filter_map(|entry| {
+            futures::future::ready(Ok((entry.size_bytes
+                > loonfs_types::format::wal::MAX_FENCE_OR_FLOOR_OBJECT_BYTES as u64)
+                .then_some(entry.key)))
+        })
+        .try_collect()
+        .await
+        .expect("list the WAL")
+}
+
 /// Loads the catalog of `namespace_id` from its current manifest, the
 /// catalog that a runtime hands the upload calls.
 pub async fn load_catalog<S: ObjectStore>(

@@ -889,7 +889,7 @@ A `gc` job on a namespace or on a pool deletes an unreferenced object once the o
 
 A namespace's job and a pool's job collect different objects:
 
-- A namespace's collection covers the namespace's manifests, WAL objects, metadata segments, extension segments, and snapshots. It makes no request under the pool's prefix, and it deletes no content, including when it retires the namespace. Retiring a namespace deletes a fork's fork snapshot on its source and raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)). A collection of a retired namespace deletes every manifest, WAL object, segment, and snapshot record under the namespace's prefix once the object is older than the grace window, and keeps the boundary object.
+- A namespace's collection covers the namespace's manifests, WAL objects, metadata segments, extension segments, and snapshots. It makes no request under the pool's prefix, and it deletes no content, including when it retires the namespace. Retiring a namespace deletes a fork's fork snapshot on its source and raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)). A collection of a retired namespace deletes every manifest, data WAL object, segment, and snapshot record under the namespace's prefix once the object is older than the grace window, and keeps the boundary object, the [fences](glossary.md#fence), and the [floor objects](glossary.md#floor-object). No collection deletes a fence or a floor object, in any namespace.
 - A pool's collection covers the pool's content objects, upload records, and temporary objects, with roots that it reads from every member of the [pool](glossary.md#pool).
 
 [One complete collection](format.md#111-one-complete-collection) defines both collections.
@@ -920,7 +920,7 @@ A GC response includes `listed_bytes`: the bytes of every object that the collec
 
 A namespace's GC response groups related counts:
 
-- `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, and `manifests`. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
+- `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, and `manifests`. `wal_objects` counts data WAL objects, because a collection keeps fences and floor objects. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
 - `deleted_snapshots_by_owner` contains `user` and `fork` counts for the snapshots deleted in the collection. `user` counts user snapshots. Their sum is the total number of snapshots deleted.
 
 A pool's GC response has no `deleted_snapshots_by_owner`, and its `deleted` contains these counts:
@@ -933,7 +933,7 @@ A pool's response doesn't report the deletion of a member entry.
 
 Each deletion is counted once. When a fork's target namespace deletes its fork snapshot, the deletion counts toward `fork` if the snapshot was present before the deletion, and repeating that deletion on an absent snapshot adds nothing. Every count field is present, including fields whose value is zero.
 
-Every core GC response also includes `retained`, which counts the candidates the collection kept, grouped by the reason each one was kept. The reasons are a closed set, so every field of the response's `retained` is always present, a zero means nothing was kept for that reason, and the fields sum to the total. A namespace's response has the first five reasons in this table, and a pool's response has the first four and the two upload session reasons:
+Every core GC response also includes `retained`, which counts the candidates the collection kept, grouped by the reason each one was kept. The reasons are a closed set, so every field of the response's `retained` is always present, a zero means nothing was kept for that reason, and the fields sum to the total. A namespace's response has the first five reasons in this table and `fences_and_floor_objects`, and a pool's response has the first four and the two upload session reasons:
 
 | Reason | Means |
 | --- | --- |
@@ -944,6 +944,7 @@ Every core GC response also includes `retained`, which counts the candidates the
 | `snapshot_not_deletable` | A snapshot that's kept by its owner or by its grace window. |
 | `upload_session_window` | An upload session that's waiting for a window that ends at a known time. These are the same waits that `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session that's kept for a reason that doesn't end at a known time: a lost compare-and-swap, a record that disappeared during the collection, or a content cleanup failure. |
+| `fences_and_floor_objects` | A [fence](glossary.md#fence) or a [floor object](glossary.md#floor-object), which no collection deletes. The collection tells a fence or a floor object from a data WAL object by its listed size (see [Candidate and age rules](format.md#113-candidate-and-age-rules)). |
 
 Each collection counts the candidates that it examined and kept, not the objects in the namespace or the pool, so an object that two collections both examine is counted by each collection.
 
@@ -959,7 +960,7 @@ A pool's GC response also includes `skipped` when the collection stopped part of
 For example, a namespace's job that deletes three WAL objects and two grep segments returns this result:
 
 ```json
-{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0},"deleted_snapshots_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"snapshot_not_deletable":0},"listed_bytes":1048576}
+{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0},"deleted_snapshots_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"snapshot_not_deletable":0,"fences_and_floor_objects":2},"listed_bytes":1048576}
 ```
 
 A pool's job that deletes two content objects and the records of one upload session, and keeps one session whose completed-content grace hasn't ended, returns this result:

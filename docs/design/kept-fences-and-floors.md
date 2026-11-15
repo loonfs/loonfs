@@ -138,7 +138,7 @@ The storage format changes in these sections:
 - [Required operations](../specs/format.md#31-required-operations) says that a listing returns each object's size.
 - [WAL records](../specs/format.md#a5-wal-records) states the size bound and the padding of a commit object, and [Publication and collection timing](../specs/format.md#c1-publication-and-collection-timing) removes `WAL_PUBLISH_BUDGET_MS` and its term in the bound formulas.
 
-[Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes), [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy), [Object keys](../specs/format.md#a8-object-keys), and the API spec don't change.
+[Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes), [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy), and [Object keys](../specs/format.md#a8-object-keys) don't change. The API spec adds `fences_and_floor_objects` to the reasons that a namespace's GC response counts in `retained`.
 
 The design notes [Retention advance in the WAL](retention-advance-in-the-wal.md), [Retention window](retention-window.md#who-advances-the-floor), [Read freshness](read-freshness.md#what-the-format-and-api-specs-say), [The WAL implementation](wal-boundary.md#responsibilities-outside-the-wal), and [The manifest boundary](manifest-boundary.md) (its retirement, [time rules](manifest-boundary.md#time-rules), and [costs](manifest-boundary.md#costs)) change. In the glossary, "Fence" and "Floor object" say that no process deletes them, "Publication budget" covers manifest publications alone, and "Collection" and "Garbage collection" exclude fences and floor objects.
 

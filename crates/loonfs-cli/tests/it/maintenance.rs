@@ -1108,6 +1108,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(gc_data.get("next_cursor").is_none());
         let retained = gc_data["retained"].as_object().expect("json object");
         assert!(retained.contains_key("snapshot_not_deletable"));
+        assert!(retained.contains_key("fences_and_floor_objects"));
 
         let quiet_gc = harness.run(&["maintenance", "gc", "--profile", profile]);
         assert_success(&quiet_gc);

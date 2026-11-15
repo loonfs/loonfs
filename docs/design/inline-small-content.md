@@ -96,7 +96,7 @@ Why is there a byte trigger? It limits how much a cold reader has to download to
 
 ## Collection
 
-Garbage collection has no separate object family for inline content. It deletes WAL objects at or below `folded_wal_no`, and the fold writes inline bytes to content objects before it publishes that boundary.
+Garbage collection has no separate object family for inline content. It deletes the data WAL objects at or below `folded_wal_no`, and the fold writes inline bytes to content objects before it publishes that boundary.
 
 A content object that a fold or an early direct download wrote is collected like any other content object. The unfolded WAL tail refers to it until a manifest covers it, and a rooted manifest's revisions refer to it after that. Upload sessions aren't involved in an inline write. A rejected or interrupted publication can leave a materialized extent behind, and garbage collection removes it after the grace window once no root refers to it.
 

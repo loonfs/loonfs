@@ -23,8 +23,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// A retired namespace has no roots, so the collection reads no manifest
     /// and makes one listing of the namespace's prefix. It deletes every
-    /// manifest, WAL object, segment, and snapshot record there once the
-    /// object is old enough, and keeps the boundary object.
+    /// manifest, data WAL object, segment, and snapshot record there once the
+    /// object is old enough, and keeps the boundary object, the fences, and
+    /// the floor objects. No collection deletes a fence or a floor object.
     ///
     /// The collection lists nothing under its pool's prefix. The pool's own
     /// collection collects the content objects, upload records, and temporary

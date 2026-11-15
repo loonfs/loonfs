@@ -4,7 +4,7 @@ A "backfill" is a base compaction that computes the rows of one row family, the 
 
 ## Why a family needs a backfill
 
-Every row is computed from one WAL delta or one commit record (rule 1 in [Row families](../specs/format.md#19-row-families)), and garbage collection deletes each WAL object after it's folded (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). The `commits` family keeps the deltas of the commits from the [retention floor](../specs/glossary.md#retention-floor) on, but a family's rows at the floor usually came from older commits, such as a file's newest revision at or below the floor. So a family that didn't exist, or had another key, when those commits were folded has no source for its rows at the floor except the rows that other families kept.
+Every row is computed from one WAL delta or one commit record (rule 1 in [Row families](../specs/format.md#19-row-families)), and garbage collection deletes each WAL object that contains commits after it's folded (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). The `commits` family keeps the deltas of the commits from the [retention floor](../specs/glossary.md#retention-floor) on, but a family's rows at the floor usually came from older commits, such as a file's newest revision at or below the floor. So a family that didn't exist, or had another key, when those commits were folded has no source for its rows at the floor except the rows that other families kept.
 
 ## Computing the target
 

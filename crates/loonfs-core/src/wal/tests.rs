@@ -152,7 +152,7 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
 }
 
 #[tokio::test]
-async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
+async fn fences_fold_and_stay_after_a_collection() {
     let directory = tempfile::tempdir().expect("directory");
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -187,12 +187,13 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .gc(&aged.clock())
         .await
         .expect("collect");
-    assert_eq!(report.deleted.wal_objects, 1);
+    assert_eq!(report.deleted.wal_objects, 0);
+    assert_eq!(report.retained.fences_and_floor_objects, 1);
     assert!(store
         .head(&wal_object(&namespace_id, &WalNo(1)))
         .await
         .expect("first")
-        .is_none());
+        .is_some());
     assert!(store
         .head(&wal_object(&namespace_id, &WalNo(2)))
         .await
@@ -620,11 +621,18 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             .gc(&aged.clock())
             .await
             .expect("collect old WAL");
+        // The collection keeps the fence and deletes the seed's commit object.
         assert!(store
             .inner()
             .head(&wal_object(&namespace_id, &WalNo(1)))
             .await
             .expect("old fence")
+            .is_some());
+        assert!(store
+            .inner()
+            .head(&wal_object(&namespace_id, &WalNo(2)))
+            .await
+            .expect("old commit")
             .is_none());
         store.release();
     });
@@ -635,7 +643,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         CommitSeq(2)
     );
     assert!(store
-        .head(&wal_object(&namespace_id, &WalNo(1)))
+        .head(&wal_object(&namespace_id, &WalNo(2)))
         .await
         .expect("old number")
         .is_none());
@@ -657,15 +665,14 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
     }
 }
 
-/// Checks the lost commit that the second writer rule prevents: a session
-/// with tip `t` stays idle while another process's floor object at `t + 1`
-/// ages past the grace window. While the session's tip confirmation waits
-/// for its WAL HEAD, another process folds the floor object, and a
-/// collection deletes it, so the WAL HEAD finds nothing at `t + 1`. The
-/// manifest HEAD that follows finds the fold's manifest, so the session runs
-/// discovery and writes its commit at `t + 2`, not at the emptied number.
+/// Checks that a collection keeps a floor object that a session's commit
+/// would otherwise reuse: a session with tip `t` stays idle while another
+/// process's floor object at `t + 1` ages past the grace window. While the
+/// session's tip confirmation waits for its WAL HEAD, another process folds
+/// the floor object and runs a collection, which keeps the floor object. So
+/// the session runs discovery and writes its commit at `t + 2`.
 #[tokio::test]
-async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_number() {
+async fn a_confirmation_after_a_collection_finds_the_kept_floor_object() {
     use loonfs_test_support::stores::MetadataMapStore;
     let temp_dir = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("floor-gc").expect("namespace");
@@ -765,16 +772,13 @@ async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_
                 now_ms: grace + 1,
                 ..context(1_000)
             };
-            namespace
-                .gc(&aged.clock())
-                .await
-                .expect("collect the floor object");
+            namespace.gc(&aged.clock()).await.expect("collect the WAL");
             assert!(store
                 .inner()
                 .head(&wal_object(&namespace_id, &floor_object))
                 .await
                 .expect("the floor object's number")
-                .is_none());
+                .is_some());
             store.release();
         }
     );
@@ -785,8 +789,8 @@ async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_
     assert!(store
         .head(&wal_object(&namespace_id, &floor_object))
         .await
-        .expect("the emptied number")
-        .is_none());
+        .expect("the floor object")
+        .is_some());
     assert_eq!(
         engine
             .writer_position()
@@ -1065,7 +1069,7 @@ async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
 }
 
 #[tokio::test]
-async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_its_put() {
+async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
     let temp_dir = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("sleep-budget").expect("namespace");
     let store_clock = ManualClock::new(0);
@@ -1151,14 +1155,16 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
                 }
                 .clock())
                 .await
-                .expect("collect folded fence");
-            assert_eq!(report.deleted.wal_objects, 4);
+                .expect("collect the folded WAL");
+            // The two commit objects go, and the two fences stay.
+            assert_eq!(report.deleted.wal_objects, 2);
+            assert_eq!(report.retained.fences_and_floor_objects, 2);
             assert!(blocked
                 .inner()
                 .head(&fence_key)
                 .await
-                .expect("fence removed")
-                .is_none());
+                .expect("fence kept")
+                .is_some());
             assert_eq!(timer_a.now_ms(), 0);
             timer_a.advance_ms(store_clock.now_ms());
             blocked.release();
@@ -1168,16 +1174,20 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         resumed
             .results
             .remove(0)
-            .expect_err("reclaimed number must not acknowledge a commit")
+            .expect_err("the late put collides with the kept fence")
             .code(),
-        ErrorCode::OutcomeUnknown,
+        ErrorCode::StaleHead,
     );
-    assert!(blocked
-        .inner()
-        .head(&wal_object(&namespace_id, &WalNo(3)))
-        .await
-        .expect("late put written")
-        .is_some());
+    let fence = decode_wal_object_envelope_zstd(
+        &blocked
+            .inner()
+            .get(&wal_object(&namespace_id, &WalNo(3)), None)
+            .await
+            .expect("get")
+            .expect("fence"),
+    )
+    .expect("decode fence");
+    assert_eq!(fence.payload().writer_epoch, WriterEpoch(2));
     let namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
     let view = namespace
         .load_current_metadata_view()

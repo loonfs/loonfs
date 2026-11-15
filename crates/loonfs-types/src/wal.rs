@@ -101,8 +101,10 @@ pub const MAX_WAL_INLINE_CONTENT_BYTES: usize = 256 * 1024;
 /// writer thresholds are policy at or below this limit.
 pub const MAX_WAL_OBJECT_INLINE_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
-/// Upper bound for the document and payload fields outside commit records.
-pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
+/// Upper bound for the document of a WAL object with no records: the envelope
+/// fields and a payload with the longest namespace ID, four integers, an
+/// empty record list and a retention floor.
+const RECORDLESS_WAL_DOCUMENT_BYTES: usize = cbor_map_bytes(&[
     (
         "kind",
         cbor_string_bytes(WalEnvelopeKind::WalObject.as_str().len()),
@@ -118,6 +120,34 @@ pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("records", 9),
     ("retention_floor_seq", 9),
 ]);
+
+/// Largest stored size of a fence or a floor object, which is zstd's
+/// compression bound for [`RECORDLESS_WAL_DOCUMENT_BYTES`].
+///
+/// A WAL object with records is stored in more bytes than this, because the
+/// encoder pads one that would otherwise be stored in this many bytes or
+/// fewer. A collection tells a fence or a floor object from a commit object
+/// by its listed size alone
+/// ([Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records)).
+pub const MAX_FENCE_OR_FLOOR_OBJECT_BYTES: usize =
+    zstd_compress_bound(RECORDLESS_WAL_DOCUMENT_BYTES);
+
+/// Upper bound for the document and payload fields outside commit records,
+/// the longest padding included.
+pub const WAL_OBJECT_OVERHEAD_BYTES: usize = RECORDLESS_WAL_DOCUMENT_BYTES
+    + cbor_string_bytes("padding".len())
+    + cbor_string_bytes(MAX_FENCE_OR_FLOOR_OBJECT_BYTES + 1);
+
+/// Returns zstd's bound on the compressed size of `length` input bytes, as
+/// the `ZSTD_COMPRESSBOUND` macro in `zstd.h` defines it.
+const fn zstd_compress_bound(length: usize) -> usize {
+    let small_input_margin = if length < 128 * 1024 {
+        (128 * 1024 - length) >> 11
+    } else {
+        0
+    };
+    length + (length >> 8) + small_input_margin
+}
 
 // CBOR strings, collections, and u64 values need at most nine header bytes.
 /// Returns the most bytes CBOR uses for a string of `length` bytes.
@@ -481,6 +511,12 @@ struct WalObjectDocument {
     payload_checksum: crate::PayloadChecksum,
     #[serde(with = "serde_bytes")]
     payload: Vec<u8>,
+    /// Bytes that keep a commit object's stored size above
+    /// [`MAX_FENCE_OR_FLOOR_OBJECT_BYTES`], left out when the object is
+    /// larger without them. `payload_checksum` doesn't cover them, and
+    /// readers ignore their content.
+    #[serde(default, with = "serde_bytes", skip_serializing_if = "Option::is_none")]
+    padding: Option<Vec<u8>>,
 }
 
 pub(crate) fn encode_wal_payload_cbor(
@@ -494,29 +530,65 @@ pub(crate) fn encode_wal_payload_cbor(
 }
 
 /// Encodes a WAL payload once, then checksums and compresses its durable document.
+///
+/// A commit object that would be stored in [`MAX_FENCE_OR_FLOOR_OBJECT_BYTES`]
+/// or fewer gets padding until its stored size is above that bound.
 pub fn encode_wal_object_envelope_zstd(
     payload: WalObjectPayload,
 ) -> Result<crate::envelope::EncodedEnvelope<WalObjectPayload>, WalCodecError> {
     let payload_bytes = encode_wal_payload_cbor(&payload)?;
     let payload_checksum = sha256_digest(&payload_bytes);
-    let document = WalObjectDocument {
+    let mut document = WalObjectDocument {
         kind: WalEnvelopeKind::WalObject.as_str().to_owned(),
         format_version: WAL_FORMAT_VERSION,
         payload_checksum: payload_checksum.clone(),
         payload: payload_bytes,
+        padding: None,
     };
-    let mut encoded = Vec::new();
-    into_writer(&document, &mut encoded)
-        .map_err(|err| EnvelopeCodecError::EnvelopeEncode(err.to_string()))?;
-    let bytes = envelope::compress_document(&encoded)?;
-    Ok(crate::envelope::EncodedEnvelope {
-        envelope: crate::envelope::VerifiedEnvelope {
-            payload_checksum,
-            payload,
-        },
-        bytes,
-        document_bytes: encoded.len(),
-    })
+    // Each pass adds the missing bytes, up to one more than the bound.
+    // Padding doesn't compress, so one extra pass is usual, and a pass with
+    // the longest padding is the last.
+    loop {
+        let mut encoded = Vec::new();
+        into_writer(&document, &mut encoded)
+            .map_err(|err| EnvelopeCodecError::EnvelopeEncode(err.to_string()))?;
+        let bytes = envelope::compress_document(&encoded)?;
+        let padding_bytes = document.padding.as_ref().map_or(0, Vec::len);
+        if payload.records.is_empty()
+            || bytes.len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES
+            || padding_bytes > MAX_FENCE_OR_FLOOR_OBJECT_BYTES
+        {
+            return Ok(crate::envelope::EncodedEnvelope {
+                envelope: crate::envelope::VerifiedEnvelope {
+                    payload_checksum,
+                    payload,
+                },
+                bytes,
+                document_bytes: encoded.len(),
+            });
+        }
+        let padding_bytes = (padding_bytes + MAX_FENCE_OR_FLOOR_OBJECT_BYTES + 1 - bytes.len())
+            .min(MAX_FENCE_OR_FLOOR_OBJECT_BYTES + 1);
+        document.padding = Some(wal_object_padding(&payload_checksum, padding_bytes));
+    }
+}
+
+/// Returns `length` bytes of padding: successive SHA-256 digests of the
+/// payload checksum and a counter, so the same payload gets the same padding.
+fn wal_object_padding(payload_checksum: &crate::PayloadChecksum, length: usize) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut padding = Vec::with_capacity(length);
+    let mut counter: u32 = 0;
+    while padding.len() < length {
+        let digest = Sha256::new()
+            .chain_update(payload_checksum.as_str().as_bytes())
+            .chain_update(counter.to_be_bytes())
+            .finalize();
+        padding.extend_from_slice(&digest);
+        counter += 1;
+    }
+    padding.truncate(length);
+    padding
 }
 
 /// Decodes and verifies a durable zstd-compressed WAL object envelope.
@@ -910,6 +982,7 @@ mod tests {
             format_version: WAL_FORMAT_VERSION,
             payload_checksum: sha256_digest(&payload_bytes),
             payload: payload_bytes,
+            padding: None,
         };
         let mut document_bytes = Vec::new();
         into_writer(&document, &mut document_bytes).expect("encode document directly");
@@ -1137,7 +1210,7 @@ mod tests {
         .expect("encode");
         let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");
         assert_eq!(document.len(), encoded.document_bytes());
-        assert!(document.len() <= WAL_OBJECT_OVERHEAD_BYTES);
+        assert!(document.len() <= RECORDLESS_WAL_DOCUMENT_BYTES);
         assert_eq!(
             &decode_wal_object_envelope_zstd_with_limit(encoded.as_bytes(), document.len())
                 .expect("at limit"),
@@ -1329,5 +1402,130 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn tiny_commit_object() -> WalObjectPayload {
+        WalObjectPayload {
+            namespace_id: NamespaceId::parse("n").expect("namespace"),
+            wal_no: WalNo(1),
+            writer_epoch: WriterEpoch(1),
+            head_seq: CommitSeq(1),
+            records: vec![WalCommitPayload {
+                committed_seq: CommitSeq(1),
+                commit_id: CommitId::parse("c").expect("commit id"),
+                committed_by: crate::ActorId::parse("a").expect("actor"),
+                semantic_commit_fingerprint: CommitFingerprint::parse(format!(
+                    "v1:sha256:{}",
+                    crate::sha256_hex(b"test")
+                ))
+                .expect("fingerprint"),
+                committed_at_ms: 0,
+                message: None,
+                merge: None,
+                deltas: vec![WalCommitDelta {
+                    semantic_operation_index: 0,
+                    delta: WalDelta::CreateInode {
+                        delta_index: 0,
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::File,
+                    },
+                }],
+                inline_content: Vec::new(),
+            }],
+            retention_floor_seq: None,
+        }
+    }
+
+    fn stored_document(bytes: &[u8]) -> WalObjectDocument {
+        let document = zstd::stream::decode_all(bytes).expect("decompress");
+        from_reader(document.as_slice()).expect("decode document")
+    }
+
+    #[test]
+    fn the_fence_and_floor_object_bound_is_zstds_bound_for_the_longest_recordless_document() {
+        assert_eq!(RECORDLESS_WAL_DOCUMENT_BYTES, 508);
+        assert_eq!(MAX_FENCE_OR_FLOOR_OBJECT_BYTES, 572);
+        assert_eq!(
+            MAX_FENCE_OR_FLOOR_OBJECT_BYTES,
+            zstd::zstd_safe::compress_bound(RECORDLESS_WAL_DOCUMENT_BYTES),
+        );
+    }
+
+    #[test]
+    fn every_fence_and_floor_object_is_stored_at_or_below_the_bound() {
+        let hex_id = format!(
+            "{}{}",
+            crate::sha256_hex(b"first"),
+            crate::sha256_hex(b"second")
+        );
+        let max = crate::MAX_PUBLIC_INTEGER;
+        for namespace_id in ["n".repeat(crate::MAX_ID_BYTES), hex_id, "n".to_owned()] {
+            for (integer, floor) in [(max, None), (max, Some(max)), (0, None), (0, Some(0))] {
+                let encoded = encode_wal_object_envelope_zstd(WalObjectPayload {
+                    namespace_id: NamespaceId::parse(namespace_id.as_str()).expect("namespace"),
+                    wal_no: WalNo(integer),
+                    writer_epoch: WriterEpoch(integer),
+                    head_seq: CommitSeq(integer),
+                    records: Vec::new(),
+                    retention_floor_seq: floor.map(CommitSeq),
+                })
+                .expect("encode");
+                assert!(encoded.document_bytes() <= RECORDLESS_WAL_DOCUMENT_BYTES);
+                assert!(
+                    encoded.as_bytes().len() <= MAX_FENCE_OR_FLOOR_OBJECT_BYTES,
+                    "{namespace_id} {integer} {floor:?}: {} bytes",
+                    encoded.as_bytes().len()
+                );
+                assert!(stored_document(encoded.as_bytes()).padding.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn a_small_commit_object_is_padded_above_the_bound() {
+        let payload = tiny_commit_object();
+        let unpadded = unchecked_wal_object_bytes(&payload);
+        assert!(unpadded.len() <= MAX_FENCE_OR_FLOOR_OBJECT_BYTES);
+
+        let encoded = encode_wal_object_envelope_zstd(payload.clone()).expect("encode");
+        assert!(encoded.as_bytes().len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES);
+        assert!(encoded.document_bytes() <= WAL_OBJECT_OVERHEAD_BYTES);
+        let document = stored_document(encoded.as_bytes());
+        assert!(document.padding.is_some());
+        assert_eq!(document.payload_checksum, sha256_digest(&document.payload));
+
+        let again = encode_wal_object_envelope_zstd(payload.clone()).expect("encode again");
+        assert_eq!(again.as_bytes(), encoded.as_bytes());
+        let decoded = decode_wal_object_envelope_zstd(encoded.as_bytes()).expect("decode");
+        assert_eq!(decoded.into_payload(), payload);
+    }
+
+    #[test]
+    fn a_large_commit_object_has_no_padding() {
+        let mut payload = inline_wal_object(&[2048]);
+        payload.records[0].inline_content[0].bytes =
+            wal_object_padding(&sha256_digest(b"incompressible"), 2048);
+        let encoded = encode_wal_object_envelope_zstd(payload).expect("encode");
+        assert!(encoded.as_bytes().len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES);
+        assert!(stored_document(encoded.as_bytes()).padding.is_none());
+    }
+
+    #[test]
+    fn the_decoder_ignores_the_content_of_padding() {
+        let payload = tiny_commit_object();
+        let mut payload_bytes = Vec::new();
+        into_writer(&payload, &mut payload_bytes).expect("encode payload");
+        let document = WalObjectDocument {
+            kind: WalEnvelopeKind::WalObject.as_str().to_owned(),
+            format_version: WAL_FORMAT_VERSION,
+            payload_checksum: sha256_digest(&payload_bytes),
+            payload: payload_bytes,
+            padding: Some(vec![7; 3]),
+        };
+        let mut document_bytes = Vec::new();
+        into_writer(&document, &mut document_bytes).expect("encode document");
+        let stored = zstd::stream::encode_all(document_bytes.as_slice(), 0).expect("compress");
+        let decoded = decode_wal_object_envelope_zstd(&stored).expect("decode");
+        assert_eq!(decoded.into_payload(), payload);
     }
 }

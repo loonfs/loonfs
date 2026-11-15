@@ -69,11 +69,11 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .clock())
         .await
         .expect("collect folded WAL");
-    assert_eq!(report.deleted.wal_objects, 2);
-    assert!(store
-        .list_prefix(&wal_prefix(&namespace_id))
+    // The session's fence stays, and the commit object goes.
+    assert_eq!(report.deleted.wal_objects, 1);
+    assert_eq!(report.retained.fences_and_floor_objects, 1);
+    assert!(crate::test_support::commit_wal_keys(&store, &namespace_id)
         .await
-        .expect("WAL list")
         .is_empty());
 
     // Inline retry identity is based on bytes, not the newly allocated ID.
