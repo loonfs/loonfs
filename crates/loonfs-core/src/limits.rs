@@ -178,12 +178,6 @@ pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = duration_ms(PROVIDER_ATTEMPT_TIMEOU
 pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
     duration_ms(PROVIDER_PUBLICATION_REQUEST_BOUND);
 
-/// Maximum elapsed time from observing a tip to initiating its next numbered put.
-///
-/// A writer that commits again within this budget of its previous commit
-/// doesn't send a request to confirm its tip first.
-pub const WAL_PUBLISH_BUDGET_MS: u64 = 5 * 60 * 1000;
-
 /// Self-enforced budget for one metadata publication: a fold, a compaction
 /// step, a claim, a deletion, a fork installation, or a grep step.
 ///
@@ -202,31 +196,31 @@ pub const GC_SAFETY_MARGIN_MS: u64 = 5 * 60 * 1000;
 
 const _: () = assert!(GC_SAFETY_MARGIN_MS >= 1000);
 
-const fn max_u64(left: u64, right: u64) -> u64 {
-    if left > right {
-        left
-    } else {
-        right
-    }
-}
-
 /// Longest time, with the clock allowance, from the observation that a
 /// publication was planned against until the provider applies the
 /// publication's put.
 ///
-/// Every numbered put starts within a publication budget of the observation
-/// it was planned against, and the provider applies it within its request
-/// bound, so an object older than the longest budget plus the request bound
-/// plus the clock allowance was written before any put still in flight was
-/// planned. The grace window is at least this long. Collection roots only the
+/// Every manifest put starts within the publication budget of the start of
+/// its publication, and the provider applies it within its request bound, so
+/// an object older than the budget plus the request bound plus the clock
+/// allowance was written before any manifest put still in flight was planned.
+/// A WAL put has no budget, because no process deletes the fences and floor
+/// objects that a late WAL put collides with. The grace window is at least
+/// this long. Collection roots only the
 /// current manifest and the manifests that snapshots keep. A read whose
 /// manifest a newer one replaced can find a segment collected; it returns
 /// `stale_head` and is read again. A read that must outlive the current
 /// manifest takes a snapshot.
 pub const PUBLICATION_COMPLETION_BOUND_MS: u64 =
-    max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
-        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-        + GC_SAFETY_MARGIN_MS;
+    METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS;
+
+// 15 min publication budget + 5 min request bound + 5 min margin = 25 min.
+const _: () = assert!(PUBLICATION_COMPLETION_BOUND_MS == 1_500_000);
+const _: () = assert!(
+    PUBLICATION_COMPLETION_BOUND_MS
+        > METADATA_PUBLICATION_BUDGET_MS + PROVIDER_OPERATION_DEADLINE_MS,
+    "the bound keeps a margin above the budget plus the provider deadline"
+);
 
 pub use loonfs_types::limits::READ_REVALIDATION_BOUND_MS;
 
@@ -388,21 +382,3 @@ const _: () = assert!(MAX_CURRENT_FILES_PER_STAT as u64 == loonfs_types::MAX_PAG
 ///
 /// A content stream keeps at most one chunk of a file's bytes at a time.
 pub const CONTENT_READ_CHUNK_BYTES: NonZeroU64 = NonZeroU64::new(8 * 1024 * 1024).unwrap();
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn publication_completion_bound_keeps_a_margin_above_the_budget() {
-        // 15 min publication budget + 5 min request bound + 5 min margin
-        // = 25 min.
-        assert_eq!(PUBLICATION_COMPLETION_BOUND_MS, 1_500_000);
-        assert!(
-            PUBLICATION_COMPLETION_BOUND_MS
-                > max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
-                    + PROVIDER_OPERATION_DEADLINE_MS,
-            "the bound keeps a margin above budget plus provider deadline"
-        );
-    }
-}

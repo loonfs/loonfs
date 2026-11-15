@@ -9,7 +9,6 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
     store: &S,
     wal: &PreparedWalObject,
-    tip: &crate::time::Observation,
 ) -> crate::error::Result<()> {
     // Batch admission rejects a commit whose estimated size is over the limit,
     // so this fires only if the estimate is short for some request shape.
@@ -21,14 +20,6 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
     }
     let payload = wal.envelope().payload();
     let object_key = wal_object_key(&payload.namespace_id, &payload.wal_no);
-    let elapsed_ms = tip.age_ms();
-    if elapsed_ms > crate::limits::WAL_PUBLISH_BUDGET_MS {
-        return Err(WalPublishError::PublishBudgetExceeded {
-            elapsed_ms,
-            budget_ms: crate::limits::WAL_PUBLISH_BUDGET_MS,
-        }
-        .into());
-    }
     store.put_if_absent(&object_key, Bytes::copy_from_slice(wal.as_bytes())).await
         .map_err(|error| -> crate::error::CoreError {
             match error {
@@ -43,15 +34,6 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
                 }
             }
         })?;
-    let elapsed_ms = tip.age_ms();
-    // A put that is written after the budget may have been written at a reclaimed number.
-    if elapsed_ms > crate::limits::WAL_PUBLISH_BUDGET_MS {
-        return Err(WalPublishError::OutcomeUnknown(format!(
-            "publication budget exceeded after {elapsed_ms}ms (budget {}ms)",
-            crate::limits::WAL_PUBLISH_BUDGET_MS,
-        ))
-        .into());
-    }
     Ok(())
 }
 

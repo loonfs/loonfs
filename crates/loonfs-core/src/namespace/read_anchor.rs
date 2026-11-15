@@ -11,12 +11,10 @@ use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::{ensure_writer_not_fenced, AcquiredWriter};
 use crate::segment::MetadataSegmentCache;
-use crate::wal::{
-    discover_tail, wal_object_exists, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
-};
+use crate::wal::{discover_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
-use loonfs_types::{CommitSeq, ManifestNo, WalNo, WriterEpoch};
+use loonfs_types::{CommitSeq, ManifestNo, WriterEpoch};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -142,18 +140,45 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// change the writer epoch, so the anchor's head has the epoch of its
     /// manifest.
     ///
-    /// After the WAL tail above the manifest, the call checks the manifest:
-    /// a HEAD request for its successor, and then the boundary (see
-    /// [`Self::above_boundary`]). A successor, or a manifest at or below the
-    /// boundary, makes the call find the newest manifest from the boundary
-    /// and start again (format spec, "Replaying the visible WAL"). A
-    /// tombstone has no successor, so it isn't checked.
+    /// After the WAL tail above the manifest, the call checks the manifest
+    /// with [`Self::check_anchor_manifest`]. A successor, or a manifest at or
+    /// below the boundary, makes the call find the newest manifest from the
+    /// boundary and start again (format spec, "Replaying the visible WAL").
+    /// A tombstone has no successor, so it isn't checked.
     pub(crate) async fn load_read_anchor_from_manifest(
+        &self,
+        manifest: LoadedManifest,
+        boundary: Option<LoadedBoundary>,
+        observed: crate::time::Observation,
+        acquired_writer: Option<&AcquiredWriter>,
+    ) -> CoreResult<NamespaceReadAnchor> {
+        self.discover_read_anchor(manifest, boundary, observed, acquired_writer, true)
+            .await
+    }
+
+    /// Loads the anchor at `manifest` as
+    /// [`Self::load_read_anchor_from_manifest`] does, but sends no check of
+    /// the manifest after the WAL tail. A writer acquisition reads its fence's
+    /// tail this way and checks the manifest after the fence put, so the
+    /// anchor is never used before that check.
+    pub(crate) async fn load_unchecked_read_anchor(
+        &self,
+        manifest: LoadedManifest,
+        boundary: Option<LoadedBoundary>,
+        observed: crate::time::Observation,
+        acquired_writer: Option<&AcquiredWriter>,
+    ) -> CoreResult<NamespaceReadAnchor> {
+        self.discover_read_anchor(manifest, boundary, observed, acquired_writer, false)
+            .await
+    }
+
+    async fn discover_read_anchor(
         &self,
         mut manifest: LoadedManifest,
         mut boundary: Option<LoadedBoundary>,
         mut observed: crate::time::Observation,
         acquired_writer: Option<&AcquiredWriter>,
+        check_manifest: bool,
     ) -> CoreResult<NamespaceReadAnchor> {
         for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
             if let Some(acquired_writer) = acquired_writer {
@@ -166,26 +191,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
             match discover_tail(&self.store, &manifest).await {
                 Ok(DiscoveredTail { head: state, tail }) => {
-                    if !state.status.is_deleted() {
-                        let manifest_no = manifest.manifest().manifest_no;
-                        let mut newest = false;
-                        if !self.manifest_has_successor(manifest_no).await? {
-                            (newest, boundary) = self.above_boundary(manifest_no, boundary).await?;
-                        }
-                        if !newest {
-                            observed = observed.renew();
-                            PublicationBasis { manifest, boundary } =
-                                self.load_current_basis().await?;
-                            continue;
-                        }
-                    }
-                    return Ok(NamespaceReadAnchor {
+                    let mut anchor = NamespaceReadAnchor {
                         read_state: state,
                         manifest,
                         tail,
                         checked: observed,
                         boundary,
-                    });
+                    };
+                    if !check_manifest
+                        || anchor.read_state.status.is_deleted()
+                        || self.check_anchor_manifest(&mut anchor).await?
+                    {
+                        return Ok(anchor);
+                    }
+                    observed = anchor.checked.renew();
+                    PublicationBasis { manifest, boundary } = self.load_current_basis().await?;
                 }
                 Err(error @ ControlObjectLoadError::Codec { .. }) => {
                     observed = observed.renew();
@@ -201,6 +221,25 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Err(CoreError::contention_exhausted(&manifest.object_key))
     }
 
+    /// Returns whether the anchor's manifest is the newest: a HEAD request
+    /// for its successor, and when there is none, the manifest boundary (see
+    /// [`Self::above_boundary`]). The anchor keeps the boundary that the call
+    /// read.
+    pub(crate) async fn check_anchor_manifest(
+        &self,
+        anchor: &mut NamespaceReadAnchor,
+    ) -> CoreResult<bool> {
+        let manifest_no = anchor.manifest.manifest().manifest_no;
+        if self.manifest_has_successor(manifest_no).await? {
+            return Ok(false);
+        }
+        let newest;
+        (newest, anchor.boundary) = self
+            .above_boundary(manifest_no, anchor.boundary.take())
+            .await?;
+        Ok(newest)
+    }
+
     pub async fn manifest_has_successor(
         &self,
         manifest_no: ManifestNo,
@@ -209,32 +248,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             return Ok(false);
         };
         self.manifest_exists(next).await
-    }
-
-    /// Returns whether a WAL object exists at the number after `tip`, or the
-    /// manifest numbered `manifest_no` has a successor, which is a tip
-    /// confirmation (format spec, "Publication and group commit").
-    ///
-    /// The confirmation observes the tip in the order that discovery does: a
-    /// HEAD request for the WAL number after `tip`, and only after its
-    /// response, a HEAD request for the manifest number after
-    /// `manifest_no`. If an object had been created at the WAL number and
-    /// collected before the WAL response, a manifest that folded the object
-    /// was published before that response, so the manifest request finds
-    /// it. Sent together, the two requests would have no order, and that
-    /// manifest could be published between them. The manifest request isn't
-    /// sent when the WAL request finds an object.
-    pub(crate) async fn tip_has_successor(
-        &self,
-        tip: WalNo,
-        manifest_no: ManifestNo,
-    ) -> Result<bool, ControlObjectLoadError> {
-        if let Ok(next) = tip.successor() {
-            if wal_object_exists(&self.store, &self.namespace_id, next).await? {
-                return Ok(true);
-            }
-        }
-        self.manifest_has_successor(manifest_no).await
     }
 
     /// Returns the manifests above `basis`, oldest first, for a position at

@@ -72,7 +72,7 @@ Why a budget for each kind instead of one budget? With one budget, a scan that l
 
 ## What the format and API specs say
 
-The format's requirements don't cover caches, because the caches belong to the runtime. [Publication and group commit](../specs/format.md#63-publication-and-group-commit) describes the reference runtime: after a confirmation, the writer keeps its position along with the position's tail.
+The format's requirements don't cover caches, because the caches belong to the runtime. [Publication and group commit](../specs/format.md#63-publication-and-group-commit) describes the reference runtime: after a put, the writer keeps its position along with the position's tail.
 
 The API specification leaves caches to the implementation. The documentation that describes them says:
 

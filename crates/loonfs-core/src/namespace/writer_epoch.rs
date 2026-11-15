@@ -53,6 +53,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// a claim manifest with the next epoch, then writes a fence at the next WAL
     /// number (format spec, "Writer ownership").
     ///
+    /// After the fence put succeeds, the call checks the manifest that the
+    /// tail read loaded. The fence is live when that manifest is still the
+    /// newest, or when the fence's number is above the newest manifest's
+    /// `folded_wal_no`. A fence at or below that number may be at a number
+    /// that a collection emptied, so the call puts a fence again at the new
+    /// tip. A newest manifest with a higher writer epoch returns
+    /// `writer_fenced`.
+    ///
     /// A writer session acquires its epoch here before its first publication.
     /// The claim builds on the manifest of the namespace's cached head when no
     /// writer has claimed the namespace at that head (see
@@ -88,9 +96,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await?;
         let claim = update.current_manifest();
         let acquired = update.response;
-        let mut tip = clock.observe();
+        // The tail read before the fence put doesn't check the manifest: the
+        // check after the put does, and it also tells whether the fence is
+        // live.
         let mut anchor = self
-            .load_read_anchor_from_manifest(
+            .load_unchecked_read_anchor(
                 update.current.manifest,
                 update.current.boundary,
                 clock.origin(),
@@ -104,29 +114,55 @@ impl<S: ObjectStore> NamespaceStore<S> {
             let head = &anchor.read_state;
             super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
             let fence = prepare_fence(head, acquired.writer_epoch)?;
-            match publish_wal_object(&self.store, &fence, &tip).await {
+            match publish_wal_object(&self.store, &fence).await {
                 Ok(()) => {
-                    anchor.read_state = head.after_wal_object(fence.envelope().payload());
-                    anchor
-                        .tail
-                        .push_published(fence.envelope().clone(), fence.as_bytes().len());
-                    return Ok(WriterAcquisition {
-                        writer: acquired,
-                        claim,
-                        anchor,
-                    });
+                    let fenced_head = head.after_wal_object(fence.envelope().payload());
+                    if self.check_anchor_manifest(&mut anchor).await? {
+                        // The anchor's manifest is the newest, and the tail
+                        // was read above its `folded_wal_no`, so the fence is
+                        // live.
+                        anchor.read_state = fenced_head;
+                        anchor
+                            .tail
+                            .push_published(fence.envelope().clone(), fence.as_bytes().len());
+                        return Ok(WriterAcquisition {
+                            writer: acquired,
+                            claim,
+                            anchor,
+                        });
+                    }
+                    // A newer manifest. The fence is live when its number is
+                    // above the newest manifest's `folded_wal_no`, and the
+                    // anchor at that manifest then replays the fence.
+                    // Otherwise the put may have used a number that a
+                    // collection emptied, so the fence is dead, and the loop
+                    // puts a fence at the new tip (format spec, "Writer
+                    // ownership").
+                    anchor = self
+                        .load_writer_read_anchor(&acquired, clock.observe())
+                        .await?;
+                    let folded_wal_no = anchor.current_manifest().payload().folded_wal_no;
+                    if fenced_head.wal_no > folded_wal_no {
+                        super::control::ensure_namespace_live(
+                            &anchor.read_state.namespace_id,
+                            anchor.read_state.status,
+                        )?;
+                        return Ok(WriterAcquisition {
+                            writer: acquired,
+                            claim,
+                            anchor,
+                        });
+                    }
+                    clock.ensure_metadata_publication_budget(&self.namespace_id)?;
                 }
-                Err(CoreError::WalPublish(
-                    crate::wal::WalPublishError::NumberTaken
-                    | crate::wal::WalPublishError::PublishBudgetExceeded { .. },
-                )) => {}
+                Err(CoreError::WalPublish(crate::wal::WalPublishError::NumberTaken)) => {
+                    clock.ensure_metadata_publication_budget(&self.namespace_id)?;
+                    anchor = self
+                        .load_writer_read_anchor(&acquired, clock.observe())
+                        .await?;
+                }
                 Err(error) => return Err(error),
             }
-            clock.ensure_metadata_publication_budget(&self.namespace_id)?;
-            tip = clock.observe();
-            anchor = self
-                .load_writer_read_anchor(&acquired, clock.observe())
-                .await?;
         }
     }
 

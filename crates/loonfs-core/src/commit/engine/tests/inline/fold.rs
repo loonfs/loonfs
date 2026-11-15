@@ -189,15 +189,6 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
         assert_eq!(
             engine
                 .position
-                .projection_observed
-                .as_ref()
-                .expect("tip")
-                .age_ms(),
-            0
-        );
-        assert_eq!(
-            engine
-                .position
                 .current
                 .as_ref()
                 .expect("basis")
@@ -592,7 +583,6 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     .await
     .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-    let observed = engine.position.projection_observed.clone();
     engine.record_manifest_published(folded.manifest.clone());
     let position = engine.position.current.as_ref().expect("retained position");
     assert_eq!(
@@ -619,14 +609,6 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
                 .all(|(folded, cached)| Arc::ptr_eq(folded, cached)),
         "the fold tail shares the cached tail's chunks for the commits since the fold began"
     );
-    let retained = engine
-        .position
-        .projection_observed
-        .as_ref()
-        .expect("observation");
-    let observed = observed.expect("tip observation before the fold");
-    assert_eq!(retained.age_at(&observed), 0);
-    assert_eq!(observed.age_at(retained), 0);
     store.reset();
     let after = candidate("after", vec![inline(Bytes::from_static(b"after"))]);
     publish(&mut engine, &context, after)

@@ -180,11 +180,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// that the advance was planned from, exist. Each attempt then runs
     /// discovery, and when the view's floor is below `target`, puts a floor
     /// object at the number after the tip with put-if-absent, with the
-    /// writer epoch of the manifest that the attempt's discovery loaded and
-    /// within `WAL_PUBLISH_BUDGET_MS` of the discovery's start. A put that
-    /// finds the number taken, or that the budget refuses, starts the next
-    /// attempt, for at most `MAX_CONTENTION_ATTEMPTS` attempts, and the last
-    /// attempt's error is returned when every attempt failed. The call
+    /// writer epoch of the manifest that the attempt's discovery loaded.
+    /// After a put that succeeds, the attempt checks the discovery's manifest
+    /// for a newer one. The floor object is live when its number is above the
+    /// newest manifest's `folded_wal_no`. Otherwise the put may have used a
+    /// number that a collection emptied, so the floor object is dead (format
+    /// spec, "Advancing the retention floor"). A dead floor object, or a put
+    /// that finds the number taken, starts the next attempt, for at most
+    /// `MAX_CONTENTION_ATTEMPTS` attempts, and the last attempt's error is
+    /// returned when every attempt failed. The call
     /// claims no epoch and writes nothing when the view's floor is already
     /// at or above `target`. An unknown put outcome returns
     /// `outcome_unknown`, and a deleted namespace returns
@@ -207,7 +211,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<FloorObjectReport> {
         let mut last_error = None;
         for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
-            let anchor = self
+            let mut anchor = self
                 .load_live_read_anchor(Observation::now(Arc::clone(&self.timer)))
                 .await?;
             let head = &anchor.read_state;
@@ -219,25 +223,47 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 });
             }
             let floor_object = prepare_floor_object(head, head.writer_epoch, target)?;
-            match publish_wal_object(&self.store, &floor_object, &anchor.checked).await {
+            match publish_wal_object(&self.store, &floor_object).await {
                 Ok(()) => {
-                    return Ok(FloorObjectReport {
-                        retention_floor_seq: head
-                            .after_wal_object(floor_object.envelope().payload())
-                            .retention_floor_seq,
-                        manifest_retention_floor_seq,
-                    })
+                    let floored_head = head.after_wal_object(floor_object.envelope().payload());
+                    if self
+                        .floor_object_is_live(&mut anchor, &floored_head)
+                        .await?
+                    {
+                        return Ok(FloorObjectReport {
+                            retention_floor_seq: floored_head.retention_floor_seq,
+                            manifest_retention_floor_seq,
+                        });
+                    }
+                    // A collection may have emptied the number before the
+                    // put, so another publication took the number first.
+                    last_error = Some(WalPublishError::NumberTaken.into());
                 }
-                Err(
-                    error @ CoreError::WalPublish(
-                        WalPublishError::NumberTaken
-                        | WalPublishError::PublishBudgetExceeded { .. },
-                    ),
-                ) => last_error = Some(error),
+                Err(error @ CoreError::WalPublish(WalPublishError::NumberTaken)) => {
+                    last_error = Some(error);
+                }
                 Err(error) => return Err(error),
             }
         }
         Err(last_error.expect("every attempt should have failed with an error"))
+    }
+
+    /// Returns whether the floor object that `floored_head` ends with is
+    /// live: whether its WAL number is above the `folded_wal_no` of the
+    /// newest manifest after the put. The check first checks the manifest of
+    /// `anchor`, the discovery that the put was planned from. The tail was
+    /// read above that manifest's `folded_wal_no`, so when that manifest is
+    /// still the newest, the floor object is live.
+    async fn floor_object_is_live(
+        &self,
+        anchor: &mut crate::namespace::read_anchor::NamespaceReadAnchor,
+        floored_head: &crate::namespace::state::NamespaceReadState,
+    ) -> Result<bool> {
+        if self.check_anchor_manifest(anchor).await? {
+            return Ok(true);
+        }
+        let newest = self.load_current_basis().await?;
+        Ok(floored_head.wal_no > newest.manifest.payload().folded_wal_no)
     }
 }
 

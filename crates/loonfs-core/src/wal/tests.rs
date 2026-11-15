@@ -247,19 +247,21 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
     assert_eq!(current.payload().folded_wal_no, WalNo(2));
 }
 
+/// Checks that an acquisition whose fence puts keep colliding stops when
+/// the acquisition's publication budget runs out, and writes no fence.
 #[tokio::test]
-async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_acquisition_budget() {
+async fn fence_retries_end_with_the_acquisition_budget() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("slow-anchor").expect("namespace");
     let timer = Arc::new(ManualClock::new(0));
     let slow_listing = Arc::clone(&timer);
-    // Each anchor load lists manifest 1.
+    // Each load of the namespace lists manifest 1.
     let store = FailStore::new(
         MetadataMapStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::exact(metadata_manifest_object(&namespace_id, &ManifestNo(1))),
             move |metadata| {
-                slow_listing.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
+                slow_listing.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS / 3 + 1);
                 metadata
             },
         ),
@@ -272,7 +274,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
         .create()
         .await
         .expect("create");
-    store.fail_next(1);
+    store.fail_all();
     let error = crate::NamespaceStore {
         timer,
         ..crate::test_support::namespace_store(&store, &namespace_id)
@@ -284,7 +286,9 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
         error,
         crate::error::CoreError::MetadataPublicationBudgetExceeded { .. }
     );
-    assert_eq!(store.attempts(), 1);
+    // Each load of the namespace takes a third of the budget, so the budget
+    // runs out after the third collision.
+    assert_eq!(store.attempts(), 3);
     assert!(store
         .list_prefix(&wal_prefix(&namespace_id))
         .await
@@ -667,12 +671,12 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
 
 /// Checks that a collection keeps a floor object that a session's commit
 /// would otherwise reuse: a session with tip `t` stays idle while another
-/// process's floor object at `t + 1` ages past the grace window. While the
-/// session's tip confirmation waits for its WAL HEAD, another process folds
-/// the floor object and runs a collection, which keeps the floor object. So
-/// the session runs discovery and writes its commit at `t + 2`.
+/// process creates a floor object at `t + 1`, folds it, and runs a
+/// collection once the floor object is older than the grace window. The
+/// session's put at `t + 1` collides with the kept floor object, so the
+/// session runs discovery and writes its commit at `t + 2`.
 #[tokio::test]
-async fn a_confirmation_after_a_collection_finds_the_kept_floor_object() {
+async fn a_put_after_a_collection_collides_with_the_kept_floor_object() {
     use loonfs_test_support::stores::MetadataMapStore;
     let temp_dir = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("floor-gc").expect("namespace");
@@ -692,25 +696,6 @@ async fn a_confirmation_after_a_collection_finds_the_kept_floor_object() {
             metadata
         },
     );
-    // The recording store logs each request when its response arrives. The
-    // gate above it logs each manifest HEAD when the request is sent, and
-    // parks the next WAL HEAD when it's armed.
-    let store = RecordingStore::new(store, KeyPredicate::manifest(&namespace_id));
-    let sent_manifest_heads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let store = BlockingStore::matching(store, {
-        let sent_manifest_heads = Arc::clone(&sent_manifest_heads);
-        let wal = wal_prefix(&namespace_id);
-        let manifests = KeyPredicate::manifest(&namespace_id);
-        move |context| {
-            if !OperationSelector::Head.matches(context.kind()) {
-                return false;
-            }
-            if manifests.matches(context.key()) {
-                sent_manifest_heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            context.key().starts_with(&wal)
-        }
-    });
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
         .create()
         .await
@@ -737,60 +722,38 @@ async fn a_confirmation_after_a_collection_finds_the_kept_floor_object() {
         .head
         .wal_no;
     let floor_object = tip.successor().expect("next WAL number");
-    let namespace = crate::test_support::namespace_store(store.inner(), &namespace_id);
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let planned = namespace.load_current_manifest().await.expect("planned");
     namespace
         .publish_floor_object(&planned, CommitSeq(1))
         .await
         .expect("another process creates a floor object");
-
-    timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
-    store.inner().reset();
-    sent_manifest_heads.store(0, std::sync::atomic::Ordering::SeqCst);
-    store.block_next();
-    let (mut published, ()) = futures::join!(
-        engine.publish_batch(vec![directory("after")], &clock),
-        async {
-            store.wait_until_blocked().await;
-            // A manifest HEAD sent before the WAL response is answered here,
-            // before the fold, so it finds no successor.
-            for _ in 0..16 {
-                tokio::task::yield_now().await;
-            }
-            while sent_manifest_heads.load(std::sync::atomic::Ordering::SeqCst)
-                > store
-                    .inner()
-                    .snapshot()
-                    .iter()
-                    .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
-                    .count()
-            {
-                tokio::task::yield_now().await;
-            }
-            namespace.fold_wal().await.expect("fold the floor object");
-            let aged = WriterAt {
-                now_ms: grace + 1,
-                ..context(1_000)
-            };
-            namespace.gc(&aged.clock()).await.expect("collect the WAL");
-            assert!(store
-                .inner()
-                .head(&wal_object(&namespace_id, &floor_object))
-                .await
-                .expect("the floor object's number")
-                .is_some());
-            store.release();
-        }
-    );
-    published
-        .results
-        .remove(0)
-        .expect("the commit plans again after discovery");
+    namespace.fold_wal().await.expect("fold the floor object");
+    let aged = WriterAt {
+        now_ms: grace + 1,
+        ..context(1_000)
+    };
+    namespace.gc(&aged.clock()).await.expect("collect the WAL");
     assert!(store
         .head(&wal_object(&namespace_id, &floor_object))
         .await
-        .expect("the floor object")
+        .expect("the floor object's number")
         .is_some());
+
+    timer.advance_ms(60 * 60 * 1000);
+    let collided = engine.publish_batch(vec![directory("after")], &clock).await;
+    assert_matches!(
+        collided.results.as_slice(),
+        [Err(crate::error::CoreError::WalPublish(
+            crate::wal::WalPublishError::NumberTaken
+        ))]
+    );
+    engine
+        .publish_batch(vec![directory("after")], &clock)
+        .await
+        .results
+        .remove(0)
+        .expect("the commit plans again after discovery");
     assert_eq!(
         engine
             .writer_position()
@@ -998,80 +961,9 @@ async fn a_warm_probe_leaves_a_gap_in_the_wal_to_discovery_which_reports_corrupt
 }
 
 #[tokio::test]
-async fn fence_publication_enforces_the_wal_budget_before_the_put() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("fence-budget").expect("namespace");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(wal_prefix(&namespace_id)),
-    );
-    let head = crate::namespace::state::NamespaceReadState::initial(
-        namespace_id.clone(),
-        1_000,
-        loonfs_test_support::test_actor(),
-    );
-    let fence = super::prepare_fence(&head, WriterEpoch(1)).expect("fence");
-    let timer = std::sync::Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let expired = crate::time::Observation::now(timer.clone());
-    timer.advance_ms(1);
-    let boundary = crate::time::Observation::now(timer.clone());
-    timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS);
-    let error = super::publish_wal_object(&store, &fence, &expired)
-        .await
-        .expect_err("expired budget");
-    assert_eq!(error.code(), ErrorCode::StaleHead);
-    assert_eq!(store.counts().puts, 0);
-    super::publish_wal_object(&store, &fence, &boundary)
-        .await
-        .expect("budget boundary");
-    assert_eq!(store.counts().create_if_absent_puts, 1);
-}
-
-#[tokio::test]
-async fn a_wal_put_returning_after_its_budget_has_an_unknown_outcome() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("wal-return-budget").expect("namespace");
-    let timer = Arc::new(ManualClock::new(0));
-    let tip = crate::time::Observation::now(timer.clone());
-    let store = MetadataMapStore::new(
-        RecordingStore::new(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any(),
-        ),
-        KeyPredicate::prefix(wal_prefix(&namespace_id)),
-        move |metadata| {
-            timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
-            metadata
-        },
-    );
-    let head = crate::namespace::state::NamespaceReadState::initial(
-        namespace_id.clone(),
-        1_000,
-        loonfs_test_support::test_actor(),
-    );
-    let fence = super::prepare_fence(&head, WriterEpoch(1)).expect("fence");
-    let error = super::publish_wal_object(&store, &fence, &tip)
-        .await
-        .expect_err("late put must not acknowledge publication");
-    assert_matches!(
-        error,
-        crate::error::CoreError::WalPublish(crate::wal::WalPublishError::OutcomeUnknown(_))
-    );
-    assert_eq!(store.inner().counts().create_if_absent_puts, 1);
-    assert_eq!(store.inner().snapshot().len(), 1);
-    assert!(store
-        .inner()
-        .inner()
-        .head(&wal_object(&namespace_id, &WalNo(1)))
-        .await
-        .expect("written fence")
-        .is_some());
-}
-
-#[tokio::test]
 async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
     let temp_dir = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("sleep-budget").expect("namespace");
+    let namespace_id = NamespaceId::parse("sleep-fence").expect("namespace");
     let store_clock = ManualClock::new(0);
     let store = MetadataMapStore::aged(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1205,4 +1097,275 @@ async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
             .code(),
         ErrorCode::PathNotFound
     );
+}
+
+/// The store of [`acquire_over_an_emptied_number`]: a gate on the put at
+/// WAL number 3, over a store that reports every object as old.
+type EmptiedNumberStore = BlockingStore<MetadataMapStore<LocalFsStore>>;
+
+/// Runs a new writer session's acquisition whose fence put at WAL number 3
+/// a gate parks. While the put waits, the older session commits at 3 and 4,
+/// a fold covers both commits, and a collection deletes them, so the fence
+/// put succeeds at a number that a collection emptied. With `newer_claim`,
+/// a third session claims the next epoch and puts its fence at 5 before the
+/// fold.
+async fn acquire_over_an_emptied_number(
+    newer_claim: bool,
+) -> (
+    tempfile::TempDir,
+    EmptiedNumberStore,
+    NamespaceId,
+    crate::error::Result<crate::namespace::writer_epoch::WriterAcquisition>,
+) {
+    let temp_dir = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("emptied-number").expect("namespace");
+    let blocked = BlockingStore::new(
+        MetadataMapStore::aged(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::any(),
+        ),
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let setup = context(1_000);
+    let acquired = {
+        let store = blocked.inner();
+        crate::test_support::NamespaceFixture::new(store, &namespace_id, &setup)
+            .create()
+            .await
+            .expect("create");
+        let mut older = NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(store, &namespace_id),
+            setup.writer_id.clone(),
+        );
+        older
+            .publish_batch([directory("before")], &setup.clock())
+            .await
+            .results
+            .remove(0)
+            .expect("the older session commits at 2");
+        assert_eq!(
+            older
+                .writer_position()
+                .expect("a position")
+                .read_basis
+                .head
+                .wal_no,
+            WalNo(2)
+        );
+        blocked.block_next();
+        let newer = crate::test_support::namespace_store(&blocked, &namespace_id);
+        let newer_writer = WriterId::parse("writer-b").expect("writer");
+        let (acquired, ()) = futures::join!(newer.acquire_writer(&newer_writer), async {
+            blocked.wait_until_blocked().await;
+            for name in ["during-one", "during-two"] {
+                older
+                    .publish_batch([directory(name)], &setup.clock())
+                    .await
+                    .results
+                    .remove(0)
+                    .expect("the older session commits before the fence");
+            }
+            let namespace = crate::test_support::namespace_store(store, &namespace_id);
+            if newer_claim {
+                namespace
+                    .acquire_writer(&WriterId::parse("writer-c").expect("writer"))
+                    .await
+                    .expect("a third session claims the next epoch");
+            }
+            namespace.fold_wal().await.expect("fold the commits");
+            namespace
+                .gc(&WriterAt {
+                    now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+                    ..setup.clone()
+                }
+                .clock())
+                .await
+                .expect("collect the folded commits");
+            assert!(store
+                .head(&wal_object(&namespace_id, &WalNo(3)))
+                .await
+                .expect("head")
+                .is_none());
+            blocked.release();
+        });
+        acquired
+    };
+    (temp_dir, blocked, namespace_id, acquired)
+}
+
+/// Returns the writer epoch of the fence at `wal_no`.
+async fn fence_epoch<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    wal_no: WalNo,
+) -> WriterEpoch {
+    let fence = decode_wal_object_envelope_zstd(
+        &store
+            .get(&wal_object(namespace_id, &wal_no), None)
+            .await
+            .expect("get")
+            .expect("fence"),
+    )
+    .expect("decode fence");
+    assert!(fence.payload().records.is_empty());
+    fence.payload().writer_epoch
+}
+
+/// Checks that a fence put at a number that a collection emptied is dead:
+/// the check after the put finds the fold's `folded_wal_no` at or above the
+/// fence, so the session puts a fence again at the new tip, and that fence
+/// is the tip of the acquired anchor. The dead fence stays.
+#[tokio::test]
+async fn a_fence_at_an_emptied_number_is_dead_and_the_session_fences_again() {
+    let (_temp_dir, store, namespace_id, acquired) = acquire_over_an_emptied_number(false).await;
+    let acquired = acquired.expect("the session is acquired");
+    assert_eq!(acquired.writer.writer_epoch, WriterEpoch(2));
+    assert_eq!(acquired.anchor.read_state.wal_no, WalNo(5));
+    assert_eq!(
+        fence_epoch(&store, &namespace_id, WalNo(3)).await,
+        WriterEpoch(2)
+    );
+    assert_eq!(
+        fence_epoch(&store, &namespace_id, WalNo(5)).await,
+        WriterEpoch(2)
+    );
+}
+
+/// Checks that the check after a fence put applies the writer ownership
+/// rule: a newest manifest with a higher writer epoch than the claim means
+/// that another session claimed since, so the acquisition returns
+/// `writer_fenced`.
+#[tokio::test]
+async fn a_newer_claim_at_the_check_after_the_fence_fences_the_session() {
+    let (_temp_dir, _store, _namespace_id, acquired) = acquire_over_an_emptied_number(true).await;
+    let error = acquired.expect_err("a newer session claimed");
+    assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
+}
+
+/// Checks that an acquisition sends one manifest successor check, after the
+/// fence put: the tail read before the fence doesn't check the manifest.
+#[tokio::test]
+async fn an_acquisition_checks_its_manifest_once_after_the_fence_put() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("one-check").expect("namespace");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+        .create()
+        .await
+        .expect("create");
+    store.reset();
+    let acquired = crate::test_support::namespace_store(&store, &namespace_id)
+        .acquire_writer(&context(1_000).writer_id)
+        .await
+        .expect("acquire");
+    assert_eq!(acquired.anchor.read_state.wal_no, WalNo(1));
+    let operations = store.take();
+    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
+    let fence_put = operations
+        .iter()
+        .position(|operation| {
+            matches!(operation, RecordedOperation::Put { key, .. } if key.starts_with(&wal_prefix(&namespace_id)))
+        })
+        .expect("the fence put");
+    let checks = operations
+        .iter()
+        .enumerate()
+        .filter(|(_, operation)| {
+            matches!(operation, RecordedOperation::Head { key } if key.starts_with(&manifests))
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(checks.as_slice(), [check] if *check > fence_put),
+        "{operations:?}"
+    );
+}
+
+/// Checks that a floor object that a process without the writer epoch puts
+/// at a number that a collection emptied is dead: the check after the put
+/// finds the fold's `folded_wal_no` at or above the floor object, so the
+/// next attempt discovers again and puts the floor object at the new tip.
+#[tokio::test]
+async fn a_floor_object_at_an_emptied_number_is_dead_and_the_next_attempt_puts_again() {
+    let temp_dir = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("emptied-floor").expect("namespace");
+    let blocked = BlockingStore::new(
+        MetadataMapStore::aged(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::any(),
+        ),
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let store = blocked.inner();
+    let setup = context(1_000);
+    crate::test_support::NamespaceFixture::new(store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("create");
+    let mut writer = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, &namespace_id),
+        setup.writer_id.clone(),
+    );
+    writer
+        .publish_batch([directory("before")], &setup.clock())
+        .await
+        .results
+        .remove(0)
+        .expect("the session commits at 2");
+    let advancer = crate::test_support::namespace_store(&blocked, &namespace_id);
+    let planned = advancer.load_current_manifest().await.expect("planned");
+    blocked.block_next();
+    let (report, ()) = futures::join!(
+        advancer.publish_floor_object(&planned, CommitSeq(1)),
+        async {
+            blocked.wait_until_blocked().await;
+            for name in ["during-one", "during-two"] {
+                writer
+                    .publish_batch([directory(name)], &setup.clock())
+                    .await
+                    .results
+                    .remove(0)
+                    .expect("the session commits at the floor object's number");
+            }
+            let namespace = crate::test_support::namespace_store(store, &namespace_id);
+            namespace.fold_wal().await.expect("fold the commits");
+            namespace
+                .gc(&WriterAt {
+                    now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+                    ..setup.clone()
+                }
+                .clock())
+                .await
+                .expect("collect the folded commits");
+            blocked.release();
+        }
+    );
+    let report = report.expect("the advance");
+    assert_eq!(report.retention_floor_seq, CommitSeq(1));
+    for wal_no in [WalNo(3), WalNo(5)] {
+        let floor_object = decode_wal_object_envelope_zstd(
+            &store
+                .get(&wal_object(&namespace_id, &wal_no), None)
+                .await
+                .expect("get")
+                .expect("floor object"),
+        )
+        .expect("decode floor object");
+        assert_eq!(
+            floor_object.payload().retention_floor_seq,
+            Some(CommitSeq(1)),
+            "{wal_no:?}"
+        );
+    }
+    let head = crate::test_support::namespace_store(store, &namespace_id)
+        .load_read_state()
+        .await
+        .expect("head");
+    assert_eq!(head.wal_no, WalNo(5));
+    assert_eq!(head.retention_floor_seq, CommitSeq(1));
 }
