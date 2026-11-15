@@ -9,6 +9,7 @@ use crate::namespace::boundary::LoadedBoundary;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
+use crate::namespace::writer_epoch::{ensure_writer_not_fenced, AcquiredWriter};
 use crate::segment::MetadataSegmentCache;
 use crate::wal::{
     discover_tail, wal_object_exists, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
@@ -74,8 +75,27 @@ impl<S: ObjectStore> NamespaceStore<S> {
         observed: crate::time::Observation,
     ) -> CoreResult<NamespaceReadAnchor> {
         let current = self.load_current_basis().await?;
-        self.load_read_anchor_from_manifest(current.manifest, current.boundary, observed)
+        self.load_read_anchor_from_manifest(current.manifest, current.boundary, observed, None)
             .await
+    }
+
+    /// Loads the read anchor that the writer session of `acquired_writer`
+    /// publishes from. Each manifest that the load finds is checked for the
+    /// session's writer epoch before the WAL tail above it is read, so a
+    /// fenced session fails with `writer_fenced` without reading the tail.
+    pub(crate) async fn load_writer_read_anchor(
+        &self,
+        acquired_writer: &AcquiredWriter,
+        observed: crate::time::Observation,
+    ) -> CoreResult<NamespaceReadAnchor> {
+        let current = self.load_current_basis().await?;
+        self.load_read_anchor_from_manifest(
+            current.manifest,
+            current.boundary,
+            observed,
+            Some(acquired_writer),
+        )
+        .await
     }
 
     /// Loads the read anchor of a namespace that is not deleted.
@@ -116,6 +136,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads the read anchor at `manifest`, where `boundary` is the manifest
     /// boundary as the caller last read it.
     ///
+    /// With `acquired_writer`, the call checks the writer epoch of each
+    /// manifest before it reads the WAL tail above that manifest, and fails
+    /// with `writer_fenced` at a manifest of another epoch. Replay doesn't
+    /// change the writer epoch, so the anchor's head has the epoch of its
+    /// manifest.
+    ///
     /// After the WAL tail above the manifest, the call checks the manifest:
     /// a HEAD request for its successor, and then the boundary (see
     /// [`Self::above_boundary`]). A successor, or a manifest at or below the
@@ -127,8 +153,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         mut manifest: LoadedManifest,
         mut boundary: Option<LoadedBoundary>,
         mut observed: crate::time::Observation,
+        acquired_writer: Option<&AcquiredWriter>,
     ) -> CoreResult<NamespaceReadAnchor> {
         for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
+            if let Some(acquired_writer) = acquired_writer {
+                let payload = manifest.payload();
+                ensure_writer_not_fenced(
+                    payload.writer_epoch,
+                    payload.writer.as_ref(),
+                    acquired_writer,
+                )?;
+            }
             match discover_tail(&self.store, &manifest).await {
                 Ok(DiscoveredTail { head: state, tail }) => {
                     if !state.status.is_deleted() {

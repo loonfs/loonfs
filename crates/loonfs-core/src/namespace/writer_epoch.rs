@@ -5,7 +5,6 @@ use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::{PublicationReport, PublishedManifest};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
-use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::wal::{prepare_fence, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
@@ -89,6 +88,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 update.current.manifest,
                 update.current.boundary,
                 clock.origin(),
+                Some(&acquired),
             )
             .await?;
         // Only the publication budget bounds this loop, because a lost fence race means the
@@ -96,7 +96,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // caller publish another epoch.
         loop {
             let head = &anchor.read_state;
-            ensure_writer_not_fenced(head, &acquired)?;
             super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
             let fence = prepare_fence(head, acquired.writer_epoch)?;
             match publish_wal_object(&self.store, &fence, &tip).await {
@@ -119,21 +118,27 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
             clock.ensure_metadata_publication_budget(&self.namespace_id)?;
             tip = clock.observe();
-            anchor = self.load_read_anchor(clock.observe()).await?;
+            anchor = self
+                .load_writer_read_anchor(&acquired, clock.observe())
+                .await?;
         }
     }
 }
 
+/// Fails with `writer_fenced` when `active_epoch`, the writer epoch of a
+/// manifest or a head, isn't the epoch of `acquired_writer`. `active_writer`
+/// is the writer block that the manifest or head records.
 pub(crate) fn ensure_writer_not_fenced(
-    head: &NamespaceReadState,
+    active_epoch: WriterEpoch,
+    active_writer: Option<&WriterBlock>,
     acquired_writer: &AcquiredWriter,
 ) -> Result<()> {
-    if head.writer_epoch == acquired_writer.writer_epoch {
+    if active_epoch == acquired_writer.writer_epoch {
         return Ok(());
     }
     Err(CoreError::WriterFenced(WriterFence {
         fenced_epoch: acquired_writer.writer_epoch,
-        active_epoch: head.writer_epoch,
-        active_writer: head.writer.clone(),
+        active_epoch,
+        active_writer: active_writer.cloned(),
     }))
 }

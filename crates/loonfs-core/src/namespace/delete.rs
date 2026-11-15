@@ -55,7 +55,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     None => self.load_read_anchor(clock.observe()).await?.read_state,
                 };
                 super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
-                ensure_writer_not_fenced(&head, acquired_writer)?;
+                ensure_writer_not_fenced(head.writer_epoch, head.writer.as_ref(), acquired_writer)?;
                 if let Some(expected) = options.expected_head_seq {
                     if head.seq != expected {
                         return Err(CoreError::StaleHeadPrecondition {
