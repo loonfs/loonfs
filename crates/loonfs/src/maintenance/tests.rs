@@ -823,11 +823,13 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     // its find returns. It lists each of its five families once, the
     // snapshots included, and a collection of a retired
     // namespace lists the namespace's prefix once. Neither lists anything
-    // under its pool's prefix.
+    // under its pool's prefix. The live namespaces' manifests are in the
+    // segment cache from the setup's folds and collections in this runtime,
+    // so neither the load nor the collection sends a GET for a manifest.
     let heads = 1;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [5, heads, 1, 0], None, [3, 0, 6, 0], None),
-        (&claimed, [5, heads, 1, 0], None, [3, 0, 6, 0], None),
+        (&idle, [4, heads, 1, 0], None, [2, 0, 6, 0], None),
+        (&claimed, [4, heads, 1, 0], None, [2, 0, 6, 0], None),
         (
             &retired,
             [1, 0, 0, 0],

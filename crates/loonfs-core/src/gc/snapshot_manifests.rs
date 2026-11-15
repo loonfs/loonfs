@@ -4,7 +4,6 @@
 
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
-use crate::manifest::load_namespace_manifest_envelope_if_present;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::snapshot::record::snapshot_record_key_ids;
@@ -17,7 +16,6 @@ use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::format::control::SnapshotPayload;
 use loonfs_types::{ManifestNo, NamespaceId};
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 /// One key that a listing of a namespace's snapshots returned, with what the
 /// listing read of a snapshot's own record: the record for the namespace's
@@ -149,20 +147,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .boxed()
     }
 
-    /// Loads one root manifest, or returns `None` when the manifest is missing.
+    /// Loads one root manifest through the segment cache, or returns `None`
+    /// when the manifest is missing.
     async fn load_root_manifest(&self, manifest_no: ManifestNo) -> Result<Option<LoadedManifest>> {
-        let envelope = load_namespace_manifest_envelope_if_present(
-            &self.store,
-            &self.namespace_id,
-            &manifest_no,
-        )
-        .await
-        .map_err(MetadataProjectionLoadError::from)?;
-        Ok(envelope.map(|(envelope, manifest_bytes)| LoadedManifest {
-            object_key: metadata_manifest_object(&self.namespace_id, &manifest_no),
-            manifest_bytes,
-            envelope: Arc::new(envelope),
-        }))
+        Ok(self
+            .load_manifest_if_present(manifest_no)
+            .await
+            .map_err(MetadataProjectionLoadError::from)?)
     }
 }
 

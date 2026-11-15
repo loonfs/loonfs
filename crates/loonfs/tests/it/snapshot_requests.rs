@@ -85,15 +85,15 @@ impl Fixture {
 }
 
 /// Checks that after a fold, each snapshot creation on the writer's runtime
-/// costs 4 store requests, each read at a snapshot costs 3, and each
+/// costs 3 store requests, each read at a snapshot costs 3, and each
 /// deletion costs 2, whichever fold folded the tail.
 ///
 /// A creation folds from the session's position and finds nothing to fold,
 /// so it writes the snapshot and then verifies it: it loads the snapshot's
-/// manifest and checks that the manifest is still the newest with one HEAD
-/// for a successor and a read of the manifest boundary (4 requests). The
-/// fold's manifest is in the segment cache from its publication, so the first
-/// creation after an explicit fold costs the same.
+/// manifest from the segment cache and checks that the manifest is still the
+/// newest with one HEAD for a successor and a read of the manifest boundary
+/// (3 requests). The fold's manifest is in the segment cache from its
+/// publication, so the first creation after an explicit fold costs the same.
 /// A read at a snapshot checks the writer position's manifest with one HEAD
 /// for a successor and a read of the manifest boundary, and loads the
 /// snapshot, and the segments of the
@@ -115,7 +115,7 @@ async fn snapshot_calls_after_a_fold_cost_a_snapshot_record_and_its_verification
                 .await;
             snapshots.push(created.expect("create").snapshot_id);
             fixture.namespace.wait_for_fold().await.expect("settle");
-            fixture.assert_requests(&format!("{fold:?}: create {index}"), 4);
+            fixture.assert_requests(&format!("{fold:?}: create {index}"), 3);
         }
         let reader = fixture.namespace.read_only();
         for (index, snapshot) in snapshots.iter().enumerate() {
@@ -135,7 +135,7 @@ async fn snapshot_calls_after_a_fold_cost_a_snapshot_record_and_its_verification
 }
 
 /// Checks that creating a snapshot of a namespace with 32 fork snapshots costs
-/// the same 4 store requests as creating one with none, so the cost doesn't
+/// the same 3 store requests as creating one with none, so the cost doesn't
 /// grow with the number of snapshots. The forks keep the runtime's view of
 /// the source, so the snapshot after them starts warm, like the ones before.
 ///
@@ -143,7 +143,7 @@ async fn snapshot_calls_after_a_fold_cost_a_snapshot_record_and_its_verification
 /// write, which loads every snapshot twice, would add at least 64 requests
 /// to this call.)
 #[tokio::test]
-async fn a_snapshot_of_a_namespace_with_32_fork_snapshots_costs_4_requests() {
+async fn a_snapshot_of_a_namespace_with_32_fork_snapshots_costs_3_requests() {
     for fold in [Fold::Session, Fold::Explicit] {
         let fixture = fixture(fold).await;
         let actor = loonfs_test_support::test_actor();
@@ -166,6 +166,6 @@ async fn a_snapshot_of_a_namespace_with_32_fork_snapshots_costs_4_requests() {
             .await;
         created.expect("create");
         fixture.namespace.wait_for_fold().await.expect("settle");
-        fixture.assert_requests(&format!("{fold:?}: create with 32 fork snapshots"), 4);
+        fixture.assert_requests(&format!("{fold:?}: create with 32 fork snapshots"), 3);
     }
 }

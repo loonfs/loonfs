@@ -42,6 +42,7 @@ use std::assert_matches;
 use tempfile::tempdir;
 
 mod boundary;
+mod cached_manifests;
 mod concurrent_retirement;
 mod extension_segments;
 mod fork_chain;

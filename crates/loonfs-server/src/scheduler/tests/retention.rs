@@ -35,9 +35,9 @@ const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
 
 /// Requests the advance costs in a sweep of an idle namespace whose floor
 /// already reached its cutoff, or that has no window: the find of the
-/// current manifest, and no read of the WAL. The self-hosting guide quotes
-/// this number.
-const IDLE_ADVANCE_REQUESTS: usize = 4;
+/// current manifest, which an earlier sweep loaded into the segment cache, and
+/// no read of the WAL. The self-hosting guide quotes this number.
+const IDLE_ADVANCE_REQUESTS: usize = 3;
 
 /// A config with every default, and `window_ms` as its retention window.
 pub(super) fn retention_config(window_ms: Option<u64>) -> ServerConfig {

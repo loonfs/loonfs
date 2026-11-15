@@ -1366,7 +1366,14 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .await
         .expect("fold");
     runtime.writer.drain().await.expect("drain");
+    // The reader keeps no manifest, so the captured view reads its manifest
+    // from the store again, and the injected failure reaches that read.
     let reader = loonfs::LoonFs::builder_with_store(store.clone())
+        .metadata_cache(
+            loonfs::MetadataCache::builder()
+                .max_manifest_bytes(0)
+                .build(),
+        )
         .read_only()
         .build()
         .await

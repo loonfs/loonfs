@@ -128,6 +128,17 @@ async fn takeover(
     }
 }
 
+/// The request with which a read's check in A's runtime reaches B's claim.
+#[derive(Debug, Clone, Copy)]
+enum ClaimRequest {
+    /// The check's walk loads the claim from the store.
+    Get,
+    /// The check's HEAD for a successor finds the claim, and the walk loads
+    /// the claim from the segment cache, because a fold in A's runtime loaded
+    /// the claim first.
+    Head,
+}
+
 impl Takeover {
     /// Opens writer B over the shared store, or over `gate` when given.
     async fn peer(&self, gate: Option<Gate>) -> LoonFs<Writable> {
@@ -329,15 +340,20 @@ impl Takeover {
     }
 
     /// Reads `/b` in A's runtime while A's commit waits, and releases the
-    /// commit once the read's check has walked to B's claim at `claim`, so
-    /// the check's drop of A's position waits for A's commit.
-    async fn read_past_the_claim(&self, claim: ManifestNo) {
+    /// commit once the read's check has walked to B's claim at `claim` with
+    /// `reached`, so the check's drop of A's position waits for A's commit.
+    async fn read_past_the_claim(&self, claim: ManifestNo, reached: ClaimRequest) {
         self.recording.reset();
         let (entry, ()) = futures::join!(self.reader.stat("/b"), async {
             let claim =
                 loonfs_objectstore::keys::metadata_manifest_object(&self.namespace_id, &claim);
-            crate::common::wait_for_operation(&self.recording, |operation| {
-                matches!(operation, RecordedOperation::Get { key, .. } if *key == claim)
+            crate::common::wait_for_operation(&self.recording, |operation| match reached {
+                ClaimRequest::Get => {
+                    matches!(operation, RecordedOperation::Get { key, .. } if *key == claim)
+                }
+                ClaimRequest::Head => {
+                    matches!(operation, RecordedOperation::Head { key } if *key == claim)
+                }
             })
             .await;
             self.gate.release();
@@ -377,7 +393,7 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
                 fixture.peer_commits().await;
                 let claim = fixture.current_manifest_no().await;
                 assert!(claim > before.successor().expect("A's own manifest"));
-                fixture.read_past_the_claim(claim).await;
+                fixture.read_past_the_claim(claim, ClaimRequest::Get).await;
             });
             assert!(fixture.current_manifest_no().await > own);
         })
@@ -390,8 +406,10 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
 ///
 /// B claims the namespace while A's commit waits at its WAL put, and then a
 /// fold through A's maintenance folds over B's claim, so A's own manifest
-/// follows B's claim. The read's check finds B's claim right after A's
-/// position, and drops the position once A's commit releases the engine.
+/// follows B's claim. The fold loads B's claim, so the claim is in the
+/// segment cache. The read's check finds B's claim right after A's position
+/// with its HEAD for a successor, loads the claim from the segment cache, and
+/// drops the position once A's commit releases the engine.
 #[tokio::test]
 async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
     let fixture = takeover("claim-below-own", parked_commits, None).await;
@@ -401,7 +419,7 @@ async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
             let claim = fixture.current_manifest_no().await;
             let (own, ()) = futures::join!(fixture.maintenance_fold(), async {
                 fixture.wait_for_manifest_after(claim).await;
-                fixture.read_past_the_claim(claim).await;
+                fixture.read_past_the_claim(claim, ClaimRequest::Head).await;
             });
             assert!(own > claim);
         })

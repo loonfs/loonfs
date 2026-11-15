@@ -134,11 +134,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Each attempt reads the boundary, and the call returns
     /// [`NewestManifest::Retired`] when the boundary is retired. Otherwise
     /// the attempt lists the manifests numbered above the boundary, loads the
-    /// highest-numbered manifest in the listing, and reads the boundary
-    /// again. That manifest is the newest when it's still above the
-    /// boundary. The attempt starts again when the manifest is gone by its
-    /// load or is at or below the boundary by the second read, and when the
-    /// listing is empty and the boundary changed. An empty listing under an
+    /// highest-numbered manifest in the listing through the segment cache,
+    /// and reads the boundary again. That manifest is the newest when it's
+    /// still above the boundary, so a cached manifest that a collection
+    /// deleted is never returned. The attempt starts again when the manifest
+    /// is gone by its load or is at or below the boundary by the second read,
+    /// and when the listing is empty and the boundary changed. An empty
+    /// listing under an
     /// unchanged missing boundary means that no namespace has the ID, and
     /// under an unchanged boundary object it means a corrupt store, because
     /// a collection never leaves a namespace without a manifest above its
@@ -202,7 +204,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// of the next [`MANIFEST_PROBE_WINDOW`] numbers at once and takes the
     /// highest number that exists, and when that number is the last of its
     /// window, it probes the next window above it. The call then loads the
-    /// manifest at the highest number found with one GET, and checks it against
+    /// manifest at the highest number found through the segment cache, with
+    /// one GET when the cache doesn't keep it, and checks it against
     /// `previous` without the manifests in between. The call returns `None` too
     /// if that manifest is gone by the GET.
     pub(crate) async fn find_newest_manifest_above(
@@ -279,38 +282,30 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .is_some())
     }
 
+    /// Loads the manifest numbered `manifest_no` through the segment cache, or
+    /// returns `None` when the store doesn't have the manifest (see
+    /// [`Self::load_manifest_if_present`]).
     pub(crate) async fn load_manifest_by_no(
         &self,
         manifest_no: loonfs_types::ManifestNo,
     ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
-        let object_key =
-            loonfs_objectstore::keys::metadata_manifest_object(&self.namespace_id, &manifest_no);
-        let envelope = crate::manifest::load_namespace_manifest_envelope_if_present(
-            &self.store,
-            &self.namespace_id,
-            &manifest_no,
-        )
-        .await
-        .map_err(|error| match error {
-            crate::manifest::ManifestLoadError::ReadManifest {
-                object_key,
-                message,
-                kind,
-            } => ControlObjectLoadError::Store {
-                object_key,
-                message,
-                kind,
-            },
-            error => ControlObjectLoadError::Codec {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-            },
-        })?;
-        Ok(envelope.map(|(envelope, manifest_bytes)| LoadedManifest {
-            object_key,
-            manifest_bytes,
-            envelope: Arc::new(envelope),
-        }))
+        self.load_manifest_if_present(manifest_no)
+            .await
+            .map_err(|error| match error {
+                crate::manifest::ManifestLoadError::ReadManifest {
+                    object_key,
+                    message,
+                    kind,
+                } => ControlObjectLoadError::Store {
+                    object_key,
+                    message,
+                    kind,
+                },
+                error => ControlObjectLoadError::Codec {
+                    object_key: metadata_manifest_object(&self.namespace_id, &manifest_no),
+                    message: error.to_string(),
+                },
+            })
     }
 
     pub async fn load_read_state(&self) -> crate::error::Result<NamespaceReadState> {
