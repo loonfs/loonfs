@@ -19,9 +19,7 @@ use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
 use loonfs_types::options::DeleteNamespaceOptions;
-use loonfs_types::{
-    Commit, CommitId, CommitSeq, DeleteNamespaceResponse, ManifestNo, NamespaceId, WalNo, WriterId,
-};
+use loonfs_types::{Commit, CommitId, CommitSeq, DeleteNamespaceResponse, NamespaceId, WriterId};
 use std::sync::{Arc, Mutex};
 
 mod candidate;
@@ -107,7 +105,6 @@ pub struct NamespaceCommitEngine<S> {
 #[derive(Debug)]
 struct PositionState {
     current: Option<WriterPosition>,
-    projection_observed: Option<Observation>,
     acquired_anchor: Option<NamespaceReadAnchor>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionStatus`].
@@ -123,7 +120,6 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             writer_id,
             position: PositionState {
                 current: None,
-                projection_observed: None,
                 acquired_anchor: None,
                 session: SharedWriterSessionStatus::default(),
             },
@@ -327,15 +323,14 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// The call first checks that the segments of `planned`, the manifest
     /// that the advance was planned from, exist. A session with its writer
     /// epoch puts the floor object at the number after its position's tip,
-    /// after the same tip confirmation that a commit's put gets, and within
-    /// `WAL_PUBLISH_BUDGET_MS` of the tip observation. The position then
+    /// as it puts a commit, with no check after the put. The position then
     /// replays the floor object, so its tip is the floor object's number and
     /// its floor is raised. A session without its writer epoch has no
     /// position, so it creates the floor object as a process without a
     /// session does (see [`NamespaceStore::publish_floor_object`]), and the
     /// advance claims no epoch. A session that discovery finds fenced does
-    /// the same, and so does a session whose put finds the number taken or
-    /// is refused by the budget, after the put drops the position. The call
+    /// the same, and so does a session whose put finds the number taken,
+    /// after the put drops the position. The call
     /// writes nothing when the view's floor is already at or above `target`.
     pub async fn publish_floor_object(
         &mut self,
@@ -370,9 +365,9 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .publish_floor_object_against(namespace, loaded, target)
             .await
         {
-            Err(CoreError::WalPublish(
-                WalPublishError::NumberTaken | WalPublishError::PublishBudgetExceeded { .. },
-            )) => namespace.publish_floor_object_at_tip(target).await,
+            Err(CoreError::WalPublish(WalPublishError::NumberTaken)) => {
+                namespace.publish_floor_object_at_tip(target).await
+            }
             result => result,
         }
     }
@@ -422,49 +417,6 @@ impl PositionState {
     fn invalidate_projection(&mut self) {
         self.current = None;
         self.acquired_anchor = None;
-        self.projection_observed = None;
-    }
-
-    /// The position's tip and basis manifest when they need a tip
-    /// confirmation, either because the basis's last confirmation expired or
-    /// because the tip observation expired.
-    fn unconfirmed_tip(
-        &self,
-        attempt: &Observation,
-        tip_expired: bool,
-    ) -> Option<(WalNo, ManifestNo)> {
-        let position = self.current.as_ref()?;
-        let confirmed_recently = !tip_expired
-            && position.basis_checked.age_at(attempt) <= crate::limits::WAL_PUBLISH_BUDGET_MS;
-        (!confirmed_recently).then(|| {
-            (
-                position.read_basis.head.wal_no,
-                position.read_basis.basis.manifest_no(),
-            )
-        })
-    }
-
-    /// Returns whether the position's tip and basis are current: no WAL
-    /// object after `tip`, no manifest after `manifest_no`, and `manifest_no`
-    /// above the manifest boundary. The position keeps the boundary that the
-    /// call read.
-    async fn confirm_tip<S: ObjectStore>(
-        &mut self,
-        namespace: &NamespaceStore<S>,
-        tip: WalNo,
-        manifest_no: ManifestNo,
-    ) -> Result<bool> {
-        if namespace.tip_has_successor(tip, manifest_no).await? {
-            return Ok(false);
-        }
-        let Some(position) = self.current.as_mut() else {
-            return Ok(false);
-        };
-        let above;
-        (above, position.boundary) = namespace
-            .above_boundary(manifest_no, position.boundary.take())
-            .await?;
-        Ok(above)
     }
 
     /// Records that the session found its namespace deleted or missing, when
@@ -532,41 +484,6 @@ impl PositionState {
         let attempt = clock.observe();
         let acquired_writer = self.session_writer_epoch(namespace, writer_id).await?;
 
-        let tip_expired = self.projection_observed.as_ref().is_some_and(|observed| {
-            observed.age_at(&attempt) > crate::limits::WAL_PUBLISH_BUDGET_MS
-        });
-        // A put that took effect confirms the tip, not the manifest the batch was planned
-        // against: a fold or compaction (including our own) may have succeeded.
-        // The confirmation is a discovery of one WAL object: a HEAD request
-        // for the number after the tip, then one for the manifest after the
-        // basis (format spec, "Publication and group commit"). Another writer
-        // claims a successor manifest before it writes a WAL object, but a
-        // floor object needs no claim and can be older than the last
-        // confirmation, so the WAL request looks for one. A WAL object
-        // created after the WAL response is too young to be collected before
-        // the put, so the put collides with it. After this session's own put
-        // with an unknown outcome, the engine has already dropped the
-        // position. The manifest boundary is read after the two requests, so
-        // a successor that a collection deleted can't look absent: the
-        // collection raised the boundary over the basis first. A confirmation
-        // that finds an object or a manifest, finds the basis at or below the
-        // boundary, or fails, reloads the view.
-        if let Some((tip, manifest_no)) = self.unconfirmed_tip(&attempt, tip_expired) {
-            if self
-                .confirm_tip(namespace, tip, manifest_no)
-                .await
-                .unwrap_or(false)
-            {
-                if let Some(position) = self.current.as_mut() {
-                    position.basis_checked = attempt.clone();
-                }
-                if tip_expired {
-                    self.projection_observed = Some(attempt.clone());
-                }
-            } else {
-                self.invalidate_projection();
-            }
-        }
         let acquired_anchor = self.acquired_anchor.take();
         let cached_position = match acquired_anchor {
             Some(_) => {
@@ -589,21 +506,11 @@ impl PositionState {
                 return Err(error);
             }
         };
-        let projection_observed = if view.tail_discovered {
-            // Discovery confirmed the basis and observed the tip no earlier
-            // than this attempt began.
+        if view.tail_discovered {
+            // Discovery checked the basis no earlier than this attempt began.
             view.position.basis_checked = attempt.clone();
-            attempt.clone()
-        } else {
-            self.projection_observed
-                .clone()
-                .unwrap_or_else(|| attempt.clone())
-        };
-        Ok(LoadedPublishView {
-            view,
-            attempt,
-            projection_observed,
-        })
+        }
+        Ok(LoadedPublishView { view, attempt })
     }
 
     /// Publishes `candidates` against `loaded` as one batch, and keeps the
@@ -618,7 +525,6 @@ impl PositionState {
         let LoadedPublishView {
             view: publish_view,
             attempt,
-            projection_observed,
         } = loaded;
         let wal_tail_discovered = publish_view.tail_discovered;
         let published = super::batch::publish_namespace_commits_batch_against_publish_view(
@@ -626,24 +532,17 @@ impl PositionState {
             &publish_view,
             super::batch::PublicationClock {
                 batch: clock,
-                attempt: attempt.clone(),
-                tip: projection_observed.clone(),
+                attempt,
             },
         )
         .await;
         let position = publish_view.into_position();
         let published = classify_replaced_basis(namespace, &position, published).await;
-        self.projection_observed = Some(projection_observed);
         let update = self.update_publish_tail_projection(
             &namespace.namespace_id,
             position,
             published.effect,
         );
-        // A put that took effect is itself an observation of the tip it created, made no
-        // earlier than this attempt began; the next put's budget runs from it.
-        if update.advanced && self.current.is_some() {
-            self.projection_observed = Some(attempt);
-        }
         NamespaceCommitEnginePublishOutcome {
             results: published.results,
             wal_tail: Some(WalTailReport {
@@ -667,14 +566,9 @@ impl PositionState {
         loaded: LoadedPublishView<'_, S>,
         target: CommitSeq,
     ) -> Result<FloorObjectReport> {
-        let LoadedPublishView {
-            view,
-            attempt,
-            projection_observed,
-        } = loaded;
+        let LoadedPublishView { view, .. } = loaded;
         let head = view.head().clone();
         let manifest_retention_floor_seq = view.manifest_retention_floor_seq();
-        self.projection_observed = Some(projection_observed.clone());
         if head.retention_floor_seq >= target {
             self.current = Some(view.into_position());
             return Ok(FloorObjectReport {
@@ -683,7 +577,7 @@ impl PositionState {
             });
         }
         let floor_object = prepare_floor_object(&head, view.acquired_writer.writer_epoch, target)?;
-        let published = publish_wal_object(view.store(), &floor_object, &projection_observed).await;
+        let published = publish_wal_object(view.store(), &floor_object).await;
         let position = view.into_position();
         if let Err(error) = published {
             self.update_publish_tail_projection(
@@ -695,7 +589,7 @@ impl PositionState {
         }
         let head = head.after_wal_object(floor_object.envelope().payload());
         let retention_floor_seq = head.retention_floor_seq;
-        let update = self.update_publish_tail_projection(
+        self.update_publish_tail_projection(
             &namespace.namespace_id,
             position,
             PublishViewEffect::Advanced {
@@ -704,10 +598,6 @@ impl PositionState {
                 wal_bytes: floor_object.as_bytes().len(),
             },
         );
-        // The put is an observation of the tip it created, as a commit's is.
-        if update.advanced && self.current.is_some() {
-            self.projection_observed = Some(attempt);
-        }
         Ok(FloorObjectReport {
             retention_floor_seq,
             manifest_retention_floor_seq,
@@ -723,7 +613,6 @@ impl PositionState {
         mut position: WriterPosition,
         effect: PublishViewEffect,
     ) -> TailProjectionUpdate {
-        let advanced = matches!(effect, PublishViewEffect::Advanced { .. });
         match effect {
             PublishViewEffect::Unchanged => {}
             PublishViewEffect::Invalidated => {
@@ -731,7 +620,6 @@ impl PositionState {
                 return TailProjectionUpdate {
                     wal_tail_objects: position.wal_tail_objects(),
                     wal_tail_bytes: position.wal_tail_bytes(),
-                    advanced: false,
                 };
             }
             PublishViewEffect::Advanced {
@@ -754,7 +642,6 @@ impl PositionState {
                     return TailProjectionUpdate {
                         wal_tail_objects: position.wal_tail_objects(),
                         wal_tail_bytes: position.wal_tail_bytes(),
-                        advanced: false,
                     };
                 }
             }
@@ -762,30 +649,25 @@ impl PositionState {
         let update = TailProjectionUpdate {
             wal_tail_objects: position.wal_tail_objects(),
             wal_tail_bytes: position.wal_tail_bytes(),
-            advanced,
         };
         self.current = Some(position);
         update
     }
 }
 
-/// The view that one publication unit plans against, with the
-/// observations that its publication clock starts from.
+/// The view that one publication unit plans against, with the observation
+/// that its publication clock starts from.
 struct LoadedPublishView<'a, S: ObjectStore + ?Sized> {
     view: super::publish_view::PublishMetadataView<'a, S>,
     /// When the unit began.
     attempt: Observation,
-    /// When the store last showed the view's WAL tip current.
-    projection_observed: Observation,
 }
 
 /// What folding one batch into the tail projection left: the WAL-tail length
-/// the caller schedules maintenance on, and whether the batch's put took effect
-/// and moved the position.
+/// the caller schedules maintenance on.
 struct TailProjectionUpdate {
     wal_tail_objects: u64,
     wal_tail_bytes: usize,
-    advanced: bool,
 }
 
 /// Returns `report` with each result that found a metadata segment missing

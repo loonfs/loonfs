@@ -593,9 +593,7 @@ impl CoreError {
                 | DurableContentValidationError::ContentChecksumMismatch { .. }
                 | DurableContentValidationError::StoredChecksumMissing { .. },
             )
-            | CoreError::WalPublish(
-                WalPublishError::NumberTaken | WalPublishError::PublishBudgetExceeded { .. },
-            )
+            | CoreError::WalPublish(WalPublishError::NumberTaken)
             | CoreError::MaintenanceRequired { .. }
             | CoreError::VisiblePath(_)
             | CoreError::CommitValidation(_)

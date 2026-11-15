@@ -121,7 +121,7 @@ async fn runtime_retry_replays_a_published_commit_after_its_content_proof_expire
 }
 
 #[tokio::test]
-async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
+async fn a_first_publish_after_a_slow_claim_commits() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("slow-claim").expect("namespace");
     let store = Arc::new(BlockingStore::new(
@@ -140,9 +140,9 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
             ..TestCore::unpaced()
         },
     );
-    // The first publish observes its tip before the claim, and the claim's
-    // first WAL read, which follows its manifest put, is held past the
-    // publish budget.
+    // The claim's first WAL read, which follows its manifest put, is held
+    // for ten minutes. The fence put and the commit's put have no time
+    // limit, so the publish commits.
     store.block_next();
     let (published, ()) = futures::join!(
         publisher.submit(CommitCandidate::new(create_directory_request(
@@ -150,13 +150,13 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
         ))),
         async {
             store.wait_until_blocked().await;
-            clock.set_ms(loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1);
+            clock.set_ms(10 * 60 * 1000);
             store.release();
         }
     );
     assert_eq!(
         published
-            .expect("an expired attempt re-plans")
+            .expect("the publish commits after the slow claim")
             .committed_seq,
         CommitSeq(1)
     );

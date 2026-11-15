@@ -11,8 +11,6 @@ use thiserror::Error;
 pub enum WalPublishError {
     #[error("WAL number was taken by another publication")]
     NumberTaken,
-    #[error("publish budget exceeded: elapsed {elapsed_ms}ms over budget {budget_ms}ms")]
-    PublishBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error("WAL publication outcome unknown: {0}")]
     OutcomeUnknown(String),
     #[error("failed to write WAL object `{object_key}`: {message}")]
@@ -26,7 +24,7 @@ pub enum WalPublishError {
 impl WalPublishError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::NumberTaken | Self::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
+            Self::NumberTaken => ErrorCode::StaleHead,
             Self::OutcomeUnknown(_) => ErrorCode::OutcomeUnknown,
             Self::Write { kind, .. } => crate::error::classify_store_failure(*kind),
         }
@@ -35,7 +33,7 @@ impl WalPublishError {
 
 /// Returns whether a candidate with this result is published again.
 ///
-/// A taken WAL number, an expired budget, an unknown outcome, and a basis
+/// A taken WAL number, an unknown outcome, and a basis
 /// manifest that a newer manifest replaced are published again, and the next
 /// attempt plans on the current manifest. The retry keeps the commit ID, so a
 /// candidate that already committed replays its receipt.
@@ -43,9 +41,7 @@ pub fn is_retryable_wal_publish(result: &Result<Commit>) -> bool {
     matches!(
         result,
         Err(CoreError::WalPublish(
-            WalPublishError::NumberTaken
-                | WalPublishError::PublishBudgetExceeded { .. }
-                | WalPublishError::OutcomeUnknown(_)
+            WalPublishError::NumberTaken | WalPublishError::OutcomeUnknown(_)
         ) | CoreError::ManifestReplaced { .. })
     )
 }

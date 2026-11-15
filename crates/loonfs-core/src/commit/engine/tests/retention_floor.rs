@@ -160,3 +160,43 @@ async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
     .await
     .expect("a restore above the new floor");
 }
+
+/// Checks that a session's own floor object has no check after its put: the
+/// put is the call's last request, and the call sends no manifest HEAD.
+#[tokio::test]
+async fn a_sessions_floor_object_has_no_check_after_its_put() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("session-floor").expect("valid namespace id");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context("writer"))
+        .create()
+        .await
+        .expect("bootstrap");
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context("writer").writer_id,
+    );
+    let (_, deletion_seq) = delete(&mut engine, "expired").await;
+    let planned = engine
+        .namespace
+        .load_current_manifest()
+        .await
+        .expect("the planned manifest");
+    store.reset();
+    engine
+        .publish_floor_object(&planned, deletion_seq, &context("writer").clock())
+        .await
+        .expect("create the floor object");
+    let operations = store.take();
+    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
+    assert!(
+        matches!(operations.last(), Some(put) if is_wal_put(put, &namespace_id))
+            && !operations.iter().any(|operation| {
+                matches!(operation, RecordedOperation::Head { key } if key.starts_with(&manifests))
+            }),
+        "{operations:?}"
+    );
+}

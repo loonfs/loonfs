@@ -3318,11 +3318,10 @@ async fn a_closed_session_hands_its_head_and_tail_to_the_read_cache() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a writer that is quiet for longer than a WAL publication
-/// budget, or longer than the revalidation bound, confirms its tip and
-/// commits without replaying its tail.
+/// Checks that a writer that is quiet for an hour, or for an hour and the
+/// revalidation bound, commits without replaying its tail.
 #[tokio::test]
-async fn a_quiet_writer_confirms_its_tip_without_replaying_it() {
+async fn a_quiet_writer_commits_without_replaying_its_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -3347,7 +3346,7 @@ async fn a_quiet_writer_confirms_its_tip_without_replaying_it() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
 
-    let quiet_ms = loonfs_core::limits::WAL_PUBLISH_BUDGET_MS + 1_000;
+    let quiet_ms = 60 * 60 * 1000;
     for (commit_id, now_ms, replays) in [
         ("first", 0, 1),
         ("quiet", quiet_ms, 1),

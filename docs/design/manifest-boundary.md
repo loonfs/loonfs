@@ -152,9 +152,8 @@ The source's collection keeps every fork snapshot and reads nothing under the ta
 
 ### Time rules
 
-The design has no rule that a manifest publication's basis was confirmed within `READ_REVALIDATION_BOUND_MS` before its put, and a process's check of whether its manifest is the newest doesn't depend on that bound. These time rules stay:
+The design has no rule that a manifest publication's basis was confirmed within `READ_REVALIDATION_BOUND_MS` before its put, and a process's check of whether its manifest is the newest doesn't depend on that bound. A WAL put has no time rule either, because no process deletes a fence or a floor object (see [Keeping fences and floor objects](kept-fences-and-floors.md)). These time rules stay:
 
-- A WAL writer that confirmed its tip within `WAL_PUBLISH_BUDGET_MS` puts the next WAL object without a check.
 - The retirement deadline is computed as in [Retirement](../specs/format.md#95-retirement): the grace window (24 hours) after the deletion, which covers a tombstone publication that's applied late and the readers after the tombstone. A manifest put that a provider applies after the retirement doesn't depend on the deadline. Every manifest number is at or below a retired boundary, so the put's publisher counts the put as lost, and no reader takes that manifest as the newest.
 - The age rules for segments, content objects, and upload records.
 

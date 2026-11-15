@@ -85,7 +85,6 @@ impl BatchOutcomeSlot {
 pub(crate) struct PublicationClock<'a> {
     pub(crate) batch: &'a OperationClock,
     pub(crate) attempt: Observation,
-    pub(crate) tip: Observation,
 }
 
 pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
@@ -206,7 +205,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     ) {
         return abort_batch(slots, &error);
     }
-    if let Err(error) = publish_wal_object(view.store(), &wal, &clock.tip).await {
+    if let Err(error) = publish_wal_object(view.store(), &wal).await {
         return abort_batch(slots, &error);
     }
 
@@ -432,7 +431,6 @@ mod tests {
             &view,
             PublicationClock {
                 batch: &batch,
-                tip: attempt.clone(),
                 attempt,
             },
         )
@@ -495,7 +493,6 @@ mod tests {
             PublicationClock {
                 batch: &batch,
                 attempt: batch.observe(),
-                tip: batch.observe(),
             },
         )
         .await;

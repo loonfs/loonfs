@@ -9,7 +9,6 @@ use loonfs::{
     LoonFs, Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadAt,
     ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
-use loonfs_core::limits::WAL_PUBLISH_BUDGET_MS;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, writer_id};
@@ -244,13 +243,8 @@ impl Fixture {
     /// reloads no head: it lists no manifests, reads no WAL object, and reads
     /// at most one manifest (the one it plans against, the first time it
     /// plans against it).
-    ///
-    /// The clock first moves past the publish budget, so the publish checks
-    /// its manifest for a successor. A publisher left on a manifest that
-    /// this runtime replaced finds the successor and replays its tail.
     async fn assert_write_reloads_nothing(&self, round: usize, after: &str) {
         self.writer.drain().await.expect("drain");
-        self.clock.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
         let replays = self.tail_replays();
         self.recording.reset();
         self.commit("put_file", round).await;

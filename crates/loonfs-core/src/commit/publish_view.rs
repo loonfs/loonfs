@@ -27,7 +27,8 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     /// Where each content write that the batch's planning sends takes its
     /// permit.
     content_write_permits: &'a Permits,
-    /// The tip observation starts with this load rather than a retained view.
+    /// Whether this load read the WAL tail from the store rather than
+    /// starting from a retained position.
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
     pub(crate) position: WriterPosition,

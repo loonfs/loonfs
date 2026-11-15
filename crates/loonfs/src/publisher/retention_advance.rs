@@ -45,8 +45,8 @@ impl NamespacePublisher {
     }
 
     /// Creates a floor object for `target` through the session's commit
-    /// engine, which puts the floor object at the position's tip after the
-    /// tip confirmation that a commit's put gets, and moves the position
+    /// engine, which puts the floor object after the position's tip as it
+    /// puts a commit, and moves the position
     /// onto the floor object (see
     /// [`NamespaceCommitEngine::publish_floor_object`](loonfs_core::publish::NamespaceCommitEngine::publish_floor_object)).
     async fn publish_floor_object(

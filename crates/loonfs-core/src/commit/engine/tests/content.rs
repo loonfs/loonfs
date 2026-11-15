@@ -230,8 +230,8 @@ async fn publication_retry_does_not_refresh_expired_content_evidence() {
 }
 
 #[tokio::test]
-async fn publication_retry_uses_a_fresh_tip_budget() {
-    assert_expired_content_stays_rejected_on_retry(crate::limits::WAL_PUBLISH_BUDGET_MS + 1).await;
+async fn publication_retry_an_hour_later_does_not_refresh_expired_content_evidence() {
+    assert_expired_content_stays_rejected_on_retry(60 * 60 * 1000).await;
 }
 
 async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
@@ -415,9 +415,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let publish = engine.publish_batch(vec![primary, alias, later, replay], &batch);
     let advance = async {
         store.wait_until_blocked().await;
-        let elapsed_ms = 2;
-        assert!(elapsed_ms < crate::limits::WAL_PUBLISH_BUDGET_MS);
-        timer.0.store(elapsed_ms, Ordering::SeqCst);
+        timer.0.store(2, Ordering::SeqCst);
         store.release();
     };
     let (result, ()) = futures::join!(publish, advance);
