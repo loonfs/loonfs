@@ -364,26 +364,21 @@ impl<S: ObjectStore> crate::engine::NamespaceEngine<S, crate::engine::Writable> 
     /// writer session for the namespace does, for a test of core without a
     /// runtime (format spec, "Advancing the retention floor").
     ///
-    /// The advance plans the floor from the current manifest and the WAL
-    /// tail after it, and returns the view's floor when the floor would not
-    /// move. Otherwise, it creates a floor object at the WAL tip and claims
-    /// no epoch. Then, when no manifest records the view's floor, it folds
+    /// The advance plans the floor from the current manifest's floor, and
+    /// returns that floor when the floor would not move. Otherwise, it
+    /// creates a floor object at the WAL tip and claims no epoch, unless the
+    /// view that the publication discovers already has the floor. Then, when no manifest records the view's floor, it folds
     /// the WAL tail, and the report includes the fold's manifest, which
     /// records the floor.
     pub async fn advance_retention_floor(
         &self,
         target: crate::manifest::RetentionTarget,
     ) -> Result<crate::manifest::PublicationReport<loonfs_types::AdvanceRetentionResponse>> {
-        let anchor = self
-            .namespace
-            .load_live_read_anchor(crate::time::Observation::now(std::sync::Arc::clone(
-                &self.namespace.timer,
-            )))
-            .await?;
-        let planned = anchor.current_manifest();
+        let current = self.namespace.load_current_basis().await?;
+        let planned = &current.manifest;
         let report = match self
             .namespace
-            .plan_retention_floor(planned, anchor.retention_floor_seq(), target)
+            .plan_retention_floor(planned, planned.retention_floor_seq(), target)
             .await?
         {
             crate::manifest::RetentionPlan::Stays(retention_floor_seq) => {

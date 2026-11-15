@@ -843,6 +843,9 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
         .expect("fold commits 1 and 2");
     writer.shutdown().await.expect("shut down the writer");
 
+    let boundary = loonfs_objectstore::keys::boundary(&namespace);
+    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace);
+    let segments = loonfs_objectstore::keys::metadata_segment_prefix(&namespace);
     // Each advance runs in a new runtime, so no cache has the segments that
     // the fold wrote.
     let maintenance = || maintenance_past_the_grace_window(store.clone());
@@ -850,25 +853,25 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
         (
             CommitSeq(1),
             [
-                (RetentionTarget::Seq(CommitSeq(0)), 6),
-                (RetentionTarget::Seq(CommitSeq(1)), 6),
+                (RetentionTarget::Seq(CommitSeq(0)), false),
+                (RetentionTarget::Seq(CommitSeq(1)), false),
                 // The scan reads commit 2 from the commits segment, and
                 // commit 2 is later than the cutoff.
-                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 7),
+                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, true),
             ],
         ),
         (
             CommitSeq(2),
             [
-                (RetentionTarget::Head, 6),
-                (RetentionTarget::Seq(CommitSeq(u64::MAX)), 6),
+                (RetentionTarget::Head, false),
+                (RetentionTarget::Seq(CommitSeq(u64::MAX)), false),
                 // No folded commit is above the head, so the scan reads no
                 // segment.
                 (
                     RetentionTarget::Cutoff {
                         cutoff_at_ms: u64::MAX,
                     },
-                    6,
+                    false,
                 ),
             ],
         ),
@@ -889,7 +892,7 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 .await
                 .manifest_no,
         );
-        for (target, gets) in advances {
+        for (target, reads_a_segment) in advances {
             let maintenance = maintenance().await;
             store.reset();
             let advanced = maintenance
@@ -900,37 +903,125 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 .await
                 .expect("an advance that moves nothing");
             assert_eq!(advanced.retention_floor_seq, floor, "{target:?}");
-            let operations = store.take();
-            let heads = operations
-                .iter()
-                .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
-                .count();
-            assert!(
-                operations.iter().all(|operation| matches!(
-                    operation,
-                    RecordedOperation::Get { .. }
-                        | RecordedOperation::GetWithMetadata { .. }
-                        | RecordedOperation::Head { .. }
-                        | RecordedOperation::List { .. }
-                )),
-                "{target:?} sends only reads: {operations:?}"
-            );
-            let loads = operations
-                .iter()
-                .filter(|operation| {
-                    matches!(operation, RecordedOperation::Get { key, .. } if *key == manifest)
+            let operations: Vec<_> = store
+                .take()
+                .into_iter()
+                .map(|operation| match &operation {
+                    RecordedOperation::GetWithMetadata { key, .. } if *key == boundary => {
+                        "boundary".to_owned()
+                    }
+                    RecordedOperation::List { prefix } if prefix.starts_with(&manifests) => {
+                        "manifest listing".to_owned()
+                    }
+                    RecordedOperation::Get { key, .. } if *key == manifest => "manifest".to_owned(),
+                    RecordedOperation::Get { key, .. } if key.starts_with(&segments) => {
+                        "segment".to_owned()
+                    }
+                    other => format!("{other:?}"),
                 })
-                .count();
+                .collect();
+            let mut expected = vec!["boundary", "manifest listing", "manifest", "boundary"];
+            if reads_a_segment {
+                expected.push("segment");
+            }
             assert_eq!(
-                (loads, operations.len() - heads, heads),
-                (1, gets, 1),
-                "{target:?} loads the current manifest once and plans from the view after it \
-                 (the manifest boundary, a listing of the manifests, the manifest, the \
-                 boundary again, a GET of the missing WAL number after the manifest, a \
-                 HEAD request for the missing manifest after it, and the boundary once \
-                 more): {operations:?}"
+                operations, expected,
+                "{target:?} finds the current manifest and plans from that manifest's floor, \
+                 with no read of the WAL"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn an_advance_past_the_manifests_floor_finds_a_floor_object_in_the_tail_when_it_publishes() {
+    use crate::{AdvanceRetentionFloorOptions, CommitSeq, RetentionTarget};
+    use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
+
+    // The tail's floor object, the target, the floor after the advance, and
+    // the floor objects that the advance creates.
+    for (tail_floor, target, floor, floor_objects) in [
+        // The publication's discovery finds the tail's floor object, which
+        // already covers the target.
+        (CommitSeq(2), CommitSeq(1), CommitSeq(2), 0),
+        // The target is above the tail's floor object.
+        (CommitSeq(1), CommitSeq(2), CommitSeq(2), 1),
+    ] {
+        let directory = tempdir().expect("tempdir");
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
+        ));
+        let actor = loonfs_test_support::test_actor();
+        let namespace = namespace_id("tail");
+        let writer = LoonFs::builder_with_store(store.clone())
+            .writer_id(loonfs_test_support::ids::writer_id("writer"))
+            .build()
+            .await
+            .expect("writer");
+        writer
+            .create_namespace(&namespace, &actor)
+            .await
+            .expect("create the namespace");
+        for path in ["/a", "/b"] {
+            writer
+                .open_namespace(&namespace)
+                .expect("open the namespace")
+                .put_file(path, b"body", &actor)
+                .await
+                .expect("put a file");
+        }
+        writer
+            .maintenance(loonfs_test_support::ids::writer_id("writer"))
+            .fold_wal(&namespace)
+            .await
+            .expect("fold commits 1 and 2");
+        writer.shutdown().await.expect("shut down the writer");
+        // A floor object that no fold covers, as an advance whose fold
+        // failed leaves it.
+        let core = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace);
+        let planned = core
+            .load_current_basis()
+            .await
+            .expect("find the current manifest")
+            .manifest;
+        core.publish_floor_object(&planned, tail_floor)
+            .await
+            .expect("create the floor object");
+
+        let maintenance = maintenance_past_the_grace_window(store.clone()).await;
+        store.reset();
+        let advanced = maintenance
+            .advance_retention_floor_with_options(
+                &namespace,
+                &AdvanceRetentionFloorOptions {
+                    target: RetentionTarget::Seq(target),
+                },
+            )
+            .await
+            .expect("advance the floor");
+        let wal = loonfs_objectstore::keys::wal_prefix(&namespace);
+        let wal_puts = store
+            .take()
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. }
+                ) && operation.key().starts_with(&wal)
+            })
+            .count();
+        assert_eq!(advanced.retention_floor_seq, floor, "target {target:?}");
+        assert_eq!(wal_puts, floor_objects, "target {target:?}");
+        // No manifest recorded the view's floor, so the advance folds the
+        // tail.
+        assert_eq!(
+            current_manifest_payload(store.as_ref(), &namespace)
+                .await
+                .retention_floor_seq,
+            floor,
+            "target {target:?}"
+        );
     }
 }
 
