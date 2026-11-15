@@ -37,6 +37,7 @@ mod inline_retry;
 mod inode_reads;
 mod invalidation;
 mod maintenance;
+mod merge_collection;
 mod metrics_instruments;
 mod namespace;
 mod pagination;
