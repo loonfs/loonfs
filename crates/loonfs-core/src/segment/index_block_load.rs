@@ -120,10 +120,11 @@ pub fn decode_stored_block(
 
 /// Largest segment object fetched whole on first touch, in stored bytes.
 /// Below this, splitting the index and data reads into separate ranged GETs
-/// costs more round-trips than the whole object costs bytes; one GET
-/// publishes every section to the memo and shared cache. Sized to catch
-/// delta-run segments (one or two data blocks) while leaving base segments
-/// on the per-section path.
+/// costs more round-trips than the whole object costs bytes. A lookup's one
+/// GET publishes every section to the memo and shared cache, and a
+/// compaction decodes the input's data blocks from the same bytes. Sized to
+/// catch delta-run segments (one or two data blocks) while leaving base
+/// segments on the per-section path.
 const MAX_WHOLE_SEGMENT_LOAD_BYTES: u64 = 256 * 1024;
 
 /// A segment object's total stored length: the index block is the last
@@ -265,14 +266,9 @@ fn publish_segment_sections(
     data_blocks: bool,
 ) -> Result<(Option<LoadedSegmentBlock>, Option<LoadedSegmentBlock>), ManifestLoadError> {
     let object_key = metadata_segment_object_key(descriptor);
-    let section = |handle: &BlockHandle| -> Option<Bytes> {
-        let start = usize::try_from(handle.offset.checked_sub(fetch_offset)?).ok()?;
-        let end = start.checked_add(handle.stored_bytes as usize)?;
-        (end <= bytes.len()).then(|| bytes.slice(start..end))
-    };
     let decode =
         |kind, handle: &BlockHandle| -> Result<Option<LoadedSegmentBlock>, ManifestLoadError> {
-            let Some(stored) = section(handle) else {
+            let Some(stored) = section_bytes(bytes, fetch_offset, handle) else {
                 return Ok(None);
             };
             let block = decode_stored_block(&object_key, kind, handle, &stored)?;
@@ -327,6 +323,19 @@ fn publish_segment_sections(
     }
 
     Ok((index_block, filter_block))
+}
+
+/// The stored bytes of the section that `handle` points at, out of `bytes`,
+/// which start at `fetch_offset` in the segment object. Returns `None` when
+/// the section isn't wholly inside `bytes`.
+pub(super) fn section_bytes(
+    bytes: &Bytes,
+    fetch_offset: u64,
+    handle: &BlockHandle,
+) -> Option<Bytes> {
+    let start = usize::try_from(handle.offset.checked_sub(fetch_offset)?).ok()?;
+    let end = start.checked_add(handle.stored_bytes as usize)?;
+    (end <= bytes.len()).then(|| bytes.slice(start..end))
 }
 
 fn filter_cache_block(filter: SegmentFilter) -> DecodedMetadataSegmentBlock {
@@ -391,24 +400,39 @@ pub(crate) async fn load_segment_index<S: ObjectStore + ?Sized>(
     block.into_index(&metadata_segment_object_key(descriptor))
 }
 
-/// Loads only the index section even for a small segment. Compaction
-/// uses this to account data-block decoded bytes before any row payload is
-/// decoded; the normal lookup path keeps its whole-small-segment shortcut.
+/// Loads the index of a compaction input segment, without the memo or the
+/// block cache.
+///
+/// A segment object of at most [`MAX_WHOLE_SEGMENT_LOAD_BYTES`] is fetched
+/// whole in one GET and returned with the index, so the compaction decodes
+/// the segment's data blocks from the same bytes. A larger segment fetches
+/// its index section alone and returns `None` for the object. Either way no
+/// data block is decoded here, so the compaction accounts each block's
+/// decoded bytes before the block's rows are decoded.
 pub(crate) async fn load_segment_index_for_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     descriptor: &MetadataSegmentRef,
-) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
+) -> Result<(Arc<Vec<SegmentIndexEntry>>, Option<Bytes>), ManifestLoadError> {
     let handle = descriptor.index_block;
     let object_key = metadata_segment_object_key(descriptor);
-    let stored = load_section_bytes(
-        store,
-        &object_key,
-        handle.offset,
-        u64::from(handle.stored_bytes),
-    )
-    .await?;
-    decode_stored_block(&object_key, SegmentBlockKind::Index, &handle, &stored)?
-        .into_index(&object_key)
+    let object_bytes = segment_object_bytes(descriptor);
+    let whole_object = object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES;
+    let fetch_offset = if whole_object { 0 } else { handle.offset };
+    let bytes = Bytes::from(
+        load_section_bytes(
+            store,
+            &object_key,
+            fetch_offset,
+            object_bytes - fetch_offset,
+        )
+        .await?,
+    );
+    let stored = section_bytes(&bytes, fetch_offset, &handle).ok_or_else(|| {
+        segment_codec_error(&object_key, "index block outside the segment object bounds")
+    })?;
+    let index = decode_stored_block(&object_key, SegmentBlockKind::Index, &handle, &stored)?
+        .into_index(&object_key)?;
+    Ok((index, whole_object.then_some(bytes)))
 }
 
 /// Loads a segment's bloom filter block: the cheap pre-index check a lookup

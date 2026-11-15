@@ -1523,9 +1523,14 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_ends_where_it_would
 // Resource discipline
 // -------------------------------------------------------------------------
 
-async fn large_compaction_inputs(
+/// Builds `run_count` runs of `rows_per_run` attribute rows each, with a
+/// 4 KiB value of random characters in every row, and returns the runs with
+/// every row in row-key order.
+async fn attribute_compaction_inputs(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
+    run_count: u64,
+    rows_per_run: u64,
 ) -> (Vec<MetadataRunManifest>, Vec<MetadataRow>) {
     use loonfs_types::format::manifest::AttributesRevisionRecord;
     use loonfs_types::{AttributeKey, AttributeValue, Attributes, AttributesRevisionNo};
@@ -1533,9 +1538,9 @@ async fn large_compaction_inputs(
     let mut runs = Vec::new();
     let mut sequential = Vec::new();
     let mut value_state = 1u64;
-    for run in 0..3 {
+    for run in 0..run_count {
         let mut rows = Vec::new();
-        for index in 0..2_400 {
+        for index in 0..rows_per_run {
             let value: String = (0..4_096)
                 .map(|_| {
                     value_state ^= value_state << 13;
@@ -1603,21 +1608,28 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
     let local = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("byte-compaction").expect("namespace");
     let group = MetadataFamilyGroup::Attributes;
-    let (runs, sequential) = large_compaction_inputs(&local, &namespace_id).await;
+    let (runs, sequential) = attribute_compaction_inputs(&local, &namespace_id, 3, 2_400).await;
     let mut indexes = BTreeMap::new();
-    let mut input_bytes = 0;
+    let mut expected_gets = 0;
     let mut old_gets = 0;
     for descriptor in runs
         .iter()
         .flat_map(|run| group_run_descriptors(run, group))
     {
-        let index = index_block_load::load_segment_index_for_compaction(&local, descriptor)
+        let (index, _) = index_block_load::load_segment_index_for_compaction(&local, descriptor)
             .await
             .expect("index");
-        input_bytes += index
-            .iter()
-            .map(|entry| entry.block.stored_bytes as usize)
-            .sum::<usize>();
+        // Every refill of the segment asks for blocks until their stored
+        // bytes reach the fetch target, and fetches them in one GET.
+        let mut refill_bytes = 0;
+        for entry in index.iter() {
+            refill_bytes += entry.block.stored_bytes as usize;
+            if refill_bytes >= ITERATOR_FETCH_TARGET_BYTES {
+                expected_gets += 1;
+                refill_bytes = 0;
+            }
+        }
+        expected_gets += usize::from(refill_bytes > 0);
         old_gets += index.len().div_ceil(2);
         indexes.insert(metadata_segment_object_key(descriptor), index);
     }
@@ -1662,15 +1674,14 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
             })
         })
         .count();
-    let expected_gets = input_bytes.div_ceil(ITERATOR_FETCH_TARGET_BYTES);
-    assert!((expected_gets..=expected_gets + indexes.len()).contains(&data_gets));
+    assert_eq!(data_gets, expected_gets);
     assert!(data_gets * 8 < old_gets);
     assert!((2..=STORE_READS_IN_FLIGHT).contains(&store.reads().peak_in_flight));
 
     let local = store.inner().inner();
     let mut actual = Vec::new();
     for descriptor in &result.output_segments {
-        let index = index_block_load::load_segment_index_for_compaction(local, descriptor)
+        let (index, _) = index_block_load::load_segment_index_for_compaction(local, descriptor)
             .await
             .expect("output index");
         let blocks =
@@ -1725,6 +1736,130 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
     assert!(decoded_bytes <= max_decoded_input_bytes);
     assert!(decoded_bytes > max_decoded_input_bytes / 2);
     assert!(store.reads().peak_in_flight <= STORE_READS_IN_FLIGHT);
+}
+
+/// Checks that a compaction reads each input segment of at most 256 KiB in
+/// one GET of the whole object, from which it takes both the index and the
+/// data blocks.
+#[tokio::test]
+async fn a_compaction_reads_each_small_input_segment_whole_in_one_get() {
+    let directory = tempdir().expect("directory");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("small-segments").expect("namespace");
+    let group = MetadataFamilyGroup::Attributes;
+    let (runs, sequential) = attribute_compaction_inputs(&local, &namespace_id, 3, 20).await;
+    let object_bytes: BTreeMap<String, u64> = runs
+        .iter()
+        .flat_map(|run| group_run_descriptors(run, group))
+        .map(|descriptor| {
+            (
+                metadata_segment_object_key(descriptor),
+                index_block_load::segment_object_bytes(descriptor),
+            )
+        })
+        .collect();
+    assert_eq!(object_bytes.len(), runs.len());
+    assert!(object_bytes.values().all(|&bytes| bytes <= 256 * 1024));
+    let store = RecordingStore::metadata_segments(local);
+    let cache = MetadataSegmentCache::unshared(8 * 1024 * 1024);
+    let segments = VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
+    let spec = MetadataCompactionSpec::new(
+        group,
+        runs.iter().map(|run| run.run_no).collect(),
+        sequential.len() as u64,
+        plan::CompactionPlacement::Delta {
+            output_seq: CommitSeq(3),
+        },
+        CommitSeq(0),
+    );
+    let Ok(result) = run_metadata_compaction(
+        &segments,
+        &crate::cache::MetadataSegmentCache::unshared(0),
+        &namespace_id,
+        &spec,
+        MetadataRunPolicy::default(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("compact") else {
+        panic!("nothing cancelled this compaction");
+    };
+    assert_eq!(result.rows_read, sequential.len() as u64);
+
+    let gets = store.take_gets();
+    assert_eq!(gets.len(), object_bytes.len(), "one GET per input segment");
+    for (key, range) in &gets {
+        assert_eq!(
+            *range,
+            Some((0, object_bytes[key])),
+            "`{key}` is read whole"
+        );
+    }
+}
+
+/// Checks that a compaction reads an input segment larger than 256 KiB in
+/// two GETs: the index section, then the data blocks.
+#[tokio::test]
+async fn a_compaction_reads_a_large_input_segment_index_then_data() {
+    let directory = tempdir().expect("directory");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse("large-segment").expect("namespace");
+    let group = MetadataFamilyGroup::Attributes;
+    let (runs, sequential) = attribute_compaction_inputs(&local, &namespace_id, 1, 100).await;
+    let descriptors: Vec<_> = group_run_descriptors(&runs[0], group).cloned().collect();
+    let [descriptor] = descriptors.as_slice() else {
+        panic!("one input segment, not {}", descriptors.len());
+    };
+    let object_bytes = index_block_load::segment_object_bytes(descriptor);
+    assert!(object_bytes > 256 * 1024);
+    let (index, object) = index_block_load::load_segment_index_for_compaction(&local, descriptor)
+        .await
+        .expect("index");
+    assert!(object.is_none());
+    let store = RecordingStore::metadata_segments(local);
+    let cache = MetadataSegmentCache::unshared(8 * 1024 * 1024);
+    let segments = VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
+    let spec = MetadataCompactionSpec::new(
+        group,
+        vec![runs[0].run_no],
+        descriptor.row_count,
+        plan::CompactionPlacement::Delta {
+            output_seq: CommitSeq(2),
+        },
+        CommitSeq(0),
+    );
+    let Ok(result) = run_metadata_compaction(
+        &segments,
+        &crate::cache::MetadataSegmentCache::unshared(0),
+        &namespace_id,
+        &spec,
+        MetadataRunPolicy::default(),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("compact") else {
+        panic!("nothing cancelled this compaction");
+    };
+    assert_eq!(result.rows_read, sequential.len() as u64);
+
+    let key = metadata_segment_object_key(descriptor);
+    let gets: Vec<_> = store
+        .take_gets()
+        .into_iter()
+        .filter(|(read, _)| *read == key)
+        .map(|(_, range)| range)
+        .collect();
+    let last = &index.last().expect("a data block").block;
+    assert_eq!(
+        gets,
+        [
+            Some((descriptor.index_block.offset, object_bytes)),
+            Some((
+                index[0].block.offset,
+                last.offset + u64::from(last.stored_bytes)
+            )),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -3361,15 +3496,16 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
                 .iter()
                 .filter(|read| read.0 == revision_key)
                 .count(),
-            if bottom { 2 } else { 0 }
+            if bottom { 1 } else { 0 }
         );
         {
             assert_eq!(result.rows_written, expected);
             let mut layouts = Vec::new();
             for descriptor in &result.output_segments {
-                let index = index_block_load::load_segment_index_for_compaction(&store, descriptor)
-                    .await
-                    .expect("index");
+                let (index, _) =
+                    index_block_load::load_segment_index_for_compaction(&store, descriptor)
+                        .await
+                        .expect("index");
                 let blocks = data_block_load::load_segment_data_block_span(
                     &store, None, None, descriptor, &index,
                 )

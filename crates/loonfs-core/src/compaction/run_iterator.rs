@@ -1,12 +1,15 @@
 //! Combines sorted runs: streams the rows of several runs in row-key order
 //! with bounded buffering.
 
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::manifest::validate::validate_manifest_row_seq_range;
 use crate::read_working_memory::ReadReservation;
-use crate::segment::data_block_load::load_segment_data_block_span;
+use crate::segment::data_block_load::{
+    decode_data_blocks_from_object, load_segment_data_block_span,
+};
 use crate::segment::index_block_load::load_segment_index_for_compaction;
+use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -95,13 +98,17 @@ pub trait SegmentBlockLoader<Row, Segment> {
         count
     }
 
+    /// Loads a segment's index. Returns the index and the segment that the
+    /// iterator passes to [`Self::load_data_blocks`] for the segment's
+    /// blocks, which may keep bytes that the index load fetched.
     fn load_index(
         &self,
         segment: Segment,
-    ) -> impl Future<Output = std::result::Result<Arc<Vec<SegmentIndexEntry>>, Self::Error>>;
+    ) -> impl Future<Output = std::result::Result<(Arc<Vec<SegmentIndexEntry>>, Segment), Self::Error>>;
 
     /// Loads the blocks of a prefix of `entries` that holds at least one
-    /// block, in order.
+    /// block, in order. `segment` is the segment that [`Self::load_index`]
+    /// returned.
     fn load_data_blocks(
         &self,
         segment: Segment,
@@ -114,7 +121,9 @@ pub struct SegmentRowIterator<Row, Segment, SortKey> {
     sort_key: SortKey,
     segments: Vec<Segment>,
     next_segment: usize,
-    index: Option<Arc<Vec<SegmentIndexEntry>>>,
+    /// The segment that [`SegmentBlockLoader::load_index`] returned for the
+    /// open segment, with the segment's index.
+    open: Option<(Segment, Arc<Vec<SegmentIndexEntry>>)>,
     next_block: usize,
     blocks: VecDeque<Arc<DecodedDataBlock<Row>>>,
     /// The read working memory reserved for the blocks of the last refill,
@@ -131,7 +140,7 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
             sort_key,
             segments,
             next_segment: 0,
-            index: None,
+            open: None,
             next_block: 0,
             blocks: VecDeque::new(),
             batch_reservation: None,
@@ -159,8 +168,9 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
     }
 
     pub(crate) fn loaded_through_key(&self) -> Option<&str> {
-        self.index
+        self.open
             .as_ref()?
+            .1
             .get(self.next_block.checked_sub(1)?)
             .map(|entry| entry.last_row_key.as_str())
     }
@@ -196,9 +206,9 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
         self.blocks.is_empty()
             && self.next_segment >= self.segments.len()
             && self
-                .index
+                .open
                 .as_ref()
-                .is_none_or(|index| self.next_block >= index.len())
+                .is_none_or(|(_, index)| self.next_block >= index.len())
     }
 
     fn resident_blocks(&self) -> usize {
@@ -216,23 +226,24 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
     {
         while self.blocks.is_empty() {
             self.batch_reservation = None;
-            let index = match &self.index {
-                Some(index) if self.next_block < index.len() => Arc::clone(index),
+            let (segment, index) = match &self.open {
+                Some((segment, index)) if self.next_block < index.len() => {
+                    (segment.clone(), Arc::clone(index))
+                }
                 _ => {
-                    self.index = None;
+                    self.open = None;
                     let Some(segment) = self.segments.get(self.next_segment).cloned() else {
                         return Ok(());
                     };
                     self.next_segment += 1;
-                    let index = loader.load_index(segment).await?;
+                    let (index, segment) = loader.load_index(segment).await?;
                     self.next_block = self.lower.as_deref().map_or(0, |lower| {
                         index.partition_point(|entry| entry.last_row_key.as_str() < lower)
                     });
-                    self.index = Some(Arc::clone(&index));
-                    index
+                    self.open = Some((segment.clone(), Arc::clone(&index)));
+                    (segment, index)
                 }
             };
-            let segment = self.segments[self.next_segment - 1].clone();
             let count = loader.data_block_count(&index[self.next_block..], max_decoded_bytes);
             if count == 0 {
                 self.next_block = index.len();
@@ -268,6 +279,8 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
 pub(crate) struct MetadataSegmentInput {
     descriptor: MetadataSegmentRef,
     max_seq: CommitSeq,
+    /// The whole segment object, once the index load has fetched it whole.
+    object: Option<Bytes>,
 }
 
 pub(crate) type MetadataSegmentRowIterator =
@@ -286,6 +299,7 @@ impl MetadataSegmentRowIterator {
                 .map(|descriptor| MetadataSegmentInput {
                     descriptor,
                     max_seq,
+                    object: None,
                 })
                 .collect(),
             None,
@@ -308,13 +322,14 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
 {
     type Error = crate::error::CoreError;
 
+    /// Fetches a small segment whole, so its data blocks need no second GET.
     async fn load_index(
         &self,
         segment: MetadataSegmentInput,
-    ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
-        load_segment_index_for_compaction(self.store, &segment.descriptor)
-            .await
-            .map_err(CoreError::from)
+    ) -> Result<(Arc<Vec<SegmentIndexEntry>>, MetadataSegmentInput)> {
+        let (index, object) =
+            load_segment_index_for_compaction(self.store, &segment.descriptor).await?;
+        Ok((index, MetadataSegmentInput { object, ..segment }))
     }
 
     async fn load_data_blocks(
@@ -322,9 +337,13 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
         segment: MetadataSegmentInput,
         entries: Vec<SegmentIndexEntry>,
     ) -> Result<LoadedBlocks<MetadataRow>> {
-        let blocks =
-            load_segment_data_block_span(self.store, None, None, &segment.descriptor, &entries)
-                .await?;
+        let blocks = match &segment.object {
+            Some(object) => decode_data_blocks_from_object(&segment.descriptor, object, &entries)?,
+            None => {
+                load_segment_data_block_span(self.store, None, None, &segment.descriptor, &entries)
+                    .await?
+            }
+        };
         validate_manifest_row_seq_range(
             &metadata_segment_object_key(&segment.descriptor),
             blocks.iter().flat_map(|block| block.rows.iter()),
@@ -584,8 +603,8 @@ mod tests {
     impl SegmentBlockLoader<String, ()> for ShortBatches {
         type Error = ();
 
-        async fn load_index(&self, _segment: ()) -> Result<Arc<Vec<SegmentIndexEntry>>, ()> {
-            Ok(Arc::clone(&self.index))
+        async fn load_index(&self, segment: ()) -> Result<(Arc<Vec<SegmentIndexEntry>>, ()), ()> {
+            Ok((Arc::clone(&self.index), segment))
         }
 
         async fn load_data_blocks(

@@ -36,7 +36,7 @@ pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {
     pub(super) upper_bound: Option<&'a str>,
 }
 
-impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor<'_>>
+impl<'d, S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor<'d>>
     for ScanLoader<'_, S>
 {
     type Error = ManifestLoadError;
@@ -69,20 +69,21 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor<'_>
 
     async fn load_index(
         &self,
-        segment: ScanDescriptor<'_>,
-    ) -> Result<Arc<Vec<SegmentIndexEntry>>, Self::Error> {
-        load_segment_index(
+        segment: ScanDescriptor<'d>,
+    ) -> Result<(Arc<Vec<SegmentIndexEntry>>, ScanDescriptor<'d>), Self::Error> {
+        let index = load_segment_index(
             self.store,
             self.segment_cache,
             self.block_memo,
             segment.descriptor,
         )
-        .await
+        .await?;
+        Ok((index, segment))
     }
 
     async fn load_data_blocks(
         &self,
-        segment: ScanDescriptor<'_>,
+        segment: ScanDescriptor<'d>,
         entries: Vec<SegmentIndexEntry>,
     ) -> Result<LoadedBlocks<MetadataRow>, Self::Error> {
         let (blocks, reservation) = match self.blocks_per_refill {

@@ -619,7 +619,7 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, ExtensionSegmentRef>
     async fn load_index(
         &self,
         segment: ExtensionSegmentRef,
-    ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
+    ) -> Result<(Arc<Vec<SegmentIndexEntry>>, ExtensionSegmentRef)> {
         self.0.load_index(segment).await
     }
 
