@@ -28,11 +28,11 @@ use crate::publisher::{NamespaceChange, NamespaceSession, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, CapabilityDocument, CoreError, CreateNamespaceOptions, Error, ExecutionBudget,
+    ActorId, CapabilityDocument, CreateNamespaceOptions, Error, ExecutionBudget,
     ForkNamespaceOptions, InlineContentPolicy, Maintenance, MetadataCache, Namespace, NamespaceId,
     Result, SharedObjectStore, StoreConfig,
 };
-use loonfs_core::control::PublicationBasis;
+use loonfs_core::control::{ForkTarget, PublicationBasis};
 use loonfs_core::NamespaceWriterEngine;
 use loonfs_types::{
     u64_from_usize, CompactorEpoch, Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
@@ -450,19 +450,22 @@ impl LoonFs<Writable> {
                 self.namespace(source_namespace_id)
                     .ensure_administrator()
                     .await?;
-                self.ensure_fork_target_free(new_namespace_id).await?;
+                let target = self
+                    .find_fork_target(source_namespace_id, new_namespace_id)
+                    .await?;
                 match options.snapshot_id.as_ref() {
                     Some(snapshot_id) => {
                         let result = self
                             .engine(source_namespace_id)
-                            .fork_namespace_at_snapshot(new_namespace_id, actor, snapshot_id)
+                            .fork_namespace_at_snapshot(target, actor, snapshot_id)
                             .await
                             .map_err(Error::from);
                         self.finish_fork(source_namespace_id, result).await
                     }
                     None => {
-                        self.install_fork(source_namespace_id, |engine, basis| async move {
-                            engine.fork_namespace(new_namespace_id, actor, basis).await
+                        self.install_fork(source_namespace_id, |engine, basis| {
+                            let target = target.clone();
+                            async move { engine.fork_namespace(target, actor, basis).await }
                         })
                         .await
                     }
@@ -472,27 +475,23 @@ impl LoonFs<Writable> {
         .await
     }
 
-    /// Returns `NamespaceExists` when `new_namespace_id` exists. A fork checks
-    /// its target with this before it folds the source, so a fork into an
-    /// existing namespace folds nothing. Core's own check before it creates
-    /// the fork still refuses a target that a concurrent caller creates in
-    /// between.
-    pub(crate) async fn ensure_fork_target_free(
+    /// Finds `new_namespace_id` for a fork of `source_namespace_id`, and
+    /// returns `namespace_exists` or `namespace_deleted` when the ID is taken
+    /// (see [`NamespaceWriterEngine::find_fork_target`]). A fork finds its
+    /// target with this before it folds the source, so a fork into an
+    /// existing namespace folds nothing, and it passes the target to core,
+    /// which doesn't find it again. If a concurrent caller creates the target
+    /// in between, the fork's manifest 1 put fails, and core finds the target
+    /// again.
+    pub(crate) async fn find_fork_target(
         &self,
+        source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<()> {
-        match self.namespace(new_namespace_id).metadata().await {
-            Ok(_) => Err(CoreError::NamespaceExists {
-                namespace_id: new_namespace_id.clone(),
-            }
-            .into()),
-            Err(Error::Core(CoreError::NamespaceNotFound { namespace_id }))
-                if namespace_id == *new_namespace_id =>
-            {
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+    ) -> Result<ForkTarget> {
+        self.engine(source_namespace_id)
+            .find_fork_target(new_namespace_id)
+            .await
+            .map_err(Error::from)
     }
 
     /// Installs the fork of `source_namespace_id`'s current head that `fork`
@@ -547,7 +546,7 @@ mod tests {
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
     use loonfs_test_support::stores::{
-        BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
+        request_lines, BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
     };
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -598,6 +597,147 @@ mod tests {
             .expect_err("the target exists");
         assert_eq!(error.code(), ErrorCode::NamespaceExists);
         assert_eq!(manifest_and_tail().await, before);
+    }
+
+    /// A writer runtime on a store that records every request, with a
+    /// namespace `source` that has one folded commit, and a handle that keeps
+    /// the source's writer session open.
+    struct FoldedSource {
+        _temp_dir: tempfile::TempDir,
+        store: Arc<RecordingStore<LocalFsStore>>,
+        runtime: LoonFs<Writable>,
+        _source: crate::Namespace<Writable>,
+    }
+
+    /// Returns a [`FoldedSource`] with the log cleared.
+    async fn folded_source() -> FoldedSource {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::any(),
+        ));
+        let runtime = crate::test_support::writer(store.clone(), "fork-writer").await;
+        let actor = loonfs_test_support::test_actor();
+        let source_id = namespace_id("source");
+        runtime
+            .create_namespace(&source_id, &actor)
+            .await
+            .expect("create the source");
+        let source = runtime.open_namespace(&source_id).expect("open the source");
+        source
+            .put_file("/file.txt", b"body", &actor)
+            .await
+            .expect("a commit in the source");
+        runtime
+            .maintenance(loonfs_test_support::ids::writer_id("fork-writer"))
+            .fold_wal(&source_id)
+            .await
+            .expect("fold the source");
+        store.reset();
+        FoldedSource {
+            _temp_dir: temp_dir,
+            store,
+            runtime,
+            _source: source,
+        }
+    }
+
+    /// Checks the exact requests of a fork of a folded namespace in a writer
+    /// runtime whose writer session has a fresh position on the source.
+    ///
+    /// The fork finds the target's newest manifest once, before the fold,
+    /// with a boundary read, a listing, and a second boundary read, and finds
+    /// no namespace. The source's tail is empty, so the fold sends nothing.
+    /// The temporary snapshot is a record put, verified with a successor HEAD
+    /// on the source and a boundary read. Manifest 1 is a put and a boundary
+    /// read. The member entry is one put. The fork snapshot is a record put,
+    /// and the check after it sends a successor HEAD and a boundary read to
+    /// find the source active, and reads the temporary snapshot's record to
+    /// find it live. Manifest 2 is a put and a boundary read.
+    #[tokio::test]
+    async fn a_fork_with_a_fresh_position_sends_these_requests_in_order() {
+        let folded = folded_source().await;
+        folded
+            .runtime
+            .fork_namespace(
+                &namespace_id("source"),
+                &namespace_id("source-fork"),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .expect("the fork");
+        assert_eq!(
+            request_lines(&folded.store.take()),
+            [
+                "get source-fork Boundary",
+                "list namespaces/source-fork/manifests/",
+                "get source-fork Boundary",
+                "put source Snapshot",
+                "head source MetadataManifest 00000000000000000005",
+                "get source Boundary",
+                "put source-fork MetadataManifest 00000000000000000001",
+                "get source-fork Boundary",
+                "put pool PoolMember",
+                "put source Snapshot",
+                "head source MetadataManifest 00000000000000000005",
+                "get source Boundary",
+                "get source Snapshot",
+                "put source-fork MetadataManifest 00000000000000000002",
+                "get source-fork Boundary",
+            ]
+        );
+    }
+
+    /// Checks the exact requests of a fork of a folded namespace in a writer
+    /// runtime with nothing cached.
+    ///
+    /// The requests are those of
+    /// `a_fork_with_a_fresh_position_sends_these_requests_in_order`, with the
+    /// fold's load of the source after the requests that find the target: the
+    /// source's newest manifest from the boundary (a boundary read, a listing,
+    /// the manifest, and a second boundary read), a read of the WAL object
+    /// after the folded one, which finds the tail empty, and a successor HEAD
+    /// and a boundary read.
+    #[tokio::test]
+    async fn a_fork_with_nothing_cached_sends_these_requests_in_order() {
+        let folded = folded_source().await;
+        let runtime = crate::test_support::writer(folded.store.clone(), "cold-writer").await;
+        folded.store.reset();
+        runtime
+            .fork_namespace(
+                &namespace_id("source"),
+                &namespace_id("source-fork"),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .expect("the fork");
+        assert_eq!(
+            request_lines(&folded.store.take()),
+            [
+                "get source-fork Boundary",
+                "list namespaces/source-fork/manifests/",
+                "get source-fork Boundary",
+                "get source Boundary",
+                "list namespaces/source/manifests/",
+                "get source MetadataManifest 00000000000000000004",
+                "get source Boundary",
+                "get source WalObject 00000000000000000003",
+                "head source MetadataManifest 00000000000000000005",
+                "get source Boundary",
+                "put source Snapshot",
+                "head source MetadataManifest 00000000000000000005",
+                "get source Boundary",
+                "put source-fork MetadataManifest 00000000000000000001",
+                "get source-fork Boundary",
+                "put pool PoolMember",
+                "put source Snapshot",
+                "head source MetadataManifest 00000000000000000005",
+                "get source Boundary",
+                "get source Snapshot",
+                "put source-fork MetadataManifest 00000000000000000002",
+                "get source-fork Boundary",
+            ]
+        );
     }
 
     #[tokio::test]

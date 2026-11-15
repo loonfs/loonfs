@@ -491,7 +491,11 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     fixture
         .engine()
         .fork_namespace(
-            &clone,
+            fixture
+                .engine()
+                .find_fork_target(&clone)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -1375,7 +1379,11 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
     fixture
         .engine()
         .fork_namespace(
-            &clone,
+            fixture
+                .engine()
+                .find_fork_target(&clone)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -1472,7 +1480,11 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     fixture
         .engine()
         .fork_namespace(
-            &clone,
+            fixture
+                .engine()
+                .find_fork_target(&clone)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -2316,7 +2328,11 @@ async fn a_source_collection_keeps_every_fork_snapshot_and_reads_no_target() {
     fixture
         .engine()
         .fork_namespace(
-            &source,
+            fixture
+                .engine()
+                .find_fork_target(&source)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -2330,7 +2346,11 @@ async fn a_source_collection_keeps_every_fork_snapshot_and_reads_no_target() {
         fixture
             .engine()
             .fork_namespace(
-                &target,
+                fixture
+                    .engine()
+                    .find_fork_target(&target)
+                    .await
+                    .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
                 crate::test_support::folded_manifest(&fixture.namespace)
                     .await

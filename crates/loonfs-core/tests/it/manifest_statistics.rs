@@ -298,7 +298,10 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
     );
     engine
         .fork_namespace_at_snapshot(
-            &child,
+            engine
+                .find_fork_target(&child)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             &snapshot.snapshot_id,
         )
@@ -339,7 +342,10 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
     );
     child_engine
         .fork_namespace(
-            &grandchild,
+            child_engine
+                .find_fork_target(&grandchild)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &child))
                 .await

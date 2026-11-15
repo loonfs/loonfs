@@ -43,7 +43,50 @@ enum ForkAt<'a> {
     Snapshot(&'a SnapshotId),
 }
 
+/// The namespace ID that a fork creates, and the state that the fork found
+/// at that ID before its first write
+/// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/namespace-creation.md#forking-a-namespace)).
+///
+/// A caller finds the target once with
+/// [`NamespaceEngine::find_fork_target`], before it folds the source, and
+/// passes it to the fork, so the fork doesn't find the target again. If
+/// another call creates the target after the caller found it, the fork's
+/// manifest 1 put fails, and the fork then finds the target again.
+#[derive(Clone, Debug)]
+pub struct ForkTarget {
+    namespace_id: NamespaceId,
+    /// The target's manifest 1, when the target is initializing, or `None`
+    /// when no namespace has the ID.
+    initializing: Option<PublicationBasis>,
+}
+
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
+    /// Finds the newest manifest of `new_namespace_id` for a fork of this
+    /// namespace, the first step of a fork.
+    ///
+    /// Returns `namespace_exists` for an active namespace, and
+    /// `namespace_deleted` for a tombstone or a retired ID, so a caller that
+    /// finds the target before it folds the source folds nothing for a taken
+    /// ID. For an initializing namespace, it returns a target that includes
+    /// the namespace's manifest 1, so the fork finishes the earlier fork that
+    /// stopped before manifest 2.
+    pub async fn find_fork_target(&self, new_namespace_id: &NamespaceId) -> Result<ForkTarget> {
+        let target = self.namespace.with_namespace(new_namespace_id.clone());
+        let initializing = match target.find_existing_namespace().await? {
+            None => None,
+            Some(ExistingNamespace::Initializing(manifest_1)) => Some(manifest_1),
+            Some(ExistingNamespace::Active) => {
+                return Err(CoreError::NamespaceExists {
+                    namespace_id: new_namespace_id.clone(),
+                })
+            }
+        };
+        Ok(ForkTarget {
+            namespace_id: new_namespace_id.clone(),
+            initializing,
+        })
+    }
+
     /// Creates a new namespace at `basis`, the manifest that the caller's
     /// fold of this namespace's WAL tail published or found current, with
     /// the manifest boundary that the fold read.
@@ -54,11 +97,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// `snapshot_unavailable`, so the caller folds and forks again.
     pub async fn fork_namespace(
         &self,
-        new_namespace_id: &NamespaceId,
+        target: ForkTarget,
         actor_id: &loonfs_types::ActorId,
         basis: PublicationBasis,
     ) -> Result<NamespaceMetadata> {
-        self.install_fork(new_namespace_id, actor_id, ForkAt::Head(basis), None)
+        self.install_fork(target, actor_id, ForkAt::Head(basis), None)
             .await
     }
 
@@ -66,17 +109,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// [`Self::fork_namespace`] does at a manifest.
     pub async fn fork_namespace_at_snapshot(
         &self,
-        new_namespace_id: &NamespaceId,
+        target: ForkTarget,
         actor_id: &loonfs_types::ActorId,
         snapshot_id: &SnapshotId,
     ) -> Result<NamespaceMetadata> {
-        self.install_fork(
-            new_namespace_id,
-            actor_id,
-            ForkAt::Snapshot(snapshot_id),
-            None,
-        )
-        .await
+        self.install_fork(target, actor_id, ForkAt::Snapshot(snapshot_id), None)
+            .await
     }
 
     /// Creates a new namespace at `basis` for a rebase of
@@ -91,7 +129,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// `below_retention_floor`, and the call then creates no namespace.
     pub async fn fork_namespace_for_rebase(
         &self,
-        new_namespace_id: &NamespaceId,
+        target: ForkTarget,
         actor_id: &loonfs_types::ActorId,
         source_namespace_id: &NamespaceId,
         fork_point_seq: CommitSeq,
@@ -101,26 +139,21 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             source_namespace_id,
             fork_point_seq,
         };
-        self.install_fork(
-            new_namespace_id,
-            actor_id,
-            ForkAt::Head(basis),
-            Some(rebase),
-        )
-        .await
+        self.install_fork(target, actor_id, ForkAt::Head(basis), Some(rebase))
+            .await
     }
 
-    /// Forks this namespace into `new_namespace_id`, or finishes a fork into
-    /// it that stopped before manifest 2
+    /// Forks this namespace into `target`, or finishes a fork into it that
+    /// stopped before manifest 2
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/namespace-creation.md#forking-a-namespace)).
     ///
-    /// 1. Finds the newest manifest of `new_namespace_id`. An active namespace
-    ///    returns `namespace_exists`, and a tombstone or a retired ID returns
-    ///    `namespace_deleted`. An initializing namespace whose manifest 1
-    ///    matches the request is finished from step 5, after the call finds
-    ///    this namespace active and the snapshot of step 2 live. An
-    ///    initializing namespace whose manifest 1 doesn't match returns
-    ///    `namespace_exists`.
+    /// 1. The caller finds the newest manifest of the target's ID with
+    ///    [`Self::find_fork_target`], which returns `namespace_exists` for an
+    ///    active namespace, and `namespace_deleted` for a tombstone or a
+    ///    retired ID. An initializing namespace whose manifest 1 matches the
+    ///    request is finished from step 5, after the call finds this
+    ///    namespace active and the snapshot of step 2 live. An initializing
+    ///    namespace whose manifest 1 doesn't match returns `namespace_exists`.
     /// 2. Takes the snapshot that the fork is built from: the user snapshot
     ///    that `at` identifies, or a temporary snapshot of the head, which
     ///    expires `OPERATION_SNAPSHOT_TTL_MS` after the call starts.
@@ -128,8 +161,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///    that snapshot's manifest.
     /// 4. Publishes manifest 1 with the status `initializing`, whose fork
     ///    basis records the snapshot of step 2 and a generated fork snapshot
-    ///    ID. When another call's manifest 1 won, the call continues as in
-    ///    step 1.
+    ///    ID. When another call's manifest 1 put succeeded first, the call
+    ///    finds the target again and continues as step 1 describes.
     /// 5. Writes the fork's member entry in the pool that manifest 1 records.
     /// 6. Checks the call's publication budget, writes the fork snapshot, and
     ///    then checks that this namespace is active and that the snapshot of
@@ -142,24 +175,27 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// retirement deletes it. The call never deletes a snapshot.
     async fn install_fork(
         &self,
-        new_namespace_id: &NamespaceId,
+        target: ForkTarget,
         actor_id: &loonfs_types::ActorId,
         at: ForkAt<'_>,
         rebase: Option<Rebase<'_>>,
     ) -> Result<NamespaceMetadata> {
         let clock = self.namespace.start_clock();
-        let target = self.namespace.with_namespace(new_namespace_id.clone());
-        let existing = match target.find_existing_namespace().await? {
-            Some(existing) => existing,
+        let new_namespace_id = &target.namespace_id;
+        let target_store = self.namespace.with_namespace(new_namespace_id.clone());
+        let existing = match target.initializing {
+            Some(manifest_1) => ExistingNamespace::Initializing(manifest_1),
             None => match self
-                .publish_fork_manifest_1(&target, actor_id, &at, rebase, &clock)
+                .publish_fork_manifest_1(&target_store, actor_id, &at, rebase, &clock)
                 .await
             {
                 Ok((manifest_1, source)) => {
-                    return self.finish_fork(&target, manifest_1, source, &clock).await
+                    return self
+                        .finish_fork(&target_store, manifest_1, source, &clock)
+                        .await
                 }
                 Err(CoreError::NamespaceExists { .. }) => {
-                    target.find_existing_namespace().await?.ok_or_else(|| {
+                    target_store.find_existing_namespace().await?.ok_or_else(|| {
                         CoreError::NamespaceCorrupt(format!(
                             "the manifest 1 put of namespace `{new_namespace_id}` lost to a manifest that isn't there"
                         ))
@@ -188,7 +224,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         self.namespace
             .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, &clock)
             .await?;
-        self.finish_fork(&target, manifest_1, source, &clock).await
+        self.finish_fork(&target_store, manifest_1, source, &clock)
+            .await
     }
 
     /// Writes the member entry and the fork snapshot that `manifest_1`

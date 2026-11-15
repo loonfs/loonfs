@@ -24,7 +24,11 @@ async fn a_create_generates_a_pool_and_every_fork_records_its_source_pool() {
         let forked = fixture
             .engine()
             .fork_namespace(
-                target,
+                fixture
+                    .engine()
+                    .find_fork_target(target)
+                    .await
+                    .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
                 crate::test_support::folded_manifest(&fixture.namespace)
                     .await

@@ -359,7 +359,11 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
     let forked = fixture
         .engine()
         .fork_namespace(
-            &target,
+            fixture
+                .engine()
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -512,7 +516,11 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
     let forked = fixture
         .engine()
         .fork_namespace(
-            &target,
+            fixture
+                .engine()
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
             &actor_id,
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -649,7 +657,11 @@ async fn a_create_never_finishes_a_fork_and_a_fork_never_finishes_a_create() {
     let forked = fixture
         .engine()
         .fork_namespace(
-            &created,
+            fixture
+                .engine()
+                .find_fork_target(&created)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -731,7 +743,11 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     fixture
         .engine()
         .fork_namespace(
-            &target,
+            fixture
+                .engine()
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -762,7 +778,11 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     fixture
         .engine()
         .fork_namespace(
-            &nested,
+            fixture
+                .engine()
+                .find_fork_target(&nested)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -842,13 +862,7 @@ async fn fork_into_a_deleted_id_leaves_no_source_snapshot() {
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context);
     let error = fixture
         .engine()
-        .fork_namespace(
-            &target,
-            &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
-                .await
-                .expect("fold the WAL tail"),
-        )
+        .find_fork_target(&target)
         .await
         .expect_err("deleted target");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
@@ -888,7 +902,10 @@ async fn a_fork_that_loses_target_publication_writes_no_fork_snapshot() {
         store.block_next();
         let engine = crate::test_support::NamespaceFixture::new(&store, &source, &setup).engine();
         let fork = engine.fork_namespace(
-            &target,
+            engine
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
             &actor,
             crate::test_support::folded_manifest(&engine.namespace)
                 .await
@@ -1020,7 +1037,11 @@ async fn a_fork_that_stopped_after_manifest_one_is_finished_by_the_same_request(
     let forked = fixture
         .engine()
         .fork_namespace(
-            &target,
+            fixture
+                .engine()
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -1071,7 +1092,11 @@ async fn a_fork_request_that_differs_from_manifest_one_returns_namespace_exists(
     let from_other = other_fixture
         .engine()
         .fork_namespace(
-            &target,
+            other_fixture
+                .engine()
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
             &actor,
             crate::test_support::folded_manifest(&other_fixture.namespace)
                 .await
@@ -1098,7 +1123,15 @@ async fn a_fork_request_that_differs_from_manifest_one_returns_namespace_exists(
         .expect("take a named snapshot");
     let at_named = source_fixture
         .engine()
-        .fork_namespace_at_snapshot(&target, &actor, &named.snapshot_id)
+        .fork_namespace_at_snapshot(
+            source_fixture
+                .engine()
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
+            &actor,
+            &named.snapshot_id,
+        )
         .await;
     assert_matches!(at_named, Err(CoreError::NamespaceExists { .. }));
     assert_eq!(manifest_payloads(&store, &target).await, [manifest_1]);
@@ -1146,7 +1179,11 @@ async fn an_initializing_namespace_is_not_found_except_by_create_fork_and_delete
     let fork = fixture
         .engine()
         .fork_namespace_at_snapshot(
-            &NamespaceId::parse("nested").expect("nested"),
+            fixture
+                .engine()
+                .find_fork_target(&NamespaceId::parse("nested").expect("nested"))
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             &SnapshotId::generate(ManifestNo(1)),
         )
@@ -1226,17 +1263,10 @@ async fn a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a
         ]
     );
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
-    let fork = fixture
-        .engine()
-        .fork_namespace(
-            &target,
-            &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
-                .await
-                .expect("fold the WAL tail"),
-        )
-        .await;
-    assert_matches!(fork, Err(CoreError::NamespaceDeleted { .. }));
+    assert_matches!(
+        fixture.engine().find_fork_target(&target).await,
+        Err(CoreError::NamespaceDeleted { .. })
+    );
 }
 
 /// Checks that a call that finishes a fork after the fork's temporary
@@ -1261,7 +1291,11 @@ async fn a_finishing_fork_whose_snapshot_ended_returns_snapshot_not_found_and_le
         let finished = fixture
             .engine()
             .fork_namespace(
-                &target,
+                fixture
+                    .engine()
+                    .find_fork_target(&target)
+                    .await
+                    .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
                 crate::test_support::folded_manifest(&fixture.namespace)
                     .await
@@ -1299,7 +1333,15 @@ async fn a_finishing_fork_whose_source_was_deleted_returns_namespace_deleted() {
         .expect("delete the source");
     let finished = fixture
         .engine()
-        .fork_namespace(&target, &loonfs_test_support::test_actor(), source_basis)
+        .fork_namespace(
+            fixture
+                .engine()
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
+            &loonfs_test_support::test_actor(),
+            source_basis,
+        )
         .await;
     assert_matches!(finished, Err(CoreError::NamespaceDeleted { .. }));
     assert_eq!(manifest_payloads(&store, &target).await, [manifest_1]);
@@ -1336,6 +1378,10 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
     store.inner().reset();
     store.block_next();
     let finisher = fixture.engine();
+    let fork_target = finisher
+        .find_fork_target(&target)
+        .await
+        .expect("find the fork target");
     let other_finisher = async {
         store.wait_until_blocked().await;
         let namespace = crate::test_support::namespace_store(store.inner(), &target);
@@ -1359,7 +1405,7 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
     };
     let actor = loonfs_test_support::test_actor();
     let (finished, ()) = tokio::join!(
-        finisher.fork_namespace(&target, &actor, head),
+        finisher.fork_namespace(fork_target, &actor, head),
         other_finisher
     );
     let finished = finished.expect("the finisher returns success");
