@@ -85,10 +85,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// The unit plans from `basis`, a manifest that the caller already has,
     /// or from the current manifest that it loads when `basis` is `None`, and
-    /// reads its input runs without the cache. The unit compacts the whole
-    /// window that the namespace's run policy selects, whatever the number of rows
-    /// its runs list, and the compaction checks `cancellation` between
-    /// blocks. The unit publishes through
+    /// reads its input runs without the cache. The walk that builds a base
+    /// compaction's kept inode filter reads through the cache. The unit
+    /// compacts the whole window that the namespace's run policy selects,
+    /// whatever the number of rows its runs list, and the compaction checks
+    /// `cancellation` between blocks. The unit publishes through
     /// `finalize_metadata_compaction`, starting from the
     /// manifest it planned from, and finalization retries a lost put over the
     /// manifest that won while the unit's input segments are unchanged. The
@@ -120,8 +121,17 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         }
         ensure_namespace_live(&payload.namespace_id, payload.status)?;
         // The unit reads its input runs without the cache, and the compaction inserts
-        // its output into the cache.
-        let segments = metadata_basis_from_manifest(&self.namespace.store, None, current).segments;
+        // its output into the cache. The walk that builds the kept inode filter
+        // scans one directory at a time. A scan keeps the data blocks it fetches
+        // in the cache, not in its own memo, so the walk reads through the
+        // cache, and a block that contains the rows of many directories is
+        // fetched once.
+        let segments = metadata_basis_from_manifest(
+            &self.namespace.store,
+            Some(&self.namespace.segment_cache),
+            current,
+        )
+        .segments;
         let Some(spec) = plan_compaction(payload, &segments.scan_runs, self.namespace.run_policy)
         else {
             return Ok(CompactionUnitOutcome::NotNeeded);
