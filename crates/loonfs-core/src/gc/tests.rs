@@ -240,7 +240,7 @@ async fn read_upload_session<S: ObjectStore + ?Sized>(
 /// and a later collection deletes an object written late under the prefix
 /// once that object is older than the grace window.
 #[tokio::test]
-async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
+async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecognized_keys() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -264,11 +264,37 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
     create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("user snapshot");
+    advance_floor_past(&store, &namespace_id, &setup).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
         .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
+    // The WAL objects that no collection deletes: the fences of the writer
+    // sessions and the floor object of the advance.
+    let commit_keys = crate::test_support::commit_wal_keys(&store, &namespace_id).await;
+    let kept_wal = store
+        .list_prefix(&wal_prefix(&namespace_id))
+        .await
+        .expect("list the WAL")
+        .into_iter()
+        .filter(|key| !commit_keys.contains(key))
+        .collect::<BTreeSet<_>>();
+    let mut floor_objects = 0;
+    for key in &kept_wal {
+        let bytes = store
+            .get(key, None)
+            .await
+            .expect("get a WAL object")
+            .expect("WAL object");
+        let payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
+            .expect("decode a WAL object")
+            .into_payload();
+        assert!(payload.records.is_empty(), "{key}");
+        floor_objects += u64::from(payload.retention_floor_seq.is_some());
+    }
+    assert_eq!(floor_objects, 1);
+    assert!(kept_wal.len() > 1, "{kept_wal:?}");
 
     let final_activity = crate::test_support::namespace_store(&store, &namespace_id)
         .load_statistics()
@@ -290,7 +316,13 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
         .gc(&aged.clock())
         .await
         .expect("collection");
-    assert!(report.deleted.wal_objects >= 1);
+    // The deleted namespace's collection deletes the commit objects and
+    // keeps the fences and the floor object.
+    assert_eq!(report.deleted.wal_objects, commit_keys.len() as u64);
+    assert_eq!(
+        report.retained.fences_and_floor_objects,
+        kept_wal.len() as u64
+    );
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests > 0);
     assert_eq!(report.deleted_snapshots_by_owner.user, 1);
@@ -339,12 +371,14 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
         assert!(store.head(key).await.expect("reclaimed content").is_none());
     }
 
-    for prefix in [wal_prefix(&namespace_id), snapshot_prefix(&namespace_id)] {
-        assert!(
-            store.list_prefix(&prefix).await.expect("list").is_empty(),
-            "prefix `{prefix}` must be empty after reclamation"
-        );
-    }
+    assert!(crate::test_support::commit_wal_keys(&store, &namespace_id)
+        .await
+        .is_empty());
+    assert!(store
+        .list_prefix(&snapshot_prefix(&namespace_id))
+        .await
+        .expect("list")
+        .is_empty());
     // The retirement raised the boundary to retired and left the tombstone,
     // which is still younger than the grace window, as it was.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -389,6 +423,10 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
     assert_eq!(report.deleted.manifests, 1);
     assert!(report.deleted.metadata_segments > 0);
     assert_eq!(report.retained.unrecognized_key, 1);
+    assert_eq!(
+        report.retained.fences_and_floor_objects,
+        kept_wal.len() as u64
+    );
     assert_eq!(report.retires_at_ms, None);
     // Retirement deleted the member entry and the pool's collection deleted
     // the content, so nothing is under the pool's prefix.
@@ -398,10 +436,11 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
             .await,
         Err(CoreError::PoolNotFound { .. })
     );
-    let remaining = BTreeSet::from([
+    let mut remaining = BTreeSet::from([
         loonfs_objectstore::keys::boundary(&namespace_id),
         unrecognized,
     ]);
+    remaining.extend(kept_wal);
     let keys = || async {
         store
             .list_prefix(&loonfs_objectstore::keys::namespace_prefix(&namespace_id))
@@ -896,8 +935,10 @@ async fn gc_never_deletes_the_live_replay_tail() {
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect(&store, &namespace_id, &aged).await;
 
-    // The advance's floor object is folded too.
-    assert_eq!(report.deleted.wal_objects, 5);
+    // The two folded commit objects go. The fences of their sessions and the
+    // advance's floor object stay.
+    assert_eq!(report.deleted.wal_objects, 2);
+    assert_eq!(report.retained.fences_and_floor_objects, 3);
     // Latest reads replay the retained tail over the manifest basis.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace
@@ -911,6 +952,110 @@ async fn gc_never_deletes_the_live_replay_tail() {
     )
     .await
     .expect("tail commit stays readable");
+}
+
+/// Checks that an active namespace's collection keeps the fences and the
+/// floor object at or below `folded_wal_no` that are older than the grace
+/// window, and deletes the commit objects beside them, a padded one
+/// included.
+#[tokio::test]
+async fn a_collection_keeps_folded_fences_and_floor_objects_and_deletes_commit_objects() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/one.txt", "one", &setup).await;
+    // A commit that creates one directory is small enough to be padded.
+    NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        setup.writer_id.clone(),
+    )
+    .publish_batch(
+        vec![CommitCandidate::new(
+            crate::test_support::create_directory_request("small", "a"),
+        )],
+        &setup.clock(),
+    )
+    .await
+    .results
+    .pop()
+    .expect("one result")
+    .expect("create a directory");
+    // The floor advances over folded commits, and the advance folds its
+    // floor object.
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    namespace.fold_wal().await.expect("fold the WAL");
+    advance_floor_past(&store, &namespace_id, &setup).await;
+
+    let commit_keys = crate::test_support::commit_wal_keys(&store, &namespace_id).await;
+    assert!(!commit_keys.is_empty());
+    let mut padded_commits = 0;
+    for key in &commit_keys {
+        let bytes = store.get(key, None).await.expect("get").expect("commit");
+        let document = zstd::stream::decode_all(bytes.as_ref()).expect("decompress");
+        padded_commits += u64::from(document.windows(8).any(|text| text == b"\x67padding"));
+    }
+    assert!(padded_commits > 0, "a small commit object is padded");
+    let wal_keys = store
+        .list_prefix(&wal_prefix(&namespace_id))
+        .await
+        .expect("list the WAL");
+    let kept_wal = wal_keys
+        .iter()
+        .filter(|key| !commit_keys.contains(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut floor_objects = 0;
+    for key in &kept_wal {
+        let bytes = store
+            .get(key, None)
+            .await
+            .expect("get")
+            .expect("WAL object");
+        let payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
+            .expect("decode a WAL object")
+            .into_payload();
+        assert!(payload.records.is_empty(), "{key}");
+        floor_objects += u64::from(payload.retention_floor_seq.is_some());
+    }
+    assert_eq!(floor_objects, 1);
+    assert!(kept_wal.len() > 1, "{kept_wal:?}");
+    let folded_wal_no = namespace
+        .load_current_manifest()
+        .await
+        .expect("current manifest")
+        .payload()
+        .folded_wal_no;
+    for key in &wal_keys {
+        let wal_no = loonfs_objectstore::layout::wal_no_of(key).expect("WAL number");
+        assert!(wal_no <= folded_wal_no, "{key} is folded");
+    }
+
+    let aged =
+        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
+    let report = collect(&store, &namespace_id, &aged).await;
+    assert_eq!(report.deleted.wal_objects, commit_keys.len() as u64);
+    assert_eq!(
+        report.retained.fences_and_floor_objects,
+        kept_wal.len() as u64
+    );
+    assert_eq!(
+        store
+            .list_prefix(&wal_prefix(&namespace_id))
+            .await
+            .expect("list the WAL"),
+        kept_wal
+    );
+    let again = collect(&store, &namespace_id, &aged).await;
+    assert_eq!(again.deleted.wal_objects, 0);
+    assert_eq!(
+        again.retained.fences_and_floor_objects,
+        kept_wal.len() as u64
+    );
 }
 
 async fn assert_basis_reaped(

@@ -29,6 +29,9 @@ pub struct RetainedCandidates {
     /// The snapshot records that the collection couldn't delete because of their owner or their
     /// grace window.
     pub snapshot_not_deletable: u64,
+    /// The fences and floor objects, which no collection deletes. The collection tells them from
+    /// data WAL objects by their listed size.
+    pub fences_and_floor_objects: u64,
 }
 
 /// The candidates that one garbage collection of a pool inspected but didn't delete, counted
@@ -252,6 +255,8 @@ pub enum RetainedReason {
     UnrecognizedKey,
     /// Counts into [`RetainedCandidates::snapshot_not_deletable`].
     SnapshotNotDeletable,
+    /// Counts into [`RetainedCandidates::fences_and_floor_objects`].
+    FencesAndFloorObjects,
 }
 
 impl RetainedReason {
@@ -262,6 +267,7 @@ impl RetainedReason {
             Self::NoProviderTimestamp => &mut retained.no_provider_timestamp,
             Self::UnrecognizedKey => &mut retained.unrecognized_key,
             Self::SnapshotNotDeletable => &mut retained.snapshot_not_deletable,
+            Self::FencesAndFloorObjects => &mut retained.fences_and_floor_objects,
         }
     }
 }
@@ -304,13 +310,14 @@ impl RetainedCandidates {
     }
 
     /// Returns every reason and count in a fixed order.
-    pub(crate) fn by_reason(&self) -> [(&'static str, u64); 5] {
+    pub(crate) fn by_reason(&self) -> [(&'static str, u64); 6] {
         let Self {
             referenced,
             within_grace_window,
             no_provider_timestamp,
             unrecognized_key,
             snapshot_not_deletable,
+            fences_and_floor_objects,
         } = *self;
         [
             ("referenced", referenced),
@@ -318,6 +325,7 @@ impl RetainedCandidates {
             ("no_provider_timestamp", no_provider_timestamp),
             ("unrecognized_key", unrecognized_key),
             ("snapshot_not_deletable", snapshot_not_deletable),
+            ("fences_and_floor_objects", fences_and_floor_objects),
         ]
     }
 
@@ -329,12 +337,14 @@ impl RetainedCandidates {
             no_provider_timestamp,
             unrecognized_key,
             snapshot_not_deletable,
+            fences_and_floor_objects,
         } = other;
         self.referenced += referenced;
         self.within_grace_window += within_grace_window;
         self.no_provider_timestamp += no_provider_timestamp;
         self.unrecognized_key += unrecognized_key;
         self.snapshot_not_deletable += snapshot_not_deletable;
+        self.fences_and_floor_objects += fences_and_floor_objects;
     }
 
     /// Returns the reason with the highest count, and that count.

@@ -13,7 +13,7 @@ use loonfs_core::test_support::{
 use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::keys::{
     boundary, content_blob, metadata_manifest_object, metadata_manifest_prefix, pool_member,
-    snapshot_prefix, snapshot_record,
+    snapshot_prefix, snapshot_record, wal_object,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -29,6 +29,7 @@ use loonfs_types::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
     },
     AbsolutePath, CommitId, CommitSeq, DestinationBehavior, ManifestNo, NamespaceId, SnapshotId,
+    WalNo,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -1373,7 +1374,8 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
 }
 
 #[tokio::test]
-async fn gc_preserves_unfolded_data_then_empties_the_retired_prefix() {
+#[allow(clippy::disallowed_methods)]
+async fn gc_preserves_unfolded_data_then_collects_the_retired_prefix() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1416,8 +1418,8 @@ async fn gc_preserves_unfolded_data_then_empties_the_retired_prefix() {
     assert!(report.deleted.wal_objects >= 1, "{report:?}");
     // The collection retired the eligible namespace, so the next collection
     // lists the namespace's prefix once, deletes the tombstone and its
-    // segments, and keeps the boundary and the two keys that it doesn't
-    // recognize.
+    // segments, and keeps the boundary, the two fences and the two keys that
+    // it doesn't recognize.
     let stray = format!("namespaces/{}/stray", namespace_id.as_str());
     let unnumbered = format!("{}latest.json.zst", metadata_manifest_prefix(&namespace_id));
     for key in [&stray, &unnumbered] {
@@ -1434,6 +1436,7 @@ async fn gc_preserves_unfolded_data_then_empties_the_retired_prefix() {
     assert_eq!(report.deleted.manifests, 1, "{report:?}");
     assert!(report.deleted.metadata_segments >= 1, "{report:?}");
     assert_eq!(report.retained.unrecognized_key, 2, "{report:?}");
+    assert_eq!(report.retained.fences_and_floor_objects, 2, "{report:?}");
     let listings = store
         .take()
         .into_iter()
@@ -1449,7 +1452,13 @@ async fn gc_preserves_unfolded_data_then_empties_the_retired_prefix() {
             .await,
         Err(CoreError::NamespaceDeleted { .. })
     );
-    let mut kept = vec![boundary(&namespace_id), stray, unnumbered];
+    let mut kept = vec![
+        boundary(&namespace_id),
+        wal_object(&namespace_id, &WalNo(1)),
+        wal_object(&namespace_id, &WalNo(3)),
+        stray,
+        unnumbered,
+    ];
     kept.sort();
     assert_eq!(namespace_keys(&store, &namespace_id).await, kept);
 }

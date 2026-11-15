@@ -221,10 +221,8 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .clock())
         .await
         .expect("collect old WAL and segments that no snapshot keeps");
-    assert!(store
-        .list_prefix(&wal_prefix(&namespace_id))
+    assert!(crate::test_support::commit_wal_keys(&store, &namespace_id)
         .await
-        .expect("WAL listing")
         .is_empty());
 
     engine.invalidate_projection();

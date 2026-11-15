@@ -33,6 +33,7 @@ use loonfs_types::format::manifest::{
 use loonfs_types::format::wal::{
     decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, MergeRecord, WalCodecError,
     WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent, WalObjectPayload,
+    MAX_FENCE_OR_FLOOR_OBJECT_BYTES,
 };
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
@@ -559,6 +560,16 @@ fn sample_wal_floor_payload() -> WalObjectPayload {
     }
 }
 
+/// A commit object small enough to be padded: one commit with one delta and
+/// no message. The golden pins the padding bytes, which the payload checksum
+/// doesn't cover.
+fn sample_wal_padded_payload() -> WalObjectPayload {
+    let mut payload = sample_wal_payload();
+    payload.records[0].deltas.truncate(1);
+    payload.records[0].message = None;
+    payload
+}
+
 fn sample_manifest_payload() -> NamespaceManifestPayload {
     let mut manifest = NamespaceManifestPayload {
         activity: loonfs_types::format::manifest::ManifestActivity {
@@ -838,6 +849,21 @@ fn wal_object_merge_matches_golden_bytes() {
 #[test]
 fn wal_object_floor_matches_golden_bytes() {
     assert_wal_matches_golden("wal_object_floor.v1.cbor", sample_wal_floor_payload());
+}
+
+#[test]
+fn wal_object_padded_matches_golden_bytes() {
+    let payload = sample_wal_padded_payload();
+    let stored = encode_wal_object_envelope_zstd(payload.clone())
+        .expect("encode wal")
+        .into_bytes();
+    assert!(stored.len() > MAX_FENCE_OR_FLOOR_OBJECT_BYTES);
+    // The document has a `padding` field, so the golden pins the padding.
+    let key = b"padding";
+    assert!(unzstd(&stored)
+        .windows(key.len())
+        .any(|window| window == key));
+    assert_wal_matches_golden("wal_object_padded.v1.cbor", payload);
 }
 
 // The golden is the decompressed document. The stored object is that document

@@ -1159,8 +1159,8 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
     }
 }
 
-/// Requests that one retired namespace whose prefix is empty except its
-/// boundary costs in a sweep, under the namespace's prefix, and how many of
+/// Requests that one retired namespace whose prefix stores its boundary, its
+/// fences and its floor objects costs in a sweep, under the namespace's prefix, and how many of
 /// them are lists. The metadata call reads the boundary and stops at the
 /// retired boundary (1). The namespace's collection reads the boundary and
 /// lists the namespace's prefix (2). The namespace's retirement deleted its
@@ -1171,6 +1171,7 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
 const RETIRED_SWEEP_REQUESTS: (usize, usize) = (3, 1);
 
 #[tokio::test(start_paused = true)]
+#[allow(clippy::disallowed_methods)]
 async fn a_retired_namespace_costs_a_sweep_a_fixed_number_of_requests_and_no_failure() {
     for grep in [Grep::NotMaintained, Grep::Maintained] {
         let directory = tempdir().expect("tempdir");
@@ -1193,12 +1194,16 @@ async fn a_retired_namespace_costs_a_sweep_a_fixed_number_of_requests_and_no_fai
             scheduler_config((grep != Grep::NotMaintained).then(GrepWorkerConfig::default));
         let server = SchedulerServer::start(store.clone(), &config, now_ms + 2 * DAY_MS).await;
         // The first sweep's collection retires the deleted namespace, and the
-        // second sweep's collection empties its prefix.
+        // second sweep's collection leaves the boundary and the two fences.
         server.scheduler.run_sweep().await.expect("list namespaces");
         server.scheduler.run_sweep().await.expect("list namespaces");
         let prefix = loonfs_objectstore::keys::namespace_prefix(&retired);
-        let boundary = vec![loonfs_objectstore::keys::boundary(&retired)];
-        assert_eq!(keys_under(base.as_ref(), &prefix).await, boundary);
+        let kept = vec![
+            loonfs_objectstore::keys::boundary(&retired),
+            loonfs_objectstore::keys::wal_object(&retired, &loonfs_types::WalNo(1)),
+            loonfs_objectstore::keys::wal_object(&retired, &loonfs_types::WalNo(3)),
+        ];
+        assert_eq!(keys_under(base.as_ref(), &prefix).await, kept);
 
         store.reset();
         server.scheduler.run_sweep().await.expect("list namespaces");
@@ -1233,7 +1238,7 @@ async fn a_retired_namespace_costs_a_sweep_a_fixed_number_of_requests_and_no_fai
                 "a retired namespace is not a `{call}` failure"
             );
         }
-        assert_eq!(keys_under(base.as_ref(), &prefix).await, boundary);
+        assert_eq!(keys_under(base.as_ref(), &prefix).await, kept);
     }
 }
 

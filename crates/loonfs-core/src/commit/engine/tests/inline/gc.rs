@@ -101,10 +101,8 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         FoldWalOutcome::Published
     );
     collect_aged_wal(&store, namespace_id, &context).await;
-    assert!(store
-        .list_prefix(&wal_prefix(namespace_id))
+    assert!(crate::test_support::commit_wal_keys(&store, namespace_id)
         .await
-        .expect("collected WAL")
         .is_empty());
     assert_files_readable(&store, namespace_id, "handoff", &values).await;
 }
@@ -143,10 +141,8 @@ async fn losing_fold_keeps_objects_after_the_winners_wal_is_collected() {
             .expect("winning fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         collect_aged_wal(&store, namespace_id, &context).await;
-        assert!(store
-            .list_prefix(&wal_prefix(namespace_id))
+        assert!(crate::test_support::commit_wal_keys(&store, namespace_id)
             .await
-            .expect("collected WAL")
             .is_empty());
         assert_files_readable(&store, namespace_id, "competing-gc", &values).await;
         blocked.release();
