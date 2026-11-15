@@ -15,13 +15,13 @@ use crate::{Consistency, CoreError, NamespaceId, SnapshotId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    ensure_namespace_live, project_anchor_tail, NamespaceReadAnchor, ReadBasis,
+    ensure_namespace_live, project_anchor_tail, NamespaceReadAnchor, PublicationBasis, ReadBasis,
     VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
 use loonfs_core::Phase;
-use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext};
+use loonfs_core::{CreatedSnapshot, MetadataProjectionLoadError, RuntimeReadContext};
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -346,6 +346,49 @@ impl RuntimeCore {
         let basis = self
             .namespace_store(namespace_id)
             .load_snapshot_read_basis(&live.read_basis.head, snapshot_id)
+            .await
+            .map_err(Error::from)?;
+        Ok(self.pinned_read_at_basis(namespace_id, basis, live))
+    }
+
+    /// Pins the metadata view of the snapshot `created`, which this runtime
+    /// wrote on the namespace, from the record in memory.
+    ///
+    /// `verified` is the newest manifest and the manifest boundary that the
+    /// snapshot's verification read after the record write, in a check at
+    /// `checked`. That check confirms the position of the namespace's writer
+    /// session for the live head, as a `strong` read would. Without a
+    /// position that the check confirms, the live head is confirmed as a
+    /// `strong` read confirms it.
+    pub(crate) async fn pinned_read_at_created_snapshot(
+        &self,
+        namespace_id: &NamespaceId,
+        created: &CreatedSnapshot,
+        verified: PublicationBasis,
+        checked: Observation,
+    ) -> Result<PinnedRead> {
+        let checked_position = self.record_writer_position_check(
+            namespace_id,
+            checked,
+            verified.manifest.payload().manifest_no,
+            verified.boundary,
+        );
+        let live = match checked_position {
+            Some(position) => {
+                self.inner.instruments.read_head(ReadHeadSource::Position);
+                self.read_context(
+                    position.read_basis.clone(),
+                    Some(Arc::clone(&position.tail)),
+                )
+            }
+            None => {
+                self.current_read_context(namespace_id, Consistency::Strong)
+                    .await?
+            }
+        };
+        let basis = self
+            .namespace_store(namespace_id)
+            .load_created_snapshot_read_basis(&live.read_basis.head, created.record.clone())
             .await
             .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, basis, live))

@@ -232,8 +232,8 @@ pub use phase::Phase;
 pub use pool_store::PoolStore;
 pub use segment::{MetadataFamilyGroup, MetadataRunPolicy};
 pub use snapshot::{
-    ListSnapshotFilesOptions, SnapshotFile, SnapshotFilesPage, SnapshotFilesPageCursor,
-    SnapshotPageCursor, SnapshotRecordPageCursor,
+    CreatedSnapshot, ListSnapshotFilesOptions, SnapshotFile, SnapshotFilesPage,
+    SnapshotFilesPageCursor, SnapshotPageCursor, SnapshotRecordPageCursor,
 };
 pub use upload::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,

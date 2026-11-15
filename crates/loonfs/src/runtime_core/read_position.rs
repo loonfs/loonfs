@@ -245,6 +245,37 @@ impl RuntimeCore {
         Ok(slot.current())
     }
 
+    /// Records on the position of the namespace's writer session that a
+    /// check at `checked` found manifest `manifest_no` the newest, above
+    /// `boundary` (see [`ReadPositionSlot::record_check`]), and returns the
+    /// position when a check at or after `checked` confirms it.
+    ///
+    /// A check by another call, such as a snapshot's verification after its
+    /// record write, then serves a `strong` read that started before
+    /// `checked`, as the session's own check does. A runtime without the
+    /// namespace's writer session, a position on an older manifest, and a
+    /// position that the check doesn't confirm return `None`.
+    pub(crate) fn record_writer_position_check(
+        &self,
+        namespace_id: &NamespaceId,
+        checked: Observation,
+        manifest_no: ManifestNo,
+        boundary: Option<LoadedBoundary>,
+    ) -> Option<Arc<WriterPosition>> {
+        let slot = self
+            .inner
+            .head_positions
+            .get()
+            .and_then(std::sync::Weak::upgrade)?
+            .read_position_slot(namespace_id)?;
+        let checked_age_ms = checked.age_ms();
+        slot.record_check(checked, manifest_no, boundary);
+        slot.current().filter(|position| {
+            position.read_basis.basis.manifest_no() >= manifest_no
+                && position.basis_checked.age_ms() <= checked_age_ms
+        })
+    }
+
     /// Checks the position's manifest for a successor with one HEAD.
     ///
     /// A HEAD that finds nothing records the check. A HEAD that finds a

@@ -9,6 +9,7 @@
 use super::*;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::ids::page_limit;
+use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::SnapshotOwner;
 use loonfs_types::{ErrorCode, ListSnapshotRecordsResponse, PageRequest, SnapshotRecordOwner};
 
@@ -865,4 +866,89 @@ async fn a_deleted_snapshot_is_refused_by_a_host_whose_clock_is_behind() {
             .code(),
         ErrorCode::SnapshotNotFound
     );
+}
+
+/// Checks that a delete of a snapshot that this process wrote is one
+/// compare-and-swap against the version that the write stored. A write that
+/// returned no version, and a record that an extension changed after the
+/// write, are deleted after a load of the record, as a delete by ID is.
+#[tokio::test]
+async fn a_created_snapshot_is_deleted_with_the_version_its_write_stored() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+    let engine = fixture.engine();
+    let expires_at_ms = context.now_ms + 60_000;
+    let create = || async {
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let manifest = crate::test_support::folded_manifest(&namespace)
+            .await
+            .expect("fold the WAL tail");
+        engine
+            .create_verified_snapshot(None, Some(expires_at_ms), manifest)
+            .await
+            .expect("create the snapshot")
+            .0
+    };
+
+    let as_written = create().await;
+    let mut without_version = create().await;
+    without_version.etag = None;
+    let extended = create().await;
+    engine
+        .extend_snapshot(&extended.record.snapshot_id, expires_at_ms + 60_000)
+        .await
+        .expect("extend the snapshot");
+    for (label, created, expected) in [
+        ("as written", &as_written, &["swap"][..]),
+        ("without a version", &without_version, &["get", "swap"][..]),
+        (
+            "after an extension",
+            &extended,
+            &["swap", "get", "swap"][..],
+        ),
+    ] {
+        store.reset();
+        engine
+            .delete_created_snapshot(created)
+            .await
+            .expect("delete the snapshot");
+        let key =
+            loonfs_objectstore::keys::snapshot_record(&namespace_id, &created.record.snapshot_id);
+        let requests = store
+            .take()
+            .into_iter()
+            .map(|operation| {
+                assert_eq!(operation.key(), key, "for `{label}`");
+                match operation {
+                    RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => {
+                        "get"
+                    }
+                    RecordedOperation::Put {
+                        mode: PutMode::CompareAndSwap { .. },
+                        ..
+                    } => "swap",
+                    other => panic!("for `{label}`, an unexpected request: {other:?}"),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests, expected, "for `{label}`");
+        let deleted = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_snapshot_record(&created.record.snapshot_id)
+            .await
+            .expect("load the record")
+            .expect("the record stays until collection");
+        assert!(
+            deleted.state.owner.deleted_at_ms().is_some(),
+            "for `{label}`"
+        );
+    }
 }

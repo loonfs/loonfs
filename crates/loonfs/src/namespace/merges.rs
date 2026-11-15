@@ -5,14 +5,15 @@
 use crate::pinned_read::PinnedRead;
 use crate::publish::CommitCandidate;
 use crate::publisher::MergeReservation;
+use crate::runtime_core::HeadConfirmation;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, Commit, CommitId, Consistency, Error, MergeForkOptions, Mode, Namespace, NamespaceId,
-    NextMergeRangeResponse, Result, SnapshotId, Writable,
+    NextMergeRangeResponse, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::OPERATION_SNAPSHOT_TTL_MS;
-use loonfs_core::{MergeAllowance, MergeRequest};
+use loonfs_core::{CreatedSnapshot, MergeAllowance, MergeRequest};
 use loonfs_types::format::wal::MergeRecord;
 use std::sync::{Mutex, MutexGuard};
 
@@ -40,7 +41,7 @@ pub(crate) struct PlannedCommit<R = ()> {
     pub(crate) reservation: MergeReservation,
     pub(crate) record: MergeRecord,
     pub(crate) report: R,
-    pub(crate) merge_snapshot: SnapshotId,
+    pub(crate) merge_snapshot: CreatedSnapshot,
 }
 
 /// How the commit of a merge, or of a replay commit, ended.
@@ -169,7 +170,10 @@ impl Namespace<Writable> {
     /// namespace's head under `reservation`, or under a reservation that the
     /// plan takes (see [`Self::plan_commit`]). The plan checks the fork and the
     /// floors and finds the range's start, folds and takes a snapshot of the fork, and
-    /// plans. It checks the merge's size, and then its conflicts.
+    /// plans. It checks the merge's size, and then its conflicts. The checks
+    /// read the fork's view as [`HeadConfirmation::View`] does, and the
+    /// snapshot's verification then confirms the fork's head that the plan
+    /// reads (see [`Self::snapshot_fork`]).
     pub(crate) async fn plan_merge(
         &self,
         request: &MergeRequest,
@@ -183,7 +187,7 @@ impl Namespace<Writable> {
                 self.core
                     .read(
                         source_namespace_id,
-                        Some(Consistency::Strong),
+                        HeadConfirmation::View,
                         |fork| async move {
                             main.engine
                                 .check_merge(&main.context, &fork.engine, &fork.context, request)
@@ -231,7 +235,11 @@ impl Namespace<Writable> {
     /// The receipt lookup and the plan read one view of this namespace, as a
     /// read does: a view that a newer manifest replaced, whose segments a
     /// collection removed, is read once more from the current manifest, and
-    /// the reservation that the first view took stays with the second.
+    /// the reservation that the first view took stays with the second. The
+    /// view is the writer position as it is (see [`HeadConfirmation::View`]),
+    /// because the commit goes through this runtime's writer session, whose
+    /// publish finds another writer's commit, and a plan that a commit made
+    /// stale fails at the commit and plans again.
     pub(super) async fn plan_commit<R, Plan>(
         &self,
         request: &MergeRequest,
@@ -239,39 +247,36 @@ impl Namespace<Writable> {
         plan: impl Fn(PinnedRead, MergeAllowance) -> Plan,
     ) -> Result<PlannedMerge<R>>
     where
-        Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R, SnapshotId)>>,
+        Plan: std::future::Future<
+            Output = Result<(CommitCandidate, MergeRecord, R, CreatedSnapshot)>,
+        >,
     {
         let held = Mutex::new(reservation);
         self.core
-            .read(
-                &self.namespace_id,
-                Some(Consistency::Strong),
-                |target| async {
-                    if let Some(commit) = target.engine.find_merge(&target.context, request).await?
-                    {
-                        return Ok(PlannedMerge::Committed(commit));
+            .read(&self.namespace_id, HeadConfirmation::View, |target| async {
+                if let Some(commit) = target.engine.find_merge(&target.context, request).await? {
+                    return Ok(PlannedMerge::Committed(commit));
+                }
+                let reservation = match lock_reservation(&held).take() {
+                    Some(reservation) => reservation,
+                    None => self.session().reserve_merge()?,
+                };
+                match plan(target, reservation.allowance()).await {
+                    Ok((candidate, record, report, merge_snapshot)) => {
+                        Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
+                            candidate,
+                            reservation,
+                            record,
+                            report,
+                            merge_snapshot,
+                        })))
                     }
-                    let reservation = match lock_reservation(&held).take() {
-                        Some(reservation) => reservation,
-                        None => self.session().reserve_merge()?,
-                    };
-                    match plan(target, reservation.allowance()).await {
-                        Ok((candidate, record, report, merge_snapshot)) => {
-                            Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
-                                candidate,
-                                reservation,
-                                record,
-                                report,
-                                merge_snapshot,
-                            })))
-                        }
-                        Err(error) => {
-                            *lock_reservation(&held) = Some(reservation);
-                            Err(error)
-                        }
+                    Err(error) => {
+                        *lock_reservation(&held) = Some(reservation);
+                        Err(error)
                     }
-                },
-            )
+                }
+            })
             .await
     }
 
@@ -345,28 +350,38 @@ impl Namespace<Writable> {
     ///
     /// The fold is the namespace's one fold path, so when the fork's writer
     /// session in this runtime is already folding, the fold waits for that
-    /// fold instead of folding the same tail.
+    /// fold instead of folding the same tail. The read of the fork starts
+    /// from the snapshot record in memory, and the snapshot's verification
+    /// after the record write is the check of the fork's position that the
+    /// read's live head needs (see
+    /// [`RuntimeCore::pinned_read_at_created_snapshot`](crate::runtime_core::RuntimeCore::pinned_read_at_created_snapshot)).
     pub(super) async fn snapshot_fork(
         &self,
         fork_id: &NamespaceId,
         prepared_at_ms: u64,
-    ) -> Result<(PinnedRead, SnapshotId)> {
+    ) -> Result<(PinnedRead, CreatedSnapshot)> {
         let expires_at_ms = Some(prepared_at_ms + OPERATION_SNAPSHOT_TTL_MS);
-        let snapshot = self
+        let (created, verified, checked) = self
             .mode
             .publisher
             .snapshot_after_fold(fork_id, |manifest| {
                 let engine = self
                     .core
                     .writer_engine(&self.mode.writer.writer_id, fork_id);
-                async move { engine.create_snapshot(None, expires_at_ms, manifest).await }
+                let checked = self.core.observation();
+                async move {
+                    engine
+                        .create_verified_snapshot(None, expires_at_ms, manifest)
+                        .await
+                        .map(|(created, verified)| (created, verified, checked))
+                }
             })
             .await?;
         let fork = self
             .core
-            .pinned_read_at_snapshot(fork_id, &snapshot.snapshot_id)
+            .pinned_read_at_created_snapshot(fork_id, &created, verified, checked)
             .await?;
-        Ok((fork, snapshot.snapshot_id))
+        Ok((fork, created))
     }
 
     /// Returns `planned` with the snapshot its plan read the fork through, or
@@ -374,9 +389,9 @@ impl Namespace<Writable> {
     pub(super) async fn planned_with_merge_snapshot<R>(
         &self,
         fork_id: &NamespaceId,
-        merge_snapshot: SnapshotId,
+        merge_snapshot: CreatedSnapshot,
         planned: Result<(CommitCandidate, MergeRecord, R)>,
-    ) -> Result<(CommitCandidate, MergeRecord, R, SnapshotId)> {
+    ) -> Result<(CommitCandidate, MergeRecord, R, CreatedSnapshot)> {
         match planned {
             Ok((candidate, record, report)) => Ok((candidate, record, report, merge_snapshot)),
             Err(error) => {
@@ -386,16 +401,22 @@ impl Namespace<Writable> {
         }
     }
 
-    /// Deletes the snapshot that a merge's plan took on the fork. A snapshot that the
-    /// delete leaves behind expires, and the fork's collector deletes it.
-    async fn release_merge_snapshot(&self, fork_id: &NamespaceId, merge_snapshot: &SnapshotId) {
+    /// Deletes the snapshot that a merge's plan took on the fork, with the
+    /// version of the record that the snapshot's creation stored. A snapshot
+    /// that the delete leaves behind expires, and the fork's collector deletes
+    /// it.
+    async fn release_merge_snapshot(
+        &self,
+        fork_id: &NamespaceId,
+        merge_snapshot: &CreatedSnapshot,
+    ) {
         let engine = self
             .core
             .writer_engine(&self.mode.writer.writer_id, fork_id);
-        if let Err(error) = engine.delete_snapshot(merge_snapshot).await {
+        if let Err(error) = engine.delete_created_snapshot(merge_snapshot).await {
             tracing::warn!(
                 namespace_id = %fork_id,
-                snapshot_id = %merge_snapshot,
+                snapshot_id = %merge_snapshot.record.snapshot_id,
                 error = %error,
                 "could not release a merge's snapshot on the fork"
             );

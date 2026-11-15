@@ -14,6 +14,7 @@ mod summary;
 #[cfg(test)]
 mod tests;
 
+pub use self::create::CreatedSnapshot;
 pub use self::files::{
     ListSnapshotFilesOptions, SnapshotFile, SnapshotFilesPage, SnapshotFilesPageCursor,
 };

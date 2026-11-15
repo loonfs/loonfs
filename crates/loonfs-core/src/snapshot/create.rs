@@ -33,8 +33,22 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         expires_at_ms: Option<u64>,
         basis: PublicationBasis,
     ) -> Result<Snapshot> {
+        self.create_verified_snapshot(name, expires_at_ms, basis)
+            .await
+            .map(|(created, _)| super::snapshot_summary(created.record))
+    }
+
+    /// Creates a snapshot as [`Self::create_snapshot`] does, and returns the
+    /// record with the version that its write stored, beside the newest
+    /// manifest and the manifest boundary that the verification read.
+    pub async fn create_verified_snapshot(
+        &self,
+        name: Option<String>,
+        expires_at_ms: Option<u64>,
+        basis: PublicationBasis,
+    ) -> Result<(CreatedSnapshot, PublicationBasis)> {
         self.namespace
-            .create_snapshot_record(
+            .create_verified_snapshot_record(
                 SnapshotOwner::User {
                     name,
                     expires_at_ms,
@@ -44,26 +58,49 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 &self.namespace.start_clock(),
             )
             .await
-            .map(|(record, _)| super::snapshot_summary(record))
     }
 }
 
+/// A snapshot record that this process wrote, with the version of the record
+/// that the write stored.
+#[derive(Debug, Clone)]
+pub struct CreatedSnapshot {
+    /// The record as the write stored it.
+    pub record: SnapshotPayload,
+    /// The record's version, for a compare-and-swap, or `None` when the store
+    /// returned no version.
+    pub etag: Option<String>,
+}
+
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Creates a verified snapshot of `basis`'s manifest for `owner`.
-    ///
-    /// `basis` is the manifest that the caller's fold published or found
-    /// current, with the manifest boundary that the fold read. The call
-    /// returns `snapshot_unavailable` when the manifest stopped being current
-    /// before the snapshot's verification, so the caller can fold and take a
-    /// snapshot again. Returns the snapshot record with
-    /// the newest manifest and the manifest boundary that the verification
-    /// read.
+    /// Creates a verified snapshot of `basis`'s manifest for `owner`, and returns the
+    /// snapshot record with the newest manifest and the manifest boundary that
+    /// the verification read (see [`Self::create_verified_snapshot_record`]).
     pub(crate) async fn create_snapshot_record(
         &self,
         owner: SnapshotOwner,
         basis: PublicationBasis,
         clock: &OperationClock,
     ) -> Result<(SnapshotPayload, PublicationBasis)> {
+        self.create_verified_snapshot_record(owner, basis, clock)
+            .await
+            .map(|(created, basis)| (created.record, basis))
+    }
+
+    /// Creates a verified snapshot of `basis`'s manifest for `owner`.
+    ///
+    /// `basis` contains the manifest that the caller's fold published or found
+    /// current and the manifest boundary that the fold read. The call returns `snapshot_unavailable` when the manifest
+    /// stopped being current before the snapshot's verification, so the caller
+    /// can fold and take a snapshot again. Returns the snapshot record with
+    /// the version that its write stored, and the newest manifest with the
+    /// manifest boundary that the verification read.
+    pub(crate) async fn create_verified_snapshot_record(
+        &self,
+        owner: SnapshotOwner,
+        basis: PublicationBasis,
+        clock: &OperationClock,
+    ) -> Result<(CreatedSnapshot, PublicationBasis)> {
         validate_snapshot_owner(&owner)?;
         let manifest = basis.manifest.manifest();
         let snapshot_id = SnapshotId::generate(manifest.manifest_no);
@@ -76,13 +113,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
             owner,
         };
         let verification = async {
-            write_snapshot_record(&self.store, &record).await?;
-            self.verify_snapshot_basis(basis).await
+            let written = write_snapshot_record(&self.store, &record).await?;
+            Ok::<_, CoreError>((written.etag, self.verify_snapshot_basis(basis).await?))
         }
         .await;
         let error = match verification {
-            Ok(SnapshotBasisVerification::Verified(basis)) => return Ok((record, basis)),
-            Ok(SnapshotBasisVerification::Invalid) => CoreError::SnapshotUnavailable(
+            Ok((etag, SnapshotBasisVerification::Verified(basis))) => {
+                return Ok((CreatedSnapshot { record, etag }, basis))
+            }
+            Ok((_, SnapshotBasisVerification::Invalid)) => CoreError::SnapshotUnavailable(
                 "the snapshot's manifest stopped being current before the snapshot record was verified".to_owned(),
             ),
             Err(error) => error,
