@@ -182,6 +182,12 @@ Design and measure in round trips to object storage first, then bytes, then CPU.
 
 - **Keep the commit path small.** Commits are serialized through one ordered WAL, so anything on that path slows every commit.
 
+- **Resolve a namespace's head once per operation, and pass it down.** A function that needs the head takes it from the caller that resolved it, as `get_snapshot(&self, head, snapshot_id)` does. A helper that loads the manifest or reads the boundary itself hides a request from the operation's count, and two helpers that each load the head send the request twice.
+
+- **Pick a read's confirmation by who acts on the result.** A plan that the writer session validates again at the commit reads the position as it is, because a plan that a commit made stale fails at the commit and is planned again. A result that the caller sees, or that chooses between an error and the normal path, reads as `strong`, whatever the check costs. For example, a merge's receipt lookup reads as `strong`, because its result decides whether the plan touches a fork that another runtime may have deleted since.
+
+- **Stop at the first response that decides the outcome.** When a response already shows the result, such as a manifest whose writer epoch shows that the writer is fenced, return before the next request.
+
 ## Formats and the wire
 
 `docs/specs/format.md` and `docs/specs/api.md` define the durable formats and the API. These rules describe how the code expresses them.
@@ -291,6 +297,8 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 ### Tests
 
 - **Test a contract, an invariant, or a bug fix.** Strengthen an existing test before you add one, and cover many cases with a loop or a table instead of one test each, because every test has to be read and maintained.
+
+- **Pin the request sequence of every store-facing operation** with the recording store, in a writer runtime with fresh positions and in a runtime with nothing cached, as `a_merge_with_fresh_positions_sends_these_requests_in_order` does. A functional test passes when a change adds a request, so the pinned sequence is what catches the request. A pull request that changes a pinned count says why in its body.
 
 - **Use the smallest kind of test that can check the behavior.** Use an inline `#[cfg(test)]` module for private internals, the crate's integration binary under `tests/it/` for flows across modules, golden fixtures for byte formats, the differential suite to compare core with the model oracle, and live provider conformance (behind `LOONFS_TEST_*`) for real providers.
 
