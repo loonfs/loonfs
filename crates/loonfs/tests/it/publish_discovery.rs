@@ -234,8 +234,8 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
                     .key()
                     .starts_with(&metadata_manifest_prefix(&namespace_id)))
             .count(),
-        1,
-        "the fold's manifest; {requests:?}"
+        0,
+        "the fold's publication cached the fold's manifest; {requests:?}"
     );
     assert_eq!(
         before_put

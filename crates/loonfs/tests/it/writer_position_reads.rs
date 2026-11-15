@@ -546,10 +546,11 @@ async fn another_runtimes_fold_moves_the_position_past_the_staleness() {
 }
 
 /// Checks that a manifest check that finds a fold this runtime published,
-/// while a publish has the engine locked, loads the fold's manifest, finds
-/// nothing after it, waits for the publish to release the engine, and then
-/// moves the position onto the fold's manifest without reloading, so reads
-/// start from the fold's manifest.
+/// while a publish has the engine locked, loads the fold's manifest from the
+/// segment cache without a request, finds nothing after it, waits for the
+/// publish to release the engine, and then moves the position onto the
+/// fold's manifest without reloading, so reads start from the fold's
+/// manifest.
 ///
 /// The fold runs through maintenance while the publish waits for its WAL
 /// put, so the fold's own move of the position waits for the engine too.
@@ -611,15 +612,12 @@ async fn a_check_that_finds_this_runtimes_own_fold_keeps_the_position() {
                 })
                 .collect();
             assert!(
-                checked.len() >= 3
+                checked.len() == 2
                     && *checked[0] == manifest(fold_manifest)
-                    && is_manifest_get(checked[1], &fixture.namespace_id, fold_manifest)
-                    && is_manifest_get(checked[2], &fixture.namespace_id, after_fold)
-                    && checked[3..].iter().all(|operation| {
-                        is_manifest_get(operation, &fixture.namespace_id, fold_manifest)
-                    }),
-                "one HEAD finds the fold's manifest, the check loads it and finds nothing \
-                 after it, and the read starts from the fold's manifest: {operations:?}"
+                    && is_manifest_get(checked[1], &fixture.namespace_id, after_fold),
+                "one HEAD finds the fold's manifest, the check loads the fold's manifest \
+                 from the segment cache and finds nothing after it, and the read starts \
+                 from the fold's manifest: {operations:?}"
             );
             assert_eq!(
                 fixture.head_sources(),

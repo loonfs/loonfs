@@ -168,6 +168,31 @@ impl<S: ObjectStore> NamespaceStore<S> {
         loaded.map(Some)
     }
 
+    /// Loads the manifest numbered `manifest_no` through the segment cache, or
+    /// returns `None` when the store doesn't have the manifest.
+    ///
+    /// A manifest in the segment cache is loaded without a request. A manifest
+    /// read from the store is inserted in the segment cache. The caller decides
+    /// whether the manifest is live, such as by reading the manifest boundary
+    /// after the load.
+    pub(crate) async fn load_manifest_if_present(
+        &self,
+        manifest_no: ManifestNo,
+    ) -> Result<Option<LoadedManifest>, ManifestLoadError> {
+        match load_manifest_segments_for_inspection(
+            &self.store,
+            Some(&self.segment_cache),
+            &self.namespace_id,
+            &manifest_no,
+        )
+        .await
+        {
+            Ok(segments) => Ok(Some(segments.loaded_manifest())),
+            Err(ManifestLoadError::MissingManifest { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Returns the manifest of a writer session's position as a basis that a
     /// publication can build on, with the manifest boundary that the position
     /// keeps, or `None` when the manifest is at or below the boundary (see
@@ -195,9 +220,6 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
     manifest: &LoadedManifest,
 ) -> LoadedMetadataBasis<'a, S> {
     let scan_runs = Arc::new(runs_newest_first(manifest.payload()));
-    if let Some(cache) = segment_cache {
-        cache_manifest(cache, manifest, &scan_runs);
-    }
     metadata_basis_from_segments(VerifiedMetadataSegments::new(
         store,
         segment_cache,

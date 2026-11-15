@@ -443,6 +443,65 @@ async fn manifests_and_blocks_are_charged_to_budgets_of_their_own() {
     );
 }
 
+/// Checks that a second find of the newest manifest in one runtime reads the
+/// boundary, lists the manifests, and reads the boundary again, and sends no
+/// GET for the manifest, because the first find cached the manifest. A
+/// runtime whose segment cache has a zero manifest budget finds the same
+/// manifest and sends the GET each time.
+#[tokio::test]
+async fn a_second_find_of_one_manifest_reads_the_manifest_from_the_segment_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    bootstrap_namespace(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    let manifest_key = metadata_manifest_object(
+        &namespace_id,
+        &current_manifest_number(&store, &namespace_id).await,
+    );
+    let find = |gets_manifest: bool| {
+        let mut requests = vec![
+            ("get", loonfs_objectstore::keys::boundary(&namespace_id)),
+            ("list", metadata_manifest_prefix(&namespace_id)),
+        ];
+        if gets_manifest {
+            requests.push(("get", manifest_key.clone()));
+        }
+        requests.push(("get", loonfs_objectstore::keys::boundary(&namespace_id)));
+        requests
+    };
+    for (namespace, second_find_gets_manifest) in [
+        (
+            crate::test_support::namespace_store_with_segment_cache(&store, &namespace_id),
+            false,
+        ),
+        (
+            crate::test_support::namespace_store(&store, &namespace_id),
+            true,
+        ),
+    ] {
+        store.reset();
+        for gets_manifest in [true, second_find_gets_manifest] {
+            let crate::namespace::control::NewestManifest::Manifest(found) = namespace
+                .find_newest_manifest()
+                .await
+                .expect("find the newest manifest")
+            else {
+                panic!("the namespace has a manifest");
+            };
+            assert_eq!(found.manifest.object_key, manifest_key);
+            assert_eq!(
+                control_requests(&namespace_id, &store.take()),
+                find(gets_manifest)
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     let temp_dir = tempdir().expect("tempdir");

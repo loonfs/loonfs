@@ -571,27 +571,41 @@ async fn a_sweep_survives_a_failing_namespace() {
 }
 
 /// Forwards every call to a local store, and panics on a read of one
-/// namespace's manifest while armed.
+/// namespace's manifest boundary while armed.
 #[derive(Debug)]
-struct PanicOnManifestRead {
+struct PanicOnBoundaryRead {
     inner: LocalFsStore,
-    manifest_prefix: String,
+    boundary_key: String,
     armed: AtomicBool,
 }
 
 #[async_trait::async_trait]
-impl ObjectStore for PanicOnManifestRead {
-    loonfs_test_support::delegate_object_store!(self => self.inner; except get);
+impl ObjectStore for PanicOnBoundaryRead {
+    loonfs_test_support::delegate_object_store!(self => self.inner;
+        head,
+        checksum_algorithm,
+        identity,
+        create_multipart_upload,
+        complete_multipart_upload,
+        abort_multipart_upload,
+        get,
+        put,
+        put_streamed,
+        put_immutable_verified,
+        assemble,
+        delete,
+        list_entries_from_stream,
+        list_child_prefixes,
+    );
 
-    async fn get(
+    async fn get_with_metadata(
         &self,
         key: &str,
-        range: Option<loonfs_objectstore::ByteRange>,
-    ) -> Result<Option<bytes::Bytes>, ObjectStoreError> {
-        if self.armed.load(Ordering::SeqCst) && key.starts_with(&self.manifest_prefix) {
+    ) -> Result<Option<loonfs_objectstore::ObjectBody>, ObjectStoreError> {
+        if self.armed.load(Ordering::SeqCst) && key == self.boundary_key {
             panic!("injected panic reading `{key}`");
         }
-        self.inner.get(key, range).await
+        self.inner.get_with_metadata(key).await
     }
 }
 
@@ -605,9 +619,9 @@ async fn a_panicking_call_is_backed_off_and_the_next_namespace_still_runs_its_st
         seed_unfolded_tail(&writer, namespace_id).await;
     }
     writer.shutdown().await.expect("stop the writer");
-    let store = Arc::new(PanicOnManifestRead {
+    let store = Arc::new(PanicOnBoundaryRead {
         inner: LocalFsStore::new(directory.path()).expect("local store"),
-        manifest_prefix: loonfs_objectstore::keys::metadata_manifest_prefix(&names[1]),
+        boundary_key: loonfs_objectstore::keys::boundary(&names[1]),
         armed: AtomicBool::new(false),
     });
     let config = scheduler_config(None);
@@ -631,7 +645,7 @@ async fn a_panicking_call_is_backed_off_and_the_next_namespace_still_runs_its_st
         "the panic doesn't stop the steps of other namespaces"
     );
     // The retention advance and the collections of the namespace and its pool
-    // load the same manifest, so they panic too.
+    // read the same manifest boundary, so they panic too.
     assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 4);
     for call in [
         MaintenanceCall::Metadata,
@@ -1048,23 +1062,24 @@ enum Grep {
 /// Requests one idle namespace costs in a sweep, and how many of them are
 /// lists. The sweep includes the collection of the namespace's pool. Each
 /// call finds the namespace's newest manifest with a read of the manifest
-/// boundary, a listing of the manifests, a GET of the newest manifest, and a
-/// second read of the boundary. The retention advance uses those 4 requests alone.
+/// boundary, a listing of the manifests, and a second read of the boundary.
+/// An earlier sweep loaded the newest manifest into the segment cache, so no
+/// call sends a GET for it. The retention advance uses those 3 requests alone.
 /// The metadata call and the pool's collection then check the manifest with a GET of the WAL number
 /// after it, a HEAD of the manifest number after it, and a read of the
-/// boundary, so each of them sends 7 requests before its own listings. The
+/// boundary, so each of them sends 6 requests before its own listings. The
 /// namespace's collection takes its roots from the manifest that its find
-/// returns, so it sends the 4 requests of the find and then 5 listings. The
+/// returns, so it sends the 3 requests of the find and then 5 listings. The
 /// pool's collection lists the upload sessions and the member entries before
 /// it reads the member, and then lists the member's snapshots, the content,
-/// and the temporary objects, so the four calls cost 7, 4, 9, and 12. A
-/// maintained grep index adds a call that finds the newest manifest (4), and
-/// an enabled one also reads the WAL number after it (5). The docs quote
+/// and the temporary objects, so the four calls cost 6, 3, 8, and 11. A
+/// maintained grep index adds a call that finds the newest manifest (3), and
+/// an enabled one also reads the WAL number after it (4). The docs quote
 /// these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
-    (Grep::NotMaintained, 32, 14),
-    (Grep::Maintained, 36, 15),
-    (Grep::Enabled, 37, 15),
+    (Grep::NotMaintained, 28, 14),
+    (Grep::Maintained, 31, 15),
+    (Grep::Enabled, 32, 15),
 ];
 
 #[tokio::test(start_paused = true)]
