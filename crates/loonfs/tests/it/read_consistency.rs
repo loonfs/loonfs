@@ -956,6 +956,15 @@ async fn an_eventual_read_confirms_the_head_for_a_position_ahead_of_its_cached_h
         .expect("a diff to the writer's head");
     assert_eq!(diff.to_seq, head_seq);
 
+    // A diff without a `to_seq` ends at the head that the page reads, so its
+    // `from_seq` is the position that the page has to reach.
+    let head_seq = commit(&fixture, "latest.txt").await;
+    let diff = reader
+        .diff_with_options(head_seq, &DiffOptions::default())
+        .await
+        .expect("a diff from the writer's head");
+    assert_eq!(diff.to_seq, head_seq);
+
     let ahead = CommitSeq(head_seq.0 + 1);
     assert_matches!(
         reader.list_changes(ahead).page().await,
@@ -976,6 +985,15 @@ async fn an_eventual_read_confirms_the_head_for_a_position_ahead_of_its_cached_h
             .await,
         Err(Error::Core(CoreError::InvalidDiffRange {
             param: "to_seq",
+            ..
+        }))
+    );
+    assert_matches!(
+        reader
+            .diff_with_options(ahead, &DiffOptions::default())
+            .await,
+        Err(Error::Core(CoreError::InvalidDiffRange {
+            param: "from_seq",
             ..
         }))
     );

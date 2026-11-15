@@ -571,9 +571,9 @@ impl<M: crate::Mode> Namespace<M> {
     /// next page, pass the returned `to_seq` and `next_after_seq` as
     /// `options.to_seq` and `options.after_seq`. A `from_seq` below the
     /// retention floor of the head that a page reads returns
-    /// `below_retention_floor`. An eventual page whose `to_seq` is above
-    /// that head confirms the head as a [`Consistency::Strong`] page does,
-    /// and a `to_seq` that is still above the confirmed head returns
+    /// `below_retention_floor`. An eventual page whose `from_seq` or `to_seq`
+    /// is above that head confirms the head as a [`Consistency::Strong`] page
+    /// does, and a sequence that is still above the confirmed head returns
     /// `invalid_request`.
     pub async fn diff_with_options(
         &self,
@@ -589,7 +589,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .read_at_least(
                         &self.namespace_id,
                         options.consistency,
-                        options.to_seq,
+                        Some(options.to_seq.unwrap_or(from_seq)),
                         |pinned| async move { pinned.diff_page(from_seq, options).await },
                     )
                     .await?;
