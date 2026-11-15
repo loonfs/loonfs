@@ -214,14 +214,26 @@ impl<S: ObjectStore> NamespaceStore<S> {
             (None, Some(anchor)) => ViewSource::Cold(Box::new(anchor)),
             (None, None) => {
                 let observed = crate::time::Observation::now(Arc::clone(&self.timer));
-                ViewSource::Cold(Box::new(self.load_read_anchor(observed).await?))
+                ViewSource::Cold(Box::new(
+                    self.load_writer_read_anchor(&acquired_writer, observed)
+                        .await?,
+                ))
             }
         };
+        // An anchor's loader checked the writer epoch of the anchor's manifest
+        // before the load read the tail, and replay doesn't change the epoch.
         let head = match &source {
-            ViewSource::Cached(cached, _) => &cached.read_basis.head,
+            ViewSource::Cached(cached, _) => {
+                let head = &cached.read_basis.head;
+                ensure_writer_not_fenced(
+                    head.writer_epoch,
+                    head.writer.as_ref(),
+                    &acquired_writer,
+                )?;
+                head
+            }
             ViewSource::Cold(anchor) => &anchor.read_state,
         };
-        ensure_writer_not_fenced(head, &acquired_writer)?;
         ensure_namespace_live(&head.namespace_id, head.status)?;
         let tail_discovered = matches!(source, ViewSource::Cold(_));
         let (position, manifest_segments) = match source {

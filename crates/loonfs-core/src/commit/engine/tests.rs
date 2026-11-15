@@ -776,7 +776,10 @@ async fn a_quiet_writer_finds_a_takeover_claim_and_is_fenced() {
 /// writer drops its position, and its retry finds that it was fenced.
 ///
 /// Before the put, the writer sends no request within its publication
-/// budget, and a tip confirmation after it.
+/// budget, and a tip confirmation after it. The retry finds the newest
+/// manifest, whose writer epoch is the new writer's, and fails with
+/// `writer_fenced` after the find's four requests: a boundary read, a LIST,
+/// a GET of the manifest and a boundary read. It reads no WAL object.
 #[tokio::test]
 async fn a_takeover_after_the_last_check_is_found_by_the_put() {
     for (quiet_ms, confirms) in [
@@ -799,15 +802,17 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
         store.reset();
         store.inner().block_next();
         let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
-        let (published, ()) = futures::join!(
+        let (published, rival) = futures::join!(
             engine.publish_batch(vec![create_dir("beta", "beta")], &deadline),
             async {
                 store.inner().wait_until_blocked().await;
-                crate::test_support::namespace_store(store.inner().inner(), &namespace_id)
-                    .acquire_writer_epoch(&context("writer-b").writer_id)
-                    .await
-                    .expect("writer b takes over");
+                let rival =
+                    crate::test_support::namespace_store(store.inner().inner(), &namespace_id)
+                        .acquire_writer_epoch(&context("writer-b").writer_id)
+                        .await
+                        .expect("writer b takes over");
                 store.inner().release();
+                rival
             }
         );
         assert_matches!(
@@ -836,12 +841,40 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
         let retried = engine
             .publish_batch(vec![create_dir("beta", "beta")], &deadline)
             .await;
+        let [Err(CoreError::WriterFenced(fence))] = retried.results.as_slice() else {
+            panic!("{quiet_ms}: displaced writer: {:?}", retried.results);
+        };
+        assert_eq!(fence.active_epoch, rival.writer_epoch, "{quiet_ms}");
         assert_eq!(
-            retried.results[0]
-                .as_ref()
-                .expect_err("displaced writer")
-                .code(),
-            ErrorCode::WriterFenced
+            fence.fenced_epoch,
+            WriterEpoch(rival.writer_epoch.0 - 1),
+            "{quiet_ms}"
+        );
+        assert_eq!(
+            fence.active_writer.as_ref().map(|writer| &writer.writer_id),
+            Some(&rival.writer_id),
+            "{quiet_ms}"
+        );
+        let boundary = loonfs_objectstore::keys::boundary(&namespace_id);
+        let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
+        let operations = store.take();
+        assert!(
+            matches!(
+                operations.as_slice(),
+                [
+                    RecordedOperation::Get { key: first, .. }
+                        | RecordedOperation::GetWithMetadata { key: first, .. },
+                    RecordedOperation::List { prefix },
+                    RecordedOperation::Get { key: manifest, .. }
+                        | RecordedOperation::GetWithMetadata { key: manifest, .. },
+                    RecordedOperation::Get { key: last, .. }
+                        | RecordedOperation::GetWithMetadata { key: last, .. },
+                ] if first == &boundary
+                    && prefix == &manifests
+                    && manifest.starts_with(&manifests)
+                    && last == &boundary
+            ),
+            "{quiet_ms}: {operations:?}"
         );
     }
 }
