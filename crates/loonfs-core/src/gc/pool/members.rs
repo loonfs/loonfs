@@ -309,7 +309,7 @@ impl PoolRoots {
         }
         let mut snapshots = member.list_snapshot_manifests(head.manifest_no);
         while let Some(listed) = snapshots.try_next().await? {
-            let ListedSnapshotKey::Snapshot(snapshot) = listed else {
+            let ListedSnapshotKey::Snapshot(snapshot, ()) = listed else {
                 continue;
             };
             match &snapshot.manifest {
