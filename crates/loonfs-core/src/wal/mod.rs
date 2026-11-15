@@ -23,7 +23,7 @@ pub(crate) use self::publish::publish_wal_object;
 use self::publish::wal_object_key;
 pub use self::publish_error::{is_retryable_wal_publish, settle_publish_attempt, WalPublishError};
 pub(crate) use self::reader::{load_replayed_wal_tail, replay_discovered_tail, wal_object_exists};
-pub(crate) use self::reclaim::{live_folded_wal_no, object_is_required};
+pub(crate) use self::reclaim::object_is_required;
 pub(crate) use self::writer::{prepare_commits_object, prepare_fence, prepare_floor_object};
 
 #[cfg(test)]

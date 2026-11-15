@@ -726,14 +726,16 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     // namespace sends a HEAD request for the missing manifest after the
     // current one and a read of the manifest boundary in its check of the
     // manifest. A load of a retired namespace reads its boundary and lists
-    // nothing. A collection of a live namespace lists each of its five
-    // families once, the snapshots included, and a collection of a retired
+    // nothing. A collection of a live namespace reads no WAL object and
+    // sends no HEAD request, because its roots come from the manifest that
+    // its find returns. It lists each of its five families once, the
+    // snapshots included, and a collection of a retired
     // namespace lists the namespace's prefix once. Neither lists anything
     // under its pool's prefix.
     let heads = 1;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [5, heads, 1, 0], None, [5, heads, 6, 0], None),
-        (&claimed, [5, heads, 1, 0], None, [5, heads, 6, 0], None),
+        (&idle, [5, heads, 1, 0], None, [3, 0, 6, 0], None),
+        (&claimed, [5, heads, 1, 0], None, [3, 0, 6, 0], None),
         (
             &retired,
             [1, 0, 0, 0],
