@@ -5,6 +5,8 @@ use super::record::load_snapshot_record_at_key;
 use crate::control_object::ControlObjectLoadError;
 use crate::engine::NamespaceEngine;
 use crate::error::{CoreError, Result};
+use crate::namespace::control::ensure_namespace_live;
+use crate::namespace::state::NamespaceReadState;
 use futures::StreamExt;
 use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::ObjectStore;
@@ -99,6 +101,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         request: PageRequest<SnapshotRecordPageCursor>,
     ) -> Result<Page<SnapshotRecord, SnapshotRecordPageCursor>> {
+        self.namespace.load_current_manifest().await?;
         self.list_mapped_snapshot_records_page(request, |record| {
             Some(super::snapshot_record_summary(record))
         })
@@ -108,10 +111,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Lists one page of snapshots (the user snapshots) in ascending ID order.
     /// A deleted snapshot and a snapshot that expired at or before the
     /// wall-clock time of the call are left out.
+    ///
+    /// `head` is the namespace's head as the caller read it. An initializing
+    /// head returns `namespace_not_found`, and a deleted head returns
+    /// `namespace_deleted`.
     pub async fn list_snapshots_page(
         &self,
+        head: &NamespaceReadState,
         request: PageRequest<SnapshotPageCursor>,
     ) -> Result<Page<Snapshot, SnapshotPageCursor>> {
+        ensure_namespace_live(&head.namespace_id, head.status)?;
         let request = PageRequest {
             limit: request.limit,
             cursor: request.cursor.map(SnapshotRecordPageCursor::from),
@@ -130,14 +139,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Lists the snapshots after the request's cursor and returns up to its limit of
     /// the rows that `row` returns for them. A snapshot for which `row` returns
-    /// `None` doesn't count toward the limit.
+    /// `None` doesn't count toward the limit. The listing makes no namespace
+    /// check, so each caller makes its own.
     async fn list_mapped_snapshot_records_page<T>(
         &self,
         request: PageRequest<SnapshotRecordPageCursor>,
         row: impl Fn(SnapshotPayload) -> Option<T>,
     ) -> Result<Page<T, SnapshotRecordPageCursor>> {
-        self.namespace.load_current_manifest().await?;
-
         if let Some(cursor) = &request.cursor {
             cursor.validate_for(&self.namespace.namespace_id)?;
         }

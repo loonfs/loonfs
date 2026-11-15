@@ -1,6 +1,8 @@
 //! A [`Namespace`] handle's lifecycle: deletion, closing the writer session,
 //! the administrator check, and administrator recovery.
 
+use crate::pinned_read::PinnedRead;
+use crate::runtime_core::HeadConfirmation;
 use crate::trace::{self, operation_span};
 use crate::{
     CloseNamespaceReport, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode,
@@ -14,11 +16,26 @@ impl<M: crate::Mode> Namespace<M> {
         if self.core.subject().is_none() {
             return Ok(());
         }
-        let crate::pinned_read::PinnedRead { engine, context } = self
+        self.administrator_read().await.map(drop)
+    }
+
+    /// Returns a pinned read of the namespace's head after the check that
+    /// [`Self::ensure_administrator`] makes, for an operation that reads
+    /// the head itself. A handle with a subject confirms the head as a
+    /// `strong` read for the check. A handle without a subject makes no
+    /// check and confirms the head as [`HeadConfirmation::View`] does.
+    pub(crate) async fn administrator_read(&self) -> Result<PinnedRead> {
+        let confirmation = if self.core.subject().is_some() {
+            HeadConfirmation::from(crate::Consistency::Strong)
+        } else {
+            HeadConfirmation::View
+        };
+        let pinned = self
             .core
-            .pinned_read(&self.namespace_id, crate::Consistency::Strong)
+            .pinned_read(&self.namespace_id, confirmation)
             .await?;
-        Ok(engine.ensure_administrator(&context).await?)
+        pinned.engine.ensure_administrator(&pinned.context).await?;
+        Ok(pinned)
     }
 
     /// Checks the administrator of a deletion as [`Self::ensure_administrator`]

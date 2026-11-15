@@ -750,7 +750,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Read the differences between two sequences | `list_diff` | `idempotent` | `GET /v0/namespaces/{ns}/diff?from_seq=418&to_seq=425&path=/docs&after_seq=418&limit=100` (`to_seq`, `path`, and `after_seq` are optional) |
 | Create a snapshot | `create_snapshot` | `not_idempotent` | `POST /v0/namespaces/{ns}/snapshots`. Accepts `name` and `ttl_ms`. |
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
-| Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (a missing, expired, or deleted snapshot returns `snapshot_not_found`) |
+| Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (a missing, expired, or deleted snapshot returns `snapshot_not_found`, and a deleted namespace returns `namespace_deleted`) |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and never moves the expiry earlier. |
 | Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the snapshot, and a missing ID succeeds) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
@@ -985,7 +985,7 @@ An expired snapshot can't be read, forked, extended, or retrieved. Each of those
 
 An extension measures its requested `ttl_ms` from the server's current time, and it moves an unexpired snapshot's expiry to that time. It never moves the expiry earlier, so extending a snapshot without an expiry returns the snapshot unchanged.
 
-`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, and it leaves out expired snapshots, deleted snapshots, and fork snapshots. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, the ID of an expired or deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`.
+`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, and it leaves out expired snapshots, deleted snapshots, and fork snapshots. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, the ID of an expired or deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`. On a deleted namespace, the listing and the retrieval return `namespace_deleted` (410), as other ordinary operations do (see [Deleting a namespace](format.md#94-deleting-a-namespace)).
 
 Deleting a snapshot records the time of the deletion in the snapshot's record (`deleted_at_ms`), leaves its expiry unchanged, and returns the addressed namespace and snapshot:
 
@@ -1434,7 +1434,7 @@ The embedded `NamespaceStore::load_statistics` and `NamespaceStore::load_snapsho
 
 Deletes a namespace. In an ACL namespace, this operation requires an administrator subject. A request with no subject headers acts as the token holder.
 
-Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). A delete of a namespace whose creation hasn't finished (its newest manifest is `initializing`) publishes its tombstone without a writer session. The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest until the namespace is [retired](format.md#95-retirement), and these requests return `namespace_deleted` after the retirement too.
+Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). A delete of a namespace whose creation hasn't finished (its newest manifest is `initializing`) publishes its tombstone without a writer session. The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, snapshot listings and retrievals, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest until the namespace is [retired](format.md#95-retirement), and these requests return `namespace_deleted` after the retirement too.
 
 The snapshot inventory and snapshot deletion are explicit exceptions, and they stay available after deletion until the namespace is retired. Deleting a fork snapshot's ID through the snapshot route still returns `snapshot_not_found`.
 

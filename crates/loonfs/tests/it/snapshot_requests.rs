@@ -6,8 +6,9 @@ use loonfs::{
 };
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, MemoryStore, RecordingStore};
+use loonfs_test_support::stores::{KeyPredicate, MemoryStore, RecordedOperation, RecordingStore};
 use loonfs_types::{ChecksumAlgorithm, NamespaceId};
+use std::assert_matches;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -130,6 +131,61 @@ async fn snapshot_calls_after_a_fold_cost_a_snapshot_record_and_its_verification
             deleted.await.expect("delete");
             fixture.assert_requests(&format!("{fold:?}: delete {index}"), 2);
         }
+    }
+}
+
+/// Checks that on the writer's runtime, whose position was checked within
+/// the revalidation bound, a snapshot retrieval costs one request, the read
+/// of the snapshot's record, and a snapshot listing costs one listing of the
+/// snapshots and one read of each record. Neither call reads a manifest or
+/// the manifest boundary, because both take the writer position's head.
+#[tokio::test]
+async fn snapshot_lookups_on_the_writers_runtime_read_snapshot_records_and_no_manifest() {
+    let fixture = fixture(Fold::Session).await;
+    let mut snapshots = Vec::new();
+    for index in 0..3 {
+        let options = CreateSnapshotOptions {
+            name: Some(format!("lookup-{index}")),
+            ..CreateSnapshotOptions::default()
+        };
+        let created = fixture
+            .namespace
+            .create_snapshot_with_options(&options)
+            .await;
+        snapshots.push(created.expect("create"));
+        fixture.namespace.wait_for_fold().await.expect("settle");
+    }
+    let snapshot_prefix = loonfs_objectstore::keys::snapshot_prefix(&fixture.namespace_id);
+    let reader = fixture.namespace.read_only();
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        fixture.recording.reset();
+        let read = reader.get_snapshot(&snapshot.snapshot_id).await;
+        assert_eq!(&read.expect("get"), snapshot);
+        let operations = fixture.recording.take();
+        assert_matches!(
+            &operations[..],
+            [RecordedOperation::GetWithMetadata { key, .. }] if key.starts_with(&snapshot_prefix),
+            "get {index}"
+        );
+    }
+
+    snapshots.sort_by(|left, right| left.snapshot_id.cmp(&right.snapshot_id));
+    fixture.recording.reset();
+    let mut pager = reader.list_snapshots();
+    let page = pager.next().await.expect("one page").expect("list");
+    assert!(pager.next().await.is_none());
+    assert_eq!(page.snapshots, snapshots);
+    let operations = fixture.recording.take();
+    assert_eq!(operations.len(), 4, "list: {operations:?}");
+    assert_matches!(
+        &operations[0],
+        RecordedOperation::List { prefix } if prefix == &snapshot_prefix
+    );
+    for operation in &operations[1..] {
+        assert_matches!(
+            operation,
+            RecordedOperation::GetWithMetadata { key, .. } if key.starts_with(&snapshot_prefix)
+        );
     }
 }
 

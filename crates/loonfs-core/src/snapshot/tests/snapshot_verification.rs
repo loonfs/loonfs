@@ -402,7 +402,7 @@ async fn a_fork_snapshot_id_is_read_like_a_user_snapshot_and_refused_by_every_ot
                 &store,
                 &namespace_id,
             ))
-            .get_snapshot(fork)
+            .get_snapshot(&head, fork)
             .await
             .map(drop),
         ),

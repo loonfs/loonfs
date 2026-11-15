@@ -10,6 +10,7 @@ use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::ReadBasis;
+use crate::namespace::control::ensure_namespace_live;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::keys::snapshot_record;
@@ -72,8 +73,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// id, the id of a deleted snapshot, the id of a snapshot that expired at or
     /// before the wall-clock time of the call, or the id of a fork snapshot
     /// returns `snapshot_not_found`.
-    pub async fn get_snapshot(&self, snapshot_id: &SnapshotId) -> Result<Snapshot> {
-        self.namespace.load_current_manifest().await?;
+    ///
+    /// `head` is the namespace's head as the caller read it. An initializing
+    /// head returns `namespace_not_found`, and a deleted head returns
+    /// `namespace_deleted`.
+    pub async fn get_snapshot(
+        &self,
+        head: &NamespaceReadState,
+        snapshot_id: &SnapshotId,
+    ) -> Result<Snapshot> {
+        ensure_namespace_live(&head.namespace_id, head.status)?;
         let now_ms = self.now_ms();
         let loaded = ensure_live(
             self.namespace.load_user_snapshot(snapshot_id).await?,

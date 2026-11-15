@@ -18,7 +18,7 @@ use crate::{
     SetRetentionWindowResponse, SnapshotId, SnapshotRecord, WriterState,
 };
 use crate::{Error, Result};
-use loonfs_core::control::{LoadedManifest, NamespaceStorageDiagnostics};
+use loonfs_core::control::{LoadedManifest, NamespaceReadState, NamespaceStorageDiagnostics};
 use loonfs_core::{
     ExtensionBasis, ExtensionPublication, FloorObjectReport, MetadataCompactionCancellation,
     RetentionPlan, SnapshotRecordPageCursor,
@@ -105,28 +105,41 @@ impl Maintenance {
             operation_span!(self.core, "diagnostics", namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                let diagnostics = self
+                let anchor = self
                     .core
                     .namespace_store(namespace_id)
-                    .load_diagnostics()
+                    .load_live_read_anchor(self.core.observation())
                     .await?;
-                let live_snapshots = self.count_live_snapshots(namespace_id).await?;
-                Ok(Self::namespace_diagnostics(diagnostics, live_snapshots))
+                let live_snapshots = self
+                    .count_live_snapshots(namespace_id, &anchor.read_state)
+                    .await?;
+                Ok(Self::namespace_diagnostics(
+                    NamespaceStorageDiagnostics::from(&anchor),
+                    live_snapshots,
+                ))
             },
         )
         .await
     }
 
-    async fn count_live_snapshots(&self, namespace_id: &NamespaceId) -> Result<u64> {
+    /// Counts the live snapshots of the namespace whose head is `head`.
+    async fn count_live_snapshots(
+        &self,
+        namespace_id: &NamespaceId,
+        head: &NamespaceReadState,
+    ) -> Result<u64> {
         let mut cursor = None;
         let mut live_snapshots = 0_u64;
         loop {
             let page = self
                 .engine(namespace_id)
-                .list_snapshots_page(PageRequest {
-                    limit: loonfs_types::EffectiveLimit::MAX,
-                    cursor,
-                })
+                .list_snapshots_page(
+                    head,
+                    PageRequest {
+                        limit: loonfs_types::EffectiveLimit::MAX,
+                        cursor,
+                    },
+                )
                 .await
                 .map_err(Error::from)?;
             live_snapshots = live_snapshots.saturating_add(u64_from_usize(page.items.len()));
