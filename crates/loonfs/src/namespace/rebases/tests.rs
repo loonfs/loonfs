@@ -1,16 +1,17 @@
 //! Replay commits that race another writer of the rebase's new fork,
-//! retries of a replay commit that committed, and a rebase that the fork's
-//! own retention floor refuses.
+//! retries of a replay commit that committed, which return its conflict
+//! report, and a rebase that the fork's own retention floor refuses.
 
 use super::super::merges::{PlannedCommit, PlannedMerge};
 use crate::test_support::maintenance_past_the_grace_window;
 use crate::{
-    ActorId, CommitId, DeleteOptions, ErrorCode, LoonFs, Maintenance, MergeForkOptions, NamespaceId,
+    ActorId, CommitId, DeleteOptions, ErrorCode, LoonFs, Maintenance, MergeForkOptions,
+    NamespaceId, PutFileOptions, ReplayForkResponse, Writable,
 };
 use loonfs_core::MergeRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_types::{DeleteDirectoryBehavior, ManifestNo, MergeConflictKind};
+use loonfs_types::{DeleteDirectoryBehavior, DestinationBehavior, ManifestNo, MergeConflictKind};
 use std::sync::Arc;
 
 fn actor() -> ActorId {
@@ -18,8 +19,8 @@ fn actor() -> ActorId {
 }
 
 /// Checks that a retry of a replay commit that committed returns the new
-/// fork without a conflict report and folds neither the fork nor the new
-/// fork. Each has a later commit in its WAL tail when the retry runs, and
+/// fork with the replay commit's empty conflict report and folds neither the
+/// fork nor the new fork. Each has a later commit in its WAL tail when the retry runs, and
 /// neither publishes a manifest.
 #[tokio::test]
 async fn a_retry_of_a_committed_replay_folds_nothing() {
@@ -60,7 +61,7 @@ async fn a_retry_of_a_committed_replay_folds_nothing() {
         .replay_fork_with_options(&fork_id, &actor(), &options)
         .await
         .expect("the replay");
-    assert_eq!(replayed.conflicts, Some(Vec::new()));
+    assert_eq!(replayed.conflicts, Vec::new());
     for namespace in [&fork, &rebase] {
         namespace
             .put_file("/later.txt", b"later", &actor())
@@ -73,11 +74,115 @@ async fn a_retry_of_a_committed_replay_folds_nothing() {
         .replay_fork_with_options(&fork_id, &actor(), &options)
         .await
         .expect("the retry");
-    assert_eq!(retried.conflicts, None);
+    assert_eq!(retried.conflicts, Vec::new());
     assert_eq!(
         manifest_nos(&maintenance, [&fork_id, &rebase_id]).await,
         before
     );
+}
+
+/// Builds a runtime on `store` with the writer `writer`.
+async fn runtime_on(store: Arc<LocalFsStore>, writer: &str) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store)
+        .writer_id(writer_id(writer))
+        .build()
+        .await
+        .expect("runtime")
+}
+
+/// Creates `main` with `/a.txt`, forks it as `main-fork`, changes `/a.txt` in
+/// both, and creates the rebase's new fork `main-rebase`, so a replay commit
+/// of the fork reports one `content` conflict. Returns the fork's ID and the
+/// new fork's ID.
+async fn rebase_with_one_conflict(runtime: &LoonFs<Writable>) -> (NamespaceId, NamespaceId) {
+    let [main_id, fork_id, rebase_id] = ["main", "main-fork", "main-rebase"].map(namespace_id);
+    runtime
+        .create_namespace(&main_id, &actor())
+        .await
+        .expect("main");
+    let main = runtime.open_namespace(&main_id).expect("open main");
+    main.put_file("/a.txt", b"base", &actor())
+        .await
+        .expect("seed");
+    runtime
+        .fork_namespace(&main_id, &fork_id, &actor())
+        .await
+        .expect("fork");
+    let fork = runtime.open_namespace(&fork_id).expect("open the fork");
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..PutFileOptions::default()
+    };
+    fork.put_file_with_options("/a.txt", b"ours", &actor(), &replace)
+        .await
+        .expect("change the file in the fork");
+    main.put_file_with_options("/a.txt", b"theirs", &actor(), &replace)
+        .await
+        .expect("change the file in main");
+    runtime
+        .fork_namespace_for_rebase(&main_id, &fork_id, &rebase_id, &actor())
+        .await
+        .expect("the rebase's new fork");
+    (fork_id, rebase_id)
+}
+
+/// Replays `fork_id` into `rebase_id` under the commit ID `replay`.
+async fn replay(
+    runtime: &LoonFs<Writable>,
+    fork_id: &NamespaceId,
+    rebase_id: &NamespaceId,
+) -> ReplayForkResponse {
+    let options = MergeForkOptions {
+        commit_id: Some(CommitId::parse("replay").expect("commit id")),
+        ..MergeForkOptions::default()
+    };
+    runtime
+        .open_namespace(rebase_id)
+        .expect("open the new fork")
+        .replay_fork_with_options(fork_id, &actor(), &options)
+        .await
+        .expect("the replay")
+}
+
+/// Checks that a retry of a replay commit that committed returns the
+/// conflict report that the first request returned, at the same head.
+#[tokio::test]
+async fn a_retried_replay_commit_returns_its_conflict_report() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let runtime = runtime_on(store, "rebase-writer").await;
+    let (fork_id, rebase_id) = rebase_with_one_conflict(&runtime).await;
+
+    let replayed = replay(&runtime, &fork_id, &rebase_id).await;
+    let kinds: Vec<_> = replayed
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.kind)
+        .collect();
+    assert_eq!(kinds, [MergeConflictKind::Content]);
+    let retried = replay(&runtime, &fork_id, &rebase_id).await;
+    assert_eq!(retried.conflicts, replayed.conflicts);
+    assert_eq!(retried.namespace.head_seq, replayed.namespace.head_seq);
+}
+
+/// Checks that a new runtime on the same store returns a committed replay
+/// commit's conflict report, which it can only read from the replay
+/// commit's merge record.
+#[tokio::test]
+async fn a_fresh_runtime_returns_a_committed_replay_commits_conflict_report() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let runtime = runtime_on(store.clone(), "rebase-writer").await;
+    let (fork_id, rebase_id) = rebase_with_one_conflict(&runtime).await;
+    let replayed = replay(&runtime, &fork_id, &rebase_id).await;
+    assert_eq!(replayed.conflicts.len(), 1);
+    runtime.drain().await.expect("drain the first runtime");
+    drop(runtime);
+
+    let fresh = runtime_on(store, "rebase-writer-2").await;
+    let retried = replay(&fresh, &fork_id, &rebase_id).await;
+    assert_eq!(retried.conflicts, replayed.conflicts);
+    assert_eq!(retried.namespace.head_seq, replayed.namespace.head_seq);
 }
 
 /// Checks that a rebase of a fork whose own retention floor is above the

@@ -73,12 +73,10 @@ pub struct ReplayForkResponse {
     /// The new fork after the replay commit.
     pub namespace: NamespaceMetadata,
     /// The replay commit's conflict report, with one entry for each inode whose change the replay
-    /// commit didn't apply. It's absent when the request's commit ID identifies a replay commit
-    /// that an earlier request committed, because only the response that committed the replay
-    /// commit has its report.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub conflicts: Option<Vec<MergeConflict>>,
+    /// commit didn't apply. It's empty when the replay commit left nothing out. The replay
+    /// commit's merge record stores the report, so a retry with the same commit ID returns the
+    /// same report.
+    pub conflicts: Vec<MergeConflict>,
 }
 
 /// Where a fork's next merge into a namespace starts.
@@ -147,6 +145,7 @@ pub enum NextMergeRangeOutcome {
 /// the inode after the fork point, hides it, or has the name that the change needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MergeConflict {
     /// The inode. It has the same ID in the fork and in the namespace being merged into.
     #[serde(with = "crate::inode_id::public")]
@@ -173,8 +172,6 @@ pub struct MergeConflict {
 }
 
 /// Which check of the conflict rule a merge's change failed.
-///
-/// A newer server can return a kind that isn't listed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -202,14 +199,12 @@ pub enum MergeConflictKind {
     /// restore, or a move into a directory whose create or restore was skipped, or the delete of
     /// a directory that still contains an inode whose move out of it was skipped.
     Dependency,
-    /// A kind from a newer server. It serializes as `unknown`.
-    #[serde(other)]
-    Unknown,
 }
 
 /// One version of an inode in a merge conflict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MergeConflictVersion {
     /// The inode's path in that version, built from the stored display names.
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
@@ -223,6 +218,7 @@ pub struct MergeConflictVersion {
 /// A file's revision in one version of a merge conflict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MergeConflictRevision {
     /// The file's revision number in that version. A directory has none.
     #[cfg_attr(feature = "openapi", schema(required = false))]

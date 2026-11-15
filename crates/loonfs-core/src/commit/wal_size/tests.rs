@@ -255,6 +255,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                         .expect("namespace"),
                     source_after_seq: CommitSeq(MAX_PUBLIC_INTEGER - 1),
                     source_through_seq: CommitSeq(MAX_PUBLIC_INTEGER),
+                    conflicts: Vec::new(),
                 },
                 CommitSeq(MAX_PUBLIC_INTEGER - 1),
                 (0..operation_count)
@@ -375,6 +376,7 @@ fn a_merges_bound_includes_the_layouts_of_its_proofs() {
                 source_namespace_id: fork.clone(),
                 source_after_seq: CommitSeq(3),
                 source_through_seq: CommitSeq(7),
+                conflicts: Vec::new(),
             },
             CommitSeq(3),
             BTreeMap::from([(
@@ -392,5 +394,49 @@ fn a_merges_bound_includes_the_layouts_of_its_proofs() {
     assert_eq!(
         merge(vec![proof]).wal_record_bytes_upper_bound(),
         merge(Vec::new()).wal_record_bytes_upper_bound() + layout_bytes(3)
+    );
+}
+
+/// Checks that a merge record's bound counts a replay commit's conflict
+/// report: a record with one conflict counts more bytes than the same
+/// record without it, and at least the report's encoded size with its field
+/// name (the WAL codec's tests check that this is what the report adds to an
+/// encoded payload).
+#[test]
+fn a_merge_records_bound_counts_its_conflict_report() {
+    let without = MergeRecord {
+        source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
+        source_after_seq: CommitSeq(3),
+        source_through_seq: CommitSeq(7),
+        conflicts: Vec::new(),
+    };
+    let version = loonfs_types::MergeConflictVersion {
+        path: AbsolutePath::parse(format!("/{}", "a".repeat(200))).expect("path"),
+        revision: Some(loonfs_types::MergeConflictRevision {
+            revision_no: RevisionNo(2),
+            content_ref: ContentRef::blob_v1(
+                ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
+                b"content",
+                loonfs_types::ChecksumAlgorithm::Crc64nvme,
+            ),
+        }),
+    };
+    let with = MergeRecord {
+        conflicts: vec![loonfs_types::MergeConflict {
+            inode_id: InodeId::generate(CommitSeq(4), std::num::NonZeroU32::MIN),
+            kind: loonfs_types::MergeConflictKind::Content,
+            base: Some(version.clone()),
+            ours: Some(version.clone()),
+            theirs: Some(version),
+        }],
+        ..without.clone()
+    };
+    let encoded = 1 + "conflicts".len() + conflict_report_cbor_bytes(&with.conflicts);
+    assert!(merge_bytes(&with) > merge_bytes(&without));
+    assert!(
+        merge_bytes(&with) - merge_bytes(&without) >= encoded,
+        "{} - {} < {encoded}",
+        merge_bytes(&with),
+        merge_bytes(&without)
     );
 }

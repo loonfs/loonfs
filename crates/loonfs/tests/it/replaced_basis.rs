@@ -347,7 +347,7 @@ async fn a_replay_planned_on_a_replaced_manifest_commits_on_the_current_one() {
     let replay = rebase_writer.replay_fork(&fork, &actor);
     let (replayed, ()) = tokio::join!(replay, replace_and_collect(&store, &maintenance, &rebase));
     let replayed = replayed.expect("the replay commits on the current manifest");
-    assert_eq!(replayed.conflicts, Some(Vec::new()));
+    assert_eq!(replayed.conflicts, Vec::new());
 
     assert_shared_file(store, &rebase, FORKED_CONTENT, &[("folded", "yes")]).await;
     writer.shutdown().await.expect("shut down the writer");

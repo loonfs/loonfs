@@ -576,12 +576,12 @@ async fn writer_epoch(family: &Family) -> loonfs_types::WriterEpoch {
 /// Checks the rebase and replay routes: a fork whose merge conflicts rebases
 /// into a new fork of `main`, which records `rebased_from`, and the replay
 /// commit applies the change that doesn't conflict and reports the one that
-/// does. A retry with the commit ID returns the new fork without a report, a
-/// second rebase into the new fork returns `namespace_exists`, a replay into
+/// does. A retry with the commit ID returns the new fork with the same
+/// report, a second rebase into the new fork returns `namespace_exists`, a replay into
 /// a namespace that isn't a rebase of the fork returns `invalid_request`,
 /// and the new fork then merges into `main`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_no_report() {
+async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_the_report() {
     let family = Family::new("http-rebase").await;
     let client = &family.harness.client;
     let replace = crate::common::http_split_support::replace_file_options();
@@ -616,9 +616,9 @@ async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_no_report() {
         })
     );
     let rebased = family.replay(&new_fork, "rebase").await.expect("replay");
-    let conflicts = rebased.conflicts.clone().expect("a conflict report");
     assert_eq!(
-        conflicts
+        rebased
+            .conflicts
             .iter()
             .map(|conflict| (
                 conflict.kind,
@@ -640,7 +640,7 @@ async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_no_report() {
     );
 
     let retried = family.replay(&new_fork, "rebase").await.expect("a retry");
-    assert_eq!(retried.conflicts, None);
+    assert_eq!(retried.conflicts, rebased.conflicts);
     assert_eq!(retried.namespace.head_seq, rebased.namespace.head_seq);
     let (code, _) = api_error(
         family

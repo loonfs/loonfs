@@ -41,7 +41,6 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.composite::<NextMergeRangeResponse, NextMergeRangeOutcome>("outcome", Some("unknown"));
     named.plain::<DiffEntryKind>("unknown");
     named.plain::<MergeBound>("unknown");
-    named.plain::<MergeConflictKind>("unknown");
     named.plain::<GcSkippedWork>("unknown");
     named.plain::<MetadataMaintenanceOutcome>("unknown");
     named.plain::<MetadataSkippedWork>("unknown");

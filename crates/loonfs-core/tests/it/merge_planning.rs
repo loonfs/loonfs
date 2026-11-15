@@ -179,7 +179,7 @@ impl Family {
         let fork = self.engine(&self.fork, subject);
         fork.fold_wal().await?;
         let main_context = read_context(&self.store, &self.main).await;
-        if let Some(commit) = main.find_merge(&main_context, request).await? {
+        if let Some((commit, _)) = main.find_merge(&main_context, request).await? {
             return Ok(commit);
         }
         let fork_context = read_context(&self.store, &self.fork).await;

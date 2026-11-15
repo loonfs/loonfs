@@ -12,7 +12,7 @@ use super::operations::{
 use super::replay::Replay;
 use super::state::{Edge, InodeState, StateReader};
 use crate::authorize::{require, Absence, Authorizer};
-use crate::commit::wal_size::merge_operation_bytes;
+use crate::commit::wal_size::{conflict_bytes, merge_operation_bytes};
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::name_keys;
 use crate::path::read::LoadedMetadataView;
@@ -497,9 +497,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     }
 
     /// Counts a conflict, keeps it as the first when its inode has the
-    /// smallest ID so far, and adds it to a replay commit's report. `theirs`
-    /// is the merged-into namespace's version that the conflict reports. An
-    /// inode's later conflicts change nothing.
+    /// smallest ID so far, and adds it to a replay commit's report and its
+    /// bytes to the planned bytes, because the replay commit's merge record
+    /// stores the report. `theirs` is the merged-into namespace's version
+    /// that the conflict reports. An inode's later conflicts change nothing.
     pub(super) async fn conflict(
         &mut self,
         inode_id: InodeId,
@@ -530,6 +531,9 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             theirs,
         };
         if let Some(replay) = &mut self.replay {
+            self.planned_bytes = self
+                .planned_bytes
+                .saturating_add(conflict_bytes(&conflict, replay.report.is_empty()));
             replay.report.push(conflict.clone());
         }
         if first {

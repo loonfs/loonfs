@@ -890,6 +890,7 @@ mod tests {
             source_namespace_id: NamespaceId::parse("demo-fork").expect("namespace"),
             source_after_seq: CommitSeq(418),
             source_through_seq: CommitSeq(425),
+            conflicts: Vec::new(),
         };
         let input = MergeFingerprintInput {
             namespace_id: &namespace_id,
@@ -926,6 +927,45 @@ mod tests {
             };
             assert_ne!(changed_input.fingerprint(), fingerprint, "{changed:?}");
         }
+    }
+
+    /// Checks that a replay commit's conflict report isn't part of its
+    /// identity: a record with conflicts has the fingerprint of the same
+    /// record without them.
+    #[test]
+    fn a_merge_fingerprint_leaves_out_the_conflict_report() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace");
+        let actor_id = ActorId::parse("usr_8f3c").expect("actor");
+        let merge = MergeRecord {
+            source_namespace_id: NamespaceId::parse("demo-fork").expect("namespace"),
+            source_after_seq: CommitSeq(418),
+            source_through_seq: CommitSeq(425),
+            conflicts: Vec::new(),
+        };
+        let reported = MergeRecord {
+            conflicts: vec![crate::MergeConflict {
+                inode_id: crate::ROOT_INODE_ID,
+                kind: crate::MergeConflictKind::Content,
+                base: None,
+                ours: Some(crate::MergeConflictVersion {
+                    path: AbsolutePath::parse("/a.txt").expect("path"),
+                    revision: None,
+                }),
+                theirs: None,
+            }],
+            ..merge.clone()
+        };
+        let fingerprint = |merge| {
+            MergeFingerprintInput {
+                namespace_id: &namespace_id,
+                actor_id: &actor_id,
+                subject_id: None,
+                merge,
+                message: None,
+            }
+            .fingerprint()
+        };
+        assert_eq!(fingerprint(&reported), fingerprint(&merge));
     }
 
     #[test]

@@ -422,7 +422,8 @@ pub struct WalInlineContent {
 }
 
 /// Identifies the fork and the range of the fork's commits that a merge
-/// applied to the committing namespace.
+/// applied to the committing namespace, and for a rebase's replay commit,
+/// the changes that the replay commit left out.
 ///
 /// The range follows the change feed's convention: the fork's commits above
 /// `source_after_seq`, through `source_through_seq`. See
@@ -437,6 +438,10 @@ pub struct MergeRecord {
     pub source_after_seq: CommitSeq,
     /// The fork's commits at or below this sequence were applied.
     pub source_through_seq: CommitSeq,
+    /// The changes that a replay commit left out, as its conflict report. A
+    /// merge's record has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<crate::MergeConflict>,
 }
 
 /// Contains one accepted logical commit inside a WAL object.
@@ -517,6 +522,15 @@ struct WalObjectDocument {
     /// readers ignore their content.
     #[serde(default, with = "serde_bytes", skip_serializing_if = "Option::is_none")]
     padding: Option<Vec<u8>>,
+}
+
+/// Returns the number of bytes that a conflict report takes in a WAL
+/// record's CBOR encoding, without the field name.
+pub fn conflict_report_cbor_bytes(conflicts: &[crate::MergeConflict]) -> usize {
+    let mut encoded = Vec::new();
+    into_writer(conflicts, &mut encoded)
+        .expect("a conflict report of paths, IDs, and integers should encode as CBOR");
+    encoded.len()
 }
 
 pub(crate) fn encode_wal_payload_cbor(
@@ -1305,6 +1319,7 @@ mod tests {
             source_namespace_id: NamespaceId::parse(source).expect("namespace"),
             source_after_seq: CommitSeq(after),
             source_through_seq: CommitSeq(through),
+            conflicts: Vec::new(),
         };
         let inverted = Some("`source_after_seq` must be below `source_through_seq`");
         for (record, rejected) in [
@@ -1341,6 +1356,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Checks that a replay commit's merge record round-trips its conflict
+    /// report, with a revision flattened into one version, and that the
+    /// report adds its field name and [`conflict_report_cbor_bytes`] to the
+    /// encoded payload. A conflict with an unknown field is rejected.
+    #[test]
+    fn a_merge_record_round_trips_its_conflict_report() {
+        let without = MergeRecord {
+            source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
+            source_after_seq: CommitSeq(4),
+            source_through_seq: CommitSeq(9),
+            conflicts: Vec::new(),
+        };
+        let version = |path: &str| crate::MergeConflictVersion {
+            path: crate::AbsolutePath::parse(path).expect("path"),
+            revision: Some(crate::MergeConflictRevision {
+                revision_no: RevisionNo(3),
+                content_ref: ContentRef::blob_v1(
+                    ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
+                    b"ours",
+                    crate::ChecksumAlgorithm::Crc64nvme,
+                ),
+            }),
+        };
+        let conflicts = vec![crate::MergeConflict {
+            inode_id: InodeId(2),
+            kind: crate::MergeConflictKind::Content,
+            base: Some(version("/a.txt")),
+            ours: Some(version("/a.txt")),
+            theirs: Some(crate::MergeConflictVersion {
+                path: crate::AbsolutePath::parse("/b").expect("path"),
+                revision: None,
+            }),
+        }];
+        let with = MergeRecord {
+            conflicts: conflicts.clone(),
+            ..without.clone()
+        };
+        let payload = |merge: &MergeRecord| {
+            let mut payload = inline_wal_object(&[0]);
+            payload.records[0].merge = Some(merge.clone());
+            payload
+        };
+        let encoded =
+            encode_wal_object_envelope_zstd(payload(&with)).expect("encode the replay commit");
+        let decoded = decode_wal_object_envelope_zstd(&encoded.into_bytes()).expect("decode");
+        assert_eq!(decoded.payload().records[0].merge.as_ref(), Some(&with));
+        let payload_bytes = |merge| {
+            encode_wal_payload_cbor(&payload(merge))
+                .expect("encode the payload")
+                .len()
+        };
+        assert_eq!(
+            payload_bytes(&with) - payload_bytes(&without),
+            1 + "conflicts".len() + conflict_report_cbor_bytes(&conflicts)
+        );
+
+        let mut value = serde_json::to_value(&conflicts[0]).expect("conflict as JSON");
+        value["unknown"] = serde_json::json!(1);
+        let error = serde_json::from_value::<crate::MergeConflict>(value)
+            .expect_err("a conflict with an unknown field");
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     /// Checks that a bind includes a revision summary exactly when its child

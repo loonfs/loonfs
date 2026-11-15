@@ -266,7 +266,7 @@ async fn a_rebase_waits_for_the_fork_sessions_fold() {
         .run_beside_the_parked_fold(rebase.replay_fork(family.fork.id(), &actor()))
         .await
         .expect("the replay");
-    assert_eq!(replayed.conflicts, Some(Vec::new()));
+    assert_eq!(replayed.conflicts, Vec::new());
     family.assert_folded_once("a rebase", FILES, &[family.fork.id(), &rebase_id]);
     family.runtime.shutdown().await.expect("shutdown");
 }

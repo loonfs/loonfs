@@ -309,13 +309,6 @@ pub(crate) fn human_merge_step(outcome: &MergeSessionOutcome) -> String {
                 through_seq.0
             )
         }
-        MergeSessionOutcome::ReportLost {
-            replaced_fork_id,
-            new_fork_id,
-        } => format!(
-            "the conflict report of `{replaced_fork_id}` was lost; rebasing again into \
-             `{new_fork_id}`"
-        ),
         MergeSessionOutcome::Resolved {
             fork_id,
             through_seq,
@@ -423,7 +416,6 @@ fn merge_conflict_line(conflict: &MergeConflict) -> String {
         MergeConflictKind::Name => "name",
         MergeConflictKind::Subtree => "subtree",
         MergeConflictKind::Dependency => "dependency",
-        MergeConflictKind::Unknown => "unknown",
     };
     let version = conflict
         .ours

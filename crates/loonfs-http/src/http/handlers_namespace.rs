@@ -622,7 +622,7 @@ pub(super) async fn fork_namespace_for_rebase(
         path = "/v0/namespaces/{namespace_id}/replays",
         tag = "namespaces",
         summary = "Replay a fork into a rebase's new fork",
-        description = "Replays a fork's unmerged commits into the namespace, a rebase's new fork for the fork, as one replay commit, which applies the changes that don't conflict with the new fork and reports the ones that do. Each request continues after the new fork's previous replay commit. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
+        description = "Replays a fork's unmerged commits into the namespace, a rebase's new fork for the fork, as one replay commit, which applies the changes that don't conflict with the new fork and reports the ones that do. Each request continues after the new fork's previous replay commit. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork with the same conflict report. The report counts toward the replay commit's size, so a report that doesn't fit returns `merge_too_large` with a split hint.",
         params(("namespace_id" = String, Path, description = "The rebase's new fork, which the replay commit commits into.")),
         request_body = ReplayForkRequest,
         responses(

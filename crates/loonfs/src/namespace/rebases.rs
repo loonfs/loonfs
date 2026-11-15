@@ -93,8 +93,11 @@ impl Namespace<Writable> {
     /// since the `resume_after_seq` that this namespace's fork basis
     /// records, leaves out each change that conflicts with this namespace
     /// under the conflict rule, and returns them as the conflict report with
-    /// this namespace's metadata. A retry with the commit ID of a replay
-    /// commit that committed returns the metadata without a report. When
+    /// this namespace's metadata. The replay commit's merge record stores the
+    /// report, so a retry with the commit ID of a replay commit that
+    /// committed returns the same report. The report counts toward the
+    /// replay commit's size, so a report that doesn't fit returns
+    /// `merge_too_large` with a split hint. When
     /// the commit fails because this namespace changed after the plan, the
     /// replay plans again, up to three times, as a merge does, and a later
     /// plan reports a changed row that isn't the fork's own. The subject of
@@ -128,8 +131,8 @@ impl Namespace<Writable> {
                     })
                     .await?
                 {
-                    MergeOutcome::Found(_) => None,
-                    MergeOutcome::Committed { report, .. } => Some(report),
+                    MergeOutcome::Found { conflicts, .. } => conflicts,
+                    MergeOutcome::Committed { report, .. } => report,
                 };
                 Ok(ReplayForkResponse {
                     namespace: self.metadata().await?,

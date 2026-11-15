@@ -27,11 +27,10 @@ struct Family {
     writer: WriterAt,
 }
 
-/// What one replay returned: its commit, and its conflict report, which a
-/// retry of a committed replay commit doesn't have.
+/// What one replay returned: its commit, and its conflict report.
 struct Replay {
     commit: Commit,
-    conflicts: Option<Vec<MergeConflict>>,
+    conflicts: Vec<MergeConflict>,
 }
 
 impl Family {
@@ -152,11 +151,8 @@ impl Family {
         let fork = namespace_engine(&self.store, &self.fork, &self.writer);
         let main = namespace_engine(&self.store, &self.main, &self.writer);
         let rebase_context = read_context(&self.store, &self.rebase).await;
-        if let Some(commit) = rebase.find_merge(&rebase_context, &request).await? {
-            return Ok(Replay {
-                commit,
-                conflicts: None,
-            });
+        if let Some((commit, conflicts)) = rebase.find_merge(&rebase_context, &request).await? {
+            return Ok(Replay { commit, conflicts });
         }
         rebase
             .check_replay(
@@ -186,10 +182,7 @@ impl Family {
             .await
             .pop()
             .expect("one result")?;
-        Ok(Replay {
-            commit,
-            conflicts: Some(conflicts),
-        })
+        Ok(Replay { commit, conflicts })
     }
 
     /// Returns where the fork's next replay commit into the new fork starts.
@@ -323,7 +316,7 @@ async fn a_rebase_whose_changes_all_apply_replays_them_into_the_new_fork() {
     );
 
     let replay = family.replay("replay-1", None).await.expect("replay");
-    assert_eq!(replay.conflicts, Some(Vec::new()));
+    assert_eq!(replay.conflicts, Vec::new());
     let merge = replay.commit.merge.expect("a replay commit is a merge");
     assert_eq!(merge.source_namespace_id, family.fork);
     assert_eq!(merge.source_after_seq, CommitSeq(2));
@@ -380,13 +373,13 @@ async fn a_content_conflict_is_skipped_and_reported_with_base_ours_and_theirs() 
     let inode_id = family.inode(&family.main, "/docs/a.txt").await;
     assert_eq!(
         replay.conflicts,
-        Some(vec![MergeConflict {
+        vec![MergeConflict {
             inode_id,
             kind: MergeConflictKind::Content,
             base: Some(base),
             ours: Some(family.version(&family.fork, "/docs/a.txt").await),
             theirs: Some(family.version(&family.rebase, "/docs/a.txt").await),
-        }])
+        }]
     );
     assert_eq!(
         family.bytes(&family.rebase, "/docs/a.txt").await.as_deref(),
@@ -411,7 +404,7 @@ async fn a_skipped_directory_create_skips_its_children_with_dependency_entries()
     family.create_rebase().await;
 
     let replay = family.replay("replay-1", None).await.expect("replay");
-    let conflicts = replay.conflicts.expect("a report");
+    let conflicts = replay.conflicts;
     let entries: Vec<_> = conflicts
         .iter()
         .map(|conflict| (conflict.kind, conflict.inode_id, conflict.theirs.clone()))
@@ -469,7 +462,6 @@ async fn a_skipped_move_keeps_its_old_directorys_delete_from_applying() {
     let moved = family.version(&family.fork, "/taken.txt").await;
     let entries: Vec<_> = replay
         .conflicts
-        .expect("a report")
         .into_iter()
         .map(|conflict| (conflict.kind, conflict.inode_id, conflict.theirs))
         .collect();
@@ -525,7 +517,7 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
         .replay("piece-1", Some(first.committed_seq))
         .await
         .expect("the first piece");
-    assert_eq!(piece.conflicts, Some(Vec::new()));
+    assert_eq!(piece.conflicts, Vec::new());
     assert_eq!(
         family.next_range().await.outcome,
         NextMergeRangeOutcome::Open {
@@ -545,7 +537,7 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
         .replay("piece-2", None)
         .await
         .expect("the second piece");
-    assert_eq!(rest.conflicts, Some(Vec::new()));
+    assert_eq!(rest.conflicts, Vec::new());
     let (first, second) = (
         piece.commit.merge.expect("a merge"),
         rest.commit.merge.expect("a merge"),
@@ -561,18 +553,19 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
 }
 
 /// Checks that a retry with a committed replay commit's commit ID returns
-/// that commit without a conflict report, and commits nothing.
+/// that commit with the conflict report that its merge record stores, and
+/// commits nothing.
 #[tokio::test]
-async fn a_retry_of_a_replay_commit_returns_no_report() {
+async fn a_retry_of_a_replay_commit_returns_its_report() {
     let family = Family::new().await;
     family.write(&family.main, "/docs/a.txt", b"theirs").await;
     family.write(&family.fork, "/docs/a.txt", b"ours").await;
     family.create_rebase().await;
 
     let replay = family.replay("replay-1", None).await.expect("replay");
-    assert_eq!(replay.conflicts.map(|conflicts| conflicts.len()), Some(1));
+    assert_eq!(replay.conflicts.len(), 1);
     let retry = family.replay("replay-1", None).await.expect("retry");
-    assert_eq!(retry.conflicts, None);
+    assert_eq!(retry.conflicts, replay.conflicts);
     assert_eq!(retry.commit.committed_seq, replay.commit.committed_seq);
     assert_eq!(retry.commit.merge, replay.commit.merge);
 }
@@ -599,7 +592,7 @@ async fn a_resolvers_commit_between_pieces_makes_its_row_foreign_for_the_next_pi
         .replay("piece-2", None)
         .await
         .expect("the second piece");
-    let conflicts = rest.conflicts.expect("a report");
+    let conflicts = rest.conflicts;
     assert_eq!(
         conflicts
             .iter()
@@ -643,7 +636,7 @@ async fn a_replay_reads_main_through_the_snapshot_after_the_new_fork_compacts() 
     family.compact_rebase().await;
 
     let replay = family.replay("replay-1", None).await.expect("replay");
-    assert_eq!(replay.conflicts, Some(Vec::new()));
+    assert_eq!(replay.conflicts, Vec::new());
     assert!(family.entry(&family.rebase, "/docs").await.is_none());
     assert_eq!(
         family.bytes(&family.rebase, "/other.txt").await.as_deref(),
@@ -669,7 +662,6 @@ async fn a_subtree_change_on_main_before_the_rebase_is_found_through_the_snapsho
     let replay = family.replay("replay-1", None).await.expect("replay");
     let entries: Vec<_> = replay
         .conflicts
-        .expect("a report")
         .into_iter()
         .map(|conflict| (conflict.kind, conflict.inode_id, conflict.theirs))
         .collect();

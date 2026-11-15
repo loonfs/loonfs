@@ -13,12 +13,12 @@ use loonfs_types::{
 
 /// The most new forks that one session's rebases create.
 ///
-/// A session creates a new fork for each merge that conflicts, and to
-/// replace a new fork whose conflict report was lost. A new fork's merge
-/// conflicts only if the namespace changed one of the new fork's files after
-/// the rebase created the new fork, so a session that reaches this limit is
-/// merging into a namespace that doesn't stop conflicting. The limit bounds
-/// the state's list of new forks, and the new forks that recovery finds.
+/// A session creates a new fork for each merge that conflicts. A new fork's
+/// merge conflicts only if the namespace changed one of the new fork's files
+/// after the rebase created the new fork, so a session that reaches this
+/// limit is merging into a namespace that doesn't stop conflicting. The limit
+/// bounds the state's list of new forks, and the new forks that recovery
+/// finds.
 pub const MAX_NEW_FORKS: usize = 8;
 
 /// Options for starting a merge session.
@@ -238,19 +238,16 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             }
         };
         let error = match answer {
-            Ok(response) => match response.conflicts {
-                Some(conflicts) => {
-                    return Ok(replayed(
-                        fork_id,
-                        through_seq,
-                        new_fork_id,
-                        replay,
-                        reports,
-                        conflicts,
-                    ))
-                }
-                None => return Ok(self.replace_new_fork(fork_id, through_seq, new_fork_id)),
-            },
+            Ok(response) => {
+                return Ok(replayed(
+                    fork_id,
+                    through_seq,
+                    new_fork_id,
+                    replay,
+                    reports,
+                    response.conflicts,
+                ))
+            }
             Err(error) => refused(error)?,
         };
         Ok(match refusal(replay, &error) {
@@ -269,40 +266,6 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                 Transition::failed(fork_id, MergeFailure::Refused { error }, reports)
             }
         })
-    }
-
-    /// Starts the rebase again into another new fork after the conflict
-    /// report of `new_fork_id` was lost, which repeats the classification of
-    /// every change.
-    ///
-    /// `new_fork_id` stays in the state's new forks, and the session deletes
-    /// it with the others once it's `merged` or `abandoned`. If this step
-    /// deleted it, a run that stopped before the caller saved the step's state
-    /// would resume from a state whose new fork is deleted, and its rebase
-    /// would fail with `namespace_deleted`.
-    fn replace_new_fork(
-        &self,
-        fork_id: &NamespaceId,
-        through_seq: CommitSeq,
-        new_fork_id: &NamespaceId,
-    ) -> Transition {
-        let Some(replacement_id) = self.new_fork_id() else {
-            return Transition::failed(fork_id, MergeFailure::NewForkLimit, &[]);
-        };
-        Transition {
-            status: MergeSessionStatus::Rebasing {
-                fork_id: fork_id.clone(),
-                through_seq,
-                new_fork_id: replacement_id.clone(),
-                replay: PendingCommit::new(through_seq),
-                reports: Vec::new(),
-            },
-            created_fork_id: Some(replacement_id.clone()),
-            outcome: MergeSessionOutcome::ReportLost {
-                replaced_fork_id: new_fork_id.clone(),
-                new_fork_id: replacement_id,
-            },
-        }
     }
 
     /// Hands the new fork to the resolver, and then merges it through its

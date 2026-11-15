@@ -93,7 +93,7 @@ impl Family {
     async fn plan(&self, request: &MergeRequest) -> PlannedCommit {
         match self.main.plan_merge(request, None).await.expect("plan") {
             PlannedMerge::Candidate(planned) => *planned,
-            PlannedMerge::Committed(commit) => panic!("expected a plan, got {commit:?}"),
+            PlannedMerge::Committed { commit, .. } => panic!("expected a plan, got {commit:?}"),
         }
     }
 
@@ -199,7 +199,7 @@ impl Family {
         planned: PlannedCommit,
         replan: impl FnMut(MergeRequest, MergeReservation) -> BoxFuture<'a, Result<PlannedMerge>>,
     ) -> Result<Commit> {
-        let (MergeOutcome::Found(commit) | MergeOutcome::Committed { commit, .. }) = self
+        let (MergeOutcome::Found { commit, .. } | MergeOutcome::Committed { commit, .. }) = self
             .main
             .commit_merge(request, PlannedMerge::Candidate(Box::new(planned)), replan)
             .await?;

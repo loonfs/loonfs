@@ -39,6 +39,7 @@ async fn publish_merge<S: ObjectStore>(
         source_namespace_id: fork(fork_name),
         source_after_seq: CommitSeq(after_seq),
         source_through_seq: CommitSeq(through_seq),
+        conflicts: Vec::new(),
     };
     let name = format!("merge-{fork_name}-{through_seq}");
     let intent = crate::test_support::create_directory_request(&name, &name);

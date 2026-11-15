@@ -55,9 +55,8 @@ pub(crate) enum Answer {
     Committed(u64),
     /// The rebase creates the new fork.
     Forked,
-    /// The replay commit commits with this conflict report, or without one,
-    /// as when the request's commit ID identifies an earlier replay commit.
-    Replayed(Option<Vec<MergeConflict>>),
+    /// The replay commit commits with this conflict report.
+    Replayed(Vec<MergeConflict>),
     /// The next-range query's `open` answer, with the fork's newest merge
     /// when `merged`.
     Range {
@@ -374,16 +373,6 @@ pub(crate) fn merges(sent: &[Sent]) -> Vec<(NamespaceId, MergeForkOptions)> {
     sent.iter()
         .filter_map(|sent| match sent {
             Sent::Merge { fork_id, options } => Some((fork_id.clone(), options.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Returns the namespaces that the session deleted, in order.
-pub(crate) fn deletes(sent: &[Sent]) -> Vec<NamespaceId> {
-    sent.iter()
-        .filter_map(|sent| match sent {
-            Sent::Delete { namespace_id } => Some(namespace_id.clone()),
             _ => None,
         })
         .collect()
