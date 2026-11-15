@@ -438,8 +438,15 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
             .await
             .expect("create namespace");
     }
+    // The second pass takes each head as it is, however long the first pass
+    // took. Under the default bound of one second, a slow run refreshes the
+    // oldest heads with a boundary read each.
     let reader = loonfs::LoonFs::builder_with_store(object_store)
         .read_only()
+        .config(loonfs::RuntimeConfig {
+            max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+            ..loonfs::RuntimeConfig::default()
+        })
         .build()
         .await
         .expect("reader");
