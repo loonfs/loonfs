@@ -446,9 +446,10 @@ async fn proxied_upload_calls_take_the_catalog_from_the_writer_position() {
         assert_eq!(namespace_keys, Vec::<String>::new());
         harness.recording.reset();
     };
-    // In this runtime, reads start from the writer session's position only
-    // after the session's second commit, so the test commits once more
-    // before it counts.
+    // The harness dropped its namespace handle after the warm-up commit,
+    // which ended that writer session and its position. This handle's
+    // session has a position for reads to start from after its first
+    // commit, so the test commits once before it counts.
     namespace
         .create_directory("/position", &loonfs_test_support::test_actor())
         .await
