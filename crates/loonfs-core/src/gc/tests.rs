@@ -417,7 +417,10 @@ async fn a_retired_namespace_keeps_only_its_boundary_and_unrecognized_keys() {
         .put_if_absent(&late, Bytes::from_static(b"late"))
         .await
         .expect("late write");
-    let young = collect(&store, &namespace_id, &again).await;
+    // The late object's age is one millisecond short of the grace window.
+    let within_window =
+        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS - 1).await);
+    let young = collect(&store, &namespace_id, &within_window).await;
     assert_eq!(young.deleted.manifests, 0);
     assert_eq!(young.retained.within_grace_window, 1);
     let later =
