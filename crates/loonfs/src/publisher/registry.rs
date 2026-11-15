@@ -597,13 +597,14 @@ pub(crate) enum NamespaceChange {
     /// the cached head move to it, or each one that can't move there is
     /// dropped.
     Published(Box<PublishedManifest>),
-    /// The mutation published no manifest, such as a garbage collection
-    /// or a change to a snapshot. The publisher keeps its position, and the
-    /// cached head stays confirmed, because the head didn't move.
+    /// The mutation published no manifest that the views move onto, such as
+    /// a garbage collection, a change to a snapshot, or a create (which
+    /// installs the new namespace's cached head in core). The publisher keeps
+    /// its position, and the cached head stays confirmed.
     Unchanged,
     /// The mutation may have changed the namespace in ways this runtime
-    /// hasn't recorded, such as creating it or failing with a stale head. The
-    /// publisher drops its position, and the runtime drops its cached head.
+    /// hasn't recorded, such as failing with a stale head. The publisher
+    /// drops its position, and the runtime drops its cached head.
     Unknown,
 }
 

@@ -216,6 +216,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 Ok(NewestManifest::Manifest(current))
                     if current.manifest.payload().status.is_active() =>
                 {
+                    target.install_active_head(&current, clock.origin());
                     Ok(crate::namespace::status::created_namespace(
                         current.manifest.payload(),
                     ))

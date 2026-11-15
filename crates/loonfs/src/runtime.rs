@@ -401,9 +401,12 @@ impl LoonFs<Writable> {
                     .bootstrap_namespace(actor, &options)
                     .await
                     .map_err(Error::from);
+                // A create that publishes manifest 2 installs it as the
+                // namespace's cached head, and a create that finds the
+                // namespace active changes nothing.
                 self.mode
                     .publisher
-                    .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unknown)
+                    .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
                     .await
             },
         )
@@ -455,19 +458,14 @@ impl LoonFs<Writable> {
                             .fork_namespace_at_snapshot(new_namespace_id, actor, snapshot_id)
                             .await
                             .map_err(Error::from);
-                        self.finish_fork(source_namespace_id, new_namespace_id, result)
-                            .await
+                        self.finish_fork(source_namespace_id, result).await
                     }
                     None => {
-                        self.install_fork(
-                            source_namespace_id,
-                            new_namespace_id,
-                            |engine, manifest| async move {
-                                engine
-                                    .fork_namespace(new_namespace_id, actor, manifest)
-                                    .await
-                            },
-                        )
+                        self.install_fork(source_namespace_id, |engine, manifest| async move {
+                            engine
+                                .fork_namespace(new_namespace_id, actor, manifest)
+                                .await
+                        })
                         .await
                     }
                 }
@@ -499,9 +497,9 @@ impl LoonFs<Writable> {
         }
     }
 
-    /// Installs the fork of `source_namespace_id`'s current head into
-    /// `new_namespace_id` that `fork` makes with the source's engine, and
-    /// moves this runtime's views of both namespaces past the fork.
+    /// Installs the fork of `source_namespace_id`'s current head that `fork`
+    /// makes with the source's engine, and keeps this runtime's views of the
+    /// source (see [`Self::finish_fork`]).
     ///
     /// The source's WAL tail is folded first, through the source's one fold
     /// path, and `fork` takes a snapshot of the fold's manifest (see
@@ -509,7 +507,6 @@ impl LoonFs<Writable> {
     pub(crate) async fn install_fork<Fork>(
         &self,
         source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
         mut fork: impl FnMut(NamespaceWriterEngine<SharedObjectStore>, ManifestRef) -> Fork,
     ) -> Result<crate::NamespaceMetadata>
     where
@@ -522,36 +519,27 @@ impl LoonFs<Writable> {
                 fork(self.engine(source_namespace_id), manifest)
             })
             .await;
-        self.finish_fork(source_namespace_id, new_namespace_id, result)
-            .await
+        self.finish_fork(source_namespace_id, result).await
     }
 
-    /// Moves this runtime's views of `source_namespace_id` and
-    /// `new_namespace_id` past a fork whose result is `result`.
+    /// Moves this runtime's views of `source_namespace_id` past a fork whose
+    /// result is `result`.
     async fn finish_fork(
         &self,
         source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
         result: Result<crate::NamespaceMetadata>,
     ) -> Result<crate::NamespaceMetadata> {
         // The fork folded the source through this runtime's fold path, which
         // moved the source's views onto the fold's manifest, and then wrote
         // snapshot records on the source, which no view tracks. So the
-        // source's views stay, as they do after a user snapshot. The runtime
-        // has no view of the new namespace, and drops what a read loaded of
-        // it while the fork ran.
-        let result = self
-            .mode
+        // source's views stay, as they do after a user snapshot. The runtime's
+        // view of the new namespace is the manifest 2 that the fork published
+        // or found, which the fork installed as the new namespace's cached
+        // head.
+        self.mode
             .publisher
             .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unchanged)
-            .await;
-        if result.is_ok() {
-            self.mode
-                .publisher
-                .invalidate_namespace(new_namespace_id, NamespaceChange::Unknown)
-                .await;
-        }
-        result
+            .await
     }
 }
 
