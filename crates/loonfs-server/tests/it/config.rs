@@ -897,6 +897,30 @@ root = "/tmp/loonfs-server"
     }
 }
 
+/// Checks that a config that still sets the removed `max_read_working_bytes`
+/// fails to load with an error that names the setting.
+#[test]
+fn load_rejects_the_removed_read_working_memory_setting() {
+    let path = write_config(
+        r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+max_read_working_bytes = 268435456
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#,
+    );
+    match load_server_config(&path).expect_err("a removed setting must be rejected") {
+        ServerError::ConfigDecode(message) => assert!(
+            message.contains("max_read_working_bytes"),
+            "decode error must name the removed setting, got: {message}"
+        ),
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+}
+
 /// Checks that a manifest check interval or a maximum staleness above the
 /// revalidation bound fails to load and fails `validate`, and that the
 /// bound itself loads.
@@ -974,7 +998,6 @@ root = "/tmp/loonfs-server"
     assert_eq!(config.manifest_revalidation_interval_ms, None);
     assert_eq!(config.max_staleness_ms, None);
     assert_eq!(config.consistency, ReadConsistency::Eventual);
-    assert_eq!(config.max_read_working_bytes, None);
 }
 
 #[test]
@@ -986,7 +1009,6 @@ writer_id = "loonfs-server"
 manifest_revalidation_interval_ms = 250
 max_staleness_ms = 5000
 consistency = "strong"
-max_read_working_bytes = 8192
 
 [metadata_cache]
 max_segment_bytes = 16384
@@ -1008,7 +1030,6 @@ root = "/tmp/loonfs-server"
     assert_eq!(config.manifest_revalidation_interval_ms, Some(250));
     assert_eq!(config.max_staleness_ms, Some(5000));
     assert_eq!(config.consistency, ReadConsistency::Strong);
-    assert_eq!(config.max_read_working_bytes, Some(8192));
     assert_eq!(
         config.metadata_cache,
         MetadataCacheConfig {

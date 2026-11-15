@@ -18,12 +18,14 @@ use crate::reads::NamespaceReads;
 use crate::segments::{GrepSegments, RunWriter};
 use crate::{GrepError, Result};
 use loonfs::engine::{
-    refill_iterators, select_next_iterator, LoadedBlocks, SegmentBlockLoader, SegmentRowIterator,
+    refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys::after_row_key;
 use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
-use loonfs_types::format::segment_blocks::{SegmentIndexEntry, DEFAULT_MAX_COMPACTION_INPUT_BYTES};
+use loonfs_types::format::segment_blocks::{
+    DecodedDataBlock, SegmentIndexEntry, DEFAULT_MAX_COMPACTION_INPUT_BYTES,
+};
 use loonfs_types::{IndexSegmentId, RunNo};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -627,13 +629,16 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, ExtensionSegmentRef>
         &self,
         segment: ExtensionSegmentRef,
         entries: Vec<SegmentIndexEntry>,
-    ) -> Result<LoadedBlocks<IndexRow>> {
+        max_decoded_bytes: usize,
+    ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
         let uncached = GrepSegments {
             store: self.0.store,
             namespace_id: self.0.namespace_id,
             block_cache: None,
         };
-        uncached.load_data_blocks(segment, entries).await
+        uncached
+            .load_data_blocks(segment, entries, max_decoded_bytes)
+            .await
     }
 }
 

@@ -196,23 +196,21 @@ async fn session_exists<S: ObjectStore>(
     exists(store, &upload_session(pool_id, &session.upload_id)).await
 }
 
-/// Runs the collection of `pool_id` with a read working memory of
-/// `limit_bytes`, and checks that the collection releases the memory it held.
+/// Runs the collection of `pool_id` with a live set of at most
+/// `limit_bytes`.
 async fn gc_within<S: ObjectStore>(
     store: &S,
     pool_id: &PoolId,
     limit_bytes: usize,
     clock: &OperationClock,
 ) -> crate::error::Result<PoolGcResponse> {
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(limit_bytes, None));
-    let report = crate::PoolStore {
-        segment_cache: Arc::new(root_scan_cache(Arc::clone(&memory))),
-        ..crate::test_support::pool_store(store, pool_id)
-    }
-    .gc(None, clock)
-    .await;
-    assert_eq!(memory.in_use(), 0, "the collection released what it held");
-    report
+    crate::test_support::pool_store(store, pool_id)
+        .gc_within(
+            None,
+            clock,
+            crate::gc::charged_set::CollectionMemory::new(pool_id.to_string(), limit_bytes),
+        )
+        .await
 }
 
 #[tokio::test]

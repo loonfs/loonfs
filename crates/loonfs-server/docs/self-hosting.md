@@ -86,12 +86,15 @@ fixed = 128 MiB
       + max_concurrent_content_writes x 16 MiB (72 MiB on R2)
       + 32 MiB
       + 64 MiB + metadata_cache.ssd.max_segment_bytes / 4 KiB x 168 B, with a [metadata_cache.ssd] table
+      + (max_concurrent_reads + max_concurrent_publications + max_concurrent_folds
+         + max_concurrent_compactions + max_concurrent_maintenance) x 10 MiB
+      + max_concurrent_maintenance x 64 MiB
 headroom = 200 MiB + 20% of (memory_limit_bytes - fixed - 200 MiB)
 managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_manifest_bytes
         - metadata_cache.max_head_bytes - max_merge_bytes
 ```
 
-`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, the completed upload sessions that garbage collection keeps between collections, and the SSD tier of the metadata segment cache. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB. The SSD tier's term is its 64 MiB write queue plus its index of the blocks on disk, at 168 bytes for each block. The tier charges each block at least 4 KiB against its budget, so it keeps at most one block for each 4 KiB of `max_segment_bytes`, and the term is a bound: about 484 MiB for a 10 GiB tier, and about 4.2 GiB for a 100 GiB tier. (In a compacted namespace of 20,000 files, the average stored block was 4.1 KiB.) (See [Keeping metadata blocks on local SSD](#keeping-metadata-blocks-on-local-ssd).)
+`fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, the completed upload sessions that garbage collection keeps between collections, the SSD tier of the metadata segment cache, the blocks that reads and other operations keep outside the caches, and the live sets of garbage collections. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB. The SSD tier's term is its 64 MiB write queue plus its index of the blocks on disk, at 168 bytes for each block. The tier charges each block at least 4 KiB against its budget, so it keeps at most one block for each 4 KiB of `max_segment_bytes`, and the term is a bound: about 484 MiB for a 10 GiB tier, and about 4.2 GiB for a 100 GiB tier. (In a compacted namespace of 20,000 files, the average stored block was 4.1 KiB.) (See [Keeping metadata blocks on local SSD](#keeping-metadata-blocks-on-local-ssd).) Each read, publication batch, fold, compaction, and maintenance slot keeps up to 8 MiB of decoded blocks for the scan that it runs and a 2 MiB memo of the index, filter, and lookup blocks that it has read, so its term is 10 MiB. Each maintenance slot can also run a garbage collection, which keeps a live set of up to 64 MiB. ([Memory outside the block cache](../../../docs/design/block-cache.md#memory-outside-the-block-cache) describes these budgets and the cases that go past them.)
 
 The headroom covers memory that the allocator keeps after the server frees it. The budgets share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the budgets.
 
@@ -99,17 +102,16 @@ The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the 
 
 | Budget | Share of managed memory | Setting |
 | --- | ---: | --- |
-| Metadata segment cache | 30% | `metadata_cache.max_segment_bytes` |
+| Metadata segment cache | 50% | `metadata_cache.max_segment_bytes` |
 | WAL tail cache | 10% | `metadata_cache.max_wal_tail_bytes` |
 | Content object cache | 10% | `metadata_cache.max_content_object_bytes` |
 | Grep cache | 10% | `grep.max_cache_bytes` (added to the segment cache's share when grep isn't served) |
-| Read working memory | 20% | `max_read_working_bytes` |
 | Admitted publication bytes | 10% | `max_admitted_bytes` |
 | Compaction input | 10% | `max_compaction_input_bytes`, divided by `max_concurrent_compactions` |
 
 You can still set each budget's setting to override its share. The sum check uses the final values, including one compaction input allowance for each concurrent compaction. At startup, the server logs one line for each term, with its final value and whether it was derived or set. Without sizing, the budgets you didn't set are logged as defaults.
 
-Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 32 content writes, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection, transfer, fold, compaction, and content write counts, and it divides compaction input by the final compaction count.
+Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 32 content writes, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection, transfer, read, publication, fold, compaction, maintenance, and content write counts, and it divides compaction input by the final compaction count.
 
 Why is the headroom 200 MiB plus a quarter of the budgets? In the lab, the server's peak memory on Linux with the three glibc settings below was 10% to 32% above the same workload's memory on macOS, and a quiet phase stayed about 200 MiB above it. With glibc's defaults, the peaks were up to about three times the macOS figures (769 MiB against 256 MiB for one workload), which is more than the headroom covers. So for a Linux deployment, set these environment variables (the published image already sets them):
 
@@ -407,7 +409,8 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |
-| Read working memory | `max_read_working_bytes` | Derived: 20%. 256 MiB without a memory limit | Blocks retained across read, publication, fold, and snapshot-fold memos | Shared |
+| Read memory | None | 10 MiB for each read, publication, fold, compaction, and maintenance slot | Decoded blocks that one operation keeps for its scan (8 MiB) and its memo (2 MiB) | Per operation |
+| Collection live sets | None | 64 MiB | The object keys, content IDs, and extent filters that one garbage collection keeps. A collection that needs more fails | Per operation |
 | Compaction input | `max_compaction_input_bytes` | Derived: 10% divided by the compaction count. 64 MiB without a memory limit | Decoded blocks that one compaction keeps in memory while it runs | Per operation |
 | Merge allowance | `max_merge_bytes` | 512 MiB, with or without a memory limit. Zero turns merges off | Estimated peak memory of the merges that the server plans and publishes at the same time, three times each merge's planned WAL bytes or the memory that planning the merge uses, whichever is larger | Shared |
 | Segment output | None | 32 MiB | Encoded segments that one fold, compaction, or maintenance step keeps in memory while it writes them | Per operation |
@@ -419,21 +422,21 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Reads | `max_concurrent_reads` | 64 | Public reads running at once. Each page takes one slot | Concurrency |
 | Publications | `max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
-All memos share one read working memory budget. When the read working memory is full, a memo evicts its own entries or doesn't retain new blocks, and reads don't wait or fail because of memory. The budget counts decoded data, index and filter sections, keys, reference counts, and memo containers. Setting it to zero disables retention. A block that a caller already has stays valid after it's evicted.
+Each operation's memo and scan have budgets of their own, and no operation shares them. A memo that reaches 2 MiB evicts its oldest blocks, and a scan's refill stops at the scan's budget, so reads don't wait or fail because of memory. The budgets count decoded data, index and filter sections, keys, reference counts, and memo containers. A block that a caller already has stays valid after it's evicted. With `metadata_cache.max_segment_bytes = 0`, every read's 2 MiB memo is its only cache, so a read whose lookups cycle through more than 2 MiB of blocks fetches them again. (Earlier versions had one shared budget for these blocks, set by `max_read_working_bytes`. A config that still sets `max_read_working_bytes` fails to load with an error that identifies the setting, so remove the line.)
 
-A fold keeps its segment output in memory and takes its memo from the shared read working memory. A compaction keeps its compaction input and its segment output in memory, which comes to up to 96 MiB per concurrent compaction without sizing or overrides. A metadata step that folds the WAL tail and then compacts takes a fold permit for the fold, and then a compaction permit for the compaction. So the fold and compaction limits bound that memory, not `max_concurrent_maintenance`.
+A fold keeps its segment output in memory, and it keeps its memo and scan within their own budgets. A compaction keeps its compaction input and its segment output in memory, which comes to up to 96 MiB per concurrent compaction without sizing or overrides. A metadata step that folds the WAL tail and then compacts takes a fold permit for the fold, and then a compaction permit for the compaction. So the fold and compaction limits bound that memory, not `max_concurrent_maintenance`.
 
 A compaction keeps at most `max_compaction_input_bytes` of decoded input in memory at once, whatever the size of its window, so lowering the setting makes compactions read in smaller waves.
 
 The segment output budget has no setting, and a segment larger than the budget is written on its own.
 
-When a snapshot or a fork has to fold the WAL tail first, it runs that fold with the shared read working memory. Creating a snapshot or a fork waits for a fold permit, even when the tail is already folded. A fork of a snapshot doesn't fold, and it doesn't take a fold permit.
+When a snapshot or a fork has to fold the WAL tail first, it runs that fold like any other fold. Creating a snapshot or a fork waits for a fold permit, even when the tail is already folded. A fork of a snapshot doesn't fold, and it doesn't take a fold permit.
 
 Maintenance requests sent to the API don't count against `max_concurrent_maintenance`, but their folds and compactions take the same fold and compaction permits as every other fold and compaction, and a maintenance request's fold or compaction unit also waits for a fold or a unit of the same namespace that's already running.
 
 `max_upload_bytes` and `max_download_bytes` limit the size of one proxied transfer, and both default to 256 MiB. They don't reserve any memory.
 
-Without a memory limit, grep, an SSD tier, or overrides, the budgets in the table above that have a byte ceiling add up to 2,288 MiB:
+Without a memory limit, grep, an SSD tier, or overrides, the budgets in the table above that have a byte ceiling add up to 3,384 MiB:
 
 | Budget | Ceiling |
 | --- | --- |
@@ -448,10 +451,11 @@ Without a memory limit, grep, an SSD tier, or overrides, the budgets in the tabl
 | 8 uploads at 8 MiB | 64 MiB |
 | 16 downloads at 8 MiB | 128 MiB |
 | 32 content writes at 16 MiB | 512 MiB |
-| Read working memory | 256 MiB |
+| 84 operations' read memory at 10 MiB | 840 MiB |
+| 8 collection live sets at 64 MiB | 512 MiB |
 | 2 fold outputs at 32 MiB | 64 MiB |
 | 2 compactions at 96 MiB | 192 MiB |
-| Total | 2,288 MiB |
+| Total | 3,384 MiB |
 
 The total leaves out:
 
@@ -472,7 +476,7 @@ The `loonfs_grep_steps_running` gauge reports the steps that have a permit, and 
 
 The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps` for its grep worker. If you embed grep in a host that runs more than one worker (for example, one for each runtime), pass a clone of one budget to every worker, so the limit is one ceiling for the whole process. A worker that has its own budget adds its own steps on top of that ceiling.
 
-A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2.5 GiB limit leaves about 157 MiB of managed memory, which is too little, and the smallest limit that passes is 2,684 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 4,476 MiB unless you lower `max_concurrent_content_writes` or `max_merge_bytes`. A deployment that never merges sets `max_merge_bytes = 0`, and then the smallest limit that passes is 2,044 MiB, or 3,836 MiB on R2. Use the formula in [Set one number](#set-one-number) when you change counts or override individual budgets.
+A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, `fixed` is 2,816 MiB, of which 1,352 MiB is read memory and collection live sets. So a 4 GiB limit leaves about 304 MiB of managed memory, and the smallest limit that passes is 4,036 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 5,828 MiB unless you lower `max_concurrent_content_writes` or `max_merge_bytes`. A deployment that never merges sets `max_merge_bytes = 0`, and then the smallest limit that passes is 3,396 MiB, or 5,188 MiB on R2. Lowering `max_concurrent_reads` lowers the smallest limit by 10 MiB for each read, and lowering `max_concurrent_maintenance` lowers it by 74 MiB for each slot (before the headroom). Use the formula in [Set one number](#set-one-number) when you change counts or override individual budgets.
 
 The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (64 MiB of unfolded WAL bytes or 1,024 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when the session or the maintenance scheduler finds that the namespace was deleted or doesn't exist.
 

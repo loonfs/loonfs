@@ -87,31 +87,19 @@ A pool has no scheduler entry and no retry state. The scheduler records a failed
 
 Sweeps and session steps run in separate loops. A long compaction uses one slot until it finishes, and the other free slots can keep working. The scheduler starts a session's steps without waiting for the steps that other sessions started at the interval before, so a session's long metadata step delays only that session: at each interval, the scheduler starts no steps for a session whose earlier steps are still pending or running, and starts the steps of every other session. All maintenance from one runtime shares that runtime's compactor claim and execution budget. Shutdown cancels both loops and stops new steps, and a running compaction stops at its next block, within the server's shutdown deadline.
 
-## Shared read working memory
+## Read memory
 
-This section describes the shared budget that limits read working memory.
+This section describes the memory that reads, publications, folds, compactions, and collections keep outside the caches.
 
-The budget is `max_read_working_bytes` in `ExecutionBudget`, which defaults to 256 MiB. All read-only and writable runtimes that are given clones of a budget share this read working memory. A runtime without an explicit budget creates a private one. Core callers without a runtime budget use an unshared 64 MiB budget. Metadata caches have their own limits, which are managed separately.
+Each of these operations keeps the blocks of its scans' refills and a memo of the index, filter, and lookup blocks that it has read. Each operation's budgets for those blocks are constants: 8 MiB of refills for each range scan (`MAX_SCAN_DECODED_BYTES`) and 2 MiB for the memo (`MAX_BLOCK_MEMO_BYTES`). A garbage collection also keeps its live set, up to 64 MiB (`MAX_COLLECTION_BYTES`). No budget is shared between operations, so an operation never waits for memory that another operation keeps, and a refill never loads fewer blocks because other reads are running. The execution budget's permits limit how many operations run at once, so the permits and the per-operation budgets together bound the memory, as [Memory outside the block cache](block-cache.md#memory-outside-the-block-cache) describes with a worked example.
 
-| Limit | Owner | Default | At the limit |
-| --- | --- | --- | --- |
-| `max_read_working_bytes` | `ExecutionBudget` | 256 MiB | A memo evicts its own entries, and continues without keeping blocks that don't fit. A scan's refill loads fewer blocks, and always takes its first block, which the budget records even above the limit, so the read working memory can exceed the limit by one block for each segment that a scan has open until the scan consumes the block. Nothing waits. |
+| Budget | Default | At the limit |
+| --- | --- | --- |
+| A scan's refills | 8 MiB decoded, shared equally by the segments that the scan has open | A refill stops at its segment's share, but always takes its first block. |
+| A memo | 2 MiB decoded | The memo evicts its oldest blocks. A block that a caller already has stays valid after eviction. |
+| A collection's live set | 64 MiB | The collection fails with `server_error`. |
 
-Read, publication, fold, and snapshot-fold memos reserve memory from this budget, and so does each refill of a scan, for the decoded bytes of its blocks until the scan has consumed them. A memo's reservation covers:
-
-- decoded data blocks,
-- decoded indexes and filters,
-- keys and reference counts, and
-- allocated memo container capacity.
-
-Evicting or dropping an entry releases its reservation. A block that a caller already has stays valid after eviction. Cache entries are charged to their own limits, even when they share an allocation with a memo. Allocator bookkeeping, temporary decoding, returned rows, and blocks borrowed after eviction aren't counted in this budget. The budget doesn't limit read concurrency.
-
-`ExecutionBudget::stats().read_working_bytes` reports the retained bytes. The budget's recorder reports two gauges:
-
-- `loonfs.execution_budget.read_working_bytes`
-- `loonfs.execution_budget.read_working_reservation_failures`, which counts failed attempts to reserve, including retries after eviction.
-
-The reference server sets the budget with its `max_read_working_bytes` setting, and a value of zero keeps no memo, so each scan keeps one block for each segment that it has open.
+A memo counts its decoded blocks, keys, and container capacity. A scan counts the decoded bytes of its refills' blocks, and a collection counts its sets' entries, keys, and table capacity. Cache entries are charged to their own limits, even when they share an allocation with a memo or a scan. Allocator bookkeeping, temporary decoding, and returned rows aren't counted.
 
 ## Store request costs
 

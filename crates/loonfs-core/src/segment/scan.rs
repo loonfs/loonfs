@@ -9,6 +9,7 @@ use super::scan_load::{ScanDescriptor, ScanLoader};
 use crate::compaction::run_iterator::{refill_iterators, SegmentRowIterator};
 use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::limits::MAX_SCAN_DECODED_BYTES;
 use crate::manifest::error::ManifestLoadError;
 #[cfg(test)]
 use crate::metadata::MetadataState;
@@ -53,23 +54,21 @@ pub(crate) enum BlocksPerRefill {
     /// which fetches the block that has the key.
     One,
     /// The next blocks of the scan's remaining key range, up to
-    /// `MAX_SCAN_REFILL_BYTES` of stored bytes and the decoded bytes that the
-    /// refill reserves from the read working memory, for a scan of a key
-    /// range, so a cold page of up to 1 MiB of blocks loads in one GET. The
-    /// scan keeps the reservation until it has consumed the blocks, and the
-    /// memo doesn't record them.
+    /// `MAX_SCAN_REFILL_BYTES` of stored bytes and the segment's share of
+    /// `MAX_SCAN_DECODED_BYTES`, for a scan of a key range, so a cold page of
+    /// several blocks of a segment loads in one GET. The scan keeps the blocks
+    /// until it has consumed them, and the memo doesn't record them.
     KeyRange,
     /// The next blocks of the segment, past the end of the scan's key range,
-    /// up to `MAX_SCAN_REFILL_BYTES` of stored bytes and the decoded bytes
-    /// that the refill reserves. A scan of one directory's children uses this
-    /// mode, because a recursive listing scans a tree's directories one after
-    /// another and the next directory's rows are often in the blocks that
-    /// follow (see [What a read fetches](https://github.com/loonfs/loonfs/blob/main/docs/design/block-cache.md#what-a-read-fetches)).
-    /// The scan reserves and keeps a refill's blocks as it does for
-    /// `KeyRange`, and the refill inserts every block that it fetches into
-    /// the block cache. Without a block cache, a scan in this mode reads no
-    /// further than a `KeyRange` scan, because the scan would drop the blocks
-    /// past its range.
+    /// within the same caps as `KeyRange`. A scan of one directory's children
+    /// uses this mode, because a recursive listing scans a tree's directories
+    /// one after another and the next directory's rows are often in the
+    /// blocks that follow (see [What a read fetches](https://github.com/loonfs/loonfs/blob/main/docs/design/block-cache.md#what-a-read-fetches)).
+    /// The scan keeps a refill's blocks as it does for `KeyRange`, and the
+    /// refill inserts every block that it fetches into the block cache.
+    /// Without a block cache, a scan in this mode reads no further than a
+    /// `KeyRange` scan, because the scan would drop the blocks past its
+    /// range.
     ReadAhead,
 }
 
@@ -91,8 +90,9 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     /// doesn't depend on this order, because row keys are unique across
     /// runs, but [`Self::scan_prefix_in_newest_run_for_lookup`] does.
     pub(crate) scan_runs: Arc<Vec<MetadataRunManifest>>,
-    /// The decoded blocks that this view's reads have loaded, charged to the
-    /// read working memory until the view ends.
+    /// The decoded blocks that this view's reads have loaded, up to
+    /// [`MAX_BLOCK_MEMO_BYTES`](crate::limits::MAX_BLOCK_MEMO_BYTES), until
+    /// the view ends.
     pub(super) block_memo: SessionBlockMemo,
     #[cfg(test)]
     pub(super) peak_page_rows: std::sync::atomic::AtomicUsize,
@@ -166,7 +166,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             manifest,
             manifest_bytes,
             scan_runs,
-            block_memo: SessionBlockMemo::new(super::cache::read_working_memory(segment_cache)),
+            block_memo: SessionBlockMemo::default(),
             #[cfg(test)]
             peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -484,7 +484,6 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             store: self.store,
             segment_cache: self.segment_cache,
             block_memo: &self.block_memo,
-            read_working_memory: self.block_memo.read_working_memory(),
             blocks_per_refill,
             upper_bound,
         };
@@ -521,12 +520,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             if iterators.is_empty() {
                 break;
             }
-            refill_iterators(
-                &loader,
-                &mut iterators,
-                loader.read_working_memory.available_bytes(),
-            )
-            .await?;
+            refill_iterators(&loader, &mut iterators, MAX_SCAN_DECODED_BYTES).await?;
             if filter_admitted {
                 for iterator in &iterators[previously_open..] {
                     let matched = iterator

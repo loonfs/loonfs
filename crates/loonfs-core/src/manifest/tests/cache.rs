@@ -401,7 +401,6 @@ async fn manifests_and_blocks_are_charged_to_budgets_of_their_own() {
                 max_manifest_bytes,
             )),
             ObjectStoreScope::new(0),
-            crate::segment::cache::unshared_read_working_memory(),
         )
     };
     let unbounded = cache(usize::MAX, usize::MAX);
@@ -862,7 +861,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
 }
 
 #[tokio::test]
-async fn a_zero_block_memo_and_block_cache_refetch_data_blocks_for_reads_and_folds() {
+async fn reads_and_folds_keep_their_lookup_blocks_in_their_memos_without_a_block_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -887,7 +886,6 @@ async fn a_zero_block_memo_and_block_cache_refetch_data_blocks_for_reads_and_fol
     let cache = Arc::new(MetadataSegmentCache::new(
         Arc::new(SharedSegmentBlocks::new(0, 0)),
         ObjectStoreScope::new(0),
-        Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
     ));
     let namespace = crate::NamespaceStore {
         segment_cache: Arc::clone(&cache),
@@ -920,9 +918,10 @@ async fn a_zero_block_memo_and_block_cache_refetch_data_blocks_for_reads_and_fol
             .await
             .expect("repeated lookup")
             .is_some());
-        assert!(
-            store.count(OperationSelector::Read) > first_lookup_reads,
-            "a zero memo and a zero block cache keep no data block for the repeated lookup"
+        assert_eq!(
+            store.count(OperationSelector::Read),
+            first_lookup_reads,
+            "the view's memo keeps the lookup's blocks when the block cache keeps none"
         );
     }
 }
@@ -1515,7 +1514,6 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
         blocks.clone(),
         Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
         ObjectStoreScope::new(0),
-        crate::segment::cache::unshared_read_working_memory(),
     );
 
     let (cold, cold_reads) = wide_read(&store, Some(&cache), &descriptor, &index).await;
@@ -1591,139 +1589,58 @@ async fn snapshot_delta_update_does_not_read_existing_metadata_segments() {
 }
 
 #[tokio::test]
-async fn two_loaded_views_share_one_read_working_memory_and_return_the_same_rows() {
-    use crate::cache::ReadWorkingMemory;
-
+async fn two_loaded_views_keep_their_own_memos_and_return_the_same_rows() {
     let (_root, store, descriptor) = direntry_segment_after_snapshot().await;
     let namespace_id = &descriptor.owner_namespace_id;
     let manifest_number = current_manifest_number(&store, namespace_id).await;
-    let cache = |read_working_memory| {
-        MetadataSegmentCache::new(
-            Arc::new(SharedSegmentBlocks::new(0, 0)),
-            ObjectStoreScope::new(0),
-            read_working_memory,
-        )
-    };
-    let probe_memory = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
-    let probe_cache = cache(Arc::clone(&probe_memory));
-    let probe = load_manifest_segments_for_inspection(
-        &store,
-        Some(&probe_cache),
-        namespace_id,
-        &manifest_number,
-    )
-    .await
-    .expect("probe view");
-    let expected = probe
-        .scan_range(
-            ApiMetadataRowFamily::DirentryBinds,
-            "",
-            None,
-            usize::MAX,
-            None,
-            scan::BlocksPerRefill::One,
-        )
-        .await
-        .expect("probe rows");
-    let working_bytes = probe_memory.in_use();
-    assert!(working_bytes > 0);
-    drop(probe);
-    assert_eq!(probe_memory.in_use(), 0);
-    let read_working_memory = Arc::new(ReadWorkingMemory::new(working_bytes, None));
-    let shared_cache = cache(Arc::clone(&read_working_memory));
-    let first = load_manifest_segments_for_inspection(
-        &store,
-        Some(&shared_cache),
-        namespace_id,
-        &manifest_number,
-    )
-    .await
-    .expect("first view");
-    let second = load_manifest_segments_for_inspection(
-        &store,
-        Some(&shared_cache),
-        namespace_id,
-        &manifest_number,
-    )
-    .await
-    .expect("second view");
-    for view in [&first, &second] {
-        assert_eq!(
-            view.scan_range(
-                ApiMetadataRowFamily::DirentryBinds,
-                "",
-                None,
-                usize::MAX,
-                None,
-                scan::BlocksPerRefill::One
-            )
+    let cache = MetadataSegmentCache::new(
+        Arc::new(SharedSegmentBlocks::new(0, 0)),
+        ObjectStoreScope::new(0),
+    );
+    let first =
+        load_manifest_segments_for_inspection(&store, Some(&cache), namespace_id, &manifest_number)
             .await
-            .expect("rows"),
-            expected
+            .expect("first view");
+    let expected = direntry_rows(&first).await;
+    assert!(!expected.is_empty());
+    let second =
+        load_manifest_segments_for_inspection(&store, Some(&cache), namespace_id, &manifest_number)
+            .await
+            .expect("second view");
+    store.reset();
+    assert_eq!(direntry_rows(&second).await, expected);
+    assert!(
+        store.count(OperationSelector::Read) > 0,
+        "the second view's memo starts empty, and the block cache keeps nothing"
+    );
+    for view in [&first, &second] {
+        store.reset();
+        assert_eq!(direntry_rows(view).await, expected);
+        assert_eq!(
+            store.count(OperationSelector::Read),
+            0,
+            "each view rereads its blocks from its own memo"
         );
     }
-    assert_eq!(read_working_memory.in_use(), working_bytes);
-    store.reset();
-    assert_eq!(
-        first
-            .scan_range(
-                ApiMetadataRowFamily::DirentryBinds,
-                "",
-                None,
-                usize::MAX,
-                None,
-                scan::BlocksPerRefill::One
-            )
-            .await
-            .expect("first reread"),
-        expected
-    );
-    assert_eq!(store.count(OperationSelector::Read), 0);
-    store.reset();
-    assert_eq!(
-        second
-            .scan_range(
-                ApiMetadataRowFamily::DirentryBinds,
-                "",
-                None,
-                usize::MAX,
-                None,
-                scan::BlocksPerRefill::One
-            )
-            .await
-            .expect("second reread"),
-        expected
-    );
-    assert!(store.count(OperationSelector::Read) > 0);
     drop(first);
-    assert_eq!(read_working_memory.in_use(), 0);
-    second
-        .scan_range(
-            ApiMetadataRowFamily::DirentryBinds,
-            "",
-            None,
-            usize::MAX,
-            None,
-            scan::BlocksPerRefill::One,
-        )
-        .await
-        .expect("read after release");
-    assert_eq!(read_working_memory.in_use(), working_bytes);
     store.reset();
-    second
-        .scan_range(
-            ApiMetadataRowFamily::DirentryBinds,
-            "",
-            None,
-            usize::MAX,
-            None,
-            scan::BlocksPerRefill::One,
-        )
-        .await
-        .expect("retained reread");
+    assert_eq!(direntry_rows(&second).await, expected);
     assert_eq!(store.count(OperationSelector::Read), 0);
-    drop(second);
-    assert_eq!(read_working_memory.in_use(), 0);
+}
+
+async fn direntry_rows<S: ObjectStore + ?Sized>(
+    view: &scan::VerifiedMetadataSegments<'_, S>,
+) -> Vec<(String, MetadataRow)> {
+    view.scan_range(
+        ApiMetadataRowFamily::DirentryBinds,
+        "",
+        None,
+        usize::MAX,
+        None,
+        scan::BlocksPerRefill::One,
+    )
+    .await
+    .expect("direntry rows")
 }
 
 async fn current_segment_refs<S: ObjectStore + ?Sized>(

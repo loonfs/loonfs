@@ -4,7 +4,6 @@
 use crate::error::Result;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::manifest::validate::validate_manifest_row_seq_range;
-use crate::read_working_memory::ReadReservation;
 use crate::segment::data_block_load::{
     decode_data_blocks_from_object, load_segment_data_block_span,
 };
@@ -64,16 +63,6 @@ pub(crate) fn locality_of(
     &tail[..end]
 }
 
-/// The data blocks that one refill of a segment row iterator loaded, with the
-/// read working memory reserved for those blocks.
-pub struct LoadedBlocks<Row> {
-    /// One block for each of a prefix of the requested entries, in order.
-    pub blocks: Vec<Arc<DecodedDataBlock<Row>>>,
-    /// The bytes reserved for `blocks`, or `None` when the loader bounds its
-    /// blocks by its own budget.
-    pub reservation: Option<ReadReservation>,
-}
-
 /// Loads the index and data blocks for one segment row iterator.
 pub trait SegmentBlockLoader<Row, Segment> {
     type Error;
@@ -107,13 +96,16 @@ pub trait SegmentBlockLoader<Row, Segment> {
     ) -> impl Future<Output = std::result::Result<(Arc<Vec<SegmentIndexEntry>>, Segment), Self::Error>>;
 
     /// Loads the blocks of a prefix of `entries` that holds at least one
-    /// block, in order. `segment` is the segment that [`Self::load_index`]
-    /// returned.
+    /// block, in order, one block for each entry of the prefix. `segment` is
+    /// the segment that [`Self::load_index`] returned, and
+    /// `max_decoded_bytes` is the iterator's share that
+    /// [`Self::data_block_count`] was given.
     fn load_data_blocks(
         &self,
         segment: Segment,
         entries: Vec<SegmentIndexEntry>,
-    ) -> impl Future<Output = std::result::Result<LoadedBlocks<Row>, Self::Error>>;
+        max_decoded_bytes: usize,
+    ) -> impl Future<Output = std::result::Result<Vec<Arc<DecodedDataBlock<Row>>>, Self::Error>>;
 }
 
 /// Walks ordered segment rows with bounded decoded-block residency.
@@ -126,9 +118,6 @@ pub struct SegmentRowIterator<Row, Segment, SortKey> {
     open: Option<(Segment, Arc<Vec<SegmentIndexEntry>>)>,
     next_block: usize,
     blocks: VecDeque<Arc<DecodedDataBlock<Row>>>,
-    /// The read working memory reserved for the blocks of the last refill,
-    /// which the next refill releases once `blocks` is empty.
-    batch_reservation: Option<ReadReservation>,
     row: usize,
     lower: Option<String>,
 }
@@ -143,7 +132,6 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
             open: None,
             next_block: 0,
             blocks: VecDeque::new(),
-            batch_reservation: None,
             row: 0,
             lower,
         }
@@ -225,7 +213,6 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
         Loader: SegmentBlockLoader<Row, Segment>,
     {
         while self.blocks.is_empty() {
-            self.batch_reservation = None;
             let (segment, index) = match &self.open {
                 Some((segment, index)) if self.next_block < index.len() => {
                     (segment.clone(), Arc::clone(index))
@@ -250,14 +237,15 @@ impl<Row, Segment, SortKey> SegmentRowIterator<Row, Segment, SortKey> {
                 continue;
             }
             let entries = index[self.next_block..self.next_block + count].to_vec();
-            let loaded = loader.load_data_blocks(segment, entries).await?;
+            let loaded = loader
+                .load_data_blocks(segment, entries, max_decoded_bytes)
+                .await?;
             assert!(
-                !loaded.blocks.is_empty() && loaded.blocks.len() <= count,
+                !loaded.is_empty() && loaded.len() <= count,
                 "a refill should load a non-empty prefix of the blocks it asked for"
             );
-            self.next_block += loaded.blocks.len();
-            self.batch_reservation = loaded.reservation;
-            for block in loaded.blocks {
+            self.next_block += loaded.len();
+            for block in loaded {
                 let next_row = self.lower.as_deref().map_or(0, |lower| {
                     block
                         .row_keys
@@ -336,7 +324,8 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
         &self,
         segment: MetadataSegmentInput,
         entries: Vec<SegmentIndexEntry>,
-    ) -> Result<LoadedBlocks<MetadataRow>> {
+        _max_decoded_bytes: usize,
+    ) -> Result<Vec<Arc<DecodedDataBlock<MetadataRow>>>> {
         let blocks = match &segment.object {
             Some(object) => decode_data_blocks_from_object(&segment.descriptor, object, &entries)?,
             None => {
@@ -349,12 +338,7 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
             blocks.iter().flat_map(|block| block.rows.iter()),
             segment.max_seq,
         )?;
-        // Compaction bounds the blocks it keeps by its step's decoded input
-        // budget, not by the read working memory.
-        Ok(LoadedBlocks {
-            blocks,
-            reservation: None,
-        })
+        Ok(blocks)
     }
 }
 
@@ -429,10 +413,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        locality_of, refill_iterators, LoadedBlocks, LocalityGrouping, SegmentBlockLoader,
-        SegmentRowIterator,
+        locality_of, refill_iterators, LocalityGrouping, SegmentBlockLoader, SegmentRowIterator,
     };
-    use crate::read_working_memory::ReadWorkingMemory;
     use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily};
     use loonfs_types::format::segment_blocks::{BlockHandle, DecodedDataBlock, SegmentIndexEntry};
     use loonfs_types::{CommitSeq, DisplayName, InodeId, NameKey};
@@ -559,12 +541,11 @@ mod tests {
     }
 
     /// A loader of one in-memory segment of two-row blocks that returns at
-    /// most two blocks of each request, reserves each batch's decoded bytes,
-    /// and records how many blocks each request asked for.
+    /// most two blocks of each request, and records how many blocks each
+    /// request asked for.
     struct ShortBatches {
         blocks: Vec<Arc<DecodedDataBlock<String>>>,
         index: Arc<Vec<SegmentIndexEntry>>,
-        read_working_memory: Arc<ReadWorkingMemory>,
         requests: Mutex<Vec<usize>>,
     }
 
@@ -594,7 +575,6 @@ mod tests {
             Self {
                 blocks,
                 index: Arc::new(index),
-                read_working_memory: Arc::new(ReadWorkingMemory::new(usize::MAX, None)),
                 requests: Mutex::new(Vec::new()),
             }
         }
@@ -611,14 +591,12 @@ mod tests {
             &self,
             _segment: (),
             entries: Vec<SegmentIndexEntry>,
-        ) -> Result<LoadedBlocks<String>, ()> {
+            _max_decoded_bytes: usize,
+        ) -> Result<Vec<Arc<DecodedDataBlock<String>>>, ()> {
             self.requests.lock().expect("requests").push(entries.len());
             let first = usize::try_from(entries[0].block.offset / 100).expect("block number");
             let count = entries.len().min(2);
-            Ok(LoadedBlocks {
-                blocks: self.blocks[first..first + count].to_vec(),
-                reservation: Some(self.read_working_memory.reserve(100 * count, 100)),
-            })
+            Ok(self.blocks[first..first + count].to_vec())
         }
     }
 
@@ -634,8 +612,7 @@ mod tests {
             if iterator.head().is_none() {
                 break;
             }
-            // Only the batch that the iterator keeps is reserved.
-            assert!(loader.read_working_memory.in_use() <= 200);
+            assert!(iterator.resident_blocks() <= 2);
             while iterator.head().is_some() {
                 rows.push(iterator.take_head());
             }
@@ -643,7 +620,5 @@ mod tests {
         let expected: Vec<_> = (1..10).map(|row| format!("key-{row:03}")).collect();
         assert_eq!(rows, expected);
         assert_eq!(*loader.requests.lock().expect("requests"), [5, 3, 1]);
-        drop(iterator);
-        assert_eq!(loader.read_working_memory.in_use(), 0);
     }
 }

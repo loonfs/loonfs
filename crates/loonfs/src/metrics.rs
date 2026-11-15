@@ -10,7 +10,6 @@
 
 pub(crate) mod labels;
 pub(crate) mod object_store;
-pub(crate) mod read_working_memory;
 mod runtime;
 
 pub use loonfs_objectstore::metrics::{

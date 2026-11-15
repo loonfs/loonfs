@@ -6,9 +6,11 @@ mod members;
 mod sweep;
 mod uploads;
 
+use super::charged_set::CollectionMemory;
 use super::deletes::apply_decisions;
 use super::session_cache::CompletedUploadSessionCache;
 use crate::error::{CoreError, Result};
+use crate::limits::MAX_COLLECTION_BYTES;
 use crate::pool_store::PoolStore;
 use crate::time::OperationClock;
 use content::ContentFilters;
@@ -34,17 +36,31 @@ impl<S: ObjectStore> PoolStore<S> {
     ///
     /// The content sweep reads the extent filter of each distinct layout
     /// segment of the members' rooted manifests through the segment cache,
-    /// charges the filters to that cache's read working memory, and lists the
+    /// charges the filters to the collection's live set, and lists the
     /// content prefix once. The collection doesn't read the record of a
     /// completed upload session that `session_cache` has, and it adds each
     /// completed session that it keeps to `session_cache`.
+    ///
+    /// The collection's live set is at most [`MAX_COLLECTION_BYTES`], and a
+    /// collection that needs more fails.
     pub async fn gc(
         &self,
         session_cache: Option<&CompletedUploadSessionCache>,
         clock: &OperationClock,
     ) -> Result<PoolGcResponse> {
+        let memory = CollectionMemory::new(self.pool_id.to_string(), MAX_COLLECTION_BYTES);
+        self.gc_within(session_cache, clock, memory).await
+    }
+
+    /// Collects as [`Self::gc`] does, with a live set charged to `memory`.
+    pub(super) async fn gc_within(
+        &self,
+        session_cache: Option<&CompletedUploadSessionCache>,
+        clock: &OperationClock,
+        memory: CollectionMemory,
+    ) -> Result<PoolGcResponse> {
         let mut report = PoolGcResponse::empty(self.pool_id.clone());
-        let roots = PoolRoots::load(self, session_cache, clock).await?;
+        let roots = PoolRoots::load(self, session_cache, clock, memory).await?;
         let sweep = PoolSweep {
             pool: self,
             clock,

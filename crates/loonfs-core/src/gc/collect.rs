@@ -7,6 +7,7 @@ use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
 use super::sweep::{retired_candidate, Sweep};
 use crate::error::{CoreError, Result};
+use crate::limits::MAX_COLLECTION_BYTES;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use futures::{future, stream, Stream, StreamExt, TryStreamExt};
@@ -30,9 +31,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// The collection lists nothing under its pool's prefix. The pool's own
     /// collection collects the content objects, upload records, and temporary
     /// objects there (see [`crate::PoolStore::gc`]).
+    ///
+    /// The collection's live set is at most [`MAX_COLLECTION_BYTES`], and a
+    /// collection that needs more fails.
     pub async fn gc(&self, clock: &OperationClock) -> Result<GcResponse> {
+        let memory = CollectionMemory::new(self.namespace_id.to_string(), MAX_COLLECTION_BYTES);
+        self.gc_within(clock, memory).await
+    }
+
+    /// Collects as [`Self::gc`] does, with a live set charged to `memory`.
+    pub(super) async fn gc_within(
+        &self,
+        clock: &OperationClock,
+        memory: CollectionMemory,
+    ) -> Result<GcResponse> {
         let mut report = GcResponse::empty(self.namespace_id.clone());
-        let Some(mut live) = LiveSet::load(self, clock).await? else {
+        let Some(mut live) = LiveSet::load(self, clock, memory).await? else {
             let prefix = namespace_prefix(&self.namespace_id);
             let boundary_key = boundary(&self.namespace_id);
             let mut listed_bytes = 0;

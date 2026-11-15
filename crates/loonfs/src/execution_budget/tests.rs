@@ -180,15 +180,12 @@ async fn wait_for_stats(budget: &ExecutionBudget, expected: ExecutionBudgetStats
 }
 
 /// Waits until the budget matches `expected` in everything but the admitted
-/// bytes, which depend on request encodings, and the read working bytes,
-/// which a running compaction reserves for its input blocks after it takes its
-/// permit and keeps while its write is parked. Callers that finish their
-/// work check that both return to zero with [`wait_for_stats`].
+/// bytes, which depend on request encodings. Callers that finish their work
+/// check that the admitted bytes return to zero with [`wait_for_stats`].
 async fn wait_for_counts(budget: &ExecutionBudget, expected: ExecutionBudgetStats) {
     wait_until(budget, |stats| {
         ExecutionBudgetStats {
             admitted_bytes: expected.admitted_bytes,
-            read_working_bytes: expected.read_working_bytes,
             ..stats
         } == expected
     })
@@ -753,7 +750,6 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
     assert_eq!(
         stats,
         ExecutionBudgetStats {
-            read_working_bytes: stats.read_working_bytes,
             content_writes_running: 1,
             content_writes_waiting: 1,
             ..ExecutionBudgetStats::default()

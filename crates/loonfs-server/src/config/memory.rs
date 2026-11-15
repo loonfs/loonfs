@@ -33,6 +33,13 @@ const _: () = assert!(
         && loonfs::SSD_INDEX_ENTRY_BYTES == 168
 );
 
+// The labels of the read working memory and collection terms in `fixed`
+// state these values.
+const _: () = assert!(
+    loonfs::MAX_SCAN_DECODED_BYTES + loonfs::MAX_BLOCK_MEMO_BYTES == 10 * MIB
+        && loonfs::MAX_COLLECTION_BYTES == 64 * MIB
+);
+
 /// Where a memory term's size came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemorySource {
@@ -85,7 +92,7 @@ impl MemoryTerm {
 #[derive(Debug)]
 pub(crate) struct MemorySizing {
     limit: Option<MemoryTerm>,
-    fixed: [(&'static str, u128); 7],
+    fixed: [(&'static str, u128); 9],
     headroom: usize,
     managed: usize,
     segment: MemoryTerm,
@@ -94,7 +101,6 @@ pub(crate) struct MemorySizing {
     wal_tail: MemoryTerm,
     content_object: MemoryTerm,
     pub(crate) grep: MemoryTerm,
-    pub(super) read_working: MemoryTerm,
     pub(super) admitted: MemoryTerm,
     pub(super) merge: MemoryTerm,
     pub(super) compaction_input: MemoryTerm,
@@ -103,7 +109,7 @@ pub(crate) struct MemorySizing {
 }
 
 impl MemorySizing {
-    fn terms(&self) -> [(&MemoryTerm, usize); 10] {
+    fn terms(&self) -> [(&MemoryTerm, usize); 9] {
         [
             (&self.segment, 1),
             (&self.manifest, 1),
@@ -111,7 +117,6 @@ impl MemorySizing {
             (&self.wal_tail, 1),
             (&self.content_object, 1),
             (&self.grep, usize::from(self.serves_grep)),
-            (&self.read_working, 1),
             (&self.admitted, 1),
             (&self.merge, 1),
             (&self.compaction_input, self.compactions),
@@ -271,7 +276,7 @@ impl ServerConfig {
             segment: MemoryTerm::new(
                 "metadata_cache.max_segment_bytes",
                 self.metadata_cache.max_segment_bytes,
-                share(if serves_grep { 30 } else { 40 }),
+                share(if serves_grep { 50 } else { 60 }),
                 loonfs::DEFAULT_MAX_SEGMENT_BYTES,
             ),
             manifest,
@@ -293,12 +298,6 @@ impl ServerConfig {
                 self.grep.max_cache_bytes,
                 share(if serves_grep { 10 } else { 0 }),
                 loonfs_grep::DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-            ),
-            read_working: MemoryTerm::new(
-                "max_read_working_bytes",
-                self.max_read_working_bytes,
-                share(20),
-                loonfs::DEFAULT_MAX_READ_WORKING_BYTES,
             ),
             admitted: MemoryTerm::new(
                 "max_admitted_bytes",
@@ -326,13 +325,24 @@ impl ServerConfig {
 
     /// Returns the memory terms that don't depend on the memory limit: the
     /// process, connections, transfers, segment output, content writes,
-    /// completed upload sessions, and the SSD tier's index.
+    /// completed upload sessions, the SSD tier's index, the read working
+    /// memory of every operation that reads a namespace, and the live sets of
+    /// collections.
     fn fixed_memory_terms(
         &self,
         folds: usize,
         compactions: usize,
         content_writes: usize,
-    ) -> [(&'static str, u128); 7] {
+    ) -> [(&'static str, u128); 9] {
+        let reads = self
+            .max_concurrent_reads
+            .unwrap_or(loonfs::DEFAULT_MAX_CONCURRENT_READS)
+            .get();
+        let publications = self
+            .max_concurrent_publications
+            .unwrap_or(loonfs::DEFAULT_MAX_CONCURRENT_PUBLICATIONS)
+            .get();
+        let maintenance = self.max_concurrent_maintenance.get();
         [
             ("process", (128 * MIB) as u128),
             (
@@ -364,6 +374,15 @@ impl ServerConfig {
                 self.metadata_cache.ssd.as_ref().map_or(0, |ssd| {
                     SsdSegmentBlocks::memory_bytes(ssd.max_segment_bytes) as u128
                 }),
+            ),
+            (
+                "read working memory ((`max_concurrent_reads` + `max_concurrent_publications` + `max_concurrent_folds` + `max_concurrent_compactions` + `max_concurrent_maintenance`) x 10 MiB)",
+                (reads + publications + folds + compactions + maintenance) as u128
+                    * (loonfs::MAX_SCAN_DECODED_BYTES + loonfs::MAX_BLOCK_MEMO_BYTES) as u128,
+            ),
+            (
+                "collections (`max_concurrent_maintenance` x 64 MiB)",
+                maintenance as u128 * loonfs::MAX_COLLECTION_BYTES as u128,
             ),
         ]
     }

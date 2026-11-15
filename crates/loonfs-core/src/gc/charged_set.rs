@@ -1,43 +1,52 @@
-//! Bytes a collection keeps, charged to the read working memory.
+//! Bytes a collection keeps, charged to the collection's own budget.
 
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::{hash_map_table_bytes, hash_set_table_bytes, HeapBytes};
-use crate::read_working_memory::ReadWorkingMemory;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// The read working memory one collection charges, and the bytes all of
-/// the collection's charges reserve together, so a failed charge can report the whole
-/// live set.
+/// The budget of one collection, and the bytes that all of the collection's
+/// charges reserve together, so a failed charge can report the whole live
+/// set.
 #[derive(Clone)]
 pub(super) struct CollectionMemory {
     /// The namespace or the pool that the collection collects.
     collected_id: Arc<str>,
-    memory: Arc<ReadWorkingMemory>,
+    limit: usize,
     held_bytes: Arc<AtomicUsize>,
+    /// The most bytes that the collection's charges have reserved together.
+    #[cfg(test)]
+    peak_bytes: Arc<AtomicUsize>,
 }
 
 impl CollectionMemory {
-    pub(super) fn new(collected_id: String, memory: Arc<ReadWorkingMemory>) -> Self {
+    pub(super) fn new(collected_id: impl Into<Arc<str>>, limit: usize) -> Self {
         Self {
             collected_id: collected_id.into(),
-            memory,
+            limit,
             held_bytes: Arc::default(),
+            #[cfg(test)]
+            peak_bytes: Arc::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn peak_bytes(&self) -> usize {
+        self.peak_bytes.load(Ordering::SeqCst)
     }
 
     /// The bytes that all of the collection's charges reserve now.
     pub(super) fn held_bytes(&self) -> usize {
-        self.held_bytes.load(Ordering::Relaxed)
+        self.held_bytes.load(Ordering::SeqCst)
     }
 
     pub(super) fn limit(&self) -> usize {
-        self.memory.limit()
+        self.limit
     }
 }
 
-/// One reservation in the read working memory, released when it drops.
+/// One reservation in a collection's budget, released when it drops.
 pub(super) struct Charge {
     memory: CollectionMemory,
     reserved_bytes: usize,
@@ -55,32 +64,38 @@ impl Charge {
         self.reserved_bytes
     }
 
-    /// Adds `bytes` to the reservation, or fails the collection when the memory
-    /// can't fit them. The error reports what the collection's charges would reserve
-    /// together with `bytes` added.
+    /// Adds `bytes` to the reservation, or fails the collection when its
+    /// budget can't fit them. The error reports what the collection's charges
+    /// would reserve together with `bytes` added.
     pub(super) fn add(&mut self, bytes: usize) -> Result<()> {
         if bytes == 0 {
             return Ok(());
         }
-        if !self.memory.memory.try_reserve(bytes) {
-            return Err(CoreError::LiveSetExceedsReadMemory {
+        let limit = self.memory.limit;
+        let reserved =
+            self.memory
+                .held_bytes
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+                    held.checked_add(bytes).filter(|total| *total <= limit)
+                });
+        if let Err(held) = reserved {
+            return Err(CoreError::LiveSetExceedsCollectionMemory {
                 collected_id: self.memory.collected_id.to_string(),
-                bytes: self
-                    .memory
-                    .held_bytes
-                    .load(Ordering::Relaxed)
-                    .saturating_add(bytes),
-                limit: self.memory.memory.limit(),
+                bytes: held.saturating_add(bytes),
+                limit,
             });
         }
+        #[cfg(test)]
+        self.memory
+            .peak_bytes
+            .fetch_max(self.memory.held_bytes(), Ordering::SeqCst);
         self.reserved_bytes += bytes;
-        self.memory.held_bytes.fetch_add(bytes, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Grows the reservation to `bytes`, or fails the collection when the memory
-    /// can't fit the difference. A reservation never shrinks, so it keeps the
-    /// most bytes that its collection has needed.
+    /// Grows the reservation to `bytes`, or fails the collection when its
+    /// budget can't fit the difference. A reservation never shrinks, so it
+    /// keeps the most bytes that its collection has needed.
     fn grow_to(&mut self, bytes: usize) -> Result<()> {
         self.add(bytes.saturating_sub(self.reserved_bytes))
     }
@@ -88,10 +103,9 @@ impl Charge {
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        self.memory.memory.release(self.reserved_bytes);
         self.memory
             .held_bytes
-            .fetch_sub(self.reserved_bytes, Ordering::Relaxed);
+            .fetch_sub(self.reserved_bytes, Ordering::SeqCst);
     }
 }
 
@@ -205,8 +219,8 @@ impl<T: HeapBytes> ChargedQueue<T> {
             .grow_to(self.values.capacity() * std::mem::size_of::<T>() + self.heap_bytes)
     }
 
-    /// Pushes `value`, or returns `value` when the memory can't fit the queue
-    /// with it.
+    /// Pushes `value`, or returns `value` when the collection's budget can't
+    /// fit the queue with it.
     pub(super) fn try_push_back(&mut self, value: T) -> std::result::Result<(), T> {
         self.values.reserve(1);
         let bytes = self.values.capacity() * std::mem::size_of::<T>()

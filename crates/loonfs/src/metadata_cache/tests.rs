@@ -26,11 +26,7 @@ enum SnapshotCreation {
     Fork,
 }
 
-async fn snapshot_fold_reads(
-    creation: SnapshotCreation,
-    max_read_working_bytes: usize,
-    max_segment_bytes: usize,
-) -> usize {
+async fn snapshot_fold_reads(creation: SnapshotCreation, max_segment_bytes: usize) -> usize {
     let root = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::metadata_segments(
         loonfs_test_support::stores::BlockingStore::new(
@@ -39,14 +35,8 @@ async fn snapshot_fold_reads(
             OperationSelector::Put,
         ),
     ));
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let budget = crate::ExecutionBudget::builder()
-        .max_read_working_bytes(max_read_working_bytes)
-        .metrics_recorder(recorder.clone())
-        .build();
     let runtime = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("snapshot-writer"))
-        .execution_budget(budget.clone())
         .metadata_cache(
             MetadataCache::builder()
                 .max_segment_bytes(max_segment_bytes)
@@ -112,32 +102,8 @@ async fn snapshot_fold_reads(
         () = &mut operation => panic!("fold should block before writing a segment"),
         () = store.inner().wait_until_blocked() => {}
     }
-    let retained = budget.stats().read_working_bytes;
-    if max_read_working_bytes > 1 {
-        assert!(
-            retained > 0,
-            "{creation:?} charges the shared read working memory"
-        );
-    } else {
-        assert_eq!(retained, 0);
-    }
-    assert_eq!(
-        gauge(
-            &recorder.snapshot(),
-            "loonfs.execution_budget.read_working_bytes"
-        ),
-        retained as i64
-    );
     store.inner().release();
     operation.await;
-    assert_eq!(budget.stats().read_working_bytes, 0);
-    assert_eq!(
-        gauge(
-            &recorder.snapshot(),
-            "loonfs.execution_budget.read_working_bytes"
-        ),
-        0
-    );
     let reads = store.count(OperationSelector::Read);
     assert_eq!(
         loonfs_core::test_support::namespace_store(store.as_ref(), &demo())
@@ -152,23 +118,17 @@ async fn snapshot_fold_reads(
 }
 
 #[tokio::test]
-async fn folds_and_snapshot_folds_use_the_shared_read_working_memory_and_segment_cache() {
+async fn folds_and_snapshot_folds_use_the_shared_segment_cache() {
     for creation in [
         SnapshotCreation::Fold,
         SnapshotCreation::Snapshot,
         SnapshotCreation::Fork,
     ] {
-        let small_memo_reads = snapshot_fold_reads(creation, 1, 0).await;
-        let default_memo_reads =
-            snapshot_fold_reads(creation, crate::DEFAULT_MAX_READ_WORKING_BYTES, 0).await;
-        let warm_cache_reads = snapshot_fold_reads(creation, 1, 1024 * 1024).await;
+        let cold_cache_reads = snapshot_fold_reads(creation, 0).await;
+        let warm_cache_reads = snapshot_fold_reads(creation, 1024 * 1024).await;
         assert!(
-            default_memo_reads > 0,
+            cold_cache_reads > 0,
             "{creation:?} reads the chains' layouts"
-        );
-        assert!(
-            small_memo_reads > default_memo_reads,
-            "{creation:?}: a one-byte memo must reread blocks: {small_memo_reads} against {default_memo_reads}"
         );
         assert_eq!(warm_cache_reads, 0, "{creation:?} reuses cached blocks");
     }
@@ -631,31 +591,6 @@ async fn read_policy_stays_with_each_binding() {
         0,
         "the other binding never probes"
     );
-
-    let (no_memo, no_memo_store) = binding(|builder| {
-        builder.execution_budget(
-            crate::ExecutionBudget::builder()
-                .max_read_working_bytes(0)
-                .build(),
-        )
-    })
-    .await;
-    let (memo, memo_store) = binding(|builder| builder).await;
-    for (runtime, store) in [(&no_memo, &no_memo_store), (&memo, &memo_store)] {
-        assert_reads(runtime, b"first").await;
-        store.reset();
-        runtime
-            .namespace(&demo())
-            .stat(FOLDED)
-            .await
-            .expect("stat the folded file");
-    }
-    assert!(
-        no_memo_store.count(OperationSelector::Get) > memo_store.count(OperationSelector::Get),
-        "a zero block memo rereads blocks the default memo keeps: {} against {}",
-        no_memo_store.count(OperationSelector::Get),
-        memo_store.count(OperationSelector::Get)
-    );
 }
 
 const CACHE_METRICS: [&str; 5] = [
@@ -668,10 +603,6 @@ const CACHE_METRICS: [&str; 5] = [
 
 fn registered(snapshot: &MetricsSnapshot, name: &str) -> bool {
     snapshot.by_name(name).next().is_some()
-}
-
-fn gauge(snapshot: &MetricsSnapshot, name: &str) -> i64 {
-    crate::test_support::gauge(snapshot, name, &[])
 }
 
 /// Checks that a runtime registers no cache metric with its recorder,
@@ -713,97 +644,6 @@ async fn runtimes_report_no_cache_metrics_to_their_recorder() {
             "{stats:?}"
         );
     }
-}
-
-#[tokio::test]
-async fn reads_on_two_runtimes_share_read_working_memory_and_release_it() {
-    use crate::ExecutionBudget;
-    use loonfs_test_support::stores::BlockingStore;
-
-    let root = tempdir().expect("tempdir");
-    let writer = same_shape_store(
-        &local_store(root.path()),
-        &MetadataCache::default(),
-        b"file",
-    )
-    .await;
-    writer.shutdown().await.expect("shutdown");
-    let cache = MetadataCache::builder().max_segment_bytes(0).build();
-    let reader = |budget: ExecutionBudget| {
-        let store = Arc::new(BlockingStore::new(
-            RecordingStore::metadata_segments(LocalFsStore::new(root.path()).expect("store")),
-            KeyPredicate::content_blob(),
-            OperationSelector::Read,
-        ));
-        let runtime = LoonFs::builder_with_store(store.clone())
-            .read_only()
-            .metadata_cache(cache.clone())
-            .execution_budget(budget)
-            .build();
-        async move { (runtime.await.expect("reader"), store) }
-    };
-    let (probe, probe_store) = reader(ExecutionBudget::default()).await;
-    probe_store.arm();
-    let mut read = Box::pin(async { probe.namespace(&demo()).read_file(FOLDED).await });
-    tokio::select! {
-        result = &mut read => panic!("read should block, got {result:?}"),
-        () = probe_store.wait_until_blocked() => {}
-    }
-    let working_bytes = probe.execution_budget().stats().read_working_bytes;
-    assert!(working_bytes > 0);
-    drop(read);
-    assert_eq!(probe.execution_budget().stats().read_working_bytes, 0);
-
-    let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let budget = ExecutionBudget::builder()
-        .max_read_working_bytes(working_bytes)
-        .metrics_recorder(recorder.clone())
-        .build();
-    let (first, first_store) = reader(budget.clone()).await;
-    let (second, second_store) = reader(budget.clone()).await;
-    first_store.arm();
-    let mut first_read = Box::pin(async { first.namespace(&demo()).read_file(FOLDED).await });
-    tokio::select! {
-        result = &mut first_read => panic!("read should block, got {result:?}"),
-        () = first_store.wait_until_blocked() => {}
-    }
-    assert_eq!(budget.stats().read_working_bytes, working_bytes);
-    assert_eq!(
-        gauge(
-            &recorder.snapshot(),
-            "loonfs.execution_budget.read_working_bytes"
-        ),
-        working_bytes as i64
-    );
-    second_store.arm();
-    let mut second_read = Box::pin(async { second.namespace(&demo()).read_file(FOLDED).await });
-    tokio::select! {
-        result = &mut second_read => panic!("read should block, got {result:?}"),
-        () = second_store.wait_until_blocked() => {}
-    }
-    assert_eq!(budget.stats().read_working_bytes, working_bytes);
-    assert!(
-        second_store.inner().count(OperationSelector::Read)
-            > first_store.inner().count(OperationSelector::Read)
-    );
-    assert!(
-        gauge(
-            &recorder.snapshot(),
-            "loonfs.execution_budget.read_working_reservation_failures"
-        ) > 0
-    );
-    first_store.release();
-    second_store.release();
-    assert_eq!(first_read.await.expect("first read").bytes, b"file");
-    assert_eq!(second_read.await.expect("second read").bytes, b"file");
-    assert_eq!(budget.stats().read_working_bytes, 0);
-    assert_eq!(
-        gauge(
-            &recorder.snapshot(),
-            "loonfs.execution_budget.read_working_bytes"
-        ),
-        0
-    );
 }
 
 /// Creates a writer whose namespace exists, over a store that records every

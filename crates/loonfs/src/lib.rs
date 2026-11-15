@@ -86,7 +86,8 @@ mod trace;
 
 pub use loonfs_core::cache::SegmentFilterStats;
 pub use loonfs_core::limits::{
-    DIRECT_TRANSFER_URL_TTL_MS, GC_GRACE_WINDOW_MS, MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES,
+    DIRECT_TRANSFER_URL_TTL_MS, GC_GRACE_WINDOW_MS, MAX_BLOCK_MEMO_BYTES, MAX_COLLECTION_BYTES,
+    MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES, MAX_SCAN_DECODED_BYTES,
     MAX_SIGNED_PARTS_PER_REQUEST, PUBLICATION_COMPLETION_BOUND_MS, SSD_WRITE_QUEUE_BYTES,
 };
 pub use loonfs_core::time::WallClock;
@@ -136,7 +137,7 @@ pub mod engine {
     pub use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
     pub use loonfs_core::{
         refill_iterators, select_next_iterator, BudgetPermit, ExtensionBasis, ExtensionPublication,
-        LoadedBlocks, PermitCounts, Permits, SegmentBlockLoader, SegmentRowIterator,
+        PermitCounts, Permits, SegmentBlockLoader, SegmentRowIterator,
     };
     pub use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef};
     pub use loonfs_types::{ExtensionName, RunNo};
@@ -219,8 +220,8 @@ pub use config::{
 pub use execution_budget::{
     ExecutionBudget, ExecutionBudgetBuilder, ExecutionBudgetStats,
     DEFAULT_MAX_CONCURRENT_COMPACTIONS, DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
-    DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_READS, DEFAULT_MAX_MERGE_BYTES,
-    DEFAULT_MAX_READ_WORKING_BYTES,
+    DEFAULT_MAX_CONCURRENT_FOLDS, DEFAULT_MAX_CONCURRENT_PUBLICATIONS,
+    DEFAULT_MAX_CONCURRENT_READS, DEFAULT_MAX_MERGE_BYTES,
 };
 pub use loonfs_core::{phase_span, Phase};
 pub use maintenance::{

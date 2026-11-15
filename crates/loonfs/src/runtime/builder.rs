@@ -161,7 +161,6 @@ impl<M> LoonFsBuilder<M> {
     /// Runs this runtime's reads, publications, folds, and compactions under
     /// `execution_budget`, which other runtimes may share.
     ///
-    /// Read memos share its read working memory budget.
     /// Every publication request this runtime admits counts against the
     /// budget's admitted totals until its work settles. Public reads wait for
     /// a read permit before loading anything. Publication batches,
@@ -322,7 +321,7 @@ impl CoreConfig {
         // Bind the cache to the store the caller supplied, not to the metrics
         // wrapper below. Each runtime builds its own wrapper, so runtimes over
         // clones of one store would otherwise read under separate scopes.
-        let metadata_cache = metadata_cache.bind(&store, execution_budget.read_working_memory());
+        let metadata_cache = metadata_cache.bind(&store);
         let instruments = RuntimeInstruments::new(self.metrics_recorder);
         let recorder = fan_out_object_store_recorder(
             self.object_store_metrics_recorder,

@@ -2423,16 +2423,6 @@ async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
     }
 }
 
-fn root_scan_cache(
-    memory: Arc<crate::cache::ReadWorkingMemory>,
-) -> crate::cache::MetadataSegmentCache {
-    crate::cache::MetadataSegmentCache::new(
-        Arc::new(crate::cache::SharedSegmentBlocks::new(0, 0)),
-        crate::cache::ObjectStoreScope::new(0),
-        memory,
-    )
-}
-
 async fn folded_namespace_with_two_files(store: &LocalFsStore, namespace_id: &NamespaceId) {
     let setup = context(1_000);
     crate::test_support::NamespaceFixture::new(store, namespace_id, &setup)
@@ -2455,67 +2445,47 @@ async fn folded_namespace_with_two_files(store: &LocalFsStore, namespace_id: &Na
 }
 
 #[tokio::test]
-async fn a_collection_reads_its_roots_through_the_given_cache_and_releases_their_memory() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct Peak(AtomicUsize);
-    impl crate::cache::ReadWorkingMemoryObserver for Peak {
-        fn in_use(&self, bytes: usize) {
-            self.0.fetch_max(bytes, Ordering::SeqCst);
-        }
-        fn reservation_failed(&self) {}
-    }
+async fn a_collection_charges_its_roots_to_its_own_budget_and_releases_them() {
+    use crate::gc::charged_set::CollectionMemory;
 
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     folded_namespace_with_two_files(&store, &namespace_id).await;
 
-    let peak = Arc::new(Peak(AtomicUsize::new(0)));
-    let observer: Arc<dyn crate::cache::ReadWorkingMemoryObserver> = peak.clone();
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(
-        64 * 1024 * 1024,
-        Some(observer),
-    ));
-    let cache = Arc::new(root_scan_cache(Arc::clone(&memory)));
     let aged =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
-    crate::NamespaceStore {
-        segment_cache: Arc::clone(&cache),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    }
-    .gc(&aged.clock())
-    .await
-    .expect("collection");
-    assert!(
-        peak.0.load(Ordering::SeqCst) > 0,
-        "the roots were read and held through the shared memory"
-    );
-    assert_eq!(memory.in_use(), 0, "the collection released what it held");
-
-    peak.0.store(0, Ordering::SeqCst);
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
-    let report = crate::PoolStore {
-        segment_cache: Arc::clone(&cache),
-        ..crate::test_support::pool_store(&store, &pool_id)
-    }
-    .gc(None, &aged.clock())
-    .await
-    .expect("pool collection");
-    assert_eq!(report.deleted.content_objects, 0);
-    assert!(
-        peak.0.load(Ordering::SeqCst) > 0,
-        "the pool's roots were read and held through the shared memory"
-    );
+    let memory = CollectionMemory::new(namespace_id.to_string(), 64 * 1024 * 1024);
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc_within(&aged.clock(), memory.clone())
+        .await
+        .expect("collection");
+    assert!(memory.peak_bytes() > 0, "the roots were charged");
     assert_eq!(
-        memory.in_use(),
+        memory.held_bytes(),
+        0,
+        "the collection released what it held"
+    );
+
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let memory = CollectionMemory::new(pool_id.to_string(), 64 * 1024 * 1024);
+    let report = crate::test_support::pool_store(&store, &pool_id)
+        .gc_within(None, &aged.clock(), memory.clone())
+        .await
+        .expect("pool collection");
+    assert_eq!(report.deleted.content_objects, 0);
+    assert!(memory.peak_bytes() > 0, "the pool's roots were charged");
+    assert_eq!(
+        memory.held_bytes(),
         0,
         "the pool's collection released what it held"
     );
 }
 
 #[tokio::test]
-async fn a_collection_fails_when_its_snapshot_manifests_do_not_fit_the_read_memory() {
+async fn a_collection_fails_when_its_snapshot_manifests_do_not_fit_its_budget() {
+    use crate::gc::charged_set::CollectionMemory;
+
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -2523,39 +2493,21 @@ async fn a_collection_fails_when_its_snapshot_manifests_do_not_fit_the_read_memo
     // Each rooted manifest charges its object keys and its snapshot's record, so
     // the most that a collection with one snapshot's manifest holds fits one
     // snapshot's manifest but not ten.
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Peak(AtomicUsize);
-    impl crate::cache::ReadWorkingMemoryObserver for Peak {
-        fn in_use(&self, bytes: usize) {
-            self.0.fetch_max(bytes, Ordering::SeqCst);
-        }
-        fn reservation_failed(&self) {}
-    }
-    let peak = Arc::new(Peak(AtomicUsize::new(0)));
-    let observer: Arc<dyn crate::cache::ReadWorkingMemoryObserver> = peak.clone();
-    let measured = Arc::new(crate::cache::ReadWorkingMemory::new(
-        64 * 1024 * 1024,
-        Some(observer),
-    ));
     let aged =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
-    crate::NamespaceStore {
-        segment_cache: Arc::new(root_scan_cache(measured)),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    }
-    .gc(&aged.clock())
-    .await
-    .expect("measure one snapshot's manifest");
-    let budget = peak.0.load(Ordering::SeqCst);
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(budget, None));
-    let cache = Arc::new(root_scan_cache(Arc::clone(&memory)));
-    crate::NamespaceStore {
-        segment_cache: Arc::clone(&cache),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    }
-    .gc(&aged.clock())
-    .await
-    .expect("one snapshot's manifest fits the budget");
+    let measured = CollectionMemory::new(namespace_id.to_string(), 64 * 1024 * 1024);
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc_within(&aged.clock(), measured.clone())
+        .await
+        .expect("measure one snapshot's manifest");
+    let budget = measured.peak_bytes();
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .gc_within(
+            &aged.clock(),
+            CollectionMemory::new(namespace_id.to_string(), budget),
+        )
+        .await
+        .expect("one snapshot's manifest fits the budget");
 
     let setup = context(1_000);
     for index in 0..9 {
@@ -2570,20 +2522,17 @@ async fn a_collection_fails_when_its_snapshot_manifests_do_not_fit_the_read_memo
     }
     let aged =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
-    let error = crate::NamespaceStore {
-        segment_cache: Arc::clone(&cache),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    }
-    .gc(&aged.clock())
-    .await
-    .expect_err("ten snapshots' manifests do not fit the budget");
-
-    let CoreError::LiveSetExceedsReadMemory { limit, .. } = error else {
-        panic!("expected LiveSetExceedsReadMemory, got {error:?}");
+    let memory = CollectionMemory::new(namespace_id.to_string(), budget);
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc_within(&aged.clock(), memory.clone())
+        .await
+        .expect_err("ten snapshots' manifests do not fit the budget");
+    let CoreError::LiveSetExceedsCollectionMemory { limit, .. } = error else {
+        panic!("expected LiveSetExceedsCollectionMemory, got {error:?}");
     };
     assert_eq!(limit, budget);
     assert_eq!(
-        memory.in_use(),
+        memory.held_bytes(),
         0,
         "the failed collection released what it held"
     );

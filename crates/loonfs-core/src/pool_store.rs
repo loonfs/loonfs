@@ -16,8 +16,7 @@ use std::sync::Arc;
 pub struct PoolStore<S> {
     pub(crate) store: S,
     pub(crate) pool_id: PoolId,
-    /// The decoded segment blocks that member reads go through, with the
-    /// read working memory.
+    /// The decoded segment blocks that member reads go through.
     pub(crate) segment_cache: Arc<MetadataSegmentCache>,
     pub(crate) head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
     pub(crate) object_cache: Arc<ObjectCache>,

@@ -15,7 +15,6 @@ use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::read_anchor::project_anchor_tail;
 use crate::namespace::store::NamespaceStore;
 use crate::pool_store::PoolStore;
-use crate::segment::cache::read_working_memory;
 use crate::time::{Observation, OperationClock};
 use futures::TryStreamExt;
 use loonfs_objectstore::keys::{metadata_segment_object_key, pool_member, pool_members_prefix};
@@ -63,7 +62,7 @@ pub(super) struct MemberReadReport {
     pub(super) members_read: usize,
 }
 
-/// The roots of a pool's members, charged to the read working memory.
+/// The roots of a pool's members, charged to the collection's budget.
 pub(super) struct PoolRoots {
     pub(super) content_ids: ChargedSet<ContentId>,
     /// Each upload session that was completed when the collection listed the
@@ -96,18 +95,15 @@ impl PoolRoots {
     /// reads the roots of every listed member.
     ///
     /// The sessions, content IDs, layout segments, and members that the
-    /// collection keeps are charged to the read working memory of the pool's
-    /// segment cache as they arrive. The collection doesn't read the record of
-    /// a completed session that `session_cache` has.
+    /// collection keeps are charged to `memory` as they arrive. The
+    /// collection doesn't read the record of a completed session that
+    /// `session_cache` has.
     pub(super) async fn load<S: ObjectStore>(
         pool: &PoolStore<S>,
         session_cache: Option<&CompletedUploadSessionCache>,
         clock: &OperationClock,
+        memory: CollectionMemory,
     ) -> Result<Self> {
-        let memory = CollectionMemory::new(
-            pool.pool_id.to_string(),
-            read_working_memory(Some(pool.segment_cache.as_ref())),
-        );
         let mut roots = Self {
             content_ids: ChargedSet::new(&memory),
             completed_sessions: ChargedMap::new(&memory),
@@ -153,7 +149,7 @@ impl PoolRoots {
             layout_segment_bytes = roots.layout_segments.reserved_bytes(),
             member_bytes = roots.members.reserved_bytes(),
             live_set_bytes = roots.memory.held_bytes(),
-            read_memory_limit_bytes = roots.memory.limit(),
+            live_set_limit_bytes = roots.memory.limit(),
             complete = outcome.is_ok(),
             "read the pool's roots");
         outcome?;
@@ -167,7 +163,7 @@ impl PoolRoots {
     /// at a member whose roots can't be read, and before a member that it
     /// would start after [`POOL_ROOTS_READ_BUDGET_MS`] has passed since the
     /// collection's clock started. Either way the collection skips the content
-    /// sweep and continues. A charge to the read working memory that fails
+    /// sweep and continues. A charge to the collection's budget that fails
     /// ends the collection, and so does a listing that fails. A key under the
     /// member list's prefix that isn't a member entry is logged and left
     /// alone.
@@ -203,7 +199,7 @@ impl PoolRoots {
             match self.load_member(&member, &pool.pool_id).await {
                 Ok(Some(state)) => self.members.insert(member_id, state)?,
                 Ok(None) => {}
-                Err(error @ CoreError::LiveSetExceedsReadMemory { .. }) => return Err(error),
+                Err(error @ CoreError::LiveSetExceedsCollectionMemory { .. }) => return Err(error),
                 Err(error) => {
                     tracing::warn!(
                         pool_id = %pool.pool_id,
@@ -234,7 +230,7 @@ impl PoolRoots {
     /// snapshot keeps. A retired namespace, an ID without a manifest, and a
     /// namespace whose manifest records another pool aren't members. The
     /// collection deletes their entries as the listing yields them and keeps
-    /// nothing of them, so stale entries take no read working memory.
+    /// nothing of them, so stale entries take none of the collection's budget.
     async fn load_member<S: ObjectStore>(
         &mut self,
         member: &NamespaceStore<S>,
