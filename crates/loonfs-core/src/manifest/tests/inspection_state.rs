@@ -351,7 +351,7 @@ pub(crate) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     while start < needed.end && remaining_rows > 0 {
         let required_end = match blocks_per_refill {
             BlocksPerRefill::One => start + 1,
-            BlocksPerRefill::KeyRange => needed.end,
+            BlocksPerRefill::KeyRange | BlocksPerRefill::ReadAhead => needed.end,
         };
         let blocks = load_segment_data_block_span(
             store,

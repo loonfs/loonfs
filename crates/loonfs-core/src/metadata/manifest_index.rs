@@ -78,7 +78,10 @@ pub(crate) async fn commits_after_page<S: ObjectStore + ?Sized>(
 /// each row's stored key.
 ///
 /// The scan probes each segment's filter with the parent's probe, so it
-/// skips the segments of a run that has no row under the parent.
+/// skips the segments of a run that has no row under the parent. Its
+/// refills read ahead past the parent's last row, because a recursive
+/// listing scans the tree's next directories right after this one (see
+/// [`BlocksPerRefill::ReadAhead`]).
 pub(crate) async fn direntry_binds_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
@@ -94,7 +97,7 @@ pub(crate) async fn direntry_binds_page<S: ObjectStore + ?Sized>(
             upper_bound.as_deref(),
             limit,
             Some(&lookup_keys::direntry_parent_probe(parent_inode_id)),
-            BlocksPerRefill::KeyRange,
+            BlocksPerRefill::ReadAhead,
         )
         .await?
         .into_iter()

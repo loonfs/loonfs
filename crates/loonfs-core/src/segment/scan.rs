@@ -59,6 +59,18 @@ pub(crate) enum BlocksPerRefill {
     /// scan keeps the reservation until it has consumed the blocks, and the
     /// memo doesn't record them.
     KeyRange,
+    /// The next blocks of the segment, past the end of the scan's key range,
+    /// up to `MAX_SCAN_REFILL_BYTES` of stored bytes and the decoded bytes
+    /// that the refill reserves. A scan of one directory's children uses this
+    /// mode, because a recursive listing scans a tree's directories one after
+    /// another and the next directory's rows are often in the blocks that
+    /// follow (see [What a read fetches](https://github.com/loonfs/loonfs/blob/main/docs/design/block-cache.md#what-a-read-fetches)).
+    /// The scan reserves and keeps a refill's blocks as it does for
+    /// `KeyRange`, and the refill inserts every block that it fetches into
+    /// the block cache. Without a block cache, a scan in this mode reads no
+    /// further than a `KeyRange` scan, because the scan would drop the blocks
+    /// past its range.
+    ReadAhead,
 }
 
 #[cfg(test)]

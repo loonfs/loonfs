@@ -170,3 +170,172 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
         assert_eq!(entry.kind, stat_kind, "a listing reports no reference");
     }
 }
+
+/// The directories of a tree with `fanout` directories in each directory,
+/// `depth` levels deep below `root`, in path order, and the paths of `files`
+/// files spread over the deepest directories, where consecutive files go to
+/// consecutive directories.
+fn spread_tree(
+    root: &str,
+    files: usize,
+    fanout: usize,
+    depth: usize,
+) -> (Vec<String>, Vec<String>) {
+    let mut directories = BTreeSet::new();
+    let mut paths = Vec::with_capacity(files);
+    for index in 0..files {
+        let mut directory = root.to_owned();
+        for level in 0..depth {
+            let stride = fanout.pow(u32::try_from(depth - 1 - level).expect("a small depth"));
+            directory.push_str(&format!("/d{level}-{:02}", (index / stride) % fanout));
+            directories.insert(directory.clone());
+        }
+        paths.push(format!("{directory}/f-{index:06}.js"));
+    }
+    (directories.into_iter().collect(), paths)
+}
+
+/// Checks that a cold page of a recursive listing sends at most one GET of
+/// data blocks to each `direntry_binds` segment.
+///
+/// The tree has 4,368 directories (16 subdirectories in each directory,
+/// three levels deep) and 5,000 files spread over the deepest ones, so a
+/// page of 1,000 entries scans about 470 directories one after another. The tree is committed in
+/// path order in batches of 500 operations, each folded, and then compacted,
+/// so one `direntry_binds` segment is too large to fetch whole and the page
+/// reads it in refills. If a refill stopped at the end of each directory's
+/// rows, the scan of the next directory would fetch the next block alone, so
+/// the page would send one GET for each block of that segment that it
+/// reads.
+#[tokio::test]
+async fn a_cold_recursive_page_sends_at_most_one_data_get_to_each_segment() {
+    use loonfs::publish::{CommitIntent, FilesystemOperation};
+    use loonfs::{CommitId, ListOptions, MaintenanceCancellation, MetadataMaintenanceOutcome};
+    use loonfs_types::{AbsolutePath, FileContent};
+
+    let temporary = tempdir().expect("temporary directory");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temporary.path()).expect("local store"));
+    let namespace_id = namespace_id("cold-recursive-page");
+    let actor = loonfs_test_support::test_actor();
+    let writer = writer(store.clone(), "cold-recursive-writer").await;
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
+        "cold-recursive-maintenance",
+    ));
+    writer
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let prepared = namespace_writer
+        .prepare_content(b"x")
+        .await
+        .expect("prepare file content");
+    let (directories, files) = spread_tree("/deps", 5_000, 16, 3);
+    let operations: Vec<_> = std::iter::once("/deps")
+        .chain(directories.iter().map(String::as_str))
+        .map(|path| FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(path).expect("directory path"),
+            parents: false,
+        })
+        .chain(files.iter().map(|path| FilesystemOperation::PutFile {
+            path: AbsolutePath::parse(path).expect("file path"),
+            content: FileContent::Ref(prepared.content_ref().clone()),
+            behavior: DestinationBehavior::NoReplace,
+            expected_inode_id: None,
+            expected_revision_no: None,
+        }))
+        .collect();
+    for (batch, operations) in operations.chunks(500).enumerate() {
+        let writes_files = operations
+            .iter()
+            .any(|operation| matches!(operation, FilesystemOperation::PutFile { .. }));
+        namespace_writer
+            .commit_prepared(
+                CommitIntent {
+                    commit_id: CommitId::parse(format!("tree-{batch}")).expect("commit id"),
+                    actor_id: actor.clone(),
+                    subject: None,
+                    message: None,
+                    operations: operations.to_vec(),
+                    preconditions: Vec::new(),
+                },
+                writes_files.then(|| prepared.clone()).into_iter().collect(),
+            )
+            .await
+            .expect("commit tree batch");
+        maintenance
+            .fold_wal(&namespace_id)
+            .await
+            .expect("fold tree batch");
+    }
+    let report = maintenance
+        .maintain_metadata_while_due(&namespace_id, &MaintenanceCancellation::new())
+        .await
+        .expect("compact");
+    assert!(report.response.compaction_units > 0);
+    assert_eq!(
+        report.response.outcome,
+        MetadataMaintenanceOutcome::CaughtUp
+    );
+    // Each `direntry_binds` segment's data blocks end where its filter
+    // and index blocks start.
+    let data_ends: std::collections::BTreeMap<String, u64> =
+        loonfs_core::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("load manifest")
+            .payload()
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+            .filter(|segment| segment.family == MetadataRowFamily::DirentryBinds)
+            .map(|segment| {
+                (
+                    metadata_segment_object_key(segment),
+                    segment.index_block.offset.min(segment.filter_block.offset),
+                )
+            })
+            .collect();
+    assert!(
+        data_ends.values().any(|end| *end > 256 * 1024),
+        "a segment is too large to fetch whole: {data_ends:?}"
+    );
+
+    let recording = Arc::new(RecordingStore::metadata_segments(store));
+    let reader = LoonFs::builder_with_store(recording.clone())
+        .read_only()
+        .build()
+        .await
+        .expect("fresh reader");
+    let page = reader
+        .namespace(&namespace_id)
+        .list_with_options(
+            "/deps",
+            &ListOptions {
+                recursive: true,
+                ..ListOptions::default()
+            },
+        )
+        .page_limit(page_limit(1_000))
+        .page()
+        .await
+        .expect("recursive page");
+    assert_eq!(page.entries.len(), 1_000);
+    let gets = recording.take_gets();
+    for (key, data_end) in &data_ends {
+        let data_gets: Vec<_> = gets
+            .iter()
+            .filter(|(get_key, range)| {
+                get_key == key && range.is_none_or(|(start, _)| start < *data_end)
+            })
+            .collect();
+        assert!(
+            data_gets.len() <= 1,
+            "{} GETs of data blocks of {key}: {data_gets:?}",
+            data_gets.len()
+        );
+    }
+}
