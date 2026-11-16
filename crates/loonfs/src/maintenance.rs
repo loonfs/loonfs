@@ -370,9 +370,11 @@ impl Maintenance {
     /// Every call rebuilds the current live roots and keeps no cursor. A
     /// collection runs only when asked. A deleted namespace is collected, which is how
     /// it is retired; a namespace that does not exist returns
-    /// `namespace_not_found`.
+    /// `namespace_not_found`. The call waits for a collection permit from the
+    /// runtime's execution budget.
     pub async fn gc(&self, namespace_id: &NamespaceId) -> Result<crate::GcResponse> {
         trace::in_operation(operation_span!(self.core, "gc", namespace_id), async {
+            let _permit = self.core.collection_permit().await;
             let namespace = self.core.namespace_store(namespace_id);
             let report = namespace
                 .gc(&namespace.start_clock())
@@ -395,11 +397,13 @@ impl Maintenance {
     /// every member of the pool.
     ///
     /// Every call rebuilds the members' roots and keeps no cursor. A pool
-    /// with nothing under its prefix returns `pool_not_found`.
+    /// with nothing under its prefix returns `pool_not_found`. The call waits
+    /// for a collection permit from the runtime's execution budget.
     pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<crate::PoolGcResponse> {
         trace::in_operation(
             operation_span!(self.core, "gc_pool", pool_id = pool_id),
             async {
+                let _permit = self.core.collection_permit().await;
                 let pool = self.core.pool_store(pool_id);
                 let report = pool
                     .gc(

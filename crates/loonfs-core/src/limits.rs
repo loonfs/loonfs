@@ -64,24 +64,29 @@ pub const SSD_WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 /// about as much as a GET of one block.
 pub const MAX_SCAN_REFILL_BYTES: u64 = 1024 * 1024;
 
-/// Most decoded bytes of data blocks that one scan fetches in each refill,
+/// Most decoded bytes of data blocks that one refill of a scan returns,
 /// shared equally by the segments that the scan has open.
 ///
-/// A scan with two segments open fetches up to 4 MiB (64 blocks of the
-/// 64 KiB data-block target) from each one in a refill. The budget counts
-/// from the first block that a refill fetches, so the blocks that the block
-/// cache already has in front of that block don't shorten the GET. A refill
-/// still fetches its first block when the segment's share is smaller than
-/// that block, so a scan with more than 128 segments open fetches one block
-/// from each. Blocks of directory rows compress to about 5 KB stored for
-/// each 64 KiB decoded, so this budget, not [`MAX_SCAN_REFILL_BYTES`], limits
-/// how far a read-ahead refill of those blocks reaches. A cold recursive
-/// page of 1,000 entries over a tree of 4,368 directories sends one data GET
-/// to each segment at a budget of 2, 4, or 8 MiB, and a larger budget reads
-/// further ahead for the pages after it. Every operation that reads a
-/// namespace keeps at most this many bytes of fetched blocks for each range
-/// scan that it runs, on top of its block memo ([`MAX_BLOCK_MEMO_BYTES`]).
-pub const MAX_SCAN_DECODED_BYTES: usize = 8 * 1024 * 1024;
+/// A scan with two segments open takes up to 1 MiB (16 blocks of the 64 KiB
+/// data-block target) from each one in a refill. Every block that a refill
+/// returns counts, whether the block cache had it or the refill fetched it,
+/// so a warm scan keeps no more than a cold one. A refill that starts with a
+/// cached block returns cached blocks only, and ends at the first block that
+/// the cache doesn't have, so a fetch always starts a refill of its own with
+/// the full budget. A refill still takes its first block when the segment's
+/// share is smaller than that block, so a scan with more than 32 segments
+/// open takes one block from each. Blocks of directory rows compress to about
+/// 5 KB stored for each 64 KiB decoded, so this budget, not
+/// [`MAX_SCAN_REFILL_BYTES`], limits how far a read-ahead refill of those
+/// blocks reaches. A cold recursive page of 1,000 entries over a tree of
+/// 4,368 directories sends one data GET to each segment with a 2 MiB budget.
+/// On a tree of 100,000 files, an 8 MiB budget cut a recursive walk's
+/// requests further, but made a cold first page of a small directory about
+/// 75 ms slower, because the refill decoded blocks that the page never used.
+/// Every operation that reads a namespace keeps at most this many bytes of
+/// blocks for each range scan that it runs, on top of its block memo
+/// ([`MAX_BLOCK_MEMO_BYTES`]).
+pub const MAX_SCAN_DECODED_BYTES: usize = 2 * 1024 * 1024;
 
 /// Most decoded bytes that one operation's block memo keeps: the index,
 /// filter, and lookup blocks that the operation has read.

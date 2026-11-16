@@ -422,6 +422,10 @@ impl ServerConfig {
             .max_compaction_input_bytes(positive(memory.compaction_input.bytes))
             .max_admitted_bytes(positive(memory.admitted.bytes))
             .max_merge_bytes(memory.merge.bytes)
+            // Scheduled and explicit collections share one limit, which is
+            // the count that the memory sizing multiplies the collection
+            // budget by.
+            .max_concurrent_collections(self.max_concurrent_maintenance)
             .metrics_recorder(recorder);
         if let Some(limit) = self.max_concurrent_reads {
             builder = builder.max_concurrent_reads(limit);

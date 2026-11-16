@@ -96,12 +96,20 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(super) block_memo: SessionBlockMemo,
     #[cfg(test)]
     pub(super) peak_page_rows: std::sync::atomic::AtomicUsize,
+    /// The most data blocks that this view's scans have kept at once.
+    #[cfg(test)]
+    pub(super) peak_resident_blocks: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
 impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     pub(crate) fn peak_page_rows(&self) -> usize {
         self.peak_page_rows
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn peak_resident_blocks(&self) -> usize {
+        self.peak_resident_blocks
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -169,6 +177,8 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             block_memo: SessionBlockMemo::default(),
             #[cfg(test)]
             peak_page_rows: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            peak_resident_blocks: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -520,7 +530,11 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             if iterators.is_empty() {
                 break;
             }
-            refill_iterators(&loader, &mut iterators, MAX_SCAN_DECODED_BYTES).await?;
+            let _resident_blocks =
+                refill_iterators(&loader, &mut iterators, MAX_SCAN_DECODED_BYTES).await?;
+            #[cfg(test)]
+            self.peak_resident_blocks
+                .fetch_max(_resident_blocks, std::sync::atomic::Ordering::Relaxed);
             if filter_admitted {
                 for iterator in &iterators[previously_open..] {
                     let matched = iterator

@@ -1498,6 +1498,54 @@ impl SegmentBlockCache for CountingBlockCache {
     }
 }
 
+/// Checks that a refill that starts with cached blocks that fill its decoded
+/// cap returns those blocks and looks up no block past the cap in the block
+/// cache, so a block cache with an SSD tier reads and decodes none of them.
+#[tokio::test]
+async fn a_cached_refill_looks_up_no_block_past_its_decoded_cap() {
+    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
+    assert!(index.len() >= 3, "the segment has {} blocks", index.len());
+    let blocks = Arc::new(CountingBlockCache::default());
+    let cache = MetadataSegmentCache::with_blocks(
+        blocks.clone(),
+        Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
+        ObjectStoreScope::new(0),
+    );
+    wide_read(&store, Some(&cache), &descriptor, &index).await;
+    blocks.gets.lock().expect("gets lock").clear();
+    store.reset();
+
+    let cap: usize = index[..2]
+        .iter()
+        .map(|entry| entry.block.decoded_bytes as usize)
+        .sum();
+    let refill = crate::segment::data_block_load::load_segment_data_block_refill(
+        &store,
+        Some(&cache),
+        &descriptor,
+        &index,
+        index.len(),
+        u64::MAX,
+        cap,
+    )
+    .await
+    .expect("refill");
+    assert_eq!(refill.len(), 2);
+    assert_eq!(store.count(OperationSelector::Read), 0);
+    let looked_up: Vec<u64> = blocks
+        .gets
+        .lock()
+        .expect("gets lock")
+        .iter()
+        .map(|(offset, _)| *offset)
+        .collect();
+    assert_eq!(
+        looked_up,
+        vec![index[0].block.offset, index[1].block.offset],
+        "no block past the cap is looked up"
+    );
+}
+
 /// Checks that a wide read passes each block's handle with every get and
 /// each block's stored bytes with every insert, and that a second read gets
 /// each block once from the block cache and inserts nothing.

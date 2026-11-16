@@ -297,6 +297,71 @@ async fn a_read_ahead_scan_fetches_the_blocks_after_its_key_range() {
     }
 }
 
+/// Checks that a warm scan over a fully cached segment keeps at most its
+/// decoded budget of blocks and one more at once, though the cache has every
+/// block of the segment.
+#[tokio::test]
+async fn a_warm_scan_over_a_cached_segment_keeps_at_most_its_budget_and_one_block() {
+    use crate::limits::MAX_SCAN_DECODED_BYTES;
+    use loonfs_types::format::manifest::lookup_keys;
+
+    let temp = tempdir().expect("tempdir");
+    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+    let expected = rows(0, 8_192, 1);
+    let (descriptor, index) = segment_with_block_target(&store, &expected, 12 * 1024).await;
+    let segment_decoded_bytes: usize = index
+        .iter()
+        .map(|entry| entry.block.decoded_bytes as usize)
+        .sum();
+    assert!(
+        segment_decoded_bytes > 2 * MAX_SCAN_DECODED_BYTES,
+        "the segment is larger than a scan's budget: {segment_decoded_bytes}"
+    );
+    let smallest_block = index
+        .iter()
+        .map(|entry| entry.block.decoded_bytes as usize)
+        .min()
+        .expect("a block");
+    let cache = MetadataSegmentCache::unshared(usize::MAX);
+    let prefix = lookup_keys::direntry_parent_prefix(loonfs_types::ROOT_INODE_ID);
+    let upper = string_prefix_upper_bound(&prefix);
+    for (pass, blocks_per_refill) in [
+        scan::BlocksPerRefill::KeyRange,
+        scan::BlocksPerRefill::ReadAhead,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let view = scan::VerifiedMetadataSegments::from_runs(
+            &store,
+            &cache,
+            one_segment_runs(descriptor.clone()),
+        );
+        store.reset();
+        let page = view
+            .scan_range(
+                FAMILY,
+                &prefix,
+                upper.as_deref(),
+                usize::MAX,
+                None,
+                blocks_per_refill,
+            )
+            .await
+            .expect("scan the segment");
+        assert_eq!(page.len(), expected.len());
+        if pass == 0 {
+            continue;
+        }
+        assert_eq!(store.take_gets(), Vec::new(), "the segment is cached");
+        assert!(
+            view.peak_resident_blocks() <= MAX_SCAN_DECODED_BYTES / smallest_block + 1,
+            "a warm scan kept {} blocks",
+            view.peak_resident_blocks()
+        );
+    }
+}
+
 /// Checks that a refill's caps count from the first block that it fetches:
 /// a read-ahead scan whose key range starts in blocks that an earlier refill
 /// cached and ends in the first block past them fetches from that block in

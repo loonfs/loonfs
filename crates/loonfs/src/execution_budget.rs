@@ -25,6 +25,9 @@ pub const DEFAULT_MAX_CONCURRENT_READS: NonZeroUsize = NonZeroUsize::new(64).unw
 /// Default maximum publication batches that runtimes sharing one budget run
 /// at once.
 pub const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+/// Default maximum garbage collections that the runtimes sharing one budget
+/// run at once.
+pub const DEFAULT_MAX_CONCURRENT_COLLECTIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// Default maximum content object writes that the runtimes sharing one
 /// budget run at once.
 pub const DEFAULT_MAX_CONCURRENT_CONTENT_WRITES: NonZeroUsize = NonZeroUsize::new(32).unwrap();
@@ -75,6 +78,7 @@ struct ExecutionBudgetInner {
     publications: Permits,
     folds: Permits,
     compactions: Permits,
+    collections: Permits,
     max_compaction_input_bytes: NonZeroUsize,
     content_writes: Arc<Permits>,
 }
@@ -106,6 +110,7 @@ impl ExecutionBudget {
             max_concurrent_publications: DEFAULT_MAX_CONCURRENT_PUBLICATIONS,
             max_concurrent_folds: DEFAULT_MAX_CONCURRENT_FOLDS,
             max_concurrent_compactions: DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+            max_concurrent_collections: DEFAULT_MAX_CONCURRENT_COLLECTIONS,
             max_compaction_input_bytes:
                 loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
             max_concurrent_content_writes: DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
@@ -224,6 +229,14 @@ impl ExecutionBudget {
         self.inner.compactions.acquire().await
     }
 
+    /// Waits for a collection permit. Every garbage collection of a
+    /// namespace or a pool takes one, whether the maintenance scheduler or a
+    /// caller starts it, so the number of collections that run at once has a
+    /// limit, and so does the memory of their live sets.
+    pub(crate) async fn collection_permit(&self) -> BudgetPermit<'_> {
+        self.inner.collections.acquire().await
+    }
+
     /// The decoded metadata bytes one compaction may keep.
     pub(crate) fn max_compaction_input_bytes(&self) -> NonZeroUsize {
         self.inner.max_compaction_input_bytes
@@ -240,6 +253,7 @@ pub struct ExecutionBudgetBuilder {
     max_concurrent_publications: NonZeroUsize,
     max_concurrent_folds: NonZeroUsize,
     max_concurrent_compactions: NonZeroUsize,
+    max_concurrent_collections: NonZeroUsize,
     max_compaction_input_bytes: NonZeroUsize,
     max_concurrent_content_writes: NonZeroUsize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
@@ -322,6 +336,18 @@ impl ExecutionBudgetBuilder {
         self
     }
 
+    /// Sets the maximum number of garbage collections run at once, whether
+    /// [`Maintenance::gc`](crate::Maintenance::gc) and
+    /// [`Maintenance::gc_pool`](crate::Maintenance::gc_pool) calls come from a
+    /// scheduler or a caller. Each collection keeps a live set of up to
+    /// [`MAX_COLLECTION_BYTES`](crate::MAX_COLLECTION_BYTES). The reference
+    /// server sets this to its `max_concurrent_maintenance`. Defaults to
+    /// [`DEFAULT_MAX_CONCURRENT_COLLECTIONS`].
+    pub fn max_concurrent_collections(mut self, limit: NonZeroUsize) -> Self {
+        self.max_concurrent_collections = limit;
+        self
+    }
+
     /// Sets the decoded metadata bytes one compaction keeps in memory at once,
     /// whatever the size of its window. Defaults to 64 MiB.
     pub fn max_compaction_input_bytes(mut self, max_compaction_input_bytes: NonZeroUsize) -> Self {
@@ -374,6 +400,7 @@ impl ExecutionBudgetBuilder {
                 publications: Permits::new(self.max_concurrent_publications, Some(publications)),
                 folds: Permits::new(self.max_concurrent_folds, Some(folds)),
                 compactions: Permits::new(self.max_concurrent_compactions, Some(compactions)),
+                collections: Permits::new(self.max_concurrent_collections, None),
                 max_compaction_input_bytes: self.max_compaction_input_bytes,
                 content_writes: Arc::new(Permits::new(
                     self.max_concurrent_content_writes,

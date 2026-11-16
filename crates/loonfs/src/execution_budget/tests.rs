@@ -772,3 +772,40 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
     assert_eq!(content_write_gauges(), [0, 0]);
     runtime.shutdown().await.expect("shutdown");
 }
+
+/// Checks that an explicit garbage collection takes a collection permit:
+/// with every permit held, the collection waits, and it runs once a permit
+/// is released.
+#[tokio::test]
+async fn an_explicit_collection_waits_for_a_collection_permit() {
+    let budget = ExecutionBudget::builder()
+        .max_concurrent_collections(NonZeroUsize::MIN)
+        .build();
+    let gated = sharing(&budget).await;
+    let namespace_id = namespace_id("collected");
+    gated
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create namespace");
+    let maintenance = gated.runtime.maintenance(writer_id("budget-collector"));
+
+    maintenance
+        .gc(&namespace_id)
+        .await
+        .expect("a collection with a free permit runs");
+    let held = budget.collection_permit().await;
+    let mut collection = Box::pin(maintenance.gc(&namespace_id));
+    assert!(
+        bounded(Duration::from_millis(500), collection.as_mut())
+            .await
+            .is_err(),
+        "the collection waits while every permit is held"
+    );
+    drop(held);
+    bounded(Duration::from_secs(10), collection)
+        .await
+        .expect("the collection runs once the permit is released")
+        .expect("collection");
+    gated.runtime.shutdown().await.expect("shut down");
+}

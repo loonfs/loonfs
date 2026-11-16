@@ -36,7 +36,7 @@ const _: () = assert!(
 // The labels of the read working memory and collection terms in `fixed`
 // state these values.
 const _: () = assert!(
-    loonfs::MAX_SCAN_DECODED_BYTES + loonfs::MAX_BLOCK_MEMO_BYTES == 10 * MIB
+    loonfs::MAX_SCAN_DECODED_BYTES + loonfs::MAX_BLOCK_MEMO_BYTES == 4 * MIB
         && loonfs::MAX_COLLECTION_BYTES == 64 * MIB
 );
 
@@ -376,7 +376,7 @@ impl ServerConfig {
                 }),
             ),
             (
-                "read working memory ((`max_concurrent_reads` + `max_concurrent_publications` + `max_concurrent_folds` + `max_concurrent_compactions` + `max_concurrent_maintenance`) x 10 MiB)",
+                "read working memory ((`max_concurrent_reads` + `max_concurrent_publications` + `max_concurrent_folds` + `max_concurrent_compactions` + `max_concurrent_maintenance`) x 4 MiB)",
                 (reads + publications + folds + compactions + maintenance) as u128
                     * (loonfs::MAX_SCAN_DECODED_BYTES + loonfs::MAX_BLOCK_MEMO_BYTES) as u128,
             ),

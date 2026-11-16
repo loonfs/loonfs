@@ -91,11 +91,11 @@ Sweeps and session steps run in separate loops. A long compaction uses one slot 
 
 This section describes the memory that reads, publications, folds, compactions, and collections keep outside the caches.
 
-Each of these operations keeps the blocks of its scans' refills and a memo of the index, filter, and lookup blocks that it has read. Each operation's budgets for those blocks are constants: 8 MiB of refills for each range scan (`MAX_SCAN_DECODED_BYTES`) and 2 MiB for the memo (`MAX_BLOCK_MEMO_BYTES`). A garbage collection also keeps its live set, up to 64 MiB (`MAX_COLLECTION_BYTES`). No budget is shared between operations, so an operation never waits for memory that another operation keeps, and a refill never loads fewer blocks because other reads are running. The execution budget's permits limit how many operations run at once, so the permits and the per-operation budgets together bound the memory, as [Memory outside the block cache](block-cache.md#memory-outside-the-block-cache) describes with a worked example.
+Each of these operations keeps the blocks of its scans' refills and a memo of the index, filter, and lookup blocks that it has read. Each operation's budgets for those blocks are constants: 2 MiB of refills for each range scan (`MAX_SCAN_DECODED_BYTES`) and 2 MiB for the memo (`MAX_BLOCK_MEMO_BYTES`). A garbage collection also keeps its live set, up to 64 MiB (`MAX_COLLECTION_BYTES`), and every collection, scheduled or explicit, waits for one of the execution budget's collection permits (`max_concurrent_maintenance` of them on the reference server). No budget is shared between operations, so an operation never waits for memory that another operation keeps, and a refill never loads fewer blocks because other reads are running. The execution budget's permits limit how many operations run at once, so the permits and the per-operation budgets together bound the memory, as [Memory outside the block cache](block-cache.md#memory-outside-the-block-cache) describes with a worked example.
 
 | Budget | Default | At the limit |
 | --- | --- | --- |
-| A scan's refills | 8 MiB decoded, shared equally by the segments that the scan has open | A refill stops at its segment's share, but always takes its first block. |
+| A scan's refills | 2 MiB decoded, shared equally by the segments that the scan has open | A refill stops at its segment's share, but always takes its first block. |
 | A memo | 2 MiB decoded | The memo evicts its oldest blocks. A block that a caller already has stays valid after eviction. |
 | A collection's live set | 64 MiB | The collection fails with `server_error`. |
 
