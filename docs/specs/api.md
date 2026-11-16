@@ -1039,9 +1039,9 @@ An expired snapshot stays listed until GC deletes it, after its expiry plus the 
 
 An ordinary operation that finds that its namespace was deleted returns `namespace_deleted`. Cached readers follow the rules in [Deleting a namespace](format.md#94-deleting-a-namespace). Collection is asynchronous. It has no set completion time, and it doesn't guarantee physical erasure.
 
-[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement does. Retirement raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired, and later collections of the namespace delete its tombstone and every other object under its prefix except the boundary object. No retirement deletes content. A deleted namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member's roots refer to it. The namespace's own references stop protecting its content at its retirement deadline, and the manifests that its snapshots keep protect content until those snapshots are deleted (see [Content roots](format.md#119-content-roots)). The boundary object stays as the record that the ID was used, and purging it is outside the scope of this API.
+[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement does. Retirement raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to retired, and later collections of the namespace delete its tombstone and every other object under its prefix except the boundary object, the [fences](glossary.md#fence), the [floor objects](glossary.md#floor-object), and any key that it doesn't recognize. No retirement deletes content. A deleted namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member's roots refer to it. The namespace's own references stop protecting its content at its retirement deadline, and the manifests that its snapshots keep protect content until those snapshots are deleted (see [Content roots](format.md#119-content-roots)). The boundary object stays as the record that the ID was used, and purging it is outside the scope of this API.
 
-A deleted ancestor namespace keeps every object it published while a live descendant still depends on it.
+A deleted ancestor keeps, for each of its forks, the manifest that the fork's fork snapshot refers to and the segments that the manifest lists, until that fork is retired.
 
 A pool's collection reclaims a content object once it's older than the grace window and nothing in any member of the pool references it. A content object is referenced by:
 
@@ -1458,7 +1458,7 @@ A commit can succeed without its acknowledgement reaching the caller, and deleti
 - Requests admitted after the delete fail with `namespace_deleted`.
 - If the delete ends up failing its precondition, no request is rejected because of it.
 
-Why do the snapshot inventory and snapshot deletion still work after deletion? A snapshot without an expiry keeps its manifest until it's deleted, so it has to stay discoverable and deletable after the namespace is deleted.
+Why do the snapshot inventory and snapshot deletion still work after deletion? A deleted namespace's user snapshots stay until garbage collection collects them, which it can do once the grace window has passed since their creation (see [Snapshot cleanup](format.md#117-snapshot-cleanup)), and until then a client can still list the snapshots it created and delete them.
 
 ### 6.4 `GET /filesystem/entry` and `GET /inodes/{inode_id}`
 
