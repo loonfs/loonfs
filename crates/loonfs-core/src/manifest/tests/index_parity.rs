@@ -54,6 +54,7 @@ pub(super) async fn rewrite_manifest_segment(
     .await
     .expect("overwrite segment");
 
+    descriptor.checksum = loonfs_types::Checksum::compute(store.checksum_algorithm(), &built.bytes);
     descriptor.row_count = built.row_count;
     descriptor.min_row_key = built.min_row_key;
     descriptor.max_row_key = built.max_row_key;
@@ -722,6 +723,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     )
     .await
     .expect("replace inode segment");
+    descriptor.checksum = loonfs_types::Checksum::compute(store.checksum_algorithm(), &built.bytes);
     descriptor.row_count = built.row_count;
     descriptor.min_row_key = built.min_row_key;
     descriptor.max_row_key = built.max_row_key;

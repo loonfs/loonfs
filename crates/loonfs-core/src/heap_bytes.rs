@@ -780,6 +780,7 @@ impl HeapBytes for MetadataSegmentRef {
     fn heap_bytes(&self) -> usize {
         self.owner_namespace_id.heap_bytes()
             + self.segment_id.heap_bytes()
+            + self.checksum.heap_bytes()
             + self.min_row_key.heap_bytes()
             + self.max_row_key.heap_bytes()
             + self.filter_inline.heap_bytes()
@@ -808,7 +809,11 @@ impl HeapBytes for loonfs_types::ContentLayout {
             + self
                 .extents
                 .iter()
-                .map(|extent| extent.content_id.heap_bytes() + extent.object.heap_bytes())
+                .map(|extent| {
+                    extent.content_id.heap_bytes()
+                        + extent.object.heap_bytes()
+                        + extent.object_checksum.heap_bytes()
+                })
                 .sum::<usize>()
     }
 }
@@ -816,9 +821,11 @@ impl HeapBytes for loonfs_types::ContentLayout {
 #[cfg(test)]
 mod tests {
     use super::HeapBytes;
+    use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
+    use loonfs_types::format::segment_blocks::BlockHandle;
     use loonfs_types::{
-        AccessGrants, ContentExtent, ContentId, ContentLayout, ExtentObject, NamespaceId,
-        SpanObjectId,
+        AccessGrants, Checksum, ContentExtent, ContentId, ContentLayout, ExtentObject,
+        MetadataSegmentId, NamespaceId, SpanObjectId,
     };
 
     #[test]
@@ -830,6 +837,7 @@ mod tests {
             extents: vec![ContentExtent {
                 content_id: content_id.clone(),
                 object,
+                object_checksum: Checksum::crc64nvme(b"0123456789"),
                 offset: 0,
                 length: 10,
             }],
@@ -842,6 +850,72 @@ mod tests {
         });
         assert_eq!(span_object_id.as_str().len(), 31);
         assert_eq!(span.heap_bytes(), whole.heap_bytes() + 31);
+    }
+
+    /// Checks that a layout is charged for each extent's object checksum,
+    /// whose value is 16 hexadecimal characters for CRC-64/NVME and 8 for
+    /// CRC-32C.
+    #[test]
+    fn a_layout_is_charged_for_each_extents_object_checksum() {
+        let content_id = ContentId::generate();
+        for (checksum, hex_bytes) in [
+            (Checksum::crc64nvme(b"0123456789"), 16),
+            (Checksum::crc32c(b"0123456789"), 8),
+        ] {
+            let layout = ContentLayout {
+                creator_namespace_id: NamespaceId::parse("main").expect("namespace"),
+                extents: vec![
+                    ContentExtent {
+                        content_id: content_id.clone(),
+                        object: ExtentObject::Whole,
+                        object_checksum: checksum,
+                        offset: 0,
+                        length: 10,
+                    };
+                    2
+                ],
+            };
+            assert_eq!(
+                layout.heap_bytes(),
+                "main".len()
+                    + layout.extents.capacity() * size_of::<ContentExtent>()
+                    + 2 * (content_id.as_str().len() + hex_bytes)
+            );
+        }
+    }
+
+    /// Checks that a segment descriptor is charged for its checksum.
+    #[test]
+    fn a_segment_descriptor_is_charged_for_its_checksum() {
+        let handle = BlockHandle {
+            offset: 0,
+            stored_bytes: 1,
+            decoded_bytes: 1,
+            crc32c: 0,
+        };
+        for (checksum, hex_bytes) in [
+            (Checksum::crc64nvme(b"segment"), 16),
+            (Checksum::crc32c(b"segment"), 8),
+        ] {
+            let descriptor = MetadataSegmentRef {
+                owner_namespace_id: NamespaceId::parse("main").expect("namespace"),
+                segment_id: MetadataSegmentId::generate(),
+                checksum,
+                family: MetadataRowFamily::Inodes,
+                encoding: 1,
+                row_count: 1,
+                min_row_key: String::new(),
+                max_row_key: String::new(),
+                index_block: handle,
+                filter_block: handle,
+                filter_inline: None,
+                extent_filter_block: None,
+            };
+            assert_eq!(
+                descriptor.heap_bytes(),
+                "main".len() + descriptor.segment_id.as_str().len() + hex_bytes
+            );
+        }
     }
 
     #[test]

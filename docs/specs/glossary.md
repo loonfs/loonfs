@@ -142,7 +142,7 @@ The namespace whose commit started a chain, recorded in the chain's [layout](#la
 
 ### Extent
 
-A byte range of one content object that stores part of a chain. Content objects are immutable, so the bytes appended to a chain are written to new content objects, and a chain's bytes usually end up spread across several objects. Each extent records which content object it's in, the offset in that object, and the length.
+A byte range of one content object that stores part of a chain. Content objects are immutable, so the bytes appended to a chain are written to new content objects, and a chain's bytes usually end up spread across several objects. Each extent records which content object it's in, the offset in that object, the length, and the checksum that the store keeps for the whole object (the "object checksum"). For example, an extent that takes the first 100 bytes of a 130-byte span object records the checksum of all 130 bytes, so every extent that lists that object records the same value.
 
 Most extents are "own extents", which store bytes written for the chain itself. A "shared base extent" stores bytes of an earlier chain that this chain was started from. For example, a fork inherits `/log.txt`, whose chain the source namespace created. The fork isn't the chain's creator, so when it appends 10 bytes to the file, it starts a new chain. The new chain's layout lists the first chain's object as a shared base extent, followed by an own extent that stores the 10 new bytes. A fold never combines a shared base extent with other extents, so the shared bytes are never copied.
 
@@ -190,7 +190,7 @@ A reference that keeps a [pool's](#pool) content objects from being deleted. A r
 
 ### Metadata segment
 
-An immutable object that stores sorted metadata rows from one [row family](#row-family) (for example, directory bindings), in blocks that can be read independently.
+An immutable object that stores sorted metadata rows from one [row family](#row-family) (for example, directory bindings), in blocks that can be read independently. The manifest lists each segment with a descriptor that records where the segment's blocks are and the checksum that the store keeps for the whole segment object.
 
 ### Run
 
@@ -313,7 +313,7 @@ A position that a paginated read, or a bounded index build, resumes from.
 
 ### Ranged read
 
-A service-proxied content read that returns one byte range of a file instead of the whole file. A client uses it to read part of a large file, such as the newest records of a log, or to read a file over the proxied read limit in pieces. A client asks for the range with an HTTP `Range` header, such as `bytes=0-99` for the first 100 bytes. The server doesn't verify a ranged read against the file's checksum, because the checksum covers the whole file. See [Ranged reads](api.md#ranged-reads).
+A service-proxied content read that returns one byte range of a file instead of the whole file. A client uses it to read part of a large file, such as the newest records of a log, or to read a file over the proxied read limit in pieces. A client asks for the range with an HTTP `Range` header, such as `bytes=0-99` for the first 100 bytes. The server doesn't verify a ranged read against the file's checksum, because the checksum covers the whole file. The server does check each [span object](#span-object) that the range covers completely against the extent's object checksum, but it doesn't check a range inside one object. See [Ranged reads](api.md#ranged-reads).
 
 ## Writers
 

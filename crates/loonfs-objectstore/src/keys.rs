@@ -474,6 +474,7 @@ mod tests {
         MetadataSegmentRef {
             owner_namespace_id: namespace_id(),
             segment_id: metadata_segment_id(),
+            checksum: loonfs_types::Checksum::crc64nvme(b""),
             family: MetadataRowFamily::Inodes,
             encoding: METADATA_SEGMENT_ENCODING,
             row_count: 0,

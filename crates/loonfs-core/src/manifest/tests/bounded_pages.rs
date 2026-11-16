@@ -776,7 +776,14 @@ async fn a_damaged_block_fails_only_the_reads_that_decode_it() {
             )
             .await;
             let whole_object = count == 16;
-            if whole_object || position == 2 {
+            // A whole-object read checks the segment's checksum before it
+            // decodes any block, so the damage fails every read of the object.
+            if whole_object {
+                assert!(matches!(
+                    loaded,
+                    Err(ManifestLoadError::SegmentChecksumMismatch { .. })
+                ));
+            } else if position == 2 {
                 assert!(matches!(
                     loaded,
                     Err(ManifestLoadError::SegmentCodec { .. })

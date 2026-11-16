@@ -518,6 +518,7 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
                         extents: vec![loonfs_types::ContentExtent {
                             content_id,
                             object: loonfs_types::ExtentObject::Whole,
+                            object_checksum: checksum.clone(),
                             offset: 0,
                             length: 6,
                         }],
@@ -844,6 +845,7 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
                 extents: vec![loonfs_types::ContentExtent {
                     content_id: value.content_ref().content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,
+                    object_checksum: Checksum::crc64nvme(whole),
                     offset: 0,
                     length: offset as u64,
                 }],

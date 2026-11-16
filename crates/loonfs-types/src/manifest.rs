@@ -6,6 +6,7 @@ use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
 use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
+use crate::Checksum;
 use crate::CompactorEpoch;
 use crate::PoolId;
 use crate::{AccessGrants, ActorId, CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
@@ -93,6 +94,10 @@ pub struct MetadataSegmentRef {
     pub owner_namespace_id: NamespaceId,
     /// Immutable segment id used in the durable object key.
     pub segment_id: MetadataSegmentId,
+    /// The full-object checksum that the store keeps for the segment object,
+    /// in the store's algorithm, so a read of the whole segment can be
+    /// checked against it.
+    pub checksum: Checksum,
     /// Row schema and lookup ordering encoded in this segment.
     pub family: MetadataRowFamily,
     /// Version of the segment's block layout.

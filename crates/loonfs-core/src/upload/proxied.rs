@@ -15,7 +15,7 @@ use crate::storage::content_staging::{
 };
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::{ByteStream, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ByteStream, ObjectStore};
 use loonfs_types::format::control::{UploadSessionMode, UploadSessionPayload};
 use loonfs_types::{ContentRef, ContentRefKind, PoolId, Subject, UploadId, UploadSession};
 
@@ -163,14 +163,8 @@ pub(crate) async fn find_proxied_content_ref<S: ObjectStore + ?Sized>(
     else {
         return Ok(None);
     };
-    let checksum = stored.checksum.ok_or_else(|| {
-        CoreError::store(
-            &object_key,
-            &ObjectStoreError::StoredChecksumMissing {
-                object_key: object_key.clone(),
-            },
-        )
-    })?;
+    let checksum = loonfs_objectstore::required_checksum(&object_key, stored.checksum)
+        .map_err(|error| CoreError::store(&object_key, &error))?;
     Ok(Some(ContentRef {
         kind: ContentRefKind::BlobV1,
         content_id: session.content_id.clone(),

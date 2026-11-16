@@ -983,6 +983,7 @@ mod tests {
                             content_id: crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
                                 .expect("content id"),
                             object: crate::ExtentObject::Whole,
+                            object_checksum: crate::Checksum::crc64nvme(b""),
                             offset: 0,
                             length: 5,
                         }],

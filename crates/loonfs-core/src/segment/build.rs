@@ -15,7 +15,7 @@ use crate::storage::content_location::extent_object_name;
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{required_checksum, ObjectStore};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -23,7 +23,9 @@ use loonfs_types::format::manifest::{
 #[cfg(test)]
 pub(crate) use loonfs_types::format::segment_blocks::DEFAULT_MAX_INLINE_FILTER_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_types::format::segment_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
-use loonfs_types::{CommitSeq, ContentId, MetadataSegmentId, NamespaceId};
+use loonfs_types::{
+    Checksum, ChecksumAlgorithm, CommitSeq, ContentId, MetadataSegmentId, NamespaceId,
+};
 use std::collections::HashMap;
 use std::future::Future;
 
@@ -99,7 +101,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         family: MetadataRowFamily,
         built: BuiltSegmentBlocks,
     ) -> Result<MetadataSegmentRef> {
-        let (descriptor, bytes) = prepare_manifest_segment(&self.namespace_id, family, built);
+        let (descriptor, bytes) = prepare_manifest_segment(
+            &self.namespace_id,
+            family,
+            built,
+            self.store.checksum_algorithm(),
+        );
         let object_key = metadata_segment_object_key(&descriptor);
         self.store
             .put_immutable_verified(&object_key, bytes)
@@ -131,16 +138,25 @@ pub(crate) fn debug_assert_manifest_segments_do_not_overlap(
     }
 }
 
+/// Returns the descriptor and the bytes of a new segment of `family` in a
+/// store whose checksum algorithm is `algorithm`.
+///
+/// The descriptor is built before the put, because the put runs alongside the
+/// next segment's encoding and the run lists the descriptor at once. So the
+/// segment's checksum is computed here, over bytes already in memory, and the
+/// put checks that the store keeps the same value.
 fn prepare_manifest_segment(
     namespace_id: &NamespaceId,
     family: MetadataRowFamily,
     built: BuiltSegmentBlocks,
+    algorithm: ChecksumAlgorithm,
 ) -> (MetadataSegmentRef, Bytes) {
     let segment_id = MetadataSegmentId::generate();
     let filter_inline = built.inline_filter_hex();
     let descriptor = MetadataSegmentRef {
         owner_namespace_id: namespace_id.clone(),
         segment_id,
+        checksum: Checksum::compute(algorithm, &built.bytes),
         family,
         encoding: METADATA_SEGMENT_ENCODING,
         row_count: built.row_count,
@@ -232,10 +248,21 @@ impl<'a, S: ObjectStore + ?Sized> MetadataSegmentPuts<'a, S> {
         let object_key = metadata_segment_object_key(descriptor);
         let descriptor = descriptor.clone();
         let mut put = async move {
-            store
+            let written = store
                 .put_immutable_verified(&object_key, bytes.clone())
                 .await
                 .map_err(|error| CoreError::store(&object_key, &error))?;
+            let stored = required_checksum(&object_key, written.checksum)
+                .map_err(|error| CoreError::store(&object_key, &error))?;
+            if stored != descriptor.checksum {
+                return Err(CoreError::NamespaceCorrupt(format!(
+                    "metadata segment `{object_key}` is stored with checksum `{}:{}`, not the `{}:{}` of its bytes",
+                    stored.algorithm(),
+                    stored.value(),
+                    descriptor.checksum.algorithm(),
+                    descriptor.checksum.value()
+                )));
+            }
             // A segment this process can't decode must not be published in a manifest.
             insert_written_segment(segment_cache, &descriptor, &bytes, writer)?;
             Ok(byte_count)
@@ -344,7 +371,12 @@ impl<'a> MetadataSegmentWriter<'a> {
         let built = std::mem::replace(&mut self.builder, segment_blocks_builder(self.family))
             .build()
             .expect("a metadata segment should encode");
-        let (descriptor, bytes) = prepare_manifest_segment(self.namespace_id, self.family, built);
+        let (descriptor, bytes) = prepare_manifest_segment(
+            self.namespace_id,
+            self.family,
+            built,
+            puts.store.checksum_algorithm(),
+        );
         puts.put(&descriptor, bytes).await?;
         self.segments.push(descriptor);
         Ok(())
@@ -366,20 +398,22 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    /// Returns a new segment descriptor whose index and filter blocks lie past
-    /// the end of every body this module's tests put, so a put of zeros under
-    /// it publishes no blocks to the segment cache.
-    fn descriptor(namespace_id: &NamespaceId) -> MetadataSegmentRef {
+    /// Returns a new segment descriptor for `body` whose index and filter
+    /// blocks lie past the end of every body this module's tests put, so a put
+    /// of zeros under it publishes no blocks to the segment cache.
+    fn descriptor(namespace_id: &NamespaceId, body: &[u8]) -> MetadataSegmentRef {
         let mut builder = SegmentBlocksBuilder::default();
         builder.push("row", "row", &"row").expect("row");
         let mut descriptor = prepare_manifest_segment(
             namespace_id,
             MetadataRowFamily::Inodes,
             builder.build().expect("segment"),
+            ChecksumAlgorithm::Crc64nvme,
         )
         .0;
         descriptor.index_block.offset = u64::MAX;
         descriptor.filter_block.offset = u64::MAX;
+        descriptor.checksum = Checksum::crc64nvme(body);
         descriptor
     }
 
@@ -407,12 +441,14 @@ mod tests {
             let mut puts = MetadataSegmentPuts::new(&store, &cache, SegmentWriter::Fold);
             blocked.arm();
             for size in &initial_sizes {
-                puts.put(&descriptor(&namespace_id), Bytes::from(vec![0; *size]))
+                let body = Bytes::from(vec![0; *size]);
+                puts.put(&descriptor(&namespace_id, &body), body)
                     .await
                     .expect("initial put");
             }
-            let next_descriptor = descriptor(&namespace_id);
-            let mut next = Box::pin(puts.put(&next_descriptor, Bytes::from(vec![0; next_size])));
+            let next_body = Bytes::from(vec![0; next_size]);
+            let next_descriptor = descriptor(&namespace_id, &next_body);
+            let mut next = Box::pin(puts.put(&next_descriptor, next_body));
             // A put of 8 MiB or more compares its key before it writes, so it
             // reaches the store only while `next` drives the pending puts.
             let earlier_puts_arrive = async {
@@ -469,8 +505,12 @@ mod tests {
                 )
                 .expect("inode rows in key order");
         }
-        let (descriptor, bytes) =
-            prepare_manifest_segment(namespace_id, family, builder.build().expect("segment"));
+        let (descriptor, bytes) = prepare_manifest_segment(
+            namespace_id,
+            family,
+            builder.build().expect("segment"),
+            ChecksumAlgorithm::Crc64nvme,
+        );
         assert!(segment_object_bytes(&descriptor) > 256 * 1024);
         (descriptor, bytes)
     }
@@ -490,6 +530,41 @@ mod tests {
         puts.finish().await.expect("finish the puts");
     }
 
+    /// Checks that a written segment's descriptor records the checksum that the
+    /// store keeps for the segment object, in the store's own algorithm.
+    #[tokio::test]
+    async fn a_written_segment_descriptor_records_the_stored_checksum() {
+        let namespace_id = NamespaceId::parse("written-checksum").expect("namespace id");
+        for algorithm in [ChecksumAlgorithm::Crc64nvme, ChecksumAlgorithm::Crc32c] {
+            let directory = tempdir().expect("tempdir");
+            let store =
+                LocalFsStore::with_checksum_algorithm(directory.path(), algorithm).expect("store");
+            let cache = MetadataSegmentCache::unshared(usize::MAX);
+            let mut puts = MetadataSegmentPuts::new(&store, &cache, SegmentWriter::Fold);
+            let mut segments = MetadataSegmentWriter::new(MetadataRowFamily::Inodes, &namespace_id);
+            segments.push(
+                MetadataRow::Inode(InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::File,
+                    committed_seq: CommitSeq(1),
+                    commit_id: CommitId::generate(),
+                    committed_by: ActorId::loonfs(),
+                    committed_at_ms: 1_000,
+                }),
+                &mut |_| {},
+            );
+            let descriptor = segments.finish(&mut puts).await.expect("segment").remove(0);
+            puts.finish().await.expect("finish the puts");
+            let stored = store
+                .head(&metadata_segment_object_key(&descriptor))
+                .await
+                .expect("head the segment")
+                .expect("a written segment");
+            assert_eq!(descriptor.checksum.algorithm(), algorithm);
+            assert_eq!(stored.checksum, Some(descriptor.checksum));
+        }
+    }
+
     /// Checks that a layouts segment that a fold or a compaction writes has an
     /// extent filter over its extents' names, and that the writer inserts the
     /// filter into the segment cache.
@@ -505,6 +580,7 @@ mod tests {
                 start: 0,
                 end: 4,
             },
+            object_checksum: Checksum::crc64nvme(b"four"),
             offset: 0,
             length: 4,
         };
