@@ -133,7 +133,7 @@ func TestInlinePreparationAndRetry(t *testing.T) {
 					}
 					if len(commits) == 1 {
 						w.WriteHeader(503)
-						value = map[string]any{"code": "deadline_exceeded", "message": "reply lost"}
+						value = map[string]any{"code": "outcome_unknown", "message": "reply lost", "details": map[string]any{"cause": "deadline"}}
 					} else {
 						if !reflect.DeepEqual(commits[0], body) {
 							t.Error("retry request changed")

@@ -109,21 +109,22 @@ pub(crate) async fn run_filesystem_grep(
     args: FilesystemGrepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, None).await?;
-    let path_prefix = args
-        .path_prefix
+    let path = args
+        .path
         .as_deref()
-        .map(|path| parse_user_path_arg("--path-prefix", path, RootPath::Allowed))
+        .map(|path| parse_user_path_arg("--path", path, RootPath::Allowed))
         .transpose()
         .map_err(|error| context.fail(error))?;
     let request = loonfs_types::GrepRequest {
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
-        scope: path_prefix.map_or(
+        scope: path.map_or(
             loonfs_types::GrepScope::Namespace,
-            loonfs_types::GrepScope::PathPrefix,
+            loonfs_types::GrepScope::Path,
         ),
         allow_stale: args.allow_stale,
         allow_scan: args.allow_scan,
+        consistency: None,
     };
     let mut tail_scanned = true;
     let listing = collect_or_stream_pages(

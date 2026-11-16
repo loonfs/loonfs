@@ -1,5 +1,6 @@
 //! Content search requests and responses for the v0 HTTP API.
 
+use crate::options::Consistency;
 use crate::{AbsolutePath, CommitSeq, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
@@ -21,6 +22,10 @@ pub struct GrepRequest {
     /// Whether a pattern without required literal bytes can use a scan, which the server's budget
     /// limits.
     pub allow_scan: bool,
+    /// How recently a first page confirms the live head that it reads, or `None` for the server's
+    /// or the runtime's default. A later page reads at the first page's head, which its cursor
+    /// records. The fingerprint that binds a cursor to its request leaves this field out.
+    pub consistency: Option<Consistency>,
 }
 
 /// The part of a namespace that one content search covers.
@@ -29,8 +34,8 @@ pub enum GrepScope {
     /// Every file in the namespace.
     #[default]
     Namespace,
-    /// The descendants of one absolute directory path.
-    PathPrefix(AbsolutePath),
+    /// The descendants of one directory, which a complete absolute path identifies.
+    Path(AbsolutePath),
     /// The descendants of one inode.
     Inode(InodeId),
 }
@@ -45,13 +50,13 @@ impl GrepRequest {
         let mut seed = xxh64(self.pattern.as_bytes(), 0);
         // The scope kind keeps a namespace scope apart from an inode scope
         // on the root directory, whose ID is all zero bits.
-        let (scope_kind, path_prefix, inode_id) = match &self.scope {
+        let (scope_kind, scope_path, inode_id) = match &self.scope {
             GrepScope::Namespace => (0_u8, "", crate::ROOT_INODE_ID),
-            GrepScope::PathPrefix(path) => (1, path.as_str(), crate::ROOT_INODE_ID),
+            GrepScope::Path(path) => (1, path.as_str(), crate::ROOT_INODE_ID),
             GrepScope::Inode(inode_id) => (2, "", *inode_id),
         };
         seed = xxh64(&[scope_kind], seed);
-        seed = xxh64(path_prefix.as_bytes(), seed);
+        seed = xxh64(scope_path.as_bytes(), seed);
         seed = xxh64(&inode_id.to_be_bytes(), seed);
         let flags = [
             u8::from(self.case_insensitive),

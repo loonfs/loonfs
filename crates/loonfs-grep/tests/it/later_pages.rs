@@ -53,6 +53,9 @@ fn request(pattern: &str, scope: GrepScope) -> GrepRequest {
         scope,
         allow_stale: false,
         allow_scan: false,
+        // A query follows the worker's publication of the index, which
+        // doesn't move the runtime's cached head, so it asks for `strong`.
+        consistency: Some(loonfs::Consistency::Strong),
     }
 }
 
@@ -274,7 +277,7 @@ async fn a_file_moved_out_of_scope_between_pages_stays_in_the_cut() {
     pages.enable().await;
     let request = request(
         "moved needle",
-        GrepScope::PathPrefix(AbsolutePath::parse("/team").expect("path")),
+        GrepScope::Path(AbsolutePath::parse("/team").expect("path")),
     );
     let (cursors, order) = pages.first_pages(&request, &["historian", "viewer"]).await;
     let moved = &order[1];
@@ -315,7 +318,7 @@ async fn a_read_only_subject_pages_through_a_scan() {
     pages.enable().await;
     let mut scan = request(
         "ne",
-        GrepScope::PathPrefix(AbsolutePath::parse("/team").expect("path")),
+        GrepScope::Path(AbsolutePath::parse("/team").expect("path")),
     );
     scan.allow_scan = true;
 

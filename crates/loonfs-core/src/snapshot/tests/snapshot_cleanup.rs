@@ -77,7 +77,7 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
     );
     assert_eq!(
         creation.expect_err("verification failed").code(),
-        ErrorCode::SnapshotUnavailable,
+        ErrorCode::StaleHead,
         "a failed cleanup keeps the verification error"
     );
     assert_eq!(store.inner().attempts(), 1);

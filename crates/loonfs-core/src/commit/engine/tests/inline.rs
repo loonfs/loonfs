@@ -455,7 +455,6 @@ async fn invalid_inline_candidates_write_nothing() {
     for candidate in [
         unreferenced,
         duplicate,
-        oversized,
         excessive_total,
         mismatched,
         wrong_checksum,
@@ -467,6 +466,15 @@ async fn invalid_inline_candidates_write_nothing() {
         );
         assert_no_writes(&store);
     }
+    // An oversized value is refused with `content_too_large`, as an
+    // oversized append is.
+    store.reset();
+    let error = publish(&mut engine, &context, oversized)
+        .await
+        .expect_err("an oversized inline value");
+    assert_matches!(error, CoreError::InlineContentTooLarge { .. });
+    assert_eq!(error.code(), loonfs_types::ErrorCode::ContentTooLarge);
+    assert_no_writes(&store);
 }
 
 #[tokio::test]

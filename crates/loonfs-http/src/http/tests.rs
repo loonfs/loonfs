@@ -152,6 +152,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "max_in_flight_requests",
     "max_merge_bytes",
     "max_staleness_ms",
+    "manifest_missing",
     "max_wal_tail_objects",
     "merge_allowance",
     "recover_administrator",
@@ -173,13 +174,13 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "not_idempotent",
     "operation_id",
     "operation_index",
+    "publication_budget",
     "operation_kind",
     "operation_part",
     "parent_inode_id",
     "part_size_bytes",
     "path_absence",
     "path_binding",
-    "path_prefix",
     "prepare_content",
     "protocol_version",
     "put_file",
@@ -396,6 +397,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         .collect();
 
     let populated = ErrorDetails {
+        cause: Some(loonfs_types::ErrorCause::Deadline),
         namespace_id: Some(NamespaceId::parse("deleted").expect("namespace id")),
         precondition_index: Some(0),
         commit_id: Some(CommitId::parse("commit").expect("valid commit id")),
@@ -753,7 +755,11 @@ async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
         .expect("deadline body");
     let error: loonfs_types::ErrorResponse =
         serde_json::from_slice(&body).expect("deadline envelope");
-    assert_eq!(error.code, ErrorCode::DeadlineExceeded.as_str());
+    assert_eq!(error.code, ErrorCode::OutcomeUnknown.as_str());
+    assert_eq!(
+        error.details.as_ref().and_then(|details| details.cause),
+        Some(loonfs_types::ErrorCause::Deadline)
+    );
     assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
     assert!(error.message.contains("request_deadline_ms"));
     assert!(error.message.contains("10"));
@@ -1759,9 +1765,8 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         401,
         "unauthorized",
     );
-    // Invalid grep path prefixes return invalid_request after authentication.
-    let grep_url =
-        format!("http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=relative");
+    // An invalid grep scope path returns invalid_request after authentication.
+    let grep_url = format!("http://{addr}/v0/namespaces/demo/grep?pattern=needle&path=relative");
     let body = expect_enveloped(
         || {
             raw_agent()
@@ -1773,7 +1778,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         400,
         "invalid_request",
     );
-    assert_eq!(body["param"], "path_prefix");
+    assert_eq!(body["param"], "path");
     expect_enveloped(
         || raw_agent().get(&grep_url).call(),
         "authorization should precede grep path decoding",
@@ -1795,7 +1800,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     );
     assert_eq!(body["param"], "inode_id");
     let grep_two_scopes_url = format!(
-        "http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=/docs&inode_id=ino_0000000000000000000000000v"
+        "http://{addr}/v0/namespaces/demo/grep?pattern=needle&path=/docs&inode_id=ino_0000000000000000000000000v"
     );
     let body = expect_enveloped(
         || {
@@ -1809,6 +1814,30 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         "invalid_request",
     );
     assert_eq!(body["param"], "inode_id");
+    // The parameters' former spellings are unknown parameters now.
+    for (url, param) in [
+        (
+            format!("http://{addr}/v0/namespaces/demo/grep?pattern=needle&path_prefix=/docs"),
+            "path_prefix",
+        ),
+        (
+            format!("http://{addr}/v0/namespaces/demo/merges?source=fork"),
+            "source",
+        ),
+    ] {
+        let body = expect_enveloped(
+            || {
+                raw_agent()
+                    .get(&url)
+                    .set("authorization", "Bearer test-token")
+                    .call()
+            },
+            "a former parameter spelling should answer 400",
+            400,
+            "invalid_request",
+        );
+        assert_eq!(body["param"], param);
+    }
 
     let jobs_url = format!("http://{addr}/v0/maintenance/namespaces/demo/jobs");
     expect_enveloped(
@@ -2571,6 +2600,7 @@ fn grep_error_request() -> GrepRequest {
         scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
+        consistency: None,
     }
 }
 
@@ -3054,9 +3084,11 @@ mod direct_download {
                 serde_json::json!({"snapshot_id": "malformed"}),
                 "/snapshot_id",
             ),
+            // The revision route accepts a snapshot, as the inode revision
+            // content read does, so only a malformed one is refused.
             (
                 revision_route.to_owned(),
-                serde_json::json!({"snapshot_id": snapshot_id}),
+                serde_json::json!({"snapshot_id": "malformed"}),
                 "/snapshot_id",
             ),
         ] {

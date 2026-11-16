@@ -63,8 +63,9 @@ impl<M: crate::Mode> Namespace<M> {
     /// Prepares the content object of one retained inode revision for a
     /// direct download, as `options` asks.
     ///
-    /// A snapshot captures one revision of each file, so options that read a
-    /// snapshot return `invalid_request`.
+    /// Options that read a snapshot find the revision in the snapshot's
+    /// manifest instead of at the live head, as
+    /// [`Self::read_file_revision_stream_by_inode_with_options`] does.
     pub async fn create_revision_download_by_inode_with_options(
         &self,
         inode_id: InodeId,

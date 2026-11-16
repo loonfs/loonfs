@@ -105,10 +105,16 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     }
 
     // Counters are counters: a second status read moves that series and
-    // only that series.
+    // only that series. The read asks for `strong`, so it confirms the head
+    // with object-store calls of its own.
     harness
         .client
-        .get_namespace(&namespace)
+        .get_namespace_with_options(
+            &namespace,
+            &loonfs_client::LiveReadOptions {
+                consistency: Some(loonfs_client::Consistency::Strong),
+            },
+        )
         .await
         .expect("read status again");
     let second = scrape(&harness.server_url, Some("test-token")).expect("second scrape");

@@ -55,6 +55,11 @@ impl ErrorResponse {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorDetails {
+    /// Which of the causes that share the error's code and remedy occurred, for a code whose row
+    /// in the details table lists causes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub cause: Option<ErrorCause>,
     /// The deleted namespace that caused the operation to fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -220,6 +225,42 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub size_bytes: Option<u64>,
+}
+
+/// The cause of an error, for a code that two causes share because the client's remedy is the same
+/// for both. A client branches on the code, and it can report or count the cause.
+///
+/// A newer server can return a cause that isn't listed here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCause {
+    /// For `snapshot_not_found`: the snapshot record exists, but the manifest that it keeps is gone.
+    ManifestMissing,
+    /// For `store_contention`: a metadata publication stopped at its time budget before it
+    /// published.
+    PublicationBudget,
+    /// For `outcome_unknown`: the server cancelled the request at its `request_deadline_ms`.
+    Deadline,
+    /// For `outcome_unknown`: the server didn't observe whether its write to object storage took
+    /// effect.
+    Unconfirmed,
+    /// A cause from a newer server. It serializes as `unknown`.
+    #[serde(other)]
+    Unknown,
+}
+
+impl ErrorCause {
+    /// Returns the cause's wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ManifestMissing => "manifest_missing",
+            Self::PublicationBudget => "publication_budget",
+            Self::Deadline => "deadline",
+            Self::Unconfirmed => "unconfirmed",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// The sequence and fingerprint of the commit that already used a commit ID.

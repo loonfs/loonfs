@@ -18,8 +18,8 @@ use loonfs_types::format::control::WriterBlock;
 pub use loonfs_types::MergeBound;
 use loonfs_types::{ActiveWriter, CommittedReceipt, MergeConflict};
 use loonfs_types::{
-    BindingVersion, CommitId, CommitSeq, ErrorDetails, InodeId, InodeKind, ManifestNo, NamespaceId,
-    PathError, PoolId, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
+    BindingVersion, CommitId, CommitSeq, ErrorCause, ErrorDetails, InodeId, InodeKind, ManifestNo,
+    NamespaceId, PathError, PoolId, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
 };
 use thiserror::Error;
 
@@ -102,6 +102,15 @@ pub enum CoreError {
     },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]
     AppendTooLarge { size_bytes: u64, max_bytes: u64 },
+    /// An inline content value is larger than one WAL piece can contain.
+    #[error(
+        "inline content `{content_id}` is {size_bytes} bytes; one value is at most {max_bytes}"
+    )]
+    InlineContentTooLarge {
+        content_id: loonfs_types::ContentId,
+        size_bytes: u64,
+        max_bytes: u64,
+    },
     /// The request contains more items than one batch may read. No items were
     /// read; split the request into smaller batches.
     #[error("asked for {requested} items, over the {max} one batch answers")]
@@ -209,8 +218,22 @@ pub enum CoreError {
     /// accepted earlier may finish.
     #[error("shutting down; new work is not admitted")]
     ShuttingDown,
-    #[error("snapshot unavailable: {0}")]
-    SnapshotUnavailable(String),
+    /// The namespace's head moved while an operation that needs a fixed
+    /// basis ran: a snapshot's manifest stopped being current before the
+    /// snapshot was verified, or a fork's source kept a WAL tail too old to
+    /// fork from after every fold that the fork ran. The code is
+    /// `stale_head`, whose remedy is to retry against fresh state, and the
+    /// runtime's retry loops take a snapshot again from a fresh basis.
+    #[error("{0}")]
+    HeadMoved(String),
+    /// A snapshot record exists, but the manifest that it keeps is gone. The
+    /// code is `snapshot_not_found`, with the cause `manifest_missing`,
+    /// because the client's remedy is the same: use another snapshot.
+    #[error("snapshot `{snapshot_id}` refers to manifest `{object_key}`, which is gone")]
+    SnapshotManifestMissing {
+        snapshot_id: loonfs_types::SnapshotId,
+        object_key: String,
+    },
     #[error("content `{content_id}` requires content writes that this deployment cannot perform; read through the proxied route")]
     ContentNotMaterialized { content_id: loonfs_types::ContentId },
     #[error("invalid snapshot request: {0}")]
@@ -336,9 +359,11 @@ pub enum CoreError {
     /// A read or a publication on a manifest that a newer manifest replaced
     /// found a metadata segment missing. Garbage collection keeps the
     /// segments of the current manifest and of snapshots' manifests, so a
-    /// successor can drop the replaced manifest's. The code is `stale_head`:
-    /// a read runs again at the current manifest, and the publisher plans the
-    /// commit again on it.
+    /// successor can drop the replaced manifest's. A read runs again at the
+    /// current manifest, and the publisher plans the commit again on it. The
+    /// code is `stale_head`, which a client sees when a publication raced the
+    /// head on every attempt. A read that found its manifest replaced on every
+    /// attempt returns `store_contention` instead.
     #[error(
         "manifest `{replaced_manifest_no}` was replaced by manifest `{current_manifest_no}`, and a segment it lists is missing"
     )]
@@ -494,13 +519,15 @@ impl CoreError {
             | CoreError::PrefixForRangedRead
             | CoreError::RootGrantsWithoutAdministrator => ErrorCode::InvalidRequest,
             CoreError::RangeNotSatisfiable { .. } => ErrorCode::RangeNotSatisfiable,
-            CoreError::SnapshotNotFound { .. } => ErrorCode::SnapshotNotFound,
+            CoreError::SnapshotNotFound { .. } | CoreError::SnapshotManifestMissing { .. } => {
+                ErrorCode::SnapshotNotFound
+            }
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::InodeNotFound(_) => ErrorCode::InodeNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
-            CoreError::ContentTooLarge { .. } | CoreError::AppendTooLarge { .. } => {
-                ErrorCode::ContentTooLarge
-            }
+            CoreError::ContentTooLarge { .. }
+            | CoreError::AppendTooLarge { .. }
+            | CoreError::InlineContentTooLarge { .. } => ErrorCode::ContentTooLarge,
             CoreError::CommitTooLarge { .. } => ErrorCode::CommitTooLarge,
             CoreError::MergeTooLarge { .. } => ErrorCode::MergeTooLarge,
             CoreError::NamespaceNotFound { .. } => ErrorCode::NamespaceNotFound,
@@ -511,9 +538,9 @@ impl CoreError {
             CoreError::Forbidden { .. } | CoreError::PrincipalScopeMismatch { .. } => {
                 ErrorCode::Forbidden
             }
-            CoreError::StaleHeadPrecondition { .. } | CoreError::ManifestReplaced { .. } => {
-                ErrorCode::StaleHead
-            }
+            CoreError::StaleHeadPrecondition { .. }
+            | CoreError::ManifestReplaced { .. }
+            | CoreError::HeadMoved(_) => ErrorCode::StaleHead,
             CoreError::BindingVersionMismatch { .. } => ErrorCode::BindingVersionMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::MergeRangeConflict { .. } => ErrorCode::MergeRangeConflict,
@@ -524,10 +551,10 @@ impl CoreError {
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::ContentNotMaterialized { .. } => ErrorCode::ContentNotMaterialized,
-            CoreError::SnapshotUnavailable(_) => ErrorCode::SnapshotUnavailable,
-            // An over-budget publication stops before its next write, and
-            // the next maintenance run publishes the metadata.
-            CoreError::MetadataPublicationBudgetExceeded { .. } => ErrorCode::MaintenanceRequired,
+            // An over-budget publication stops before its next write, so
+            // nothing was published, and the client backs off before it
+            // retries, as it does after contention.
+            CoreError::MetadataPublicationBudgetExceeded { .. } => ErrorCode::StoreContention,
             // The deployment's read memory cannot fit this namespace's
             // collection live set; an operator raises the limit.
             CoreError::LiveSetExceedsCollectionMemory { .. } => ErrorCode::ServerError,
@@ -609,6 +636,7 @@ impl CoreError {
             | CoreError::CommitTooLarge { .. }
             | CoreError::MergeTooLarge { .. }
             | CoreError::AppendTooLarge { .. }
+            | CoreError::InlineContentTooLarge { .. }
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
@@ -630,7 +658,8 @@ impl CoreError {
             | CoreError::WriterSessionClosed { .. }
             | CoreError::ShuttingDown
             | CoreError::ContentNotMaterialized { .. }
-            | CoreError::SnapshotUnavailable(_)
+            | CoreError::HeadMoved(_)
+            | CoreError::SnapshotManifestMissing { .. }
             | CoreError::InvalidSnapshotRequest(_)
             | CoreError::SnapshotNotFound { .. }
             | CoreError::MetadataPublicationBudgetExceeded { .. }
@@ -740,6 +769,19 @@ impl CoreError {
                 inode_id: Some(*inode_id),
                 expected_binding_version: Some(expected_binding_version.clone()),
                 actual_binding_version: actual_binding_version.clone(),
+                ..ErrorDetails::default()
+            }),
+            CoreError::SnapshotManifestMissing { .. } => Some(ErrorDetails {
+                cause: Some(ErrorCause::ManifestMissing),
+                ..ErrorDetails::default()
+            }),
+            CoreError::MetadataPublicationBudgetExceeded { .. } => Some(ErrorDetails {
+                cause: Some(ErrorCause::PublicationBudget),
+                ..ErrorDetails::default()
+            }),
+            CoreError::OutcomeUnknown { .. }
+            | CoreError::WalPublish(WalPublishError::OutcomeUnknown(_)) => Some(ErrorDetails {
+                cause: Some(ErrorCause::Unconfirmed),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitValidation(error) => error.details(),
@@ -1069,6 +1111,71 @@ mod tests {
         assert!(CoreError::NamespaceCorrupt("boom".to_owned())
             .details()
             .is_none());
+    }
+
+    /// Checks that each cause that shares a code with another cause is
+    /// reported in the details, and that the code is the one whose remedy
+    /// fits the cause.
+    #[test]
+    fn errors_that_share_a_code_report_their_cause() {
+        use crate::wal::WalPublishError;
+        use loonfs_types::{ErrorCause, SnapshotId};
+
+        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
+            .expect("snapshot id");
+        let cases = [
+            (
+                CoreError::SnapshotManifestMissing {
+                    snapshot_id: snapshot_id.clone(),
+                    object_key: "namespaces/demo/manifests/1".to_owned(),
+                },
+                ErrorCode::SnapshotNotFound,
+                Some(ErrorCause::ManifestMissing),
+            ),
+            (
+                CoreError::SnapshotNotFound { snapshot_id },
+                ErrorCode::SnapshotNotFound,
+                None,
+            ),
+            (
+                CoreError::MetadataPublicationBudgetExceeded {
+                    elapsed_ms: 31_000,
+                    budget_ms: 30_000,
+                },
+                ErrorCode::StoreContention,
+                Some(ErrorCause::PublicationBudget),
+            ),
+            (
+                CoreError::OutcomeUnknown {
+                    object_key: "namespaces/demo/manifests/2".to_owned(),
+                    message: "timed out".to_owned(),
+                },
+                ErrorCode::OutcomeUnknown,
+                Some(ErrorCause::Unconfirmed),
+            ),
+            (
+                CoreError::WalPublish(WalPublishError::OutcomeUnknown("timed out".to_owned())),
+                ErrorCode::OutcomeUnknown,
+                Some(ErrorCause::Unconfirmed),
+            ),
+            (
+                CoreError::HeadMoved("the manifest was replaced".to_owned()),
+                ErrorCode::StaleHead,
+                None,
+            ),
+        ];
+        for (error, code, cause) in cases {
+            assert_eq!(error.code(), code, "{error}");
+            assert_eq!(
+                error.details().and_then(|details| details.cause),
+                cause,
+                "{error}"
+            );
+            // A failed operation reports the cause of the failure it wraps.
+            let wrapped = error.at_operation(1);
+            assert_eq!(wrapped.code(), code);
+            assert_eq!(wrapped.details().and_then(|details| details.cause), cause);
+        }
     }
 
     #[test]

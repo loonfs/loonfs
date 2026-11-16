@@ -27,7 +27,7 @@ pub use downloads::{
     CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
     CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, DownloadRange,
 };
-pub use errors::{ActiveWriter, CommittedReceipt, ErrorDetails, ErrorResponse};
+pub use errors::{ActiveWriter, CommittedReceipt, ErrorCause, ErrorDetails, ErrorResponse};
 pub use gc::{
     DeletedObjectCounts, DeletedSnapshotsByOwner, GcRequest, GcResponse, GcSkippedWork,
     PoolDeletedObjectCounts, PoolGcResponse, PoolRetainedCandidates, PoolRetainedReason,

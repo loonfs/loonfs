@@ -1,7 +1,7 @@
 //! The `query/v0` API group: derived-index reads.
 
 use super::extractors::SubjectHeaders;
-use super::query_params::{effective_page_limit, required_query_param};
+use super::query_params::{effective_page_limit, live_consistency, required_query_param};
 use super::{AppQuery, HttpState, NamespaceIdPath, NoBody, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
@@ -10,6 +10,7 @@ use loonfs::SharedObjectStore;
 use loonfs_grep::{
     GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepService, GrepWorker, NamespaceReads,
 };
+use loonfs_types::options::ReadConsistency;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::GrepIndex;
@@ -35,8 +36,8 @@ pub(super) struct GrepQuery {
     /// A complete absolute path that limits matches to its descendants. It can't be combined with
     /// `inode_id`.
     #[cfg_attr(feature = "openapi", param(value_type = Option<String>))]
-    path_prefix: Option<AbsolutePath>,
-    /// An inode that limits matches to its descendants. It can't be combined with `path_prefix`.
+    path: Option<AbsolutePath>,
+    /// An inode that limits matches to its descendants. It can't be combined with `path`.
     #[cfg_attr(
         feature = "openapi",
         param(
@@ -63,6 +64,15 @@ pub(super) struct GrepQuery {
     limit: Option<u32>,
     /// The opaque cursor that the previous page returned.
     cursor: Option<String>,
+    /// How recently a first page confirms the namespace head that it reads. `eventual` (the
+    /// default, unless the server's `consistency` setting is `strong`) reads at the head that the
+    /// server confirmed last while that confirmation is younger than the maximum staleness, and
+    /// `strong` confirms the head before the read. A later page reads at the first page's head.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
+    max_staleness_ms: Option<u64>,
 }
 
 #[cfg_attr(
@@ -86,7 +96,7 @@ pub(super) struct GrepQuery {
         ),
         responses(
             (status = 200, description = "One page of matches", body = GrepResponse),
-            (status = 400, description = "Invalid pattern, cursor, or scope, both scopes, or an unindexable pattern without allow_scan", body = ErrorResponse),
+            (status = 400, description = "Invalid pattern, cursor, scope, or consistency, both scopes, or an unindexable pattern without allow_scan", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, scope path, or scope inode not found", body = ErrorResponse),
             (status = 409, description = "The cursor's sequence is older than the retention floor. Run the search again from its first page.", body = ErrorResponse),
@@ -127,14 +137,14 @@ pub(super) async fn grep(
 
 fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
     let pattern = required_query_param(query.pattern, "pattern")?;
-    let scope = match (query.path_prefix, query.inode_id) {
+    let scope = match (query.path, query.inode_id) {
         (None, None) => GrepScope::Namespace,
-        (Some(path_prefix), None) => GrepScope::PathPrefix(path_prefix),
+        (Some(path), None) => GrepScope::Path(path),
         (None, Some(inode_id)) => GrepScope::Inode(inode_id),
         (Some(_), Some(_)) => {
             return Err(ApiResponseError::new(
                 loonfs_types::ErrorCode::InvalidRequest,
-                "`path_prefix` cannot be combined with `inode_id`",
+                "`path` cannot be combined with `inode_id`",
             )
             .with_param("inode_id"))
         }
@@ -145,6 +155,7 @@ fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
         scope,
         allow_stale: query.allow_stale.unwrap_or(false),
         allow_scan: query.allow_scan.unwrap_or(false),
+        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
     })
 }
 

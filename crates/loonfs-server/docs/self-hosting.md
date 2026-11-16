@@ -380,7 +380,7 @@ Segment sizes, reorganization thresholds, and reorganization step sizes use the 
 
 This section describes the limits on the server's requests, connections, memory, and concurrent work.
 
-`request_deadline_ms` sets the deadline for metadata and query requests, and it defaults to 60000 ms. Streamed content and long-running operator work are exempt. The server sets the write-stop wait to half of this deadline. A commit that reaches the write stop (64 MiB of unfolded WAL bytes or 1,024 unfolded WAL objects) waits up to that long for the session's fold. Because the wait is half the deadline, such a commit receives `maintenance_required`, which means it wasn't committed, instead of `deadline_exceeded`, which leaves its outcome unknown.
+`request_deadline_ms` sets the deadline for metadata and query requests, and it defaults to 60000 ms. Streamed content and long-running operator work are exempt. The server sets the write-stop wait to half of this deadline. A commit that reaches the write stop (64 MiB of unfolded WAL bytes or 1,024 unfolded WAL objects) waits up to that long for the session's fold. Because the wait is half the deadline, such a commit receives `maintenance_required`, which means it wasn't committed, instead of `outcome_unknown` with the cause `deadline`, which means the commit might still take effect.
 
 `max_in_flight_requests` defaults to 256, and `max_connections` defaults to 1,024. Both must be positive. The sizing formula uses the configured connection count. Keep the pod's open-file limit above that count.
 

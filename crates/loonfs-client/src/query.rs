@@ -3,6 +3,7 @@
 use crate::operations;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, Result};
+use loonfs_types::options::ReadAt;
 use loonfs_types::{GrepRequest, GrepResponse, GrepScope, NamespaceId, PageRequest, Pager};
 
 /// A pager over grep matches.
@@ -34,8 +35,8 @@ impl Client {
         query.push("case_insensitive", request.case_insensitive);
         match &request.scope {
             GrepScope::Namespace => {}
-            GrepScope::PathPrefix(path_prefix) => {
-                query.push("path_prefix", path_prefix.as_str());
+            GrepScope::Path(path) => {
+                query.push("path", path.as_str());
             }
             GrepScope::Inode(inode_id) => {
                 query.push("inode_id", inode_id.to_string());
@@ -43,6 +44,7 @@ impl Client {
         }
         query.push("allow_scan", request.allow_scan);
         query.push("allow_stale", request.allow_stale);
+        crate::reads::push_read_at(&mut query, &ReadAt::Live(request.consistency));
         query.page(&page);
         self.send_json(self.request(operations::GREP, &query.build()))
             .await
@@ -79,6 +81,7 @@ mod tests {
             scope: GrepScope::Namespace,
             allow_stale: false,
             allow_scan: false,
+            consistency: None,
         };
         let mut pager = client
             .grep(&NamespaceId::parse("demo").expect("namespace id"), &request)

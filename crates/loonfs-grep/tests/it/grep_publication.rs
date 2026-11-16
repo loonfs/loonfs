@@ -30,6 +30,9 @@ fn needle() -> GrepRequest {
         scope: GrepScope::Namespace,
         allow_stale: false,
         allow_scan: false,
+        // A query follows the worker's publication of the index, which
+        // doesn't move the runtime's cached head, so it asks for `strong`.
+        consistency: Some(loonfs::Consistency::Strong),
     }
 }
 

@@ -569,7 +569,7 @@ fn retryable_transport_failure_covers_transport_and_unavailability_only() {
     ));
     assert!(!retryable_transport_failure(
         FailureSource::Response,
-        &api("snapshot_unavailable")
+        &api("store_contention")
     ));
     assert!(!retryable_transport_failure(
         FailureSource::Response,
@@ -579,11 +579,12 @@ fn retryable_transport_failure_covers_transport_and_unavailability_only() {
         FailureSource::Response,
         &api("index_lagging")
     ));
-    // A server deadline uses 503 but is not safe to retry automatically.
-    // The caller must first determine whether a mutation completed.
+    // An unknown outcome, including a request that the server cancelled at
+    // its deadline, uses 503 but is not safe to retry automatically. The
+    // caller must first determine whether a mutation completed.
     assert!(!retryable_transport_failure(
         FailureSource::Response,
-        &api("deadline_exceeded")
+        &api("outcome_unknown")
     ));
     // A non-envelope status is retried when it says the responder is busy
     // or failing for the moment, and not when it refuses the request.

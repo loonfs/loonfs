@@ -1190,7 +1190,7 @@ async fn an_initializing_namespace_is_not_found_except_by_create_fork_and_delete
             },
         )
         .await;
-    assert_matches!(snapshot, Err(CoreError::SnapshotUnavailable(_)));
+    assert_matches!(snapshot, Err(CoreError::HeadMoved(_)));
     let fork = fixture
         .engine()
         .fork_namespace_at_snapshot(

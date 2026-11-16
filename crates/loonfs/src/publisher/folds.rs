@@ -272,7 +272,7 @@ impl PublisherRegistry {
             let created = create(basis).await;
             drop(turn);
             match created {
-                Err(CoreError::SnapshotUnavailable(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
+                Err(CoreError::HeadMoved(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
                     attempts += 1;
                 }
                 created => return created.map_err(Error::from),

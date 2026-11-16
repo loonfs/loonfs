@@ -27,9 +27,10 @@ pub(crate) async fn load_snapshot_basis<'a, S: ObjectStore + ?Sized>(
         .map_err(|error| match error {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
                 ManifestLoadError::MissingManifest { object_key },
-            )) => CoreError::SnapshotUnavailable(format!(
-                "snapshot `{snapshot_id}` refers to manifest `{object_key}`, which is gone"
-            )),
+            )) => CoreError::SnapshotManifestMissing {
+                snapshot_id: snapshot_id.clone(),
+                object_key,
+            },
             other => other,
         })?;
     Ok(SnapshotBasis { manifest, segments })
@@ -39,7 +40,8 @@ pub(crate) async fn load_snapshot_basis<'a, S: ObjectStore + ?Sized>(
 ///
 /// Namespace identity and lifecycle fields come from `live_head`. Sequence
 /// data comes from the snapshot's manifest, so later WAL entries are not
-/// replayed. A snapshot whose manifest is gone returns `snapshot_unavailable`.
+/// replayed. A snapshot whose manifest is gone returns `snapshot_not_found`
+/// with the cause `manifest_missing`.
 pub(crate) async fn load_snapshot_read_basis_from_record<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: &MetadataSegmentCache,

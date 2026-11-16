@@ -89,8 +89,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// context is used only to validate the namespace identity and confirm that
     /// it has not been deleted. An ID that doesn't identify a snapshot, or a
     /// snapshot that expired at or before the current wall-clock time, returns
-    /// `snapshot_not_found`, and a snapshot whose manifest is gone returns
-    /// `snapshot_unavailable`.
+    /// `snapshot_not_found`, and so does a snapshot whose manifest is gone,
+    /// with the cause `manifest_missing`.
     pub async fn list_snapshot_files_page(
         &self,
         snapshot_id: &SnapshotId,

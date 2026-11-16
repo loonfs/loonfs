@@ -363,7 +363,7 @@ A conditional update that replaces an object only if it hasn't changed since the
 
 ### Publication budget
 
-The longest time allowed between the start of a manifest publication and the start of its manifest put (`METADATA_PUBLICATION_BUDGET_MS`). A publication that runs past its budget stops before its put. Garbage collection relies on this budget to choose a safe [grace window](#grace-window). A WAL put has no budget, because no process deletes the [fences](#fence) and [floor objects](#floor-object) that a late WAL put collides with. See [Publication and collection timing](format.md#c1-publication-and-collection-timing).
+The longest time allowed between the start of a manifest publication and the start of its manifest put (`METADATA_PUBLICATION_BUDGET_MS`). A publication that runs past its budget stops before its put, so it publishes nothing, and the request returns `store_contention` with the cause `publication_budget`. Garbage collection relies on this budget to choose a safe [grace window](#grace-window). A WAL put has no budget, because no process deletes the [fences](#fence) and [floor objects](#floor-object) that a late WAL put collides with. See [Publication and collection timing](format.md#c1-publication-and-collection-timing).
 
 ## Deletion and garbage collection
 

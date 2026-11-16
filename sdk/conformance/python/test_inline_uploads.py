@@ -139,7 +139,12 @@ class Endpoint:
                 assert len(body["content_tokens"]) == 1
             if len(self.commits) == 1:
                 return httpx.Response(
-                    503, json={"code": "deadline_exceeded", "message": "reply lost"}
+                    503,
+                    json={
+                        "code": "outcome_unknown",
+                        "message": "reply lost",
+                        "details": {"cause": "deadline"},
+                    },
                 )
             assert self.commits[0] == body
             return httpx.Response(

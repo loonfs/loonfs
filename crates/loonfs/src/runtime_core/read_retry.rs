@@ -5,9 +5,10 @@ use crate::pinned_read::PinnedRead;
 use crate::read_view::ReadSource;
 use crate::trace::phase_span;
 use crate::{CommitSeq, Consistency, CoreError, Error, NamespaceId, Result};
-use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
+use loonfs_core::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
 use loonfs_core::Phase;
 use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
+use loonfs_types::ManifestNo;
 use tracing::Instrument;
 
 /// A read that finds a segment missing returns what a new read of `source`
@@ -64,10 +65,21 @@ pub(crate) async fn classify_read_result<T>(
     result
 }
 
+/// Returns the error of a read that found its manifest replaced on every
+/// run: `store_contention`, because the `stale_head` code is a write's
+/// precondition failure, and the read reports the runs it used instead.
+fn replaced_on_every_run(namespace_id: &NamespaceId, current_manifest_no: ManifestNo) -> Error {
+    CoreError::StoreContention {
+        object_key: format!("{namespace_id} manifest {current_manifest_no}"),
+    }
+    .into()
+}
+
 impl RuntimeCore {
     /// Runs `read` at the namespace's live head, confirmed as `confirmation`
-    /// asks, and once more at a reloaded head if a newer manifest replaced
-    /// the read's basis.
+    /// asks, and again at a reloaded head each time a newer manifest replaced
+    /// the read's basis, up to `MAX_CONTENTION_ATTEMPTS` reads in all. A read
+    /// whose basis was replaced on every attempt returns `store_contention`.
     ///
     /// A maximum staleness longer than the revalidation bound returns
     /// `invalid_request` before the read sends a request.
@@ -135,19 +147,64 @@ impl RuntimeCore {
                 .instrument(phase_span!(self, Phase::PinRead, namespace_id))
                 .await?;
         }
+        for _ in 1..MAX_CONTENTION_ATTEMPTS {
+            let context = pinned.context.clone();
+            let result =
+                classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await;
+            if !matches!(result, Err(Error::Core(CoreError::ManifestReplaced { .. }))) {
+                return result;
+            }
+            self.reload_replaced_head(namespace_id).await?;
+            pinned = self
+                .pinned_read(namespace_id, confirmation)
+                .instrument(phase_span!(self, Phase::PinRead, namespace_id))
+                .await?;
+        }
         let context = pinned.context.clone();
         let result =
             classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await;
-        if !matches!(result, Err(Error::Core(CoreError::ManifestReplaced { .. }))) {
-            return result;
+        match result {
+            Err(Error::Core(CoreError::ManifestReplaced {
+                current_manifest_no,
+                ..
+            })) => Err(replaced_on_every_run(namespace_id, current_manifest_no)),
+            result => result,
         }
-        self.reload_replaced_head(namespace_id).await?;
-        let pinned = self
-            .pinned_read(namespace_id, confirmation)
-            .instrument(phase_span!(self, Phase::PinRead, namespace_id))
-            .await?;
-        let context = pinned.context.clone();
-        classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await
+    }
+
+    /// Runs `attempt`, and runs it again from a reloaded head each time it
+    /// returns `ManifestReplaced`, up to `MAX_CONTENTION_ATTEMPTS` runs in
+    /// all. If every run returns `ManifestReplaced`, this method returns
+    /// `store_contention`.
+    ///
+    /// `attempt` reads at the namespace's head as the head is when the run
+    /// starts, so a run after a reload reads a newer manifest than the run
+    /// before it read. [`Self::read_at_least`] runs an ordinary read the same
+    /// way at a head that it pins for each run.
+    pub(crate) async fn read_at_reloaded_head<T, F, Fut>(
+        &self,
+        namespace_id: &NamespaceId,
+        mut attempt: F,
+    ) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        for _ in 1..MAX_CONTENTION_ATTEMPTS {
+            match attempt().await {
+                Err(Error::Core(CoreError::ManifestReplaced { .. })) => {
+                    self.reload_replaced_head(namespace_id).await?;
+                }
+                result => return result,
+            }
+        }
+        match attempt().await {
+            Err(Error::Core(CoreError::ManifestReplaced {
+                current_manifest_no,
+                ..
+            })) => Err(replaced_on_every_run(namespace_id, current_manifest_no)),
+            result => result,
+        }
     }
 
     /// Loads the namespace's head from the store after a newer manifest
@@ -174,6 +231,62 @@ impl RuntimeCore {
                 Consistency::Eventual { .. }
             ),
             HeadConfirmation::View => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{CoreError, Error, ErrorCode, LoonFs};
+    use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_test_support::ids::namespace_id;
+    use loonfs_types::ManifestNo;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    /// Checks that a read through views runs again after each run that
+    /// returns `ManifestReplaced`. A read replaced on its first run returns
+    /// its second run's result, and a read replaced on every run returns
+    /// `store_contention` after `MAX_CONTENTION_ATTEMPTS` runs.
+    #[tokio::test]
+    async fn reads_through_views_run_again_after_a_replaced_manifest() {
+        let temp_dir = tempdir().expect("tempdir");
+        let runtime = LoonFs::builder_with_store(Arc::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        ))
+        .writer_id(loonfs_test_support::ids::writer_id("replaced-reads"))
+        .build()
+        .await
+        .expect("build writer");
+        let id = namespace_id("replaced-reads");
+        runtime
+            .create_namespace(&id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
+        let namespace = runtime.namespace(&id);
+        for replaced_runs in [1, MAX_CONTENTION_ATTEMPTS] {
+            let runs = AtomicUsize::new(0);
+            let result = namespace
+                .read_through_views(|| async {
+                    if runs.fetch_add(1, Ordering::SeqCst) < replaced_runs {
+                        return Err(Error::from(CoreError::ManifestReplaced {
+                            replaced_manifest_no: ManifestNo(1),
+                            current_manifest_no: ManifestNo(2),
+                        }));
+                    }
+                    Ok("read")
+                })
+                .await;
+            if replaced_runs < MAX_CONTENTION_ATTEMPTS {
+                assert_eq!(result.expect("the second run returns its read"), "read");
+                assert_eq!(runs.into_inner(), replaced_runs + 1);
+            } else {
+                let error = result.expect_err("every run finds its manifest replaced");
+                assert_eq!(error.code(), ErrorCode::StoreContention);
+                assert_eq!(runs.into_inner(), MAX_CONTENTION_ATTEMPTS);
+            }
         }
     }
 }

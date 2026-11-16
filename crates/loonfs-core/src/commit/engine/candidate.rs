@@ -554,11 +554,11 @@ impl CommitCandidate {
         for value in &self.inline_content {
             let size_bytes = value.bytes().len();
             if size_bytes > MAX_WAL_INLINE_CONTENT_BYTES {
-                let content_id = &value.content_ref().content_id;
-                return Err(CoreError::InvalidCommitRequest(format!(
-                    "inline content `{content_id}` is {size_bytes} bytes; maximum is {}",
-                    MAX_WAL_INLINE_CONTENT_BYTES
-                )));
+                return Err(CoreError::InlineContentTooLarge {
+                    content_id: value.content_ref().content_id.clone(),
+                    size_bytes: size_bytes as u64,
+                    max_bytes: MAX_WAL_INLINE_CONTENT_BYTES as u64,
+                });
             }
         }
         let inline_bytes = self.inline_content_bytes();

@@ -513,7 +513,7 @@ impl LoonFs<Writable> {
     /// `fork` writes nothing, and the call releases its permit, folds the
     /// source through the namespace's one fold path, and runs `fork` again,
     /// up to `MAX_CONTENTION_ATTEMPTS` times in all, and then returns
-    /// `snapshot_unavailable`. The fold runs without the fork's permit, so
+    /// `stale_head`. The fold runs without the fork's permit, so
     /// the two folds never hold permits at the same time.
     pub(crate) async fn install_fork<Fork>(
         &self,
@@ -548,7 +548,7 @@ impl LoonFs<Writable> {
                     }
                 }
             }
-            Err(Error::from(CoreError::SnapshotUnavailable(format!(
+            Err(Error::from(CoreError::HeadMoved(format!(
                 "the WAL tail of namespace `{source_namespace_id}` still had a commit older \
                  than the max age after each of {MAX_CONTENTION_ATTEMPTS} folds"
             ))))

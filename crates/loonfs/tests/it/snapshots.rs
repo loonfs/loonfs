@@ -672,24 +672,32 @@ async fn shared_file_and_download_options_select_the_snapshot() {
         .await
         .expect("snapshot grant by inode");
     assert_eq!(grant.revision_no, RevisionNo(1));
-    for error in [
-        reader
-            .create_revision_download_with_options("/file", RevisionNo(1), &download)
-            .await
-            .err(),
-        reader
-            .create_revision_download_by_inode_with_options(inode_id, RevisionNo(1), &download)
-            .await
-            .err(),
-    ] {
-        assert_matches!(
-            error,
-            Some(loonfs::Error::InvalidRequest {
-                param: "snapshot_id",
-                ..
-            })
-        );
-    }
+    // The inode revision download finds its revision in the snapshot, as the
+    // inode revision content read does, so a revision committed after the
+    // snapshot isn't found there.
+    let grant = reader
+        .create_revision_download_by_inode_with_options(inode_id, RevisionNo(1), &download)
+        .await
+        .expect("snapshot revision grant by inode");
+    assert_eq!(grant.revision_no, RevisionNo(1));
+    let later = reader
+        .create_revision_download_by_inode_with_options(inode_id, RevisionNo(2), &download)
+        .await
+        .expect_err("a revision after the snapshot");
+    assert_eq!(later.code(), loonfs::ErrorCode::RevisionNotFound);
+    // The path form selects its revision by the snapshot, so it refuses a
+    // revision number with a snapshot.
+    let error = reader
+        .create_revision_download_with_options("/file", RevisionNo(1), &download)
+        .await
+        .err();
+    assert_matches!(
+        error,
+        Some(loonfs::Error::InvalidRequest {
+            param: "snapshot_id",
+            ..
+        })
+    );
     writer.shutdown().await.expect("shutdown");
 }
 

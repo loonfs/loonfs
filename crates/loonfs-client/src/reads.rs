@@ -16,7 +16,7 @@ use loonfs_types::{
 };
 
 /// Adds the query parameters that say what a read reads at.
-fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
+pub(crate) fn push_read_at(query: &mut QueryBuilder, at: &ReadAt) {
     let fields = ReadAtFields::from(at);
     if let Some(snapshot_id) = &fields.snapshot_id {
         query.push("snapshot_id", snapshot_id.as_str());

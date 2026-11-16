@@ -1662,7 +1662,7 @@ async fn snapshot_creation_deletes_its_record_when_the_floor_passed_its_manifest
         .await
         .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
         .expect_err("floor passed snapshot");
-    assert_eq!(error.code(), ErrorCode::SnapshotUnavailable);
+    assert_eq!(error.code(), ErrorCode::StaleHead);
     assert!(store
         .list_prefix(&snapshot_prefix(&namespace_id))
         .await

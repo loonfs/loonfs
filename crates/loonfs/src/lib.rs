@@ -134,7 +134,7 @@ pub mod engine {
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
         DecodedBlockKey, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
     };
-    pub use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
+    pub use loonfs_core::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
     pub use loonfs_core::{
         refill_iterators, select_next_iterator, BudgetPermit, ExtensionBasis, ExtensionPublication,
         PermitCounts, Permits, SegmentBlockLoader, SegmentRowIterator,
@@ -241,11 +241,11 @@ pub use options::{
     AttributeChanges, CommitOptions, Consistency, CopyOptions, CreateDirectoryOptions,
     CreateSnapshotOptions, DeleteByInodeOptions, DeleteOptions, DiffOptions,
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
-    ListFileRevisionsOptions, ListOptions, ListTrashOptions, MaintainMetadataOptions,
-    MergeForkOptions, MoveOptions, PutFileOptions, ReadAt, ReadConsistency, ReadFileOptions,
-    ReadFileStreamOptions, ReadRange, RestoreDeletedDestination, RestoreDeletedOptions,
-    StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
-    UpdateAttributesOptions,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, LiveReadOptions,
+    MaintainMetadataOptions, MergeForkOptions, MoveOptions, PutFileOptions, ReadAt,
+    ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadRange, RestoreDeletedDestination,
+    RestoreDeletedOptions, StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 pub use pagers::{
     ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, RetainedRevisionsPager,

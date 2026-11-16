@@ -30,7 +30,7 @@ pub(super) fn prepare_inline_content(
         })?;
         if bytes.len() > threshold {
             return Err(ApiResponseError::new(
-                ErrorCode::InvalidRequest,
+                ErrorCode::ContentTooLarge,
                 &format!(
                     "inline content is {} bytes; maximum is {threshold}",
                     bytes.len()

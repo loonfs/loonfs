@@ -2204,6 +2204,7 @@ conformanceTest("inode_addressing", async (activeHarness, testCase) => {
         await client.files.retrieve({
             namespace_id: namespaceId,
             path: childPath(request.copy_file_name),
+            include_attributes: true,
         }),
     );
     assert.equal(labeled.attributes_revision_no, expected.attributes_revision_no);

@@ -10,7 +10,7 @@ use std::assert_matches;
 
 /// Checks that a snapshot of a manifest that compaction, or a fold of a newer
 /// head, replaces before the snapshot's verification returns
-/// `snapshot_unavailable` and deletes the snapshot, so the caller folds and takes a
+/// `stale_head` and deletes the snapshot, so the caller folds and takes a
 /// snapshot again.
 #[tokio::test]
 async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_deleted() {
@@ -65,7 +65,7 @@ async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_de
             store.release();
         });
         let error = created.expect_err("the selected manifest is no longer current");
-        assert_eq!(error.code(), ErrorCode::SnapshotUnavailable);
+        assert_eq!(error.code(), ErrorCode::StaleHead);
         assert!(store
             .list_prefix(&snapshot_prefix(&namespace_id))
             .await
@@ -77,7 +77,7 @@ async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_de
 /// Checks that a snapshot without a fold keeps the manifest that the caller
 /// read and leaves the WAL tail unfolded, and that a fold which replaces the
 /// manifest while the snapshot record is written makes the call delete the
-/// snapshot record and return `snapshot_unavailable`, so the caller reads a
+/// snapshot record and return `stale_head`, so the caller reads a
 /// fresh basis.
 #[tokio::test]
 async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replaced_by_a_fold() {
@@ -137,7 +137,7 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
             store.release();
         }
     );
-    assert_matches!(outcome, Err(CoreError::SnapshotUnavailable(_)));
+    assert_matches!(outcome, Err(CoreError::HeadMoved(_)));
     let snapshots = store
         .list_prefix(&snapshot_prefix(&namespace_id))
         .await
@@ -263,7 +263,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
             store.release();
         }
     );
-    assert_matches!(result, Err(CoreError::SnapshotUnavailable(_)));
+    assert_matches!(result, Err(CoreError::HeadMoved(_)));
     assert!(store
         .list_prefix(&snapshot_prefix(&namespace_id))
         .await

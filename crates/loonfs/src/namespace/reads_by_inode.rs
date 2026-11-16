@@ -2,7 +2,6 @@
 //! listings, file bytes, and download targets by inode ID.
 
 use crate::downloads::DirectDownloadByInodeTarget;
-use crate::namespace::reads::ensure_revision_read_at;
 use crate::namespace::reads::{
     reject_snapshot_directory_cursor, validate_snapshot_directory_cursor,
 };
@@ -137,7 +136,6 @@ impl<M: crate::Mode> Namespace<M> {
         options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
         let _permit = self.core.read_permit().await;
-        ensure_revision_read_at(&options.at, revision_no)?;
         self.read_at(&options.at, |pinned, _| async move {
             Ok(pinned
                 .engine

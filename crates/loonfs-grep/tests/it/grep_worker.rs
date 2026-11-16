@@ -1146,7 +1146,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
     inode_scan.scope = GrepScope::Inode(directory);
     let mut path_scan = unscoped_scan.clone();
     path_scan.scope =
-        GrepScope::PathPrefix(AbsolutePath::parse(format!("/{}", name(0))).expect("scope path"));
+        GrepScope::Path(AbsolutePath::parse(format!("/{}", name(0))).expect("scope path"));
     let file_path = format!("{directory_path}/leaf.txt");
     for (case, grep_request) in [
         ("unscoped scan", unscoped_scan),
@@ -1327,8 +1327,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     assert!(absent.next_cursor.is_none());
 
     let mut missing_scope = request("shared needle");
-    missing_scope.scope =
-        GrepScope::PathPrefix(AbsolutePath::parse("/missing").expect("scope path"));
+    missing_scope.scope = GrepScope::Path(AbsolutePath::parse("/missing").expect("scope path"));
     let error = new_query(&store, &namespace_id, &missing_scope)
         .await
         .expect_err("a missing scope must remain a missing path");
@@ -1338,7 +1337,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
     let mut inode_scope = request("needle");
     inode_scope.scope = GrepScope::Inode(docs_inode_id);
     let mut path_scope = request("needle");
-    path_scope.scope = GrepScope::PathPrefix(AbsolutePath::parse("/docs").expect("scope path"));
+    path_scope.scope = GrepScope::Path(AbsolutePath::parse("/docs").expect("scope path"));
     let scoped_by_inode = new_query(&store, &namespace_id, &inode_scope)
         .await
         .expect("inode scope query");
@@ -1737,7 +1736,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     }
     let mut scan = request("ee");
     scan.allow_scan = true;
-    scan.scope = GrepScope::PathPrefix(AbsolutePath::parse("/team").expect("path"));
+    scan.scope = GrepScope::Path(AbsolutePath::parse("/team").expect("path"));
     let reads =
         NamespaceReads::new(host.reader.clone(), &namespace_id).with_subject(subject("viewer"));
     let scanned = host

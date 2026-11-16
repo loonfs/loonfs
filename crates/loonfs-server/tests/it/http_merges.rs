@@ -426,10 +426,17 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
         }
     );
 
+    // Another runtime advances the floor, so the query asks for `strong`.
     let floor = family.advance_floor(&family.main).await;
     assert!(floor > fork_point);
     let range = client
-        .next_merge_range(&family.main, &family.fork)
+        .next_merge_range_with_options(
+            &family.main,
+            &family.fork,
+            &loonfs_client::LiveReadOptions {
+                consistency: Some(loonfs_client::Consistency::Strong),
+            },
+        )
         .await
         .expect("the range below main's floor");
     assert_eq!(
@@ -448,7 +455,7 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
         other => panic!("expected an API error, got {other:?}"),
     };
     assert_eq!(code, "invalid_request");
-    assert_eq!(param.as_deref(), Some("source"));
+    assert_eq!(param.as_deref(), Some("source_namespace_id"));
     family.harness.server.abort();
 }
 
@@ -517,7 +524,7 @@ async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
                     .map(|_| ()),
             ),
             (
-                "source",
+                "source_namespace_id",
                 client
                     .next_merge_range(&family.main, source)
                     .await

@@ -5,12 +5,12 @@ use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::reject_snapshot_with_revision;
 use super::handlers_inodes::{InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
-use super::query_params::{live_consistency, read_at};
+use super::query_params::read_at;
 use super::usage::GrantedBytes;
 use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::{Extension, Json};
-use loonfs::{DownloadOptions, ReadAt};
+use loonfs::DownloadOptions;
 use loonfs_objectstore::presign::{DirectGetIssuer, PresignedGetRequest};
 use loonfs_objectstore::ByteRange;
 #[cfg(feature = "openapi")]
@@ -192,7 +192,7 @@ pub(super) async fn create_download_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
         tag = "inodes",
         summary = "Begin revision download by inode",
-        description = "Authorizes a direct read of one retained inode revision. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
+        description = "Authorizes a direct read of one retained inode revision. With `snapshot_id`, the server finds the revision in the snapshot instead of at the live head. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
@@ -201,9 +201,9 @@ pub(super) async fn create_download_by_inode(
         request_body = CreateRevisionDownloadByInodeRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
-            (status = 400, description = "Invalid inode ID, revision number, or start_offset, start_offset at or past the revision's size, or a snapshot_id, which can't be combined with a revision", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, revision number, snapshot ID, consistency, or start_offset, or start_offset at or past the revision's size", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace, inode, or revision not found", body = ErrorResponse),
+            (status = 404, description = "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
@@ -224,11 +224,15 @@ pub(super) async fn create_revision_download_by_inode(
     let runtime = state.runtime_for(subject);
     let inode_id = path.inode_id;
     let revision_no = path.revision_no;
-    let consistency = live_consistency(request.consistency, request.max_staleness_ms)
-        .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
+    let at = read_at(
+        request.snapshot_id,
+        request.consistency,
+        request.max_staleness_ms,
+    )
+    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
-        at: ReadAt::Live(consistency),
+        at,
         start_offset: request.start_offset,
     };
     let target = runtime
