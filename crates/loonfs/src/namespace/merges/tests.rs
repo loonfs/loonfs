@@ -17,8 +17,8 @@ use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{request_lines, KeyPredicate, RecordingStore};
 use loonfs_types::{
-    AbsolutePath, ContentExtent, ContentId, ContentLayout, DeleteDirectoryBehavior, ExtentObject,
-    ManifestNo, MergeConflictKind, FEATURE_MERGES,
+    AbsolutePath, ContentId, ContentLayout, DeleteDirectoryBehavior, ExtentObject, ManifestNo,
+    MergeConflictKind, FEATURE_MERGES,
 };
 use std::assert_matches;
 use std::num::NonZeroU64;
@@ -1195,15 +1195,28 @@ async fn a_merge_releases_its_snapshot_after_an_extension() {
     );
 }
 
-/// Returns the extent of the span object of `content_id` from `start` to
-/// `end`, read from its first byte.
-fn span(content_id: &ContentId, start: u64, end: u64) -> ContentExtent {
-    ContentExtent {
-        content_id: content_id.clone(),
-        object: ExtentObject::Span { start, end },
-        offset: 0,
-        length: end - start,
-    }
+/// Returns, for each extent of `layout`, its chain, the chain offsets of its
+/// span object, and the range of the object it reads. A span object's ID is
+/// random, so a test compares a layout's extents through this list, and
+/// compares the extents themselves to check that two layouts list the same
+/// object.
+fn span_bounds(layout: &ContentLayout) -> Vec<(ContentId, u64, u64, u64, u64)> {
+    layout
+        .extents
+        .iter()
+        .map(|extent| {
+            let ExtentObject::Span { start, end, .. } = extent.object else {
+                panic!("the extent should be a span object: {extent:?}");
+            };
+            (
+                extent.content_id.clone(),
+                start,
+                end,
+                extent.offset,
+                extent.length,
+            )
+        })
+        .collect()
 }
 
 /// Checks that a merge of files whose bytes are pieces in the fork's WAL
@@ -1233,23 +1246,21 @@ async fn a_merge_writes_the_pieces_in_the_forks_tail_without_folding_the_fork() 
     for (path, bytes) in [("/b.txt", &b"b"[..]), ("/c.txt", &b"cc"[..])] {
         let (content_id, layout) = family.layout(&family.main, path).await;
         let length = u64::try_from(bytes.len()).expect("a small file");
+        assert_eq!(layout.creator_namespace_id, *family.fork.id(), "{path}");
         assert_eq!(
-            layout,
-            ContentLayout {
-                creator_namespace_id: family.fork.id().clone(),
-                extents: vec![span(&content_id, 0, length)],
-            },
+            span_bounds(&layout),
+            [(content_id, 0, length, 0, length)],
             "{path}"
         );
         assert_eq!(family.fresh_read(&family.main, path).await, bytes, "{path}");
     }
 }
 
-/// Checks that the fork's own fold after a merge writes the extent that the
-/// merge wrote, and that a later merge of an append in the fork's tail
-/// writes only the appended pieces. `main`'s layout then lists the fold's
-/// extent and the second merge's extent, and both namespaces read the same
-/// bytes.
+/// Checks that the fork's own fold after a merge writes a span object of its
+/// own, with the bytes of the object that the merge wrote, and that a later
+/// merge of an append in the fork's tail writes only the appended pieces.
+/// `main`'s layout then lists the fold's extent and the second merge's
+/// extent, and both namespaces read the same bytes.
 #[tokio::test]
 async fn a_merge_after_the_forks_fold_writes_only_the_appended_pieces() {
     let family = family().await;
@@ -1263,11 +1274,21 @@ async fn a_merge_after_the_forks_fold_writes_only_the_appended_pieces() {
         .await
         .expect("fold the fork");
     let (content_id, folded) = family.layout(&family.fork, "/b.txt").await;
+    let (merged_id, merged) = family.layout(&family.main, "/b.txt").await;
+    assert_eq!(merged_id, content_id);
+    assert_eq!(merged.creator_namespace_id, folded.creator_namespace_id);
     assert_eq!(
-        family.layout(&family.main, "/b.txt").await,
-        (content_id.clone(), folded),
-        "the fork's fold writes the merge's extent"
+        span_bounds(&merged),
+        span_bounds(&folded),
+        "the fork's fold writes the merge's range"
     );
+    assert_ne!(
+        merged.extents, folded.extents,
+        "the fork's fold writes its own span object"
+    );
+    for namespace in [&family.main, &family.fork] {
+        assert_eq!(family.fresh_read(namespace, "/b.txt").await, b"b");
+    }
     family
         .fork
         .append_file("/b.txt", b"++", &actor())
@@ -1276,12 +1297,17 @@ async fn a_merge_after_the_forks_fold_writes_only_the_appended_pieces() {
     merge().await.expect("the second merge");
     let (appended, layout) = family.layout(&family.main, "/b.txt").await;
     assert_eq!(appended, content_id, "the fork extends its own chain");
+    assert_eq!(layout.creator_namespace_id, *family.fork.id());
     assert_eq!(
-        layout,
-        ContentLayout {
-            creator_namespace_id: family.fork.id().clone(),
-            extents: vec![span(&content_id, 0, 1), span(&content_id, 1, 3)],
-        }
+        span_bounds(&layout),
+        [
+            (content_id.clone(), 0, 1, 0, 1),
+            (content_id.clone(), 1, 3, 0, 2)
+        ]
+    );
+    assert_eq!(
+        layout.extents[0], folded.extents[0],
+        "the second merge lists the fold's object"
     );
     for namespace in [&family.main, &family.fork] {
         assert_eq!(family.fresh_read(namespace, "/b.txt").await, b"b++");

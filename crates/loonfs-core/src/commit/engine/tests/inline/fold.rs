@@ -3,7 +3,6 @@
 use super::*;
 use crate::test_support::WriterAt;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
-use loonfs_objectstore::PutMode;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{BlockingStore, FailStore, InjectedError, OperationSelector};
 use loonfs_types::ErrorCode;
@@ -305,7 +304,7 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         *input.read_basis.basis.manifest()
     );
     for value in &values {
-        let key = folded_key(&pool_id(&store).await, value.content_ref());
+        let key = folded_key(&store, value.content_ref()).await;
         assert_eq!(
             store
                 .get(&key, None)
@@ -348,20 +347,45 @@ async fn failed_manifest_and_over_budget_retries_keep_materialized_content() {
         .expect("retry");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     assert_content_before_metadata(&store, values.len());
-    let mut retry_keys = content_assemblies(&store);
-    retry_keys.sort();
-    let mut keys = keys;
-    keys.sort();
-    assert_eq!(retry_keys, keys);
+    // The retry writes each span object again under a new ID, and the
+    // objects of the failed attempt stay for garbage collection. The empty
+    // value's whole object has one key, so the retry writes the same key.
+    let retry_keys = content_assemblies(&store);
+    assert_eq!(retry_keys.len(), keys.len());
+    for value in &values {
+        let pool_id = pool_id(&store).await;
+        let content_id = &value.content_ref().content_id;
+        let whole = loonfs_objectstore::keys::content_blob(&pool_id, content_id);
+        let written = |keys: &[String]| -> Vec<String> {
+            keys.iter()
+                .filter(|key| key.starts_with(&whole))
+                .cloned()
+                .collect()
+        };
+        if value.content_ref().size_bytes == 0 {
+            assert_eq!(written(&retry_keys), written(&keys));
+        } else {
+            let [first] = <[String; 1]>::try_from(written(&keys)).expect("one span object");
+            let [retried] = <[String; 1]>::try_from(written(&retry_keys)).expect("one span object");
+            assert_ne!(first, retried);
+            // The first attempt, the attempt over its budget, and the retry
+            // each wrote one span object.
+            let stored = crate::test_support::span_object_keys(&store, &pool_id, content_id).await;
+            assert_eq!(stored.len(), 3);
+            assert!(stored.contains(&first) && stored.contains(&retried));
+        }
+    }
 }
 
-/// Checks that two sessions' folds of the same tail write identical content
-/// objects and publish one manifest, and that the fold of the older session
-/// finds the tail folded after the second session's epoch claim.
+/// Checks that two sessions' folds of the same tail write a span object
+/// each and publish one manifest, whose layout lists the publishing fold's
+/// object, and that the fold of the older session finds the tail folded
+/// after the second session's epoch claim.
 #[tokio::test]
-async fn competing_engines_materialize_identical_objects_and_publish_one_manifest() {
+async fn competing_engines_write_their_own_objects_and_publish_one_manifest() {
     let (_directory, store, mut first, context) = setup().await;
     let values = vec![inline(Bytes::from_static(b"shared"))];
+    let content_id = values[0].content_ref().content_id.clone();
     let candidate = candidate("race", values);
     publish(&mut first, &context, candidate.clone())
         .await
@@ -410,7 +434,16 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     );
     let keys = content_assemblies(&store);
     assert_eq!(keys.len(), 2);
-    assert_eq!(keys[0], keys[1]);
+    assert_ne!(keys[0], keys[1]);
+    let layout =
+        crate::test_support::content_layout(&store, &first.namespace.namespace_id, &content_id)
+            .await
+            .expect("the folded layout");
+    let listed = crate::storage::content_location::extent_object_key(
+        &pool_id(&store).await,
+        &layout.extents[0],
+    );
+    assert!(keys.contains(&listed));
     // The first fold's put loses to the second fold's manifest, and its next
     // attempt finds the tail folded.
     assert_eq!(
@@ -435,8 +468,12 @@ async fn competing_engines_materialize_identical_objects_and_publish_one_manifes
     );
 }
 
+/// Checks that a fold whose new span object's key is already occupied by
+/// other bytes reports corruption and publishes no manifest. No other write
+/// generates the same span object ID, so the occupied key can't be another
+/// writer's copy of the same pieces.
 #[tokio::test]
-async fn an_existing_different_object_is_corruption_and_stops_manifest_publication() {
+async fn an_occupied_span_key_is_corruption_and_stops_manifest_publication() {
     let (_directory, store, mut engine, context) = setup().await;
     let value = inline(Bytes::from_static(b"right"));
     publish(
@@ -447,20 +484,28 @@ async fn an_existing_different_object_is_corruption_and_stops_manifest_publicati
     .await
     .expect("publish");
     let input = engine.writer_position().expect("tail");
-    let key = folded_key(&pool_id(&store).await, value.content_ref());
-    store
-        .put(&key, Bytes::from_static(b"wrong"), PutMode::CreateIfAbsent)
-        .await
-        .expect("conflicting object");
+    let occupied = loonfs_test_support::stores::LostCreateStore::new(
+        store.clone(),
+        span_keys(&store, value.content_ref()).await,
+        Bytes::from_static(b"wrong"),
+    );
     store.reset();
-    let error = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+    let error = crate::test_support::namespace_store(&occupied, &engine.namespace.namespace_id)
         .fold_wal()
         .await
-        .expect_err("different object");
+        .expect_err("occupied span key");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert_matches!(error, CoreError::NamespaceCorrupt(_));
+    // The one put is the other bytes that the store wrote at the fold's key
+    // just before the fold's own create, which the store refused.
+    let operations = store.snapshot();
+    let key = folded_key(&store, value.content_ref()).await;
     assert_eq!(store.counts().puts, 1);
-    assert_eq!(content_assemblies(&store), vec![key.clone()]);
+    assert_matches!(
+        operations.as_slice(),
+        [.., RecordedOperation::Put { key: planted, .. }, RecordedOperation::Head { .. }]
+            if *planted == key
+    );
     assert_eq!(
         crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
             .load_current_manifest()
@@ -492,11 +537,6 @@ async fn a_materialization_transport_failure_remains_retryable() {
     .await
     .expect("publish");
     let input = engine.writer_position().expect("tail");
-    let key = folded_key(&pool_id(&store).await, value.content_ref());
-    store
-        .put(&key, value.bytes().clone(), PutMode::CreateIfAbsent)
-        .await
-        .expect("existing object");
     let failing = FailStore::new(
         store.clone(),
         KeyPredicate::content_blob(),
@@ -517,6 +557,7 @@ async fn a_materialization_transport_failure_remains_retryable() {
             ..
         }
     );
+    let key = folded_key(&store, value.content_ref()).await;
     assert_eq!(store.counts().puts, 1);
     assert_eq!(content_assemblies(&store), vec![key]);
     assert_eq!(

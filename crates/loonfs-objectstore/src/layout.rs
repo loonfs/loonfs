@@ -9,7 +9,9 @@ use crate::keys::{
     UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
-use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, PoolId, UploadId};
+use loonfs_types::{
+    ContentId, EffectiveLimit, ManifestNo, NamespaceId, PoolId, SpanObjectId, UploadId,
+};
 use std::num::NonZeroU32;
 
 const NAMESPACES_PREFIX: &str = "namespaces/";
@@ -18,9 +20,12 @@ const POOLS_PREFIX: &str = "pools/";
 /// Length of a content ID: `con_` and a generated ID body.
 const CONTENT_ID_BYTES: usize = "con_".len() + loonfs_types::GENERATED_ID_BODY_BYTES;
 
-/// Length of a span object name: the content ID, then `-` and a twenty-digit
-/// offset, twice.
-const CONTENT_SPAN_NAME_BYTES: usize = CONTENT_ID_BYTES + 2 * 21;
+/// Length of a span object ID: `span_` and a generated ID body.
+const SPAN_OBJECT_ID_BYTES: usize = "span_".len() + loonfs_types::GENERATED_ID_BODY_BYTES;
+
+/// Length of a span object name: the content ID, then `-` and the span
+/// object's ID.
+const CONTENT_SPAN_NAME_BYTES: usize = CONTENT_ID_BYTES + 1 + SPAN_OBJECT_ID_BYTES;
 
 /// Most ids one [`list_namespace_ids`] or [`list_pool_ids`] page contains: the
 /// most keys S3 and Google Cloud Storage return for one list request.
@@ -127,13 +132,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             if object.len() == CONTENT_SPAN_NAME_BYTES
                 && object.is_ascii()
                 && object.as_bytes()[CONTENT_ID_BYTES] == b'-'
-                && object.as_bytes()[CONTENT_ID_BYTES + 21] == b'-'
-                && object[CONTENT_ID_BYTES + 1..CONTENT_ID_BYTES + 21]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit())
-                && object[CONTENT_ID_BYTES + 22..]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit()) =>
+                && SpanObjectId::parse(&object[CONTENT_ID_BYTES + 1..]).is_ok() =>
         {
             Some(parsed(
                 DurableObjectFamily::ContentBlob,
@@ -435,31 +434,30 @@ mod tests {
     use loonfs_test_support::ids::numbered_pool_id;
     use loonfs_types::{
         ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
-        SnapshotId, UploadId, WalNo,
+        SnapshotId, SpanObjectId, UploadId, WalNo,
     };
 
     #[test]
-    fn spans_use_the_chain_id_and_require_exact_decimal_bounds() {
+    fn spans_use_the_chain_id_and_require_a_generated_id_body() {
         let pool_id = numbered_pool_id(1);
         let content_id = ContentId::generate();
         let own_key = content_blob(&pool_id, &content_id);
-        let key = crate::keys::content_span(&pool_id, &content_id, 2, 19);
-        assert_eq!(
-            key,
-            format!("{own_key}-00000000000000000002-00000000000000000019")
-        );
+        let span_object_id =
+            SpanObjectId::parse("span_00000000000000000000000002").expect("span object id");
+        let key = crate::keys::content_span(&pool_id, &content_id, &span_object_id);
+        assert_eq!(key, format!("{own_key}-span_00000000000000000000000002"));
         assert_eq!(super::content_id_of(&key), Some(content_id.clone()));
         assert_eq!(super::content_id_of(&own_key), Some(content_id));
         assert!(own_key < key);
-        assert!(parse_object_key(&format!(
-            "{own_key}/00000000000000000002-00000000000000000019"
-        ))
-        .is_none());
+        assert!(parse_object_key(&format!("{own_key}/span_00000000000000000000000002")).is_none());
         for suffix in [
-            "2-19",
-            "00000000000000000002_00000000000000000019",
-            "00000000000000000002-0000000000000000001x",
-            "00000000000000000002-00000000000000000019/extra",
+            "span_2",
+            "00000000000000000000000002",
+            "seg_000000000000000000000000002",
+            "span_0000000000000000000000000u",
+            "span_80000000000000000000000000",
+            "00000000000000000002-00000000000000000019",
+            "span_00000000000000000000000002/extra",
         ] {
             assert!(parse_object_key(&format!("{own_key}-{suffix}")).is_none());
         }
@@ -549,7 +547,7 @@ mod tests {
                 Some(content_id.as_str()),
             ),
             (
-                crate::keys::content_span(&pool_id, &content_id, 2, 19),
+                crate::keys::content_span(&pool_id, &content_id, &SpanObjectId::generate()),
                 DurableObjectFamily::ContentBlob,
                 pool,
                 Some(content_id.as_str()),

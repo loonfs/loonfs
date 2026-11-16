@@ -3,13 +3,14 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::storage::content::DurableContentValidationError;
+use crate::storage::content_location::{extent_object_key, ContentLocation, LayoutLookup};
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::test_support::WriterAt;
 use crate::ObjectRange;
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::{Checksum, ExtentObject};
+use loonfs_types::{Checksum, ExtentObject, SpanObjectId};
 use std::assert_matches;
 
 async fn layout(
@@ -25,6 +26,41 @@ async fn layout(
         .await
         .expect("layout lookup")
         .expect("layout")
+}
+
+/// Looks up one layout row, so that a test reads a chain through that row.
+struct Layout<'a>(&'a ContentLayoutRecord);
+
+#[async_trait::async_trait]
+impl LayoutLookup for Layout<'_> {
+    async fn content_layout(
+        &self,
+        _: &ContentId,
+    ) -> crate::error::Result<Option<ContentLayoutRecord>> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+/// Returns the chain offsets that `object` stores, or `None` for a whole
+/// object.
+fn span_bounds(object: &ExtentObject) -> Option<(u64, u64)> {
+    match object {
+        ExtentObject::Span { start, end, .. } => Some((*start, *end)),
+        ExtentObject::Whole => None,
+    }
+}
+
+/// Returns the key of the span object from `start` to `end` that `row`
+/// lists. A span object's key is random, so a test finds it through the
+/// layout.
+fn span_key(pool_id: &PoolId, row: &ContentLayoutRecord, start: u64, end: u64) -> String {
+    let extent = row
+        .layout
+        .extents
+        .iter()
+        .find(|extent| span_bounds(&extent.object) == Some((start, end)))
+        .expect("the layout should list the span object");
+    extent_object_key(pool_id, extent)
 }
 
 fn content_operations(store: &RecordingStore<LocalFsStore>) -> Vec<RecordedOperation> {
@@ -98,10 +134,7 @@ async fn folds_write_spans_and_combine_small_tail_extents() {
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     let first = layout(&store, &original).await;
     assert_eq!(first.layout.extents.len(), 1);
-    assert_eq!(
-        first.layout.extents[0].object,
-        ExtentObject::Span { start: 0, end: 100 }
-    );
+    assert_eq!(span_bounds(&first.layout.extents[0].object), Some((0, 100)));
     for (revision, added, expected_lengths) in [
         (2_u8, 10, vec![100, 10]),
         (3, 3, vec![100, 10, 3]),
@@ -143,13 +176,8 @@ async fn folds_write_spans_and_combine_small_tail_extents() {
         );
         assert_eq!(row.size_bytes, bytes.len() as u64);
         assert!(
-            matches!(
-                row.layout.extents.last().expect("tail").object,
-                ExtentObject::Span {
-                    start: 100,
-                    end: 115
-                }
-            ) == (revision == 4)
+            (span_bounds(&row.layout.extents.last().expect("tail").object) == Some((100, 115)))
+                == (revision == 4)
         );
         assert_eq!(
             read_file(&store, &namespace_id, RevisionNo(u64::from(revision))).await,
@@ -159,7 +187,7 @@ async fn folds_write_spans_and_combine_small_tail_extents() {
     let pool_id = pool_id(&store).await;
     assert_eq!(
         store
-            .get(&content_span(&pool_id, &original.content_id, 0, 100), None)
+            .get(&span_key(&pool_id, &first, 0, 100), None)
             .await
             .expect("get")
             .expect("first span"),
@@ -227,7 +255,7 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
     );
     assert_eq!(store.counts().gets, 2);
     let pool_id = pool_id(&store).await;
-    let missing = content_span(&pool_id, &original.content_id, 100, 110);
+    let missing = span_key(&pool_id, &layout(&store, &reference).await, 100, 110);
     store.delete(&missing).await.expect("delete span");
     assert_matches!(
         location.read_bytes(&store, None, &reference).await,
@@ -243,7 +271,7 @@ async fn a_combined_span_must_match_its_objects_stored_checksum() {
     let mut bytes = vec![b'a'; 100];
     let (inode_id, original) = folded_file(&store, &mut engine, &context, &bytes).await;
     bytes.resize(103, b'b');
-    commit_piece(
+    let reference = commit_piece(
         &store,
         &namespace_id,
         (inode_id, RevisionNo(2)),
@@ -258,7 +286,7 @@ async fn a_combined_span_must_match_its_objects_stored_checksum() {
         .await
         .expect("span fold");
     let pool_id = pool_id(&store).await;
-    let key = content_span(&pool_id, &original.content_id, 100, 103);
+    let key = span_key(&pool_id, &layout(&store, &reference).await, 100, 103);
     let incorrect = MetadataMapStore::new(
         store.clone(),
         KeyPredicate::exact(key.clone()),
@@ -287,8 +315,12 @@ async fn a_combined_span_must_match_its_objects_stored_checksum() {
     assert_no_writes(&store);
 }
 
+/// Checks that a write of a chain's pending pieces before a fold (as a copy's
+/// validation writes them) and the fold's own write of the same pieces store
+/// two span objects with the same bytes, that the earlier object doesn't
+/// change, and that a read through each layout returns the bytes.
 #[tokio::test]
-async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing_it() {
+async fn an_early_write_and_the_later_fold_store_two_objects_with_the_same_bytes() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
@@ -317,23 +349,53 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     )
     .expect("tail");
     let content = tail.content(&reference).expect("pieces");
-    let first = write_tail_content(
+    let pool_id = pool_id(&store).await;
+    let early = write_tail_content(
         ContentWrites::new(&store, &crate::test_support::content_writes(), view.head()),
         &view.metadata_view(),
         &content,
-        assemble_tail_content(&pool_id(&store).await, &content).expect("pieces"),
+        assemble_tail_content(&pool_id, &content).expect("pieces"),
     )
     .await
-    .expect("first write");
-    let pool_id = pool_id(&store).await;
-    let key = content_span(&pool_id, &original.content_id, 100, 110);
-    let before = store.head(&key).await.expect("head").expect("span");
+    .expect("early write");
+    let early_key = span_key(&pool_id, &early, 100, 110);
+    let before = store.head(&early_key).await.expect("head").expect("span");
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
         .await
-        .expect("retry publishes");
-    assert_eq!(layout(&store, &reference).await, first);
-    assert_eq!(store.head(&key).await.expect("head").expect("span"), before);
+        .expect("fold");
+    let folded = layout(&store, &reference).await;
+    let folded_key = span_key(&pool_id, &folded, 100, 110);
+    assert_ne!(folded_key, early_key);
+    assert_eq!(folded.layout.extents[0], early.layout.extents[0]);
+    assert_eq!(
+        store.head(&early_key).await.expect("head").expect("span"),
+        before
+    );
+    let mut written =
+        crate::test_support::span_object_keys(&store, &pool_id, &reference.content_id).await;
+    written.retain(|key| *key != span_key(&pool_id, &folded, 0, 100));
+    let mut expected = vec![early_key.clone(), folded_key.clone()];
+    expected.sort();
+    assert_eq!(written, expected);
+    for key in [&early_key, &folded_key] {
+        assert_eq!(
+            store.get(key, None).await.expect("get").expect("span"),
+            bytes[100..]
+        );
+    }
+    for row in [&early, &folded] {
+        let location = ContentLocation::resolve(&Layout(row), &pool_id, None, &reference)
+            .await
+            .expect("location");
+        assert_eq!(
+            location
+                .read_bytes(&store, None, &reference)
+                .await
+                .expect("read through the layout"),
+            bytes
+        );
+    }
 }
 
 #[tokio::test]
@@ -361,18 +423,21 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace.load_current_metadata_view().await.expect("view");
     let content = tail.content(original.content_ref()).expect("content");
-    write_tail_content(
+    let pool_id = pool_id(&store).await;
+    let early = write_tail_content(
         ContentWrites::new(&store, &crate::test_support::content_writes(), view.head()),
         &view.metadata_view(),
         &content,
-        assemble_tail_content(&pool_id(&store).await, &content).expect("pieces"),
+        assemble_tail_content(&pool_id, &content).expect("pieces"),
     )
     .await
     .expect("span before manifest");
+    let first_span = span_key(&pool_id, &early, 0, 5);
     let access = ReadAccess::live(Authorizer::Unrestricted);
-    let pool_id = pool_id(&store).await;
-    assert_eq!(
-        view.direct_download_target(
+    // The download writes its own span object of the same pieces, because
+    // no layout in the view lists the object that the write above stored.
+    let downloaded = view
+        .direct_download_target(
             "/file-0",
             None,
             0,
@@ -380,10 +445,18 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
             &crate::test_support::content_writes(),
         )
         .await
-        .expect("equal span download")
+        .expect("download")
         .ranges[0]
-            .object_key,
-        content_span(&pool_id, &original.content_ref().content_id, 0, 5)
+        .object_key
+        .clone();
+    assert_ne!(downloaded, first_span);
+    assert_eq!(
+        store
+            .get(&downloaded, None)
+            .await
+            .expect("get")
+            .expect("span"),
+        b"first".as_slice()
     );
     let inode_id = tail.revisions().next().expect("revision").inode_id;
     let reference = commit_piece(
@@ -434,13 +507,10 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
         .expect("retry after append");
     let row = layout(&store, &reference).await;
     assert_eq!(row.layout.extents.len(), 1);
-    assert_eq!(
-        row.layout.extents[0].object,
-        ExtentObject::Span { start: 0, end: 10 }
-    );
+    assert_eq!(span_bounds(&row.layout.extents[0].object), Some((0, 10)));
     assert_eq!(
         store
-            .get(&content_span(&pool_id, &reference.content_id, 0, 5), None)
+            .get(&first_span, None)
             .await
             .expect("get first span")
             .expect("first span"),
@@ -565,12 +635,13 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
         .await
         .expect("fold shared base");
     let pool_id = pool_id(&store).await;
-    let span = content_span(&pool_id, &fresh.content_id, 105, 106);
+    let operations = content_operations(&store);
+    let row = layout(&store, &fresh).await;
+    let span = span_key(&pool_id, &row, 105, 106);
     assert_matches!(
-        content_operations(&store).as_slice(),
+        operations.as_slice(),
         [RecordedOperation::Assemble { key, bytes: 1, .. }] if key == &span
     );
-    let row = layout(&store, &fresh).await;
     row.layout.validate(106).expect("shared prefix layout");
     let base = layout(&store, &original).await;
     assert_eq!(row.layout.extents[0], base.layout.extents[0]);
@@ -614,16 +685,17 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
         .await
         .expect("resumed ranges");
     let pool_id = pool_id(&store).await;
+    let row = layout(&store, &original).await;
     assert_eq!(
         target.ranges,
         vec![
             ObjectRange {
-                object_key: content_span(&pool_id, &original.content_id, 100, 110),
+                object_key: span_key(&pool_id, &row, 100, 110),
                 object_start: 5,
                 length: 5,
             },
             ObjectRange {
-                object_key: content_span(&pool_id, &original.content_id, 110, 113),
+                object_key: span_key(&pool_id, &row, 110, 113),
                 object_start: 0,
                 length: 3,
             },
@@ -761,16 +833,20 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .await
         .expect("fold other file");
     prune_revisions(&store, &namespace_id).await;
-    let rooted_span = content_span(&pool_id, &fresh.content_id, 5, 6);
-    let superseded_span = content_span(&pool_id, &fresh.content_id, 1, 2);
+    let fresh_row = layout(&store, &fresh).await;
+    let rooted_span = span_key(&pool_id, &fresh_row, 5, 6);
+    // The fresh chain's layout lists its base's object first.
+    let base_span = extent_object_key(&pool_id, &fresh_row.layout.extents[0]);
+    assert_eq!(fresh_row.layout.extents[0].content_id, original.content_id);
+    let unlisted_span = content_span(&pool_id, &fresh.content_id, &SpanObjectId::generate());
     store
-        .put_immutable_verified(&superseded_span, Bytes::from_static(b"x"))
+        .put_immutable_verified(&unlisted_span, Bytes::from_static(b"x"))
         .await
-        .expect("old span");
+        .expect("unlisted span");
     let unrooted = ContentId::parse("con_70000000000000000000000000").expect("unrooted id");
     let unrooted_keys = [
         content_blob(&pool_id, &unrooted),
-        content_span(&pool_id, &unrooted, 1, 2),
+        content_span(&pool_id, &unrooted, &SpanObjectId::generate()),
     ];
     for key in &unrooted_keys {
         store
@@ -805,14 +881,11 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .collect();
     assert_eq!(listed, vec![prefix]);
     assert!(store
-        .head(&superseded_span)
+        .head(&unlisted_span)
         .await
-        .expect("superseded span")
+        .expect("unlisted span")
         .is_none());
-    let shared_keys = [
-        content_span(&pool_id, &original.content_id, 0, 5),
-        rooted_span,
-    ];
+    let shared_keys = [base_span, rooted_span];
     for key in &shared_keys {
         assert!(store.head(key).await.expect("head").is_some(), "{key}");
     }
@@ -1071,7 +1144,7 @@ async fn collection_keeps_shared_objects_that_a_restore_names_across_a_floor_adv
 }
 
 #[tokio::test]
-async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
+async fn tail_revision_downloads_write_their_own_objects_in_either_order() {
     for revisions in [
         [RevisionNo(2), RevisionNo(1)],
         [RevisionNo(1), RevisionNo(2)],
@@ -1112,13 +1185,12 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         let view = namespace.load_current_metadata_view().await.expect("view");
         let access = ReadAccess::live(Authorizer::Unrestricted);
         let pool_id = pool_id(&store).await;
+        // Each download writes the chain's pieces as a span object of its
+        // own, because no layout in the view lists another download's object.
+        let mut keys = Vec::new();
         for revision in revisions {
-            let key = content_span(&pool_id, &original.content_ref().content_id, 0, 10);
             let permits = crate::Permits::new(std::num::NonZeroUsize::MIN, None);
-            let absent = store.head(&key).await.expect("head").is_none();
-            if absent {
-                blocked.block_next();
-            }
+            blocked.block_next();
             let mut download = std::pin::pin!(view.direct_download_target(
                 "/file-0",
                 Some(revision),
@@ -1126,17 +1198,16 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
                 &access,
                 &permits,
             ));
-            if absent {
-                tokio::select! {
-                    () = blocked.wait_until_blocked() => {}
-                    result = &mut download => panic!("download finished before writing: {result:?}"),
-                }
-                assert_eq!(permits.counts().running, 1);
-                blocked.release();
+            tokio::select! {
+                () = blocked.wait_until_blocked() => {}
+                result = &mut download => panic!("download finished before writing: {result:?}"),
             }
+            assert_eq!(permits.counts().running, 1);
+            blocked.release();
             let target = download.await.expect("download revision");
             assert_eq!(permits.counts(), crate::PermitCounts::default());
-            assert_eq!(target.ranges[0].object_key, key);
+            let key = target.ranges[0].object_key.clone();
+            assert!(!keys.contains(&key));
             assert_eq!(
                 target.content_ref.content_id,
                 original.content_ref().content_id
@@ -1158,14 +1229,30 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
                 .expect("read range")
                 .expect("object");
             assert_eq!(bytes, expected);
+            keys.push(key);
         }
-        let key = content_span(&pool_id, &original.content_ref().content_id, 0, 10);
-        let before = store.head(&key).await.expect("head").expect("span");
+        let mut before = Vec::new();
+        for key in &keys {
+            before.push(store.head(key).await.expect("head").expect("span"));
+        }
         crate::test_support::namespace_store(&store, &namespace_id)
             .fold_wal()
             .await
             .expect("fold after downloads");
-        assert_eq!(store.head(&key).await.expect("head").expect("span"), before);
+        for (key, before) in keys.iter().zip(before) {
+            assert_eq!(store.head(key).await.expect("head").expect("span"), before);
+        }
+        assert_eq!(
+            crate::test_support::span_object_keys(
+                &store,
+                &pool_id,
+                &original.content_ref().content_id
+            )
+            .await
+            .len(),
+            3,
+            "two downloads and the fold each wrote a span object"
+        );
     }
 }
 

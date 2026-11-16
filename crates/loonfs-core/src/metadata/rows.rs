@@ -253,6 +253,26 @@ impl MetadataState {
         &self.content_layouts
     }
 
+    /// Returns a copy of the state whose span objects all have one ID, for a
+    /// test that compares the rows of two folds of the same tail. Every fold
+    /// writes its span objects under new IDs, so the layout rows of two folds
+    /// differ only in those IDs.
+    #[cfg(test)]
+    pub(crate) fn without_span_object_ids(&self) -> Self {
+        let mut state = self.clone();
+        let fixed = loonfs_types::SpanObjectId::parse("span_00000000000000000000000000")
+            .expect("a valid span object ID");
+        for row in &mut state.content_layouts {
+            for extent in &mut row.layout.extents {
+                if let loonfs_types::ExtentObject::Span { object_id, .. } = &mut extent.object {
+                    *object_id = fixed.clone();
+                }
+            }
+        }
+        state.indexes = MetadataIndexes::rebuild(&state);
+        state
+    }
+
     pub(crate) fn push_content_layout_record(&mut self, record: ContentLayoutRecord) {
         self.indexes.record_content_layout(&record);
         self.record_row_weight(record.heap_bytes());

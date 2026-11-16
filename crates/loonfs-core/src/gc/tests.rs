@@ -678,28 +678,20 @@ async fn put_file_content_with_id<S: ObjectStore>(
 }
 
 /// Publishes `/owned-{index}` with its bytes inline in the WAL and returns
-/// the content key a fold or a direct download writes.
+/// the content ID of its chain, whose span objects a fold or a direct
+/// download writes.
 async fn publish_inline(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     index: usize,
     setup: &WriterAt,
-) -> String {
+) -> loonfs_types::ContentId {
     let value = crate::storage::inline_content::InlineContent::new(
         loonfs_types::ContentId::generate(),
         Bytes::copy_from_slice(namespace_id.as_str().as_bytes()),
         loonfs_types::ChecksumAlgorithm::Crc64nvme,
     );
-    let catalog = crate::test_support::namespace_store(store, namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("catalog");
-    let key = loonfs_objectstore::keys::content_span(
-        catalog.pool_id(),
-        &value.content_ref().content_id,
-        0,
-        value.content_ref().size_bytes,
-    );
+    let content_id = value.content_ref().content_id.clone();
     let request = CommitIntent::single(
         loonfs_types::CommitId::parse(format!("write-{index}")).expect("commit"),
         loonfs_test_support::test_actor(),
@@ -729,7 +721,7 @@ async fn publish_inline(
     .pop()
     .expect("result")
     .expect("publish inline");
-    key
+    content_id
 }
 
 #[tokio::test]

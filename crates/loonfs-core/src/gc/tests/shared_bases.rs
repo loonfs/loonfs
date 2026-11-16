@@ -344,7 +344,15 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     let (longer, kept) = layout_manifest(
         &store,
         &namespace_id,
-        [layout(ExtentObject::Span { start: 0, end: 2 }, 2, 2)],
+        [layout(
+            ExtentObject::Span {
+                object_id: loonfs_types::SpanObjectId::generate(),
+                start: 0,
+                end: 2,
+            },
+            2,
+            2,
+        )],
     )
     .await;
     let longer_run = |tier| MetadataRunRef {

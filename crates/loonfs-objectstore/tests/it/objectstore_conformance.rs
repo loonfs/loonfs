@@ -839,8 +839,7 @@ async fn assert_assembly<S: ObjectStore>(
         let key = content_span(
             &pool_id,
             &ContentId::generate(),
-            7,
-            7 + payload.len() as u64,
+            &loonfs_types::SpanObjectId::generate(),
         );
         let expected = Checksum::compute(crc, &payload);
         let written = store

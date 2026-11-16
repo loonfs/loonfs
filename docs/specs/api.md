@@ -2294,7 +2294,7 @@ The download routes return short-lived presigned URLs that let a client read a f
 
 A deployment MUST be able to serve back any file it let a client create. So every deployment that offers any direct write advertises `filesystem.downloads.direct_get`, and direct reads aren't a separate choice for the deployment. Direct reads also keep object traffic off the server.
 
-A direct download returns one presigned range for each immutable extent. If some of the revision's bytes are still pending WAL pieces, they're written as the chain's next extent, with the same writer that a fold uses. Existing objects are never rewritten. `content_not_materialized` means only that the deployment can't write the pending pieces. A chain whose bytes are all in the WAL tail reuses the span object from offset 0 to the reference's size when that object exists. For a zero-byte reference, the empty whole object is written if it doesn't exist.
+A direct download returns one presigned range for each immutable extent. If some of the revision's bytes are still pending WAL pieces, they're written as the chain's next extent, with the same writer that a fold uses. Each such download writes a new span object, so two downloads of the same pending pieces write two objects, and the fold that later covers the pieces writes another. Existing objects are never rewritten. `content_not_materialized` means only that the deployment can't write the pending pieces. For a zero-byte reference, the empty whole object is written if it doesn't exist.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a JSON body with a path and, optionally, the revision to read and the first byte to read:
 

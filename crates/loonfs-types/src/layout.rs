@@ -1,6 +1,6 @@
 //! Ordered immutable objects that store a content chain.
 
-use crate::{ContentId, NamespaceId};
+use crate::{ContentId, NamespaceId, SpanObjectId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -10,11 +10,14 @@ use thiserror::Error;
 pub enum ExtentObject {
     /// The object at the chain's own key.
     Whole,
-    /// An object named by the chain offsets it was written for.
+    /// A span object, whose key is the chain's key followed by the object's
+    /// own random ID. It stores the chain bytes from `start` to `end`.
     Span {
-        /// Inclusive chain offset.
+        /// The object's random ID, which the end of its key spells.
+        object_id: SpanObjectId,
+        /// Inclusive chain offset of the object's first byte.
         start: u64,
-        /// Exclusive chain offset.
+        /// Exclusive chain offset, just after the object's last byte.
         end: u64,
     },
 }
@@ -91,7 +94,7 @@ impl ContentLayout {
                 .offset
                 .checked_add(extent.length)
                 .ok_or_else(|| invalid("extent object range overflows"))?;
-            if let ExtentObject::Span { start, end } = extent.object {
+            if let ExtentObject::Span { start, end, .. } = extent.object {
                 if start >= end || object_end > end - start {
                     return Err(invalid("extent range must fit within the span"));
                 }
@@ -111,6 +114,14 @@ impl ContentLayout {
 mod tests {
     use super::*;
 
+    fn span_object(start: u64, end: u64) -> ExtentObject {
+        ExtentObject::Span {
+            object_id: SpanObjectId::generate(),
+            start,
+            end,
+        }
+    }
+
     #[test]
     fn layouts_cover_the_chain_and_validate_empty_and_span_extents() {
         let whole = ContentExtent {
@@ -120,7 +131,7 @@ mod tests {
             length: 10,
         };
         let span = ContentExtent {
-            object: ExtentObject::Span { start: 10, end: 15 },
+            object: span_object(10, 15),
             length: 5,
             ..whole.clone()
         };
@@ -153,9 +164,9 @@ mod tests {
         .validate(0)
         .is_ok());
         for (object, length, size_bytes) in [
-            (ExtentObject::Span { start: 2, end: 2 }, 0, 0),
-            (ExtentObject::Span { start: 3, end: 2 }, 1, 1),
-            (ExtentObject::Span { start: 10, end: 15 }, 6, 6),
+            (span_object(2, 2), 0, 0),
+            (span_object(3, 2), 1, 1),
+            (span_object(10, 15), 6, 6),
             (ExtentObject::Whole, 0, 1),
         ] {
             ContentLayout {

@@ -2933,6 +2933,9 @@ mod direct_download {
                 )
             };
             recording.reset();
+            // Each granted download writes the pending pieces to a span
+            // object of its own.
+            let mut granted = 0;
             for denied in [true, false, false] {
                 if denied {
                     failing.fail_all();
@@ -3005,7 +3008,8 @@ mod direct_download {
                     .await
                     .expect("object bytes");
                 assert_eq!(received, value.as_ref());
-                assert_eq!(recording.count(OperationSelector::Put), 1);
+                granted += 1;
+                assert_eq!(recording.count(OperationSelector::Put), granted);
             }
         }
     }

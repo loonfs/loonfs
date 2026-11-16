@@ -389,7 +389,7 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
         .await
         .expect("bootstrap")
         .pool_id;
-    let key = publish_inline(&store, &namespace_id, 0, &setup).await;
+    let content_id = publish_inline(&store, &namespace_id, 0, &setup).await;
     let target =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .direct_download_target(
@@ -400,13 +400,74 @@ async fn the_wal_tail_roots_inline_content_a_direct_download_wrote_early() {
             )
             .await
             .expect("download target");
-    assert_eq!(target.ranges[0].object_key, key);
+    let key = target.ranges[0].object_key.clone();
+    assert_eq!(
+        crate::test_support::span_object_keys(&store, &pool_id, &content_id).await,
+        std::slice::from_ref(&key)
+    );
 
     let aged =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect_pool(&store, &pool_id, &aged).await;
     assert_eq!(report.deleted.content_objects, 0);
     assert!(store.head(&key).await.expect("head").is_some());
+}
+
+/// Checks that a span object that no layout lists, as a write whose commit or
+/// manifest was never published leaves behind, is kept while it's younger
+/// than the grace window and deleted once it's older, and that the span
+/// object that the chain's layout lists stays.
+#[tokio::test]
+async fn an_unlisted_span_object_is_kept_while_young_and_deleted_once_old() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("bootstrap")
+        .pool_id;
+    let content_id = publish_inline(&store, &namespace_id, 0, &setup).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
+    let [listed] = <[String; 1]>::try_from(
+        crate::test_support::span_object_keys(&store, &pool_id, &content_id).await,
+    )
+    .expect("the fold wrote one span object");
+    let unlisted = loonfs_objectstore::keys::content_span(
+        &pool_id,
+        &content_id,
+        &loonfs_types::SpanObjectId::generate(),
+    );
+    store
+        .put_immutable_verified(&unlisted, Bytes::from_static(b"demo"))
+        .await
+        .expect("unlisted span object");
+
+    let young = context(now_after_newest_object(&store, &namespace_id, 0).await);
+    assert_eq!(
+        collect_pool(&store, &pool_id, &young)
+            .await
+            .deleted
+            .content_objects,
+        0
+    );
+    assert!(store.head(&unlisted).await.expect("head").is_some());
+
+    let aged =
+        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
+    assert_eq!(
+        collect_pool(&store, &pool_id, &aged)
+            .await
+            .deleted
+            .content_objects,
+        1
+    );
+    assert!(store.head(&unlisted).await.expect("head").is_none());
+    assert!(store.head(&listed).await.expect("head").is_some());
 }
 
 #[tokio::test]

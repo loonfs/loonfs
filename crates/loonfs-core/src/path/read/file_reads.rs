@@ -9,7 +9,6 @@ use crate::storage::content_location::extent_object_key;
 use crate::storage::content_location::ContentLocation;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::Permits;
-use loonfs_objectstore::keys::content_span;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::options::AttributeInclusion;
@@ -240,26 +239,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 object_start: 0,
                 length: 0,
             }]);
-        }
-        if location.is_resident() && location.has_pieces() {
-            let key = content_span(
-                &self.head.pool_id,
-                &content_ref.content_id,
-                0,
-                content_ref.size_bytes,
-            );
-            if store
-                .head(&key)
-                .await
-                .map_err(|error| CoreError::store(&key, &error))?
-                .is_some()
-            {
-                return Ok(vec![ObjectRange {
-                    object_key: key,
-                    object_start: start_offset,
-                    length: content_ref.size_bytes - start_offset,
-                }]);
-            }
         }
         let extents = if location.has_pieces() {
             let content = self
