@@ -172,8 +172,9 @@ impl Family {
             .await
     }
 
-    /// Merges as the runtime does, as `subject`, with the fork's fold, the
-    /// receipt lookup and the plan at one view of `main`, and the commit.
+    /// Merges as the runtime does, as `subject`, with the receipt lookup and
+    /// the plan at one view of `main`, the plan from the fork's current
+    /// manifest and WAL tail, and the commit.
     async fn merge_as(
         &self,
         request: &MergeRequest,
@@ -181,7 +182,6 @@ impl Family {
     ) -> Result<Commit, CoreError> {
         let main = self.engine(&self.main, subject);
         let fork = self.engine(&self.fork, subject);
-        fork.fold_wal().await?;
         let main_context = read_context(&self.store, &self.main).await;
         if let Some((commit, _)) = main.find_merge(&main_context, request).await? {
             return Ok(commit);
@@ -206,11 +206,9 @@ impl Family {
     }
 
     /// Plans a merge of the fork's commits into `main` through `through_seq`,
-    /// after the fork's fold, as [`Self::merge_as`] does, without committing
-    /// it.
+    /// as [`Self::merge_as`] does, without committing it.
     async fn plan(&self, through_seq: Option<CommitSeq>) -> Result<MergePlan, CoreError> {
         let fork = self.engine(&self.fork, self.subject.as_ref());
-        fork.fold_wal().await?;
         self.engine(&self.main, self.subject.as_ref())
             .plan_merge(
                 &read_context(&self.store, &self.main).await,

@@ -4,6 +4,7 @@
 
 use super::classify::Classifier;
 use super::memory::PlanningMemory;
+use super::net_change::fork_layouts;
 use super::operations::BindingChange;
 use super::order::MergeOperations;
 use super::replay::Replay;
@@ -18,6 +19,7 @@ use crate::error::Result;
 use crate::limits::OPERATION_SNAPSHOT_TTL_MS;
 use crate::path::read::LoadedMetadataView;
 use crate::storage::content_admission::PreparedContent;
+use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::{u64_from_usize, CommitPrecondition, CommitSeq, InodeKind, MergeConflict};
@@ -80,7 +82,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             source_after_seq,
             source_through_seq: through_seq(
                 source_namespace_id,
-                fork_view.anchor.manifest_head_seq,
+                fork_view.visible_seq(),
                 source_after_seq,
                 request.through_seq,
             )?,
@@ -106,6 +108,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 &memory,
             ),
             before: StateReader::new(fork_view.metadata_view_at(source_after_seq), &memory),
+            fork_tail: &fork_view.wal_tail,
             fork_authorizer: Authorizer::for_request(
                 source_namespace_id,
                 &fork_head.access,
@@ -116,7 +119,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             memory: Arc::clone(&memory),
             own_seqs: HashMap::new(),
             plans: Vec::new(),
-            layouts: HashMap::new(),
             planned_bytes: fields_bytes,
             subtree_checks: Vec::new(),
             conflicted: HashSet::new(),
@@ -183,19 +185,27 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .filter_map(|operation| operation.content_ref())
             .collect();
         let expires_at_ms = prepared_at_ms.saturating_add(OPERATION_SNAPSHOT_TTL_MS);
-        let proofs = classifier
-            .layouts
-            .drain()
-            .filter(|(content_ref, _)| applied.contains(content_ref))
-            .map(|(content_ref, layout)| {
-                PreparedContent::for_pool_member(
-                    self.namespace.namespace_id.clone(),
-                    content_ref,
-                    layout,
-                    expires_at_ms,
-                )
-            })
-            .collect();
+        let proofs = fork_layouts(
+            ContentWrites::new(
+                &self.namespace.store,
+                &self.namespace.content_writes,
+                main.head(),
+            ),
+            classifier.ours.view(),
+            &fork_view.wal_tail,
+            &applied,
+        )
+        .await?
+        .into_iter()
+        .map(|(content_ref, layout)| {
+            PreparedContent::for_pool_member(
+                self.namespace.namespace_id.clone(),
+                content_ref,
+                layout,
+                expires_at_ms,
+            )
+        })
+        .collect();
         let report = classifier.replay.take().map(|replay| replay.report);
         // The classifier borrows the record, which the commit takes with the
         // replay commit's report, so the size checks below cover the report.

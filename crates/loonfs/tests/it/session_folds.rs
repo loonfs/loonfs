@@ -1,6 +1,6 @@
 //! Tests of how many times the operations that fold a namespace's WAL tail
-//! fold it: a merge or a rebase, a snapshot, a fork, the maintenance calls
-//! that fold, and a delete. Every fold of a namespace in a runtime runs
+//! fold it: a snapshot, a fork, the maintenance calls that fold, and a
+//! delete. Every fold of a namespace in a runtime runs
 //! under the namespace's fold lock, so a fold that the namespace's writer
 //! session is already running isn't repeated, and without a session the
 //! operation folds the tail itself, once.
@@ -44,8 +44,6 @@ struct Family {
 /// An operation that folds the fork's WAL tail.
 #[derive(Debug, Clone, Copy)]
 enum Operation {
-    /// A merge of the fork into main.
-    Merge,
     /// A snapshot of the fork.
     Snapshot,
     /// A fork of the fork's head.
@@ -144,23 +142,10 @@ impl Family {
         self.runtime.maintenance(writer_id("session-folds"))
     }
 
-    /// Runs `operation` on the fork. A merge checks that it merged through
-    /// the fork's last commit.
+    /// Runs `operation` on the fork.
     async fn fold(&self, operation: Operation) {
         let fork_id = self.fork.id();
         match operation {
-            Operation::Merge => {
-                let last = self.fork.last_published_seq();
-                let merged = self
-                    .main
-                    .merge_fork(fork_id, &actor())
-                    .await
-                    .expect("the merge");
-                assert_eq!(
-                    Some(merged.merge.expect("a merge record").source_through_seq),
-                    last
-                );
-            }
             Operation::Snapshot => {
                 self.fork
                     .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
@@ -222,11 +207,11 @@ impl Family {
 /// Checks that each operation that folds a fork whose session is folding
 /// waits for that fold instead of folding the same tail at the same time,
 /// so each of the tail's content objects is written once, and no manifest
-/// put of the fork or of main fails.
+/// put of the fork or of main fails. (A merge plans from the fork's tail
+/// without a fold, so it isn't one of the operations.)
 #[tokio::test]
 async fn folds_of_a_namespace_wait_for_its_sessions_fold() {
     for operation in [
-        Operation::Merge,
         Operation::Snapshot,
         Operation::Fork,
         Operation::FoldWal,
@@ -246,31 +231,6 @@ async fn folds_of_a_namespace_wait_for_its_sessions_fold() {
     }
 }
 
-/// Checks that a rebase of a fork whose session is folding waits for that
-/// fold, as a merge does.
-#[tokio::test]
-async fn a_rebase_waits_for_the_fork_sessions_fold() {
-    let family = family().await;
-    let rebase_id = namespace_id("main-rebase");
-    family
-        .runtime
-        .fork_namespace_for_rebase(family.main.id(), family.fork.id(), &rebase_id, &actor())
-        .await
-        .expect("the rebase's new fork");
-    let rebase = family
-        .runtime
-        .open_namespace(&rebase_id)
-        .expect("open the new fork");
-    family.write_fork_and_park_its_fold().await;
-    let replayed = family
-        .run_beside_the_parked_fold(rebase.replay_fork(family.fork.id(), &actor()))
-        .await
-        .expect("the replay");
-    assert_eq!(replayed.conflicts, Vec::new());
-    family.assert_folded_once("a rebase", FILES, &[family.fork.id(), &rebase_id]);
-    family.runtime.shutdown().await.expect("shutdown");
-}
-
 /// Checks that each operation that folds a fork without a session in the
 /// runtime folds the fork's tail itself, once. The fork writes one file
 /// fewer than its fold trigger, so its session ends with the whole tail
@@ -278,12 +238,7 @@ async fn a_rebase_waits_for_the_fork_sessions_fold() {
 /// operations.
 #[tokio::test]
 async fn folds_of_a_namespace_without_a_session_fold_its_tail_once() {
-    for operation in [
-        Operation::Merge,
-        Operation::Fork,
-        Operation::FoldWal,
-        Operation::Metadata,
-    ] {
+    for operation in [Operation::Fork, Operation::FoldWal, Operation::Metadata] {
         let family = family().await;
         family.write_fork(FILES - 1).await;
         family

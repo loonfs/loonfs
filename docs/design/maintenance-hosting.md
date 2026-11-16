@@ -11,7 +11,7 @@ A [fold](../specs/glossary.md#fold) writes the commits in a namespace's WAL tail
 - the namespace's writer session, which folds its own tail and then compacts,
 - the host's scheduler, described in [Session steps and sweeps](#session-steps-and-sweeps),
 - a `metadata` maintenance request and an explicit fold request,
-- a merge or a rebase, which folds the fork first,
+- a merge or a rebase, which folds the fork before it plans when a commit in the fork's WAL tail is more than 11 hours and 45 minutes old (see [Cross-namespace copies and moves](../specs/format.md#97-cross-namespace-copies-and-moves)),
 - a snapshot, or a fork created from the current head, which folds the tail first,
 - a retention advance, which folds the tail after it creates a "floor object" (a WAL object with no commits that records the new floor, as the [glossary](../specs/glossary.md#floor-object) describes), so a manifest records the new floor, and
 - a namespace deletion.

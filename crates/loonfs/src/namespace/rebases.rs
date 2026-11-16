@@ -153,9 +153,9 @@ impl Namespace<Writable> {
     /// planned as [`Self::plan_merge`] plans a merge.
     ///
     /// The plan checks that this namespace is a rebase's new fork for the
-    /// fork and checks both floors, folds and takes a snapshot of the fork, and plans
-    /// against this namespace's head, reading the source through this
-    /// namespace's fork snapshot.
+    /// fork and checks both floors, takes a snapshot of the fork as a merge
+    /// does (see [`Self::snapshot_fork`]), and plans against this namespace's
+    /// head, reading the source through this namespace's fork snapshot.
     pub(crate) async fn plan_replay(
         &self,
         request: &MergeRequest,

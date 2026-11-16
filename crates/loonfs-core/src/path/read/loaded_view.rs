@@ -112,7 +112,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    #[cfg(test)]
+    /// Loads the view of the namespace's current manifest and WAL tail, for a
+    /// test that reads rows the public reads don't return.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn load_current_metadata_view(&self) -> Result<LoadedMetadataView<'_, S>> {
         let loaded = self
             .load_read_anchor(crate::test_support::observed_now())

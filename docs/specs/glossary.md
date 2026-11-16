@@ -156,7 +156,7 @@ A content object that stores one byte range of a chain. The content object at a 
 
 ### Piece
 
-A range of file bytes stored inside a WAL object. A piece contains a whole small value, or the bytes an append adds. Before a fold publishes a manifest that covers that WAL object, it writes the pieces to content objects as extents.
+A range of file bytes stored inside a WAL object. A piece contains a whole small value, or the bytes an append adds. Before a fold publishes a manifest that covers that WAL object, it writes the pieces to content objects as extents. Validation of a copy and a merge also write another member's pieces as extents, so that they don't have to wait for that member's fold.
 
 ### Inline content
 

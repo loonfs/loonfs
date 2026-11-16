@@ -10,12 +10,15 @@ use crate::{
     MergeForkOptions, MoveOptions, Namespace, NamespaceSessionStatus, Result, Writable,
 };
 use futures::future::BoxFuture;
+use loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS;
 use loonfs_core::MergeRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{request_lines, KeyPredicate, RecordingStore};
 use loonfs_types::{
-    AbsolutePath, DeleteDirectoryBehavior, ManifestNo, MergeConflictKind, FEATURE_MERGES,
+    AbsolutePath, ContentExtent, ContentId, ContentLayout, DeleteDirectoryBehavior, ExtentObject,
+    ManifestNo, MergeConflictKind, FEATURE_MERGES,
 };
 use std::assert_matches;
 use std::num::NonZeroU64;
@@ -24,6 +27,7 @@ use tempfile::TempDir;
 
 struct Family {
     _directory: TempDir,
+    store: crate::SharedObjectStore,
     runtime: LoonFs<Writable>,
     main: Namespace<Writable>,
     fork: Namespace<Writable>,
@@ -38,18 +42,24 @@ fn actor() -> ActorId {
 async fn family() -> Family {
     let directory = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    family_on(directory, store).await
+    family_on(directory, store, None).await
 }
 
 /// Creates the family of [`family`] in a runtime on `store`, which stores
-/// its objects in `directory`.
-async fn family_on(directory: TempDir, store: crate::SharedObjectStore) -> Family {
+/// its objects in `directory`, with `wall_clock` as the runtime's wall clock
+/// when it's set.
+async fn family_on(
+    directory: TempDir,
+    store: crate::SharedObjectStore,
+    wall_clock: Option<Arc<ManualClock>>,
+) -> Family {
     let main_id = namespace_id("main");
-    let runtime = LoonFs::builder_with_store(store)
-        .writer_id(writer_id("merge-writer"))
-        .build()
-        .await
-        .expect("runtime");
+    let builder = LoonFs::builder_with_store(store.clone()).writer_id(writer_id("merge-writer"));
+    let builder = match wall_clock {
+        Some(clock) => builder.wall_clock(clock),
+        None => builder,
+    };
+    let runtime = builder.build().await.expect("runtime");
     runtime
         .create_namespace(&main_id, &actor())
         .await
@@ -69,6 +79,7 @@ async fn family_on(directory: TempDir, store: crate::SharedObjectStore) -> Famil
         .expect("write in the fork");
     Family {
         _directory: directory,
+        store,
         runtime,
         main,
         fork,
@@ -122,6 +133,40 @@ impl Family {
             numbers.push(diagnostics.current_manifest_no);
         }
         numbers
+    }
+
+    /// Returns the content ID of `path` in `namespace`, and the layout that
+    /// `namespace`'s current view records for that chain.
+    async fn layout(
+        &self,
+        namespace: &Namespace<Writable>,
+        path: &str,
+    ) -> (ContentId, ContentLayout) {
+        let entry = namespace.stat(path).await.expect("stat the file");
+        let content_id = entry
+            .content_ref()
+            .expect("a file's content reference")
+            .content_id
+            .clone();
+        let layout = loonfs_core::test_support::content_layout(
+            self.store.as_ref(),
+            namespace.id(),
+            &content_id,
+        )
+        .await
+        .expect("a layout of the chain");
+        (content_id, layout)
+    }
+
+    /// Reads `path` in `namespace` as a reader with nothing cached.
+    async fn fresh_read(&self, namespace: &Namespace<Writable>, path: &str) -> Vec<u8> {
+        crate::test_support::fresh_reader(self.store.clone())
+            .await
+            .namespace(namespace.id())
+            .read_file(path)
+            .await
+            .expect("a fresh read")
+            .bytes
     }
 
     /// Commits a file in `main` that no merge here touches.
@@ -399,7 +444,7 @@ async fn a_merge_whose_plan_memory_doesnt_fit_beside_other_reservations_is_busy(
 /// after a commit, merges that commit. The fork's session ends on the fork's
 /// first manifest, which folded none of the fork's commits, so the runtime
 /// keeps the fork's head on that manifest, and the merge has to read the
-/// manifest that its fold of the fork publishes.
+/// commit from the fork's WAL tail.
 #[tokio::test]
 async fn a_merge_after_the_forks_handle_is_dropped_merges_its_last_commit() {
     let Family {
@@ -407,6 +452,7 @@ async fn a_merge_after_the_forks_handle_is_dropped_merges_its_last_commit() {
         runtime,
         main,
         fork,
+        ..
     } = family().await;
     let fork_id = fork.id().clone();
     let last = fork
@@ -429,19 +475,19 @@ async fn a_merge_after_the_forks_handle_is_dropped_merges_its_last_commit() {
     assert_eq!(file.bytes, b"c");
 }
 
-/// Checks that a merge reads the fork at the manifest that its fold
-/// publishes, not at an older manifest that folded some of the fork's
-/// commits. A fold of the fork covers `/b.txt`, the fork then commits
-/// `/c.txt`, and its handle is dropped, so the runtime keeps the fork's
-/// head on the older manifest. The merge applies both files, through the
-/// fork's head.
+/// Checks that a merge reads the fork's WAL tail above a manifest that
+/// folded some of the fork's commits. A fold of the fork covers `/b.txt`,
+/// the fork then commits `/c.txt`, and its handle is dropped, so the runtime
+/// keeps the fork's head on that manifest. The merge applies both files,
+/// through the fork's head.
 #[tokio::test]
-async fn a_merge_reads_the_fork_at_its_folds_manifest() {
+async fn a_merge_reads_the_forks_tail_above_a_folded_manifest() {
     let Family {
         _directory: _store,
         runtime,
         main,
         fork,
+        ..
     } = family().await;
     let fork_id = fork.id().clone();
     main.maintenance()
@@ -467,14 +513,26 @@ async fn a_merge_reads_the_fork_at_its_folds_manifest() {
     }
 }
 
-/// Checks that a merge's plan takes a snapshot of the fork's folded manifest while the
-/// merge runs, and that the merge deletes the snapshot once it commits. The
-/// request's commit ID is the longest that the commit ID grammar accepts.
+/// Checks that a merge's plan takes a snapshot of the fork's current
+/// manifest while the merge runs, without folding the fork, and that the
+/// merge deletes the snapshot once it commits. The fork's `/b.txt` is in its
+/// WAL tail, so the snapshot's head is below the fork's head. The request's
+/// commit ID is the longest that the commit ID grammar accepts.
 #[tokio::test]
 async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
     let family = family().await;
     let request = family.request(&"m".repeat(128));
+    let manifests = family.manifest_nos().await;
+    let fork_head = family.fork.metadata().await.expect("metadata").head_seq;
     let planned = family.plan(&request).await;
+    assert_eq!(
+        family.manifest_nos().await,
+        manifests,
+        "the plan folds nothing"
+    );
+    let record = &planned.merge_snapshot.record;
+    assert_eq!(Some(record.snapshot_id.manifest_no()), manifests[1]);
+    assert!(record.head_seq < fork_head, "{record:?}");
     let page = family
         .fork
         .list_snapshots()
@@ -587,7 +645,7 @@ async fn a_retry_of_a_merge_that_another_runtime_committed_finds_the_receipt_aft
     let directory = tempfile::tempdir().expect("tempdir");
     let store: crate::SharedObjectStore =
         Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let family = family_on(directory, store.clone()).await;
+    let family = family_on(directory, store.clone(), None).await;
     family.write_main("/later.txt").await;
     let other = LoonFs::builder_with_store(store)
         .writer_id(writer_id("other-merge-writer"))
@@ -1036,21 +1094,14 @@ async fn recorded_family() -> (Family, Arc<RecordingStore<LocalFsStore>>) {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let family = family_on(directory, store.clone()).await;
+    let family = family_on(directory, store.clone(), None).await;
     store.reset();
     (family, store)
 }
 
 /// Checks the exact requests of a merge in a writer runtime with fresh
-/// positions on both namespaces. The receipt lookup is a `strong` read of
-/// `main`, so it checks `main`'s position with a successor HEAD and a
-/// boundary read. The checks before the plan read the fork's position as it
-/// is and send no request. The fork's fold publishes manifest 4, and the
-/// snapshot's verification after the record write is the fork's position
-/// check, so the fork's successor is checked once, and the plan reads the
-/// snapshot record from memory. The commit is one WAL put, and the release
-/// is one compare-and-swap against the version that the record's write
-/// stored.
+/// positions on both namespaces. The fork's `/b.txt` is a piece in the
+/// fork's WAL tail, and the merge folds neither namespace.
 #[tokio::test]
 async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
     let (family, store) = recorded_family().await;
@@ -1059,21 +1110,28 @@ async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
         .merge_fork(family.fork.id(), &actor())
         .await
         .expect("the merge");
-    let mut expected = vec![
+    let expected = [
+        // The receipt lookup is a `strong` read of `main`, so it checks
+        // `main`'s position with a successor HEAD and a boundary read. The
+        // checks before the plan, and the plan's read of the fork, read the
+        // fork's position as it is and send no request.
         "head main MetadataManifest 00000000000000000005",
         "get main Boundary",
-        "assemble pool ContentBlob",
-    ];
-    expected.extend(["put main-fork MetadataSegment"; 7]);
-    expected.extend([
-        "put main-fork MetadataManifest 00000000000000000004",
-        "get main-fork Boundary",
+        // The snapshot of the fork's current manifest 3, without a fold: the
+        // record write, then the verification that manifest 3 is still
+        // current.
         "put main-fork Snapshot",
-        "head main-fork MetadataManifest 00000000000000000005",
+        "head main-fork MetadataManifest 00000000000000000004",
         "get main-fork Boundary",
+        // The plan writes `/b.txt`'s piece from the fork's tail as one
+        // extent under the pool's prefix, so the commit's reference has a
+        // layout.
+        "assemble pool ContentBlob",
+        // The commit is one WAL put, and the release is one compare-and-swap
+        // against the version that the record's write stored.
         "put main WalObject 00000000000000000005",
         "swap main-fork Snapshot",
-    ]);
+    ];
     assert_eq!(request_lines(&store.take()), expected);
 }
 
@@ -1134,4 +1192,130 @@ async fn a_merge_releases_its_snapshot_after_an_extension() {
         "the merge releases its snapshot: {:?}",
         released.snapshots
     );
+}
+
+/// Returns the extent of the span object of `content_id` from `start` to
+/// `end`, read from its first byte.
+fn span(content_id: &ContentId, start: u64, end: u64) -> ContentExtent {
+    ContentExtent {
+        content_id: content_id.clone(),
+        object: ExtentObject::Span { start, end },
+        offset: 0,
+        length: end - start,
+    }
+}
+
+/// Checks that a merge of files whose bytes are pieces in the fork's WAL
+/// tail writes each chain's pieces as one extent and publishes no manifest
+/// of the fork. `main`'s view lists that extent under the fork as the
+/// chain's creator, and a reader with nothing cached reads the bytes in
+/// `main`.
+#[tokio::test]
+async fn a_merge_writes_the_pieces_in_the_forks_tail_without_folding_the_fork() {
+    let family = family().await;
+    family
+        .fork
+        .put_file("/c.txt", b"cc", &actor())
+        .await
+        .expect("write in the fork");
+    let before = family.manifest_nos().await;
+    family
+        .main
+        .merge_fork(family.fork.id(), &actor())
+        .await
+        .expect("the merge");
+    assert_eq!(
+        family.manifest_nos().await[1],
+        before[1],
+        "the fork publishes no manifest"
+    );
+    for (path, bytes) in [("/b.txt", &b"b"[..]), ("/c.txt", &b"cc"[..])] {
+        let (content_id, layout) = family.layout(&family.main, path).await;
+        let length = u64::try_from(bytes.len()).expect("a small file");
+        assert_eq!(
+            layout,
+            ContentLayout {
+                creator_namespace_id: family.fork.id().clone(),
+                extents: vec![span(&content_id, 0, length)],
+            },
+            "{path}"
+        );
+        assert_eq!(family.fresh_read(&family.main, path).await, bytes, "{path}");
+    }
+}
+
+/// Checks that the fork's own fold after a merge writes the extent that the
+/// merge wrote, and that a later merge of an append in the fork's tail
+/// writes only the appended pieces. `main`'s layout then lists the fold's
+/// extent and the second merge's extent, and both namespaces read the same
+/// bytes.
+#[tokio::test]
+async fn a_merge_after_the_forks_fold_writes_only_the_appended_pieces() {
+    let family = family().await;
+    let merger = actor();
+    let merge = || family.main.merge_fork(family.fork.id(), &merger);
+    merge().await.expect("the first merge");
+    family
+        .main
+        .maintenance()
+        .fold_wal(family.fork.id())
+        .await
+        .expect("fold the fork");
+    let (content_id, folded) = family.layout(&family.fork, "/b.txt").await;
+    assert_eq!(
+        family.layout(&family.main, "/b.txt").await,
+        (content_id.clone(), folded),
+        "the fork's fold writes the merge's extent"
+    );
+    family
+        .fork
+        .append_file("/b.txt", b"++", &actor())
+        .await
+        .expect("append in the fork");
+    merge().await.expect("the second merge");
+    let (appended, layout) = family.layout(&family.main, "/b.txt").await;
+    assert_eq!(appended, content_id, "the fork extends its own chain");
+    assert_eq!(
+        layout,
+        ContentLayout {
+            creator_namespace_id: family.fork.id().clone(),
+            extents: vec![span(&content_id, 0, 1), span(&content_id, 1, 3)],
+        }
+    );
+    for namespace in [&family.main, &family.fork] {
+        assert_eq!(family.fresh_read(namespace, "/b.txt").await, b"b++");
+    }
+}
+
+/// Checks that a merge plans from the fork's WAL tail while the tail's
+/// oldest commit is at most [`MAX_TAIL_COMMIT_AGE_MS`] old, and folds the
+/// fork first once that commit is older. The runtime's wall
+/// clock is a manual clock, and the fork's `/b.txt` stays in the fork's tail
+/// through the first merge, so it's the tail's oldest commit at the second.
+#[tokio::test]
+async fn a_merge_folds_a_fork_whose_tail_has_a_commit_older_than_the_max_age() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let clock = Arc::new(ManualClock::at_system_time());
+    let family = family_on(directory, store, Some(clock.clone())).await;
+    let merger = actor();
+    let merge = || family.main.merge_fork(family.fork.id(), &merger);
+    let before = family.manifest_nos().await;
+    clock.advance_ms(MAX_TAIL_COMMIT_AGE_MS);
+    merge().await.expect("the first merge");
+    assert_eq!(
+        family.manifest_nos().await[1],
+        before[1],
+        "a tail whose commits are at most the max age old isn't folded"
+    );
+    family
+        .fork
+        .put_file("/c.txt", b"c", &actor())
+        .await
+        .expect("write in the fork");
+    clock.advance_ms(1);
+    merge().await.expect("the second merge");
+    let after = family.manifest_nos().await;
+    assert!(after[1] > before[1], "the merge folds the fork: {after:?}");
+    assert_eq!(family.fresh_read(&family.main, "/c.txt").await, b"c");
 }

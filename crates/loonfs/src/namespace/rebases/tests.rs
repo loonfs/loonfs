@@ -18,12 +18,14 @@ fn actor() -> ActorId {
     loonfs_test_support::test_actor()
 }
 
-/// Checks that a retry of a replay commit that committed returns the new
-/// fork with the replay commit's empty conflict report and folds neither the
-/// fork nor the new fork. Each has a later commit in its WAL tail when the retry runs, and
-/// neither publishes a manifest.
+/// Checks that a replay commit of a fork whose `/b.txt` is a piece in its
+/// WAL tail applies the file without folding the fork, and that a retry of
+/// the replay commit returns the new fork with the replay commit's empty
+/// conflict report and folds neither the fork nor the new fork. Each has a
+/// later commit in its WAL tail when the retry runs, and neither publishes a
+/// manifest.
 #[tokio::test]
-async fn a_retry_of_a_committed_replay_folds_nothing() {
+async fn a_replay_and_its_retry_fold_nothing() {
     let directory = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let runtime = LoonFs::builder_with_store(store)
@@ -57,18 +59,26 @@ async fn a_retry_of_a_committed_replay_folds_nothing() {
         commit_id: Some(CommitId::parse("replay").expect("commit id")),
         ..MergeForkOptions::default()
     };
+    let maintenance = rebase.maintenance();
+    let unfolded = manifest_nos(&maintenance, [&fork_id, &rebase_id]).await;
     let replayed = rebase
         .replay_fork_with_options(&fork_id, &actor(), &options)
         .await
         .expect("the replay");
     assert_eq!(replayed.conflicts, Vec::new());
+    assert_eq!(
+        manifest_nos(&maintenance, [&fork_id, &rebase_id]).await[0],
+        unfolded[0],
+        "the replay publishes no manifest of the fork"
+    );
+    let file = rebase.read_file("/b.txt").await.expect("the replayed file");
+    assert_eq!(file.bytes, b"b");
     for namespace in [&fork, &rebase] {
         namespace
             .put_file("/later.txt", b"later", &actor())
             .await
             .expect("a later commit");
     }
-    let maintenance = rebase.maintenance();
     let before = manifest_nos(&maintenance, [&fork_id, &rebase_id]).await;
     let retried = rebase
         .replay_fork_with_options(&fork_id, &actor(), &options)
@@ -267,7 +277,7 @@ async fn manifest_nos(
 ///
 /// The fork's handle is dropped right after the fork deletes `/d`, so the
 /// runtime keeps the fork's head on the fork's first manifest, and the plan
-/// has to read the manifest that its fold of the fork publishes.
+/// has to read the delete from the fork's WAL tail.
 #[tokio::test]
 async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_changes() {
     let directory = tempfile::tempdir().expect("tempdir");

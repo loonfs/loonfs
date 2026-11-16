@@ -1,8 +1,8 @@
 //! Creates a verified snapshot of a manifest that a caller's fold published or
-//! found current.
+//! found current, or that a caller's read of the namespace's head found.
 
 use super::record::{write_snapshot_record, SnapshotBasisVerification};
-use crate::engine::{NamespaceEngine, Writable};
+use crate::engine::{NamespaceEngine, RuntimeReadContext, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::namespace::basis::PublicationBasis;
@@ -58,6 +58,44 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 &self.namespace.start_clock(),
             )
             .await
+    }
+
+    /// Creates an unnamed snapshot that expires at `expires_at_ms` of the
+    /// manifest that `context` reads, without folding the WAL tail first
+    /// (format spec, "Creating and verifying a snapshot"), and returns the
+    /// record with the version that its write stored.
+    ///
+    /// The manifest comes from the segment cache, or from the store after a
+    /// check against the manifest boundary. If the manifest stopped being
+    /// current before the load or before the snapshot's verification, the call
+    /// returns `snapshot_unavailable`, and the caller reads the namespace's
+    /// head again and takes another snapshot.
+    pub async fn create_verified_snapshot_of_view(
+        &self,
+        expires_at_ms: Option<u64>,
+        context: &RuntimeReadContext,
+    ) -> Result<CreatedSnapshot> {
+        let segments = self
+            .namespace
+            .load_held_manifest(context.read_basis.basis.manifest(), None)
+            .await?
+            .ok_or_else(manifest_replaced)?;
+        let basis = PublicationBasis {
+            manifest: segments.loaded_manifest(),
+            boundary: None,
+        };
+        self.namespace
+            .create_verified_snapshot_record(
+                SnapshotOwner::User {
+                    name: None,
+                    expires_at_ms,
+                    deleted_at_ms: None,
+                },
+                basis,
+                &self.namespace.start_clock(),
+            )
+            .await
+            .map(|(created, _)| created)
     }
 }
 
@@ -125,15 +163,20 @@ impl<S: ObjectStore> NamespaceStore<S> {
             Ok((etag, SnapshotBasisVerification::Verified(basis))) => {
                 return Ok((CreatedSnapshot { record, etag }, basis))
             }
-            Ok((_, SnapshotBasisVerification::Invalid)) => CoreError::SnapshotUnavailable(
-                "the snapshot's manifest stopped being current before the snapshot record was verified".to_owned(),
-            ),
+            Ok((_, SnapshotBasisVerification::Invalid)) => manifest_replaced(),
             Err(error) => error,
         };
         self.delete_failed_snapshot_record(&snapshot_id, &error)
             .await;
         Err(error)
     }
+}
+
+fn manifest_replaced() -> CoreError {
+    CoreError::SnapshotUnavailable(
+        "the snapshot's manifest stopped being current before the snapshot record was verified"
+            .to_owned(),
+    )
 }
 
 fn validate_snapshot_owner(owner: &SnapshotOwner) -> Result<()> {
