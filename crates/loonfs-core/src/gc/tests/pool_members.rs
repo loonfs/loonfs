@@ -633,24 +633,91 @@ async fn a_pool_sweeps_a_live_members_sessions_by_the_members_status() {
     let first_completed =
         plant_session(&store, &pool_id, first, base_ms, Some(completed(base_ms))).await;
 
-    // The fork's snapshot keeps the deleted source from retirement, so the
-    // source's sessions stay, and the fork's sessions follow the fork's rules.
-    collect_pool_at(&store, &pool_id, base_ms + GC_GRACE_WINDOW_MS).await;
+    // The fork's snapshot keeps the deleted source from retirement, but the
+    // source is past its retirement deadline, so the source's sessions follow
+    // the rules of a retired namespace, and the fork's sessions follow the
+    // fork's rules.
+    let report = collect_pool_at(&store, &pool_id, base_ms + GC_GRACE_WINDOW_MS).await;
+    assert_eq!(report.deleted.upload_sessions, 1);
     assert!(exists(&store, &upload_outcome(&pool_id, &fork_open.upload_id)).await);
-    assert!(!exists(&store, &upload_outcome(&pool_id, &first_open.upload_id)).await);
+    assert!(exists(&store, &upload_outcome(&pool_id, &first_open.upload_id)).await);
+    assert!(session_exists(&store, &pool_id, &fork_completed).await);
+    assert!(!session_exists(&store, &pool_id, &first_completed).await);
     let later_ms = base_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS;
     let report = collect_pool_at(&store, &pool_id, later_ms).await;
-    assert_eq!(report.deleted.upload_sessions, 2);
+    assert_eq!(report.deleted.upload_sessions, 3);
     assert!(!session_exists(&store, &pool_id, &fork_open).await);
     assert!(!session_exists(&store, &pool_id, &fork_completed).await);
-    assert!(session_exists(&store, &pool_id, &first_open).await);
-    assert!(session_exists(&store, &pool_id, &first_completed).await);
-    assert!(!exists(&store, &upload_outcome(&pool_id, &first_open.upload_id)).await);
+    assert!(!session_exists(&store, &pool_id, &first_open).await);
     // Without its session, the fork's content stays because a fork revision
     // refers to it.
     collect_pool_at(&store, &pool_id, later_ms).await;
     assert!(exists(&store, &content_blob(&pool_id, &kept.content_id)).await);
     assert!(!exists(&store, &unreferenced).await);
+}
+
+/// Checks that a deleted namespace that a live fork keeps from retirement
+/// keeps its sessions until its retirement deadline, and that from the
+/// deadline on, its sessions follow the rules of a retired namespace: a
+/// completed session's records are deleted at once, and its content in the
+/// next collection, and an open session whose lease ended is aborted.
+#[tokio::test]
+async fn a_deleted_sources_sessions_end_at_its_retirement_deadline_while_a_fork_lives() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (pool_id, members) = pool(&store, &["source", "fork"]).await;
+    let source = &members[0];
+    let (completed_id, content) =
+        complete_upload_for_gc(&store, source, b"unpublished", &context(1_000)).await;
+    let content_key = content_blob(&pool_id, &content.content_id);
+    // The deadline is a grace window past every object, so the content is old
+    // enough to delete at the deadline.
+    let deadline_ms = aged_context(&store, &members).await.now_ms;
+    let deleted_at_ms = deadline_ms - GC_GRACE_WINDOW_MS;
+    // In an active namespace, the collection would abort this session at
+    // once, because its lease ended a grace window before the deletion.
+    let open = plant_session(
+        &store,
+        &pool_id,
+        source,
+        deleted_at_ms - GC_GRACE_WINDOW_MS,
+        None,
+    )
+    .await;
+    delete_namespace(&store, source, deleted_at_ms).await;
+
+    let before = collect_pool_at(&store, &pool_id, deadline_ms - 1).await;
+    assert_eq!(before.deleted.upload_sessions, 0);
+    assert_eq!(before.retained.upload_session_window, 2);
+    assert_eq!(before.next_reclamation_at_ms, Some(deadline_ms));
+    assert!(!exists(&store, &upload_outcome(&pool_id, &open.upload_id)).await);
+    assert!(exists(&store, &content_key).await);
+
+    // The fork's snapshot keeps the source from retirement at its deadline.
+    let source_report = collect(&store, source, deadline_ms).await;
+    assert_eq!(source_report.retires_at_ms, Some(deadline_ms));
+    assert_eq!(source_report.deleted_snapshots_by_owner.fork, 0);
+    assert!(exists(&store, &pool_member(&pool_id, source)).await);
+
+    let at_deadline = collect_pool_at(&store, &pool_id, deadline_ms).await;
+    assert_eq!(at_deadline.deleted.upload_sessions, 1);
+    assert!(!exists(&store, &upload_session(&pool_id, &completed_id)).await);
+    assert!(!exists(&store, &upload_outcome(&pool_id, &completed_id)).await);
+    // The session's record protected its content in the collection that
+    // deleted the record, so the next collection deletes the content.
+    assert_eq!(at_deadline.deleted.content_objects, 0);
+    assert!(exists(&store, &content_key).await);
+    assert!(exists(&store, &upload_outcome(&pool_id, &open.upload_id)).await);
+    assert!(session_exists(&store, &pool_id, &open).await);
+
+    let next = collect_pool_at(&store, &pool_id, deadline_ms).await;
+    assert_eq!(next.deleted.content_objects, 1);
+    assert!(!exists(&store, &content_key).await);
+
+    // The aborted session's records stay for the abort grace.
+    let later = collect_pool_at(&store, &pool_id, deadline_ms + GC_GRACE_WINDOW_MS).await;
+    assert_eq!(later.deleted.upload_sessions, 1);
+    assert!(!session_exists(&store, &pool_id, &open).await);
 }
 
 #[tokio::test]

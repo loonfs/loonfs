@@ -250,11 +250,13 @@ impl<S: ObjectStore> PoolStore<S> {
     /// Determines what to do with a session whose records the sweep read, by
     /// the status of the namespace that created the session.
     ///
-    /// A session of a deleted namespace is kept while the namespace is a
-    /// member, which is until its boundary is retired. An open or aborted
-    /// session follows the same rules in an active namespace and in a retired
-    /// one, and its provider cleanup runs after the retirement, because the
-    /// records and the content are under the pool's prefix.
+    /// A session of a deleted namespace is kept until the namespace's
+    /// retirement deadline, and from the deadline on it follows the rules of
+    /// a retired namespace, even while a fork's snapshot keeps the namespace
+    /// from retirement. An open or aborted session follows the same rules in
+    /// an active namespace and in a retired one, and its provider cleanup runs
+    /// after the retirement, because the records and the content are under
+    /// the pool's prefix.
     pub(super) async fn sweep_upload_session(
         &self,
         roots: &PoolRoots,
@@ -264,10 +266,11 @@ impl<S: ObjectStore> PoolStore<S> {
         let Some(status) = roots.find_retirement_status(&state.session.namespace_id) else {
             return Ok(retain_undated());
         };
-        if let RetirementStatus::Retained { retires_at_ms } = status {
-            return Ok(UploadSessionSweep::Retain {
-                reclaimable_at_ms: retires_at_ms,
-            });
+        if let RetirementStatus::Retained {
+            retires_at_ms: Some(deadline_ms),
+        } = status
+        {
+            return Ok(retain_until(deadline_ms));
         }
         match &state.outcome {
             None => self.abort_expired_session(clock, &state.session).await,
@@ -386,21 +389,29 @@ pub(super) enum UploadSessionSweep {
 /// Returns whether a completed session's records are kept or deleted, from
 /// the retirement `status` of the namespace that created the session and the
 /// session's completion time.
+///
+/// A deleted namespace past its retirement deadline (retained with no
+/// deadline) can't admit the session's content, so the session is deleted
+/// without the completed-content grace, as in a retired namespace.
 pub(super) fn sweep_completed_session(
     status: RetirementStatus,
     now_ms: u64,
     completed_at_ms: u64,
 ) -> UploadSessionSweep {
     match status {
-        RetirementStatus::Retained { retires_at_ms } => UploadSessionSweep::Retain {
-            reclaimable_at_ms: retires_at_ms,
-        },
+        RetirementStatus::Retained {
+            retires_at_ms: Some(deadline_ms),
+        } => retain_until(deadline_ms),
         RetirementStatus::Active
             if now_ms.saturating_sub(completed_at_ms) < CONTENT_RECLAMATION_GRACE_WINDOW_MS =>
         {
             retain_until(completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_WINDOW_MS))
         }
-        RetirementStatus::Active | RetirementStatus::Eligible => UploadSessionSweep::Delete,
+        RetirementStatus::Active
+        | RetirementStatus::Retained {
+            retires_at_ms: None,
+        }
+        | RetirementStatus::Eligible => UploadSessionSweep::Delete,
     }
 }
 
