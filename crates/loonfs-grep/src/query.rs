@@ -286,6 +286,7 @@ mod tests {
             scope: loonfs_types::GrepScope::Namespace,
             allow_stale: false,
             allow_scan: false,
+            consistency: None,
         };
         compile_pattern(&request).map(|compiled| compiled.plan)
     }

@@ -1421,7 +1421,11 @@ def test_inode_addressing(cases: dict[str, ConformanceCase], harness: Harness) -
         ),
     )
     labeled = _file_entry(
-        client.files.retrieve(namespace_id, path=child_path(request.copy_file_name))
+        client.files.retrieve(
+            namespace_id,
+            path=child_path(request.copy_file_name),
+            include_attributes=True,
+        )
     )
     assert labeled.attributes_revision_no == expected.attributes_revision_no
     assert labeled.attributes == {request.attribute_key: request.attribute_value}

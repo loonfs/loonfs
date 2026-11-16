@@ -2024,7 +2024,16 @@ func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
 			},
 		},
 	}, request.ActorID)
-	labeled := requireFileProjection(t, statPath(t, h.client, request.NamespaceID, childPath(request.CopyFileName)))
+	includeAttributes := true
+	labeledEntry, err := h.client.Files.Retrieve(context.Background(), &loonfs.GetPathEntryRequest{
+		NamespaceID:       request.NamespaceID,
+		Path:              childPath(request.CopyFileName),
+		IncludeAttributes: &includeAttributes,
+	})
+	if err != nil {
+		t.Fatalf("stat %s with attributes: %v", childPath(request.CopyFileName), err)
+	}
+	labeled := requireFileProjection(t, labeledEntry)
 	if labeled.AttributesRevisionNo == nil || int64(*labeled.AttributesRevisionNo) != expected.AttributesRevisionNo {
 		t.Errorf("attributes_revision_no = %v, want %d", labeled.AttributesRevisionNo, expected.AttributesRevisionNo)
 	}

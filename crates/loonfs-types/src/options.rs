@@ -145,22 +145,13 @@ impl CommitOptions {
 }
 
 /// Options for stating one entry by path or by inode.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatOptions {
-    /// Whether to include the inode's attribute map and revision, enabled by default.
+    /// Whether to include the inode's attribute map and revision, disabled by default.
     pub include_attributes: AttributeInclusion,
     /// The live head or the snapshot that the read reads, by default the live
     /// head at the runtime's default consistency.
     pub at: ReadAt,
-}
-
-impl Default for StatOptions {
-    fn default() -> Self {
-        Self {
-            include_attributes: AttributeInclusion::Include,
-            at: ReadAt::default(),
-        }
-    }
 }
 
 /// Options for listing a directory by path or by inode.
@@ -355,6 +346,15 @@ impl Default for DiffOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListFileRevisionsOptions {
     /// How recently each page confirms the live head, or `None` for the
+    /// runtime's default.
+    pub consistency: Option<Consistency>,
+}
+
+/// Options for a read of the live head that has no other options: a read of a namespace's
+/// metadata, a read view, or a fork's next merge range.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiveReadOptions {
+    /// How recently the read confirms the live head, or `None` for the
     /// runtime's default.
     pub consistency: Option<Consistency>,
 }
@@ -823,5 +823,18 @@ mod tests {
         assert_eq!(ListChangesOptions::default().at, ReadAt::Live(None));
         assert_eq!(ListFileRevisionsOptions::default().consistency, None);
         assert_eq!(ListTrashOptions::default().consistency, None);
+        assert_eq!(LiveReadOptions::default().consistency, None);
+    }
+
+    #[test]
+    fn entry_reads_and_listings_omit_attributes_by_default() {
+        assert_eq!(
+            StatOptions::default().include_attributes,
+            AttributeInclusion::Omit
+        );
+        assert_eq!(
+            ListOptions::default().include_attributes,
+            AttributeInclusion::Omit
+        );
     }
 }

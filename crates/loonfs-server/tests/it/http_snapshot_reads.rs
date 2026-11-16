@@ -765,16 +765,6 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
             ),
             "/revision_no",
         ),
-        (
-            post_json::<serde_json::Value>(
-                &format!(
-                    "{}/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/1/downloads",
-                    harness.server_url,
-                ),
-                serde_json::json!({"snapshot_id": live.snapshot_id}),
-            ),
-            "/snapshot_id",
-        ),
     ] {
         let (status, error) = result.expect_err("revision and snapshot must conflict");
         assert_eq!(status, 400);

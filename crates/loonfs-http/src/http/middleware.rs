@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use futures::FutureExt as _;
 use loonfs::ErrorCode;
-use loonfs_types::ErrorKind;
+use loonfs_types::{ErrorCause, ErrorKind};
 use std::any::Any;
 use std::sync::Arc;
 
@@ -88,13 +88,16 @@ pub(super) async fn with_request_deadline(
     .await
     {
         Ok(response) => response,
+        // A cancelled mutation might still take effect, so the outcome is
+        // unknown, and the cause says that the deadline cancelled it.
         Err(_) => ApiResponseError::new(
-            ErrorCode::DeadlineExceeded,
+            ErrorCode::OutcomeUnknown,
             &format!(
                 "the server cancelled the request at the configured deadline; \
                  request_deadline_ms is {request_deadline_ms} milliseconds"
             ),
         )
+        .with_cause(ErrorCause::Deadline)
         .into_response(),
     }
 }
@@ -199,7 +202,6 @@ pub(super) fn request_log_severity(
         | ErrorKind::Forbidden
         | ErrorKind::StoragePermissionDenied
         | ErrorKind::Unavailable
-        | ErrorKind::DeadlineExceeded
         | ErrorKind::OutcomeUnknown => RequestLogSeverity::Warn,
         ErrorKind::InvalidRequest
         | ErrorKind::ContentTooLarge

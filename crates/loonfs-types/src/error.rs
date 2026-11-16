@@ -32,9 +32,6 @@ pub enum ErrorKind {
     /// The request conflicts with current namespace state and requires refreshed state
     /// before retrying.
     Conflict,
-    /// The server cancelled work after its deadline, requiring mutation
-    /// reconciliation before retrying.
-    DeadlineExceeded,
     /// An unavailable condition that may require retry or maintenance.
     Unavailable,
     /// The operation may or may not have taken effect. Retry a commit with the same commit
@@ -154,8 +151,6 @@ error_codes! {
     ServerBusy => "server_busy",
     ShuttingDown => "shutting_down",
     StoreContention => "store_contention",
-    DeadlineExceeded => "deadline_exceeded",
-    SnapshotUnavailable => "snapshot_unavailable",
     ContentNotMaterialized => "content_not_materialized",
     MaintenanceRequired => "maintenance_required",
     UploadNotFound => "upload_not_found",
@@ -203,13 +198,11 @@ impl ErrorCode {
             ErrorCode::MethodNotAllowed => ErrorKind::MethodNotAllowed,
             ErrorCode::NamespaceDeleted => ErrorKind::Gone,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
-            ErrorCode::DeadlineExceeded => ErrorKind::DeadlineExceeded,
             ErrorCode::CommitQueueFull
             | ErrorCode::WriterSessionClosed
             | ErrorCode::ServerBusy
             | ErrorCode::ShuttingDown
             | ErrorCode::StoreContention
-            | ErrorCode::SnapshotUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::IndexLagging
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
@@ -303,8 +296,6 @@ impl ErrorCode {
             | ErrorCode::OutcomeUnknown
             | ErrorCode::WriterSessionClosed
             | ErrorCode::StoreContention
-            | ErrorCode::DeadlineExceeded
-            | ErrorCode::SnapshotUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound
@@ -367,8 +358,6 @@ impl ErrorCode {
             | ErrorCode::ShuttingDown
             | ErrorCode::WriterSessionClosed
             | ErrorCode::StoreContention
-            | ErrorCode::DeadlineExceeded
-            | ErrorCode::SnapshotUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound
@@ -441,8 +430,6 @@ impl ErrorCode {
             | ErrorCode::ShuttingDown
             | ErrorCode::WriterSessionClosed
             | ErrorCode::StoreContention
-            | ErrorCode::DeadlineExceeded
-            | ErrorCode::SnapshotUnavailable
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound

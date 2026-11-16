@@ -56,7 +56,8 @@ fn publication_overrides_are_strict_and_positive() {
 
 /// Checks that the write-stop wait is half the request deadline, so a
 /// commit that waits for the whole write-stop wait returns
-/// `maintenance_required` before its request returns `deadline_exceeded`.
+/// `maintenance_required` before the server cancels its request at the
+/// deadline with `outcome_unknown`.
 #[test]
 fn the_write_stop_wait_is_half_the_request_deadline() {
     let config = parse_server_config(

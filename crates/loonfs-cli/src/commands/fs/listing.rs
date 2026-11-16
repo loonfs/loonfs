@@ -121,9 +121,10 @@ pub(crate) async fn run_filesystem_stat(
     args: FilesystemStatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, None).await?;
+    // `stat` shows one entry, so it shows the entry's attributes too.
     let options = StatOptions {
+        include_attributes: loonfs_types::options::AttributeInclusion::Include,
         at: ReadAt::from(args.snapshot_id.clone()),
-        ..StatOptions::default()
     };
     let client = &context.profile.target.client;
     let entry = match args.inode {

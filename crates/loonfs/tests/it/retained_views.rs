@@ -433,7 +433,13 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 );
             }
             let entry = namespace_reader
-                .stat("/docs/renamed.txt")
+                .stat_with_options(
+                    "/docs/renamed.txt",
+                    &loonfs::StatOptions {
+                        include_attributes: loonfs_types::options::AttributeInclusion::Include,
+                        ..Default::default()
+                    },
+                )
                 .await
                 .expect("cleared attributes");
             let attributes = entry.attributes.expect("attribute projection");

@@ -318,21 +318,20 @@ fn read_options_project_grouped_attributes_or_none() {
     }
     annotate_owner(&namespace_writer);
 
-    // Stat includes attributes by default.
-    let default_stat = fs
-        .stat_path_blocking(&namespace_id, "/docs/report.txt")
-        .expect("stat");
-    assert!(default_stat.attributes.is_some());
+    // Stat omits attributes by default, as a listing does, and includes
+    // them on request.
+    let default_stat = block_on(namespace.stat("/docs/report.txt")).expect("stat");
+    assert!(default_stat.attributes.is_none());
 
-    let opted_out = block_on(namespace.stat_with_options(
+    let opted_in = block_on(namespace.stat_with_options(
         "/docs/report.txt",
         &StatOptions {
-            include_attributes: loonfs_types::options::AttributeInclusion::Omit,
+            include_attributes: loonfs_types::options::AttributeInclusion::Include,
             ..Default::default()
         },
     ))
-    .expect("stat without attributes");
-    assert!(opted_out.attributes.is_none());
+    .expect("stat with attributes");
+    assert!(opted_in.attributes.is_some());
 
     // Listing omits attributes by default, and includes them on request.
     let default_listing = fs.list_path_blocking(&namespace_id, "/docs").expect("list");

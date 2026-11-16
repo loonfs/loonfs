@@ -101,7 +101,7 @@ struct LoonfsOpenApi;
 /// OpenAPI definition for the 503 response every operation can return.
 #[derive(utoipa::ToResponse)]
 #[response(
-    description = "The server can't complete the request now. Check `code` to find whether the cause is a deadline, shutdown, load, writer session admission, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying."
+    description = "The server can't complete the request now. Check `code` to find whether the outcome is unknown (after a deadline or a lost acknowledgment), or the cause is shutdown, load, writer session admission, store contention, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying."
 )]
 #[expect(
     dead_code,

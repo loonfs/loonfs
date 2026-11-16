@@ -1136,7 +1136,7 @@ async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
     assert_eq!(request_lines(&store.take()), expected);
 }
 
-/// Checks that the next-range query in a writer runtime with fresh
+/// Checks that a `strong` next-range query in a writer runtime with fresh
 /// positions checks each position once, with a successor HEAD and a
 /// boundary read, as a `strong` read of a position does.
 #[tokio::test]
@@ -1144,7 +1144,12 @@ async fn the_next_merge_range_with_fresh_positions_checks_each_position() {
     let (family, store) = recorded_family().await;
     family
         .main
-        .next_merge_range(family.fork.id())
+        .next_merge_range_with_options(
+            family.fork.id(),
+            &crate::LiveReadOptions {
+                consistency: Some(crate::Consistency::Strong),
+            },
+        )
         .await
         .expect("the next range");
     assert_eq!(

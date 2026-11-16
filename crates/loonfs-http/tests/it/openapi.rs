@@ -840,9 +840,9 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
     }
 
     for (path, default) in [
-        ("/v0/namespaces/{namespace_id}/filesystem/entry", true),
+        ("/v0/namespaces/{namespace_id}/filesystem/entry", false),
         ("/v0/namespaces/{namespace_id}/filesystem/entries", false),
-        ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", true),
+        ("/v0/namespaces/{namespace_id}/inodes/{inode_id}", false),
         (
             "/v0/namespaces/{namespace_id}/inodes/{inode_id}/children",
             false,
@@ -871,6 +871,9 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/content",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions",
         "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
+        "/v0/namespaces/{namespace_id}",
+        "/v0/namespaces/{namespace_id}/merges",
+        "/v0/namespaces/{namespace_id}/grep",
     ] {
         let consistency = query_parameter(paths, path, "get", "consistency");
         assert_eq!(consistency.get("required"), Some(&Value::Bool(false)));

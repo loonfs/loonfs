@@ -921,12 +921,18 @@ async fn disable_grep(router: &Router, namespace_id: &NamespaceId) -> GrepIndex 
     response_json(response).await
 }
 
+/// Searches with `consistency=strong`, because a search follows the
+/// maintenance sweep's publication of the index, which doesn't move the
+/// serving runtime's cached head.
 async fn grep(router: &Router, namespace_id: &NamespaceId, pattern: &str) -> GrepResponse {
     response_json(
         send(
             router,
             Method::GET,
-            &query_path_with_pattern(namespace_id, pattern),
+            &format!(
+                "{}&consistency=strong",
+                query_path_with_pattern(namespace_id, pattern)
+            ),
             None,
         )
         .await,

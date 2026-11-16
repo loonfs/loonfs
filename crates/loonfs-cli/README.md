@@ -278,12 +278,12 @@ Reading
     downloaded contents. Existing files aren't overwritten unless --force
     is set. --revision downloads an older revision of one file
 
-  loonfs grep <pattern> [--path-prefix <path>] [-i] [--limit <n>]
+  loonfs grep <pattern> [--path <path>] [-i] [--limit <n>]
                         [--page-size <n>] [--cursor <cursor>] [--all] [--jsonl]
                         [--allow-scan] [--allow-stale]
     Search file content through the gram index, with a pattern in the Rust
     regex dialect (`^` and `$` match at line boundaries). -i ignores ASCII
-    case, --path-prefix limits the search to a subtree, --allow-scan
+    case, --path limits the search to a subtree, --allow-scan
     permits a bounded scan for patterns with no literal bytes, and
     --allow-stale permits results that leave out an unindexed tail that's
     too large to scan

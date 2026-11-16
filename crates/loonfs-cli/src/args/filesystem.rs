@@ -161,9 +161,10 @@ pub(crate) struct FilesystemGrepArgs {
     /// Pattern in the Rust regex dialect. `^` and `$` match at line boundaries.
     #[arg(value_hint = ValueHint::Other)]
     pub pattern: String,
-    /// Restrict matches to files under this absolute path prefix.
+    /// Restrict matches to the descendants of this directory, given as a
+    /// complete absolute path.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub path_prefix: Option<String>,
+    pub path: Option<String>,
     /// Match ASCII letters without regard to case.
     #[arg(short = 'i', long)]
     pub ignore_case: bool,

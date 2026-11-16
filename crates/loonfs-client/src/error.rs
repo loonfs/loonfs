@@ -1,7 +1,7 @@
 //! Defines [`ClientError`], returned by asynchronous client operations.
 
 use loonfs_types::config::ConfigFieldError;
-use loonfs_types::{ErrorCode, ErrorResponse};
+use loonfs_types::{ErrorCause, ErrorCode, ErrorResponse};
 use thiserror::Error;
 
 /// Error returned by the asynchronous HTTP client.
@@ -93,6 +93,18 @@ impl ClientError {
             _ => None,
         }
     }
+
+    /// Returns the cause in the details of [`ClientError::Api`], for a code
+    /// that two causes share because the remedy is the same for both. Branch
+    /// on [`Self::code`], and use the cause to report or count what happened.
+    ///
+    /// Returns `None` for other error variants and for errors without a cause.
+    pub fn cause(&self) -> Option<ErrorCause> {
+        match self {
+            ClientError::Api { response, .. } => response.details.as_ref()?.cause,
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +161,47 @@ mod tests {
             ("index_corrupt", ErrorCode::IndexCorrupt),
         ] {
             assert_eq!(api_error(500, wire).code(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn api_errors_expose_the_cause_that_shares_a_code() {
+        for (body, code, cause) in [
+            (
+                r#"{"code":"outcome_unknown","message":"m","details":{"cause":"deadline"}}"#,
+                ErrorCode::OutcomeUnknown,
+                Some(ErrorCause::Deadline),
+            ),
+            (
+                r#"{"code":"outcome_unknown","message":"m","details":{"cause":"unconfirmed"}}"#,
+                ErrorCode::OutcomeUnknown,
+                Some(ErrorCause::Unconfirmed),
+            ),
+            (
+                r#"{"code":"snapshot_not_found","message":"m","details":{"cause":"manifest_missing"}}"#,
+                ErrorCode::SnapshotNotFound,
+                Some(ErrorCause::ManifestMissing),
+            ),
+            (
+                r#"{"code":"store_contention","message":"m","details":{"cause":"publication_budget"}}"#,
+                ErrorCode::StoreContention,
+                Some(ErrorCause::PublicationBudget),
+            ),
+            (
+                r#"{"code":"store_contention","message":"m","details":{"cause":"from_a_newer_server"}}"#,
+                ErrorCode::StoreContention,
+                Some(ErrorCause::Unknown),
+            ),
+            (
+                r#"{"code":"snapshot_not_found","message":"m"}"#,
+                ErrorCode::SnapshotNotFound,
+                None,
+            ),
+        ] {
+            let response: ErrorResponse = serde_json::from_str(body).expect("error envelope");
+            let error = ClientError::from_error_response(503, response);
+            assert_eq!(error.code(), Some(code));
+            assert_eq!(error.cause(), cause);
         }
     }
 

@@ -23,8 +23,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// Every call generates a fresh `SnapshotId`, and `name` is an optional
     /// label, not a key. A manifest that stopped being current before the
-    /// snapshot's verification returns `snapshot_unavailable`, so the caller
-    /// folds and snapshots again. A snapshot with `expires_at_ms` can't be read
+    /// snapshot's verification returns `stale_head`, so the caller folds and
+    /// snapshots again. A snapshot with `expires_at_ms` can't be read
     /// after that time, and it stays listed until collection deletes it.
     /// `None` keeps the snapshot until it's deleted.
     pub async fn create_snapshot(
@@ -68,8 +68,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// The manifest comes from the segment cache, or from the store after a
     /// check against the manifest boundary. If the manifest stopped being
     /// current before the load or before the snapshot's verification, the call
-    /// returns `snapshot_unavailable`, and the caller reads the namespace's
-    /// head again and takes another snapshot.
+    /// returns `stale_head`, and the caller reads the namespace's head again
+    /// and takes another snapshot.
     pub async fn create_verified_snapshot_of_view(
         &self,
         expires_at_ms: Option<u64>,
@@ -132,7 +132,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// read: the manifest that the caller's fold published or found current,
     /// or the current manifest that a discovery of the namespace's head
     /// found, for a snapshot without a fold (format spec, "Creating and
-    /// verifying a snapshot"). The call returns `snapshot_unavailable` when
+    /// verifying a snapshot"). The call returns `stale_head` when
     /// the manifest stopped being current before the snapshot's
     /// verification, so the caller can read a fresh basis and take a snapshot
     /// again. Returns the snapshot record with the version that its write
@@ -174,7 +174,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 }
 
 fn manifest_replaced() -> CoreError {
-    CoreError::SnapshotUnavailable(
+    CoreError::HeadMoved(
         "the snapshot's manifest stopped being current before the snapshot record was verified"
             .to_owned(),
     )

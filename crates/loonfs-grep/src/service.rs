@@ -19,6 +19,8 @@ use loonfs_types::{
     PathEntry, MAX_PAGE_LIMIT,
 };
 use page_walk::{walk_page, GrepResume};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 /// Unindexed-tail revisions one query will scan exhaustively before
@@ -108,7 +110,20 @@ impl GrepService {
         // after every commit that the entry records, so the view's head is
         // at or above every sequence that the entry records, such as its
         // build's capture and a reorganization's pruning floor.
-        let head = namespace_reads.read_view().await?;
+        let mut head = namespace_reads.read_view(request.consistency).await?;
+        // A cursor minted at a head above the one that this read confirmed
+        // came from a fresher read, so the head is confirmed as a `strong`
+        // read confirms it, as for any read that includes a sequence that the
+        // caller learned from an earlier response. A cursor that doesn't
+        // decode is refused below.
+        let cursor_head_seq = cursor
+            .and_then(|cursor| decode_cursor::<GrepPageCursor>(cursor).ok())
+            .map(|cursor| cursor.head_seq);
+        if cursor_head_seq.is_some_and(|seq| seq > head.head_seq()) {
+            head = namespace_reads
+                .read_view(Some(loonfs::Consistency::Strong))
+                .await?;
+        }
         let snapshot = active_index(head.grep_entry().await?)?;
         let fingerprint = request.fingerprint();
         let page = page_reads(
@@ -128,7 +143,7 @@ impl GrepService {
         // and that includes the scope.
         let member_reads = page.member_reads();
         let scope = match &request.scope {
-            GrepScope::PathPrefix(prefix) => Some(member_reads.resolve_path(prefix).await?),
+            GrepScope::Path(prefix) => Some(member_reads.resolve_path(prefix).await?),
             GrepScope::Inode(inode_id) => Some(member_reads.resolve_inode(*inode_id).await?),
             GrepScope::Namespace => None,
         };
@@ -180,6 +195,38 @@ impl GrepService {
         &self,
         request: &GrepRequest,
         page: PageRequest<String>,
+        reads: &NamespaceReads,
+        store: &S,
+    ) -> Result<GrepResponse> {
+        // A query reads through views that pin the manifest its head was read
+        // above. When a collection removes that manifest's segments after a
+        // newer manifest replaced it, the query runs again from a reloaded
+        // head, as an ordinary read does.
+        reads
+            .namespace()
+            .read_through_views(|| {
+                // The query's future is boxed as a `Send` future, because its
+                // nested reads are deeper than the compiler's recursion limit
+                // when it lays out a future that awaits the query or checks
+                // that a host's handler is `Send`.
+                let query: Pin<Box<dyn Future<Output = Result<GrepResponse>> + Send + '_>> =
+                    Box::pin(self.query_once(request, &page, reads, store));
+                async move {
+                    match query.await {
+                        Err(GrepError::Runtime(
+                            error @ loonfs::Error::Core(CoreError::ManifestReplaced { .. }),
+                        )) => Err(error),
+                        result => Ok(result),
+                    }
+                }
+            })
+            .await?
+    }
+
+    async fn query_once<S: ObjectStore>(
+        &self,
+        request: &GrepRequest,
+        page: &PageRequest<String>,
         reads: &NamespaceReads,
         store: &S,
     ) -> Result<GrepResponse> {

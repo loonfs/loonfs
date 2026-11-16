@@ -1,6 +1,8 @@
 //! Reads namespace state and storage diagnostics.
 
+use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::Result;
+use crate::manifest::load_basis_metadata_segments;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -89,6 +91,29 @@ fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
             resume_after_seq: rebased_from.resume_after_seq,
         }),
     })
+}
+
+impl<S: ObjectStore, M> NamespaceEngine<S, M> {
+    /// Returns the namespace's metadata at the head that `context` reads: its
+    /// access mode, creation, fork basis, head, retention floor, and the
+    /// retention window of the manifest that the head is read above. A
+    /// deleted namespace returns `namespace_deleted`, as every read does.
+    pub async fn namespace_metadata(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> Result<NamespaceMetadata> {
+        self.ensure_live_context(context)?;
+        let loaded = load_basis_metadata_segments(
+            &self.namespace.store,
+            Some(&self.namespace.segment_cache),
+            &context.read_basis.basis,
+        )
+        .await?;
+        Ok(namespace_metadata(
+            context.read_basis.head.clone(),
+            loaded.segments.manifest().payload(),
+        ))
+    }
 }
 
 /// Returns the state of a namespace that this call created with `manifest`.

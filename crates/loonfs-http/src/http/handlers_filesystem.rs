@@ -35,8 +35,8 @@ pub(super) struct PathQuery {
     #[cfg_attr(feature = "openapi", param(required = true))]
     path: Option<String>,
     /// Whether the response includes the inode's attribute map and attribute revision. The default
-    /// is `true`, because a stat reads one path and a map is at most 64 KiB.
-    #[cfg_attr(feature = "openapi", param(default = true))]
+    /// is `false`, as on every route that takes this parameter.
+    #[cfg_attr(feature = "openapi", param(default = false))]
     include_attributes: Option<bool>,
     /// The snapshot whose captured path state to read.
     snapshot_id: Option<SnapshotId>,

@@ -577,8 +577,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// manifest boundary that the snapshot's verification read, and the head.
     /// When a newer manifest became current before the verification, the call
     /// reads the head again with a discovery, up to
-    /// `MAX_CONTENTION_ATTEMPTS` times, and then returns
-    /// `snapshot_unavailable`.
+    /// `MAX_CONTENTION_ATTEMPTS` times, and then returns `stale_head`.
     ///
     /// Each read of the head is checked before the snapshot is written: when
     /// a commit in its WAL tail is older than `MAX_TAIL_COMMIT_AGE_MS` at the
@@ -617,11 +616,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 .await
             {
                 Ok((created, basis)) => return Ok(Some((created.record, basis, head))),
-                Err(CoreError::SnapshotUnavailable(_)) => {}
+                Err(CoreError::HeadMoved(_)) => {}
                 Err(error) => return Err(error),
             }
         }
-        Err(CoreError::SnapshotUnavailable(format!(
+        Err(CoreError::HeadMoved(format!(
             "a newer manifest of namespace `{}` became current before each of \
              {MAX_CONTENTION_ATTEMPTS} temporary snapshots was verified",
             self.namespace.namespace_id

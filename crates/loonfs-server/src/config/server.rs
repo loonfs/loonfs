@@ -89,8 +89,8 @@ pub struct ServerConfig {
     /// The per-namespace admission limits of the server's runtime. The
     /// write-stop wait isn't a key of this table. The server sets the wait to
     /// half of `request_deadline_ms`, so a commit that waits for the whole
-    /// wait returns `maintenance_required` before the request returns
-    /// `deadline_exceeded`.
+    /// wait returns `maintenance_required` before the server cancels the
+    /// request at its deadline with `outcome_unknown`.
     #[serde(default)]
     pub publication: loonfs::PublicationPolicy,
     /// The inline content policy of the server's runtime. Inline writes are

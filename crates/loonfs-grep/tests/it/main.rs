@@ -18,3 +18,4 @@ mod grep_step_permits;
 mod grep_steps;
 mod grep_worker;
 mod later_pages;
+mod replaced_manifests;

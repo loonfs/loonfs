@@ -121,7 +121,10 @@ for (const fixture of cases) {
                     assert.deepEqual(op.content_ref, claim);
                 }
                 if (commits.length === 1)
-                    return Response.json({ code: "deadline_exceeded", message: "reply lost" }, { status: 503 });
+                    return Response.json(
+                        { code: "outcome_unknown", message: "reply lost", details: { cause: "deadline" } },
+                        { status: 503 },
+                    );
                 assert.deepEqual(body, commits[0], "retry must retain the exact request");
                 value = {
                     namespace_id: "demo",

@@ -40,7 +40,7 @@
             }
           }
         },
-        "description": "The server can't complete the request now. Check `code` to find whether the cause is a deadline, shutdown, load, writer session admission, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying."
+        "description": "The server can't complete the request now. Check `code` to find whether the outcome is unknown (after a deadline or a lost acknowledgment), or the cause is shutdown, load, writer session admission, store contention, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying."
       }
     },
     "schemas": {
@@ -875,7 +875,7 @@
         "properties": {
           "consistency": {
             "$ref": "#/components/schemas/ReadConsistency",
-            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness,\nand `strong` confirms the head before the read."
+            "description": "How recently the read confirms the namespace head that it finds the revision in. `eventual`\n(the default, unless the server's `consistency` setting is `strong`) reads at the head that\nthe server confirmed last while that confirmation is younger than the maximum staleness,\nand `strong` confirms the head before the read. It can't be combined with `snapshot_id`."
           },
           "max_staleness_ms": {
             "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
@@ -883,6 +883,10 @@
             "maximum": 1200000,
             "minimum": 0,
             "type": "integer"
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "A snapshot to find the revision in instead of the live head. The snapshot keeps the\nrevision readable after the namespace's retention floor passes it, and a revision committed\nafter the snapshot returns `revision_not_found`."
           },
           "start_offset": {
             "description": "The first byte that the download reads. It defaults to 0 and must be less than the revision's\nsize. For a revision of zero bytes, it must be 0.",
@@ -1263,6 +1267,16 @@
         ],
         "type": "object"
       },
+      "ErrorCause": {
+        "description": "The cause of an error, for a code that two causes share because the client's remedy is the same\nfor both. A client branches on the code, and it can report or count the cause.\n\nA newer server can return a cause that isn't listed here.",
+        "enum": [
+          "manifest_missing",
+          "publication_budget",
+          "deadline",
+          "unconfirmed"
+        ],
+        "type": "string"
+      },
       "ErrorDetails": {
         "description": "The machine-readable identifiers and state that explain an error response.\n\nEvery field is optional.",
         "properties": {
@@ -1315,6 +1329,10 @@
           "after_seq": {
             "$ref": "#/components/schemas/CommitSeq",
             "description": "The `after_seq` value from the change feed request."
+          },
+          "cause": {
+            "$ref": "#/components/schemas/ErrorCause",
+            "description": "Which of the causes that share the error's code and remedy occurred, for a code whose row\nin the details table lists causes."
           },
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
@@ -6398,6 +6416,27 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ReadConsistency"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1200000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -6419,7 +6458,7 @@
                 }
               }
             },
-            "description": "Invalid namespace ID"
+            "description": "Invalid namespace ID or consistency"
           },
           "401": {
             "content": {
@@ -7443,12 +7482,12 @@
             }
           },
           {
-            "description": "Whether the response includes the inode's attribute map and attribute revision. The default\nis `true`, because a stat reads one path and a map is at most 64 KiB.",
+            "description": "Whether the response includes the inode's attribute map and attribute revision. The default\nis `false`, as on every route that takes this parameter.",
             "in": "query",
             "name": "include_attributes",
             "required": false,
             "schema": {
-              "default": true,
+              "default": false,
               "type": "boolean"
             }
           },
@@ -7970,14 +8009,14 @@
           {
             "description": "A complete absolute path that limits matches to its descendants. It can't be combined with\n`inode_id`.",
             "in": "query",
-            "name": "path_prefix",
+            "name": "path",
             "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
-            "description": "An inode that limits matches to its descendants. It can't be combined with `path_prefix`.",
+            "description": "An inode that limits matches to its descendants. It can't be combined with `path`.",
             "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "query",
             "name": "inode_id",
@@ -8028,6 +8067,27 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "How recently a first page confirms the namespace head that it reads. `eventual` (the\ndefault, unless the server's `consistency` setting is `strong`) reads at the head that the\nserver confirmed last while that confirmation is younger than the maximum staleness, and\n`strong` confirms the head before the read. A later page reads at the first page's head.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ReadConsistency"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of the head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1200000,
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -8049,7 +8109,7 @@
                 }
               }
             },
-            "description": "Invalid pattern, cursor, or scope, both scopes, or an unindexable pattern without allow_scan"
+            "description": "Invalid pattern, cursor, scope, or consistency, both scopes, or an unindexable pattern without allow_scan"
           },
           "401": {
             "content": {
@@ -8158,12 +8218,12 @@
             }
           },
           {
-            "description": "Whether the response includes the inode's attribute map and attribute revision. The default\nis `true`, because a stat reads one path and a map is at most 64 KiB.",
+            "description": "Whether the response includes the inode's attribute map and attribute revision. The default\nis `false`, as on every route that takes this parameter.",
             "in": "query",
             "name": "include_attributes",
             "required": false,
             "schema": {
-              "default": true,
+              "default": false,
               "type": "boolean"
             }
           },
@@ -9147,7 +9207,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads": {
       "post": {
-        "description": "Authorizes a direct read of one retained inode revision. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
+        "description": "Authorizes a direct read of one retained inode revision. With `snapshot_id`, the server finds the revision in the snapshot instead of at the live head. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         "operationId": "create_revision_download_by_inode",
         "parameters": [
           {
@@ -9209,7 +9269,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, revision number, or start_offset, start_offset at or past the revision's size, or a snapshot_id, which can't be combined with a revision"
+            "description": "Invalid inode ID, revision number, snapshot ID, consistency, or start_offset, or start_offset at or past the revision's size"
           },
           "401": {
             "content": {
@@ -9229,7 +9289,7 @@
                 }
               }
             },
-            "description": "Namespace, inode, or revision not found"
+            "description": "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
           },
           "409": {
             "content": {
@@ -9303,10 +9363,31 @@
           {
             "description": "The fork whose next merge into the namespace the query reads. It has to be a fork of the\nnamespace, or the fork that a rebase replays into the namespace.",
             "in": "query",
-            "name": "source",
+            "name": "source_namespace_id",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/NamespaceId"
+            }
+          },
+          {
+            "description": "How recently the read confirms the heads of the namespace and the fork. `eventual` (the\ndefault, unless the server's `consistency` setting is `strong`) reads at the heads that the\nserver confirmed last while those confirmations are younger than the maximum staleness, and\n`strong` confirms both heads before the read.",
+            "in": "query",
+            "name": "consistency",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ReadConsistency"
+            }
+          },
+          {
+            "description": "With `consistency=eventual`, how old the server's last confirmation of a head can be, in\nmilliseconds. The default is the server's `max_staleness_ms`.",
+            "in": "query",
+            "name": "max_staleness_ms",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "maximum": 1200000,
+              "minimum": 0,
+              "type": "integer"
             }
           }
         ],
@@ -9329,7 +9410,7 @@
                 }
               }
             },
-            "description": "Invalid request, or the source isn't a fork of this namespace"
+            "description": "Invalid request or consistency, or the source isn't a fork of this namespace"
           },
           "401": {
             "content": {
@@ -9571,7 +9652,7 @@
                 }
               }
             },
-            "description": "Invalid request, or the source isn't a fork of this namespace"
+            "description": "Invalid request or consistency, or the source isn't a fork of this namespace"
           },
           "401": {
             "content": {

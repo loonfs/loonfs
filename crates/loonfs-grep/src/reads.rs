@@ -7,15 +7,24 @@
 use crate::entry::{grep_extension_name, GrepEntry};
 use crate::{GrepError, Result};
 use loonfs::{
-    Consistency, CoreError, CurrentFileState, ListChangesOptions, ListSnapshotFilesOptions, LoonFs,
-    Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView, RetainedRevisionsPage,
-    RetainedRevisionsPageCursor, SnapshotFilesPager, StatOptions, MAX_CURRENT_FILES_PER_STAT,
+    Consistency, CoreError, CurrentFileState, ListChangesOptions, ListSnapshotFilesOptions,
+    LiveReadOptions, LoonFs, Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView,
+    RetainedRevisionsPage, RetainedRevisionsPageCursor, SnapshotFilesPager, StatOptions,
+    MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::{
     AbsolutePath, CommitSeq, ContentRef, EffectiveLimit, InodeId, NamespaceId, Page, PathEntry,
     RevisionNo, Subject, MAX_PAGE_LIMIT,
 };
 use loonfs_types::{FilesystemEvent, ListChangesResponse};
+
+/// The options of the views that read at a sequence that the worker or an
+/// earlier page already saw, or that the worker builds the index from. These
+/// views confirm the head as a `strong` read does, so the head is at or above
+/// that sequence and includes the worker's own publications.
+const STRONG: LiveReadOptions = LiveReadOptions {
+    consistency: Some(Consistency::Strong),
+};
 
 /// Filesystem reads for one namespace.
 ///
@@ -52,10 +61,21 @@ impl NamespaceReads {
         self.namespace.id()
     }
 
-    /// Captures one read view for a query.
-    pub(crate) async fn read_view(&self) -> Result<NamespaceReadView<'_>> {
+    /// Returns the read-only handle of the namespace these reads act on.
+    pub(crate) fn namespace(&self) -> &Namespace<ReadOnly> {
+        &self.namespace
+    }
+
+    /// Captures one read view for a query, at the head that `consistency`
+    /// confirms, or at the runtime's default consistency for `None`.
+    pub(crate) async fn read_view(
+        &self,
+        consistency: Option<Consistency>,
+    ) -> Result<NamespaceReadView<'_>> {
         let namespace = self.subject_namespace.as_ref().unwrap_or(&self.namespace);
-        let view = namespace.read_view().await?;
+        let view = namespace
+            .read_view_with_options(&LiveReadOptions { consistency })
+            .await?;
         view.ensure_subject()?;
         Ok(NamespaceReadView { reads: self, view })
     }
@@ -66,7 +86,7 @@ impl NamespaceReads {
     pub(crate) async fn service_view(&self) -> Result<NamespaceReadView<'_>> {
         Ok(NamespaceReadView {
             reads: self,
-            view: self.namespace.read_view().await?,
+            view: self.namespace.read_view_with_options(&STRONG).await?,
         })
     }
 
@@ -77,7 +97,7 @@ impl NamespaceReads {
     pub(crate) async fn membership_view(&self, seq: CommitSeq) -> Result<NamespaceReadView<'_>> {
         let view = self
             .namespace
-            .read_view()
+            .read_view_with_options(&STRONG)
             .await?
             .at_seq(seq)
             .await?
@@ -98,7 +118,12 @@ impl NamespaceReads {
     /// retention floor is above `seq`. The caller must then restart the
     /// backfill.
     pub async fn list_files_at(&self, seq: CommitSeq) -> Result<SnapshotFilesPager> {
-        let view = self.namespace.read_view().await?.at_seq(seq).await?;
+        let view = self
+            .namespace
+            .read_view_with_options(&STRONG)
+            .await?
+            .at_seq(seq)
+            .await?;
         Ok(view.list_files_with_options(&ListSnapshotFilesOptions {
             include_deleted: true,
         }))

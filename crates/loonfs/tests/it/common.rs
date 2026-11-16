@@ -350,13 +350,22 @@ impl TestRuntime {
             .await
     }
 
+    /// Stats `absolute_path` with the entry's attributes.
     pub(crate) async fn stat(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<PathEntry> {
         let namespace = self.reader.namespace(namespace_id);
-        namespace.stat(absolute_path).await
+        namespace
+            .stat_with_options(
+                absolute_path,
+                &loonfs::StatOptions {
+                    include_attributes: loonfs_types::options::AttributeInclusion::Include,
+                    ..Default::default()
+                },
+            )
+            .await
     }
 
     pub(crate) async fn list_path(

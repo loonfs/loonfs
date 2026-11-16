@@ -187,7 +187,7 @@ This section describes how a grep query runs.
 
 To run a query, the serving deployment must advertise the query capability, and the namespace must have a usable grep index. Advertising the capability doesn't show that backfill is complete for every namespace.
 
-The endpoint is `GET /v0/namespaces/{ns}/grep`. A request includes the pattern, case sensitivity, an optional path-prefix scope, and an optional cursor. It can also set two flags:
+The endpoint is `GET /v0/namespaces/{ns}/grep`. A request includes the pattern, case sensitivity, an optional path scope, and an optional cursor. It can also set two flags:
 
 - `allow_scan` allows a bounded scan for a pattern that grams can't narrow.
 - `allow_stale` allows indexed-only results when the unindexed tail can't be scanned within the applicable budget.

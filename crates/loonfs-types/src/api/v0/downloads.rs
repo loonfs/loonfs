@@ -75,10 +75,16 @@ pub struct CreateDownloadByInodeRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateRevisionDownloadByInodeRequest {
+    /// A snapshot to find the revision in instead of the live head. The snapshot keeps the
+    /// revision readable after the namespace's retention floor passes it, and a revision committed
+    /// after the snapshot returns `revision_not_found`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head that it finds the revision in. `eventual`
     /// (the default, unless the server's `consistency` setting is `strong`) reads at the head that
     /// the server confirmed last while that confirmation is younger than the maximum staleness,
-    /// and `strong` confirms the head before the read.
+    /// and `strong` confirms the head before the read. It can't be combined with `snapshot_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub consistency: Option<ReadConsistency>,

@@ -13,6 +13,14 @@ fn actor(id: &str) -> ActorId {
     ActorId::parse(id).expect("actor id")
 }
 
+/// Read options that include the entry's attributes, which these tests check.
+fn with_attributes() -> loonfs_client::StatOptions {
+    loonfs_client::StatOptions {
+        include_attributes: loonfs_types::options::AttributeInclusion::Include,
+        ..Default::default()
+    }
+}
+
 fn path(absolute_path: &str) -> NamespacePath {
     NamespacePath::parse("demo", absolute_path).expect("namespace path")
 }
@@ -48,7 +56,11 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .await
         .expect("create namespace");
 
-    let root = harness.client.stat(&path("/")).await.expect("stat root");
+    let root = harness
+        .client
+        .stat_with_options(&path("/"), &with_attributes())
+        .await
+        .expect("stat root");
     assert_eq!(root.created_by, ActorId::loonfs());
     assert!(root.created_at_ms > 0);
     let root_attributes = root.attributes.expect("root attributes");
@@ -66,7 +78,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     assert_eq!(create_change.committed_by, creator);
     let created = harness
         .client
-        .stat(&path("/implicit/parent/report.txt"))
+        .stat_with_options(&path("/implicit/parent/report.txt"), &with_attributes())
         .await
         .expect("stat created file");
     assert_eq!(created.created_by, creator);
@@ -75,7 +87,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     for parent_path in ["/implicit", "/implicit/parent"] {
         let parent = harness
             .client
-            .stat(&path(parent_path))
+            .stat_with_options(&path(parent_path), &with_attributes())
             .await
             .expect("stat implicit parent");
         assert_eq!(parent.created_by, creator);
@@ -98,7 +110,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .expect("replace file");
     let replaced = harness
         .client
-        .stat(&path("/implicit/parent/report.txt"))
+        .stat_with_options(&path("/implicit/parent/report.txt"), &with_attributes())
         .await
         .expect("stat replaced file");
     assert_eq!(replaced.created_by, creator);
@@ -146,7 +158,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let copy_change = change_at(&harness, copy.committed_seq).await;
     let copied = harness
         .client
-        .stat(&path("/copy.txt"))
+        .stat_with_options(&path("/copy.txt"), &with_attributes())
         .await
         .expect("stat copy");
     assert_eq!(copied.created_by, copier);
@@ -161,7 +173,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
         .expect("move file");
     let after_move = harness
         .client
-        .stat(&path("/moved.txt"))
+        .stat_with_options(&path("/moved.txt"), &with_attributes())
         .await
         .expect("stat moved file");
     assert_eq!(after_move.created_by, before_move.created_by);
@@ -187,7 +199,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let update_change = change_at(&harness, update.committed_seq).await;
     let updated = harness
         .client
-        .stat(&path("/moved.txt"))
+        .stat_with_options(&path("/moved.txt"), &with_attributes())
         .await
         .expect("stat attributes")
         .attributes

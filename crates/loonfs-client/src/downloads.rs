@@ -322,9 +322,8 @@ impl Client {
     }
 
     /// Requests direct access to one retained inode revision, without requiring
-    /// a current path, from the offset the options name.
-    ///
-    /// A revision cannot be combined with a snapshot.
+    /// a current path, from the offset the options name. When the options name
+    /// a snapshot, the server finds the revision in that snapshot.
     pub async fn create_revision_download_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,

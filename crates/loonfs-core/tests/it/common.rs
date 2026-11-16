@@ -193,6 +193,7 @@ pub(crate) async fn create_directory_path<S: ObjectStore + ?Sized>(
     .await
 }
 
+/// Resolves `absolute_path` at the head, with the entry's attributes.
 pub(crate) async fn resolve_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -202,7 +203,10 @@ pub(crate) async fn resolve_path<S: ObjectStore + ?Sized>(
     namespace_engine(store, namespace_id, &default_writer())
         .resolve_path(
             absolute_path,
-            loonfs_types::options::StatOptions::default(),
+            loonfs_types::options::StatOptions {
+                include_attributes: loonfs_types::options::AttributeInclusion::Include,
+                ..Default::default()
+            },
             &context,
         )
         .await

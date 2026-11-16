@@ -1960,7 +1960,13 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .expect("update attributes by inode");
     let labeled = harness
         .client
-        .stat(&copy_path)
+        .stat_with_options(
+            &copy_path,
+            &loonfs_client::StatOptions {
+                include_attributes: loonfs_types::options::AttributeInclusion::Include,
+                ..Default::default()
+            },
+        )
         .await
         .expect("stat labeled copy")
         .attributes

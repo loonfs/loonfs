@@ -96,15 +96,25 @@ async fn http_reads_project_flat_attribute_siblings_together() {
     .await;
     served_namespace(&harness).await;
 
-    // Stat's default is on: the annotated inode carries its map, and the
-    // bare one carries the cleared state at revision 0 rather than nothing.
-    let annotated = get_json(&harness, "/filesystem/entry?path=%2Fdocs%2Freport.txt");
+    // Stat's default is off, as on every route that takes the parameter.
+    let default = get_json(&harness, "/filesystem/entry?path=%2Fdocs%2Freport.txt");
+    assert_projection(&default, false);
+
+    // With attributes, the annotated inode carries its map, and the bare one
+    // carries the cleared state at revision 0 rather than nothing.
+    let annotated = get_json(
+        &harness,
+        "/filesystem/entry?path=%2Fdocs%2Freport.txt&include_attributes=true",
+    );
     assert_projection(&annotated, true);
     assert_eq!(annotated["attributes"]["owner"], "platform");
     assert_eq!(annotated["attributes_revision_no"], 1);
     assert!(annotated.pointer("/attributes/attributes").is_none());
 
-    let bare = get_json(&harness, "/filesystem/entry?path=%2Fdocs%2Fnotes.txt");
+    let bare = get_json(
+        &harness,
+        "/filesystem/entry?path=%2Fdocs%2Fnotes.txt&include_attributes=true",
+    );
     assert_projection(&bare, true);
     assert_eq!(bare["attributes"], serde_json::json!({}));
     assert_eq!(bare["attributes_revision_no"], 0);
@@ -186,7 +196,7 @@ async fn http_include_attributes_accepts_true_and_false_and_nothing_else() {
     assert_eq!(
         get_json(
             &harness,
-            "/filesystem/entry?path=%2Fdocs%2Freport.txt&include_attributes=true"
+            "/filesystem/entry?path=%2Fdocs%2Freport.txt&include_attributes=false"
         ),
         get_json(&harness, "/filesystem/entry?path=%2Fdocs%2Freport.txt")
     );
@@ -216,9 +226,15 @@ async fn the_client_round_trips_the_read_options() {
     // this checks: each surface, once, against its own default.
     let stat = harness
         .client
-        .stat(&path("/docs/report.txt"))
+        .stat_with_options(
+            &path("/docs/report.txt"),
+            &StatOptions {
+                include_attributes: loonfs_types::options::AttributeInclusion::Include,
+                ..Default::default()
+            },
+        )
         .await
-        .expect("stat");
+        .expect("stat with attributes");
     assert_eq!(
         stat.attributes
             .as_ref()
@@ -235,13 +251,7 @@ async fn the_client_round_trips_the_read_options() {
 
     let without = harness
         .client
-        .stat_with_options(
-            &path("/docs/report.txt"),
-            &StatOptions {
-                include_attributes: loonfs_types::options::AttributeInclusion::Omit,
-                ..Default::default()
-            },
-        )
+        .stat(&path("/docs/report.txt"))
         .await
         .expect("stat without attributes");
     assert!(without.attributes.is_none());

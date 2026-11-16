@@ -334,7 +334,8 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
                 (unknown, ErrorCode::InvalidRequest),
             ];
             if threshold.is_some() {
-                cases.push((oversized, ErrorCode::InvalidRequest));
+                // An oversized value is refused like an oversized append.
+                cases.push((oversized, ErrorCode::ContentTooLarge));
             } else {
                 cases.push((inline, ErrorCode::NotSupported));
             }
@@ -346,6 +347,9 @@ async fn inline_sources_and_capabilities_follow_the_policy_before_any_write() {
                 assert_eq!(error["code"], code.as_str());
                 if code == ErrorCode::NotSupported {
                     assert_eq!(error["feature"], FEATURE_COMMIT_INLINE_CONTENT);
+                }
+                if code == ErrorCode::ContentTooLarge {
+                    assert_eq!(error["param"], "/operations/0/inline_content");
                 }
             }
         }

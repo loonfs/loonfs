@@ -4,7 +4,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs_types::{CommitId, ErrorCode, ErrorDetails, ErrorKind, ErrorResponse};
+use loonfs_types::{CommitId, ErrorCause, ErrorCode, ErrorDetails, ErrorKind, ErrorResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ServedErrorCode(pub(super) ErrorCode);
@@ -93,6 +93,15 @@ impl ApiResponseError {
         self.body.param.as_deref()
     }
 
+    /// Records which of the causes that share the error's code occurred.
+    pub(super) fn with_cause(mut self, cause: ErrorCause) -> Self {
+        self.body
+            .details
+            .get_or_insert_with(Box::<ErrorDetails>::default)
+            .cause = Some(cause);
+        self
+    }
+
     /// Stamps the mutation's idempotency key into the error details, so a
     /// failed or uncertain outcome includes the caller's reconciliation
     /// handle (API spec, "Commit responses and safe retry"). Details the
@@ -139,12 +148,12 @@ pub(super) fn status_for(code: ErrorCode) -> StatusCode {
         ErrorKind::Gone => StatusCode::GONE,
         ErrorKind::AlreadyExists | ErrorKind::Conflict => StatusCode::CONFLICT,
         ErrorKind::NotSupported => StatusCode::NOT_IMPLEMENTED,
-        // HTTP 408 means the client did not finish sending its request. A
-        // server-side deadline uses 503 instead. The error code remains
-        // non-retryable because a cancelled mutation may still complete.
-        ErrorKind::DeadlineExceeded | ErrorKind::Unavailable | ErrorKind::OutcomeUnknown => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        // A request that the server cancelled at its deadline is an unknown
+        // outcome too. HTTP 408 means the client did not finish sending its
+        // request, so a server-side deadline uses 503 instead. The code
+        // remains non-retryable because a cancelled mutation may still
+        // complete.
+        ErrorKind::Unavailable | ErrorKind::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
         ErrorKind::DataCorruption | ErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         // A kind without an explicit arm serves as 500 until someone chooses
         // its real status. The spec-table test in `super::tests` fails on any

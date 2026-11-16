@@ -222,7 +222,13 @@ async fn assert_shared_file(
         .expect("read the shared file");
     assert_eq!(file.bytes, content);
     let entry = read_namespace
-        .stat(SHARED_FILE)
+        .stat_with_options(
+            SHARED_FILE,
+            &loonfs::StatOptions {
+                include_attributes: loonfs_types::options::AttributeInclusion::Include,
+                ..Default::default()
+            },
+        )
         .await
         .expect("stat the shared file");
     let projection = entry.attributes.expect("the shared file's attributes");

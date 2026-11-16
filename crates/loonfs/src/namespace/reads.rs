@@ -13,8 +13,9 @@ use crate::trace::{self, operation_span};
 use crate::{
     CommitSeq, Consistency, ContentRef, CoreError, DiffOptions, DiffResponse, DownloadOptions,
     Error, FileBytes, FileContentStream, ListChangesOptions, ListChangesResponse, ListOptions,
-    ListPathEntriesResponse, ListTrashOptions, Namespace, PathEntry, ReadAt, ReadFileOptions,
-    ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, SnapshotId, StatOptions,
+    ListPathEntriesResponse, ListTrashOptions, LiveReadOptions, Namespace, PathEntry, ReadAt,
+    ReadFileOptions, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, SnapshotId,
+    StatOptions,
 };
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{
@@ -128,17 +129,49 @@ impl<M: crate::Mode> Namespace<M> {
     /// resolution, and content selection on the same head even if commits
     /// publish concurrently. It retains nothing in the store and is meant to
     /// live for one request or unit of work.
+    ///
+    /// The view reads the head at the runtime's default consistency. Use
+    /// [`Self::read_view_with_options`] to capture the head at another
+    /// consistency.
     pub async fn read_view(&self) -> Result<ReadView> {
+        self.read_view_with_options(&LiveReadOptions::default())
+            .await
+    }
+
+    /// Captures the current namespace state for a group of related reads, as
+    /// [`Self::read_view`] does, at the consistency that `options` sets, or
+    /// at the runtime's default consistency when it sets none.
+    pub async fn read_view_with_options(&self, options: &LiveReadOptions) -> Result<ReadView> {
         trace::in_operation(
             operation_span!(self.core, "read_view", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 let pinned = self
                     .core
-                    .pinned_read(&self.namespace_id, Consistency::Strong)
+                    .pinned_read(&self.namespace_id, options.consistency)
                     .await?;
                 Ok(ReadView::new(self.core.clone(), pinned, ReadSource::Head))
             },
+        )
+        .await
+    }
+
+    /// Runs `read`, which captures its own read views of this namespace and
+    /// reads through them. A read through a view returns `ManifestReplaced`
+    /// when a newer manifest replaced the view's manifest and a collection
+    /// removed that manifest's segments. Each time `read` returns that error,
+    /// this method reloads the namespace's head and runs `read` again, as an
+    /// ordinary read of the namespace runs, up to `MAX_CONTENTION_ATTEMPTS`
+    /// runs in all. If every run returns `ManifestReplaced`, this method
+    /// returns `store_contention`.
+    pub async fn read_through_views<T, F, Fut>(&self, read: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        trace::in_operation(
+            operation_span!(self.core, "read_through_views", self.namespace_id),
+            self.core.read_at_reloaded_head(&self.namespace_id, read),
         )
         .await
     }
@@ -169,7 +202,17 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Returns this namespace's metadata: its access mode, creation, fork
-    /// basis, current head, and retention floor.
+    /// basis, current head, and retention floor, from a discovery of the
+    /// namespace in the store.
+    ///
+    /// The discovery reads the manifest boundary and the newest manifest, so
+    /// it sees a deletion by another process at once. A cached head, even
+    /// one confirmed as a `strong` read confirms it, sees a new manifest only
+    /// at its manifest check, which runs at most once per
+    /// `manifest_revalidation_interval_ms`. A host checks that a namespace
+    /// exists with this read before it opens a writer session. Use
+    /// [`Self::metadata_with_options`] to read through the runtime's cached
+    /// head at a consistency.
     pub async fn metadata(&self) -> Result<crate::NamespaceMetadata> {
         trace::in_operation(
             operation_span!(self.core, "metadata", self.namespace_id),
@@ -180,6 +223,31 @@ impl<M: crate::Mode> Namespace<M> {
                     .namespace_store(&self.namespace_id)
                     .load_metadata()
                     .await?)
+            },
+        )
+        .await
+    }
+
+    /// Returns this namespace's metadata, as [`Self::metadata`] does, at the
+    /// head that the consistency in `options` confirms, or at the runtime's
+    /// default consistency when it sets none.
+    pub async fn metadata_with_options(
+        &self,
+        options: &LiveReadOptions,
+    ) -> Result<crate::NamespaceMetadata> {
+        trace::in_operation(
+            operation_span!(self.core, "metadata", self.namespace_id),
+            async {
+                let _permit = self.core.read_permit().await;
+                self.core
+                    .read(
+                        &self.namespace_id,
+                        options.consistency,
+                        |pinned| async move {
+                            Ok(pinned.engine.namespace_metadata(&pinned.context).await?)
+                        },
+                    )
+                    .await
             },
         )
         .await

@@ -9,8 +9,8 @@ use crate::publisher::MergeReservation;
 use crate::runtime_core::HeadConfirmation;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, Commit, CommitId, Consistency, CoreError, Error, MergeConflict, MergeForkOptions,
-    Mode, Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
+    ActorId, Commit, CommitId, Consistency, CoreError, Error, LiveReadOptions, MergeConflict,
+    MergeForkOptions, Mode, Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::{MAX_CONTENTION_ATTEMPTS, OPERATION_SNAPSHOT_TTL_MS};
@@ -79,10 +79,23 @@ impl<M: Mode> Namespace<M> {
     /// that doesn't exist, was deleted, or isn't a fork of this namespace
     /// returns `invalid_request`. A runtime whose merge allowance is zero
     /// returns `not_supported` for `filesystem.merges` before it reads a
-    /// namespace.
+    /// namespace. Both heads are read at the runtime's default consistency.
     pub async fn next_merge_range(
         &self,
         source_namespace_id: &NamespaceId,
+    ) -> Result<NextMergeRangeResponse> {
+        self.next_merge_range_with_options(source_namespace_id, &LiveReadOptions::default())
+            .await
+    }
+
+    /// Returns where the fork `source_namespace_id`'s next merge into this
+    /// namespace starts, as [`Self::next_merge_range`] does, reading both
+    /// namespaces' heads at the consistency that `options` sets, or at the
+    /// runtime's default consistency when it sets none.
+    pub async fn next_merge_range_with_options(
+        &self,
+        source_namespace_id: &NamespaceId,
+        options: &LiveReadOptions,
     ) -> Result<NextMergeRangeResponse> {
         trace::in_operation(
             operation_span!(self.core, "next_merge_range", self.namespace_id),
@@ -91,12 +104,12 @@ impl<M: Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 let main = self
                     .core
-                    .pinned_read(&self.namespace_id, Consistency::Strong)
+                    .pinned_read(&self.namespace_id, options.consistency)
                     .await?;
                 main.engine.ensure_administrator(&main.context).await?;
                 let fork = self
                     .core
-                    .pinned_read(source_namespace_id, Consistency::Strong)
+                    .pinned_read(source_namespace_id, options.consistency)
                     .await?;
                 fork.engine.ensure_administrator(&fork.context).await?;
                 Ok(main
@@ -408,7 +421,7 @@ impl Namespace<Writable> {
                 .create_verified_snapshot_of_view(expires_at_ms, &fork.context)
                 .await
             {
-                Err(CoreError::SnapshotUnavailable(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
+                Err(CoreError::HeadMoved(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
                     attempts += 1;
                     self.core.reload_replaced_head(fork_id).await?;
                 }

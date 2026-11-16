@@ -3,12 +3,15 @@
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
 use super::handlers_uploads::{direct_multipart_issuer, direct_put_issuer};
-use super::query_params::required_query_param;
+use super::query_params::{live_consistency, required_query_param};
 
 use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
+use loonfs::{
+    CreateNamespaceOptions, DeleteNamespaceOptions, LiveReadOptions, MergeForkOptions,
+    ReadConsistency,
+};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
@@ -52,6 +55,23 @@ pub(super) struct DeleteNamespaceQuery {
     expected_head_seq: Option<CommitSeq>,
 }
 
+/// The query of a read of a namespace's metadata.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[serde(deny_unknown_fields)]
+pub(super) struct GetNamespaceQuery {
+    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
+    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
+    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
+    /// head before the read.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
+    max_staleness_ms: Option<u64>,
+}
+
 /// The query of the next-range query.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
@@ -61,7 +81,16 @@ pub(super) struct NextMergeRangeQuery {
     /// The fork whose next merge into the namespace the query reads. It has to be a fork of the
     /// namespace, or the fork that a rebase replays into the namespace.
     #[cfg_attr(feature = "openapi", param(required = true))]
-    source: Option<NamespaceId>,
+    source_namespace_id: Option<NamespaceId>,
+    /// How recently the read confirms the heads of the namespace and the fork. `eventual` (the
+    /// default, unless the server's `consistency` setting is `strong`) reads at the heads that the
+    /// server confirmed last while those confirmations are younger than the maximum staleness, and
+    /// `strong` confirms both heads before the read.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of a head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
+    max_staleness_ms: Option<u64>,
 }
 
 /// The capability value for a transfer limit. The API lists these limits on
@@ -246,10 +275,13 @@ pub(super) async fn create_namespace(
         tag = "namespaces",
         summary = "Get namespace",
         description = "Returns the current head and retention state for a namespace.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(
+            ("namespace_id" = String, Path, description = "The namespace ID."),
+            GetNamespaceQuery
+        ),
         responses(
             (status = 200, description = "Namespace", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
+            (status = 400, description = "Invalid namespace ID or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -260,11 +292,14 @@ pub(super) async fn create_namespace(
 pub(super) async fn get_namespace(
     State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppQuery(_): AppQuery<NoQuery>,
+    AppQuery(query): AppQuery<GetNamespaceQuery>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
+    let options = LiveReadOptions {
+        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+    };
     let namespace = state.runtime.namespace(&namespace_id);
     let response = namespace
-        .metadata()
+        .metadata_with_options(&options)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
@@ -504,7 +539,7 @@ pub(super) async fn merge_fork(
         ),
         responses(
             (status = 200, description = "The fork's next merge range", body = NextMergeRangeResponse),
-            (status = 400, description = "Invalid request, or the source isn't a fork of this namespace", body = ErrorResponse),
+            (status = 400, description = "Invalid request or consistency, or the source isn't a fork of this namespace", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
@@ -520,24 +555,17 @@ pub(super) async fn get_next_merge_range(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<NextMergeRangeQuery>,
 ) -> Result<Json<NextMergeRangeResponse>, ApiResponseError> {
-    let source_namespace_id = required_query_param(query.source, "source")?;
+    let source_namespace_id =
+        required_query_param(query.source_namespace_id, "source_namespace_id")?;
+    let options = LiveReadOptions {
+        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+    };
     let response = state
         .runtime_for(subject)
         .namespace(&namespace_id)
-        .next_merge_range(&source_namespace_id)
+        .next_merge_range_with_options(&source_namespace_id, &options)
         .await
-        .map_err(|error| {
-            // The runtime names the source `source_namespace_id`, which this
-            // route reads from the `source` parameter.
-            let source_refused =
-                error.invalid_request_param().as_deref() == Some("source_namespace_id");
-            let response = ApiResponseError::runtime(error);
-            if source_refused {
-                response.with_param("source")
-            } else {
-                response
-            }
-        })?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
 }
 
@@ -566,7 +594,7 @@ pub(super) async fn get_next_merge_range(
         request_body = ForkNamespaceForRebaseRequest,
         responses(
             (status = 200, description = "New fork created", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid request, or the source isn't a fork of this namespace", body = ErrorResponse),
+            (status = 400, description = "Invalid request or consistency, or the source isn't a fork of this namespace", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which. A new fork that folds this namespace's WAL tail returns `snapshot_not_found` once 5 minutes have passed since its first call started.", body = ErrorResponse),

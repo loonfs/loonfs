@@ -680,7 +680,6 @@ mod tests {
             for code in kept.chain([
                 ErrorCode::OutcomeUnknown,
                 ErrorCode::CommitIdReuseConflict,
-                ErrorCode::DeadlineExceeded,
                 ErrorCode::WriterFenced,
                 ErrorCode::ServerError,
                 ErrorCode::NamespaceCorrupt,
