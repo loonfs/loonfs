@@ -111,8 +111,12 @@ async fn fixture<S: ObjectStore>(
             .expect("tail checksum"),
     };
     let mut tail = ProjectedWalTail::default();
-    tail.push_object(&[piece_commit(&reference, offset, bytes, 2)], 0)
-        .expect("tail");
+    tail.push_object(
+        &HEAD.namespace_id,
+        &[piece_commit(&reference, offset, bytes, 2)],
+        0,
+    )
+    .expect("tail");
     (layout, tail, reference)
 }
 
@@ -269,7 +273,8 @@ async fn local_large_tail_assembles_without_sources() {
         records.push(piece_commit(&reference, offset, piece.clone(), index + 2));
     }
     let mut tail = ProjectedWalTail::default();
-    tail.push_object(&records, 0).expect("tail");
+    tail.push_object(&HEAD.namespace_id, &records, 0)
+        .expect("tail");
     let content = tail.content(&reference).expect("content");
     let pieces = assemble_tail_content(&HEAD.pool_id, &content).expect("pieces");
     assert_eq!(pieces.len(), 13);
@@ -381,4 +386,96 @@ async fn validation_materialization_holds_a_write_permit() {
     let (written, ()) = tokio::join!(write, check);
     assert_eq!(written.expect("combined").extents[0].length, 10);
     assert_eq!(permits.counts(), crate::PermitCounts::default());
+}
+
+/// Checks that a namespace that writes the pieces of a chain that another
+/// member created records that member as the creator, and writes the pieces
+/// as one extent that isn't combined with the chain's extents, although the
+/// doubling rule combines them when the creator writes. The fold's write and
+/// validation's write share the plan, so both behave the same way.
+#[tokio::test]
+async fn another_members_chain_keeps_its_creator_and_its_extents() {
+    let main = NamespaceId::parse("main").expect("namespace");
+    for writer in [&HEAD.namespace_id, &main] {
+        for validation in [false, true] {
+            let directory = tempfile::tempdir().expect("directory");
+            let store = RecordingStore::new(
+                LocalFsStore::new(directory.path()).expect("store"),
+                KeyPredicate::any(),
+            );
+            // The chain's 6-byte extent is at most twice the 4 tail bytes.
+            let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
+            let content = tail.content(&reference).expect("content");
+            let permits = Permits::new(std::num::NonZeroUsize::MIN, None);
+            let content_writes = ContentWrites {
+                store: &store,
+                permits: &permits,
+                pool_id: &HEAD.pool_id,
+                namespace_id: writer,
+            };
+            store.reset();
+            let written = if validation {
+                materialize_content_layout(content_writes, &layout, Some(&content), &reference)
+                    .await
+                    .expect("validation's write")
+            } else {
+                let pieces = assemble_tail_content(&HEAD.pool_id, &content).expect("pieces");
+                write_tail_content(content_writes, &layout, &content, pieces)
+                    .await
+                    .expect("fold's write")
+                    .layout
+            };
+            assert_eq!(written.creator_namespace_id, HEAD.namespace_id);
+            let operations = store.snapshot();
+            let Some(RecordedOperation::Assemble { sources, bytes, .. }) = operations.last() else {
+                panic!("the write ends with an assembly: {operations:?}");
+            };
+            assert_eq!(*bytes, 4);
+            if writer == &HEAD.namespace_id {
+                assert_eq!(sources.len(), 1);
+                assert_eq!(written.extents.len(), 1);
+                assert_eq!(written.extents[0].length, 10);
+            } else {
+                assert!(sources.is_empty());
+                assert_eq!(written.extents.len(), 2);
+                assert_eq!(written.extents[0], layout.0.layout.extents[0]);
+                assert_eq!(
+                    written.extents[1].object,
+                    ExtentObject::Span { start: 6, end: 10 }
+                );
+                assert_eq!(written.extents[1].length, 4);
+            }
+        }
+    }
+}
+
+/// Checks that a chain without a layout row takes its creator from the WAL
+/// object that started it, not from the namespace that writes its pieces.
+#[tokio::test]
+async fn a_chain_that_started_in_another_members_tail_records_that_member_as_creator() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (layout, _, reference) = fixture(&store, &[], false, 4).await;
+    let source = NamespaceId::parse("source").expect("namespace");
+    let mut tail = ProjectedWalTail::default();
+    tail.push_object(&source, &[piece_commit(&reference, 0, vec![b'z'; 4], 2)], 0)
+        .expect("tail");
+    let content = tail.content(&reference).expect("content");
+    let written = write_tail_content(
+        ContentWrites::new(
+            &store,
+            &Permits::new(std::num::NonZeroUsize::MIN, None),
+            &HEAD,
+        ),
+        &layout,
+        &content,
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
+    )
+    .await
+    .expect("write");
+    assert_eq!(written.layout.creator_namespace_id, source);
+    assert_eq!(
+        written.layout.extents[0].object,
+        ExtentObject::Span { start: 0, end: 4 }
+    );
 }

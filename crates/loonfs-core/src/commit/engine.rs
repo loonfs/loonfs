@@ -629,7 +629,7 @@ impl PositionState {
             } => {
                 position.read_basis.head = head;
                 if let Err(error) =
-                    Arc::make_mut(&mut position.tail).push_object(&records, wal_bytes)
+                    Arc::make_mut(&mut position.tail).push_object(namespace_id, &records, wal_bytes)
                 {
                     // The WAL is already durable. Discard the position;
                     // replay and folding will report the accounting error.

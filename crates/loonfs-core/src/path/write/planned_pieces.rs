@@ -5,7 +5,7 @@ use crate::wal::{ProjectedContent, ProjectedPiece};
 use bytes::Bytes;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
-use loonfs_types::{CommitSeq, ContentId, ContentRef};
+use loonfs_types::{CommitSeq, ContentId, ContentRef, NamespaceId};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -19,9 +19,11 @@ impl PlannedPieces {
     }
 
     /// A content this layer has not seen starts from `below`, the newest
-    /// pieces the layers under it keep for it.
+    /// pieces the layers under it keep for it, or, if no layer has pieces for
+    /// it, as a new chain that `namespace_id`'s commit starts.
     pub(super) fn insert_piece(
         &mut self,
+        namespace_id: &NamespaceId,
         below: Option<&ProjectedContent>,
         content_ref: &ContentRef,
         entry: &WalInlineContent,
@@ -34,9 +36,9 @@ impl PlannedPieces {
         self.contents
             .entry(content_ref.content_id.clone())
             .or_insert_with(|| {
-                below
-                    .cloned()
-                    .unwrap_or_else(|| ProjectedContent::new(content_ref, committed_seq))
+                below.cloned().unwrap_or_else(|| {
+                    ProjectedContent::new(content_ref, committed_seq, namespace_id)
+                })
             })
             .insert_piece(content_ref, piece, committed_seq);
     }
@@ -71,6 +73,7 @@ impl<'a, S: ObjectStore + ?Sized> CommitPieces<'a, S> {
         committed_seq: CommitSeq,
     ) {
         self.own.insert_piece(
+            self.session.namespace_id(),
             self.session.content(content_ref).as_ref(),
             content_ref,
             entry,

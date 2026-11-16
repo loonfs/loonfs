@@ -15,7 +15,7 @@ use crate::storage::tail_content::{cut_layout, materialize_content_layout, Conte
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{next_public_ordinal, CommitSeq, ContentRef, InodeId};
+use loonfs_types::{next_public_ordinal, CommitSeq, ContentRef, InodeId, NamespaceId};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
@@ -58,6 +58,11 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             accepted_pieces: PlannedPieces::default(),
             durable_cache: DurableVisibilityCache::default(),
         }
+    }
+
+    /// The namespace that the batch commits to.
+    pub(super) fn namespace_id(&self) -> &NamespaceId {
+        &self.head.namespace_id
     }
 
     pub(super) fn content(&self, content_ref: &ContentRef) -> Option<ProjectedContent> {
@@ -111,6 +116,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         );
         for (content_ref, entry) in inline_content_refs(preview) {
             self.accepted_pieces.insert_piece(
+                &self.head.namespace_id,
                 self.tail.content(content_ref).as_ref(),
                 content_ref,
                 entry,

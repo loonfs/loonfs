@@ -8,7 +8,7 @@ use crate::metadata::{
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef};
+use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, NamespaceId};
 use std::collections::{hash_map::Entry, HashMap};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ pub(crate) struct TailChunk {
     /// The WAL object's size in the store.
     wal_bytes: usize,
     /// What the content entries own besides their bytes: content ids,
-    /// references, checksums, and piece slots.
+    /// references, checksums, creators, and piece slots.
     inline_entry_heap_bytes: usize,
 }
 
@@ -53,14 +53,24 @@ pub(crate) struct ProjectedContent {
     pub(crate) content_ref: ContentRef,
     pub(crate) committed_seq: CommitSeq,
     pub(crate) pieces: Vec<ProjectedPiece>,
+    /// The namespace whose WAL object includes the chain's first piece in
+    /// the tail. A namespace's WAL includes pieces only for chains that the
+    /// namespace created (rule 1 of the WAL records), so this is the chain's
+    /// creator.
+    pub(crate) creator_namespace_id: NamespaceId,
 }
 
 impl ProjectedContent {
-    pub(crate) fn new(content_ref: &ContentRef, committed_seq: CommitSeq) -> Self {
+    pub(crate) fn new(
+        content_ref: &ContentRef,
+        committed_seq: CommitSeq,
+        creator_namespace_id: &NamespaceId,
+    ) -> Self {
         Self {
             content_ref: content_ref.clone(),
             committed_seq,
             pieces: Vec::new(),
+            creator_namespace_id: creator_namespace_id.clone(),
         }
     }
 
@@ -113,18 +123,23 @@ impl ProjectedWalTail {
         }
     }
 
-    /// Appends one WAL object, whose size in the store is `wal_bytes`, as a
-    /// chunk. An object with no records, such as a fence, adds no chunk and no
-    /// bytes.
+    /// Appends one WAL object of `namespace_id`, whose size in the store is
+    /// `wal_bytes`, as a chunk. An object with no records, such as a fence,
+    /// adds no chunk and no bytes.
     pub(crate) fn push_object(
         &mut self,
+        namespace_id: &NamespaceId,
         records: &[WalCommitPayload],
         wal_bytes: usize,
     ) -> Result<(), WalObjectError> {
         if records.is_empty() {
             return Ok(());
         }
-        self.push_chunk(Arc::new(TailChunk::from_records(records, wal_bytes)?))
+        self.push_chunk(Arc::new(TailChunk::from_records(
+            namespace_id,
+            records,
+            wal_bytes,
+        )?))
     }
 
     fn push_chunk(&mut self, chunk: Arc<TailChunk>) -> Result<(), WalObjectError> {
@@ -306,9 +321,10 @@ impl TailChunk {
         }
     }
 
-    /// Applies each commit of one WAL object, whose size in the store is
-    /// `wal_bytes`: its pieces, then its rows.
+    /// Applies each commit of one WAL object of `namespace_id`, whose size in
+    /// the store is `wal_bytes`: its pieces, then its rows.
     fn from_records(
+        namespace_id: &NamespaceId,
         records: &[WalCommitPayload],
         wal_bytes: usize,
     ) -> Result<Self, WalObjectError> {
@@ -325,7 +341,7 @@ impl TailChunk {
                 .and_then(|activity| chunk.activity.checked_add(activity))
                 .ok_or(WalObjectError::ActivityOverflow)?;
             for (content_ref, entry) in inline_content_refs(record) {
-                chunk.insert_piece(content_ref, entry, record.committed_seq);
+                chunk.insert_piece(namespace_id, content_ref, entry, record.committed_seq);
             }
             chunk.rows.apply_committed_wal_record_mut(record);
             chunk.activity = activity;
@@ -352,6 +368,7 @@ impl TailChunk {
 
     fn insert_piece(
         &mut self,
+        namespace_id: &NamespaceId,
         content_ref: &ContentRef,
         entry: &WalInlineContent,
         committed_seq: CommitSeq,
@@ -359,11 +376,15 @@ impl TailChunk {
         let position = match self.content_positions.entry(content_ref.content_id.clone()) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(vacant) => {
-                self.inline_entry_heap_bytes +=
-                    content_ref.content_id.heap_bytes() + content_ref.heap_bytes();
+                self.inline_entry_heap_bytes += content_ref.content_id.heap_bytes()
+                    + content_ref.heap_bytes()
+                    + namespace_id.heap_bytes();
                 vacant.insert(self.contents.len());
-                self.contents
-                    .push(ProjectedContent::new(content_ref, committed_seq));
+                self.contents.push(ProjectedContent::new(
+                    content_ref,
+                    committed_seq,
+                    namespace_id,
+                ));
                 self.contents.len() - 1
             }
         };
@@ -417,7 +438,13 @@ mod tests {
     use super::ProjectedWalTail;
     use crate::metadata::MetadataState;
     use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalInlineContent};
-    use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, InodeId, RevisionNo};
+    use loonfs_types::{
+        CommitId, CommitSeq, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo,
+    };
+
+    fn namespace() -> NamespaceId {
+        NamespaceId::parse("demo").expect("namespace")
+    }
 
     fn commit(seq: u64, content_id: &ContentId, whole: &[u8], offset: usize) -> WalCommitPayload {
         WalCommitPayload {
@@ -458,11 +485,15 @@ mod tests {
             .collect();
         let mut tail = ProjectedWalTail::default();
         for (seq, content_id) in (1..).zip(&ids) {
-            tail.push_object(&[commit(seq, content_id, b"value", 0)], 100)
+            tail.push_object(&namespace(), &[commit(seq, content_id, b"value", 0)], 100)
                 .expect("value");
         }
-        tail.push_object(&[commit(65, &ids[17], b"value appended", 5)], 100)
-            .expect("append");
+        tail.push_object(
+            &namespace(),
+            &[commit(65, &ids[17], b"value appended", 5)],
+            100,
+        )
+        .expect("append");
 
         let contents = tail.contents();
         assert_eq!(
@@ -495,8 +526,12 @@ mod tests {
             (2, b"value appended", 5),
             (3, b"value appended twice", 14),
         ] {
-            tail.push_object(&[commit(seq, &content_id, whole, offset)], 100)
-                .expect("chunk");
+            tail.push_object(
+                &namespace(),
+                &[commit(seq, &content_id, whole, offset)],
+                100,
+            )
+            .expect("chunk");
         }
         let newest = ContentRef::blob_v1(
             content_id.clone(),
@@ -507,6 +542,7 @@ mod tests {
         let content = tail.content(&newest).expect("combined content");
         assert_eq!(content.content_ref, newest);
         assert_eq!(content.committed_seq, CommitSeq(3));
+        assert_eq!(content.creator_namespace_id, namespace());
         assert_eq!(
             content
                 .pieces

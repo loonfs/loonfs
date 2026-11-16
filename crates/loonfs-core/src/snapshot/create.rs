@@ -89,12 +89,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     /// Creates a verified snapshot of `basis`'s manifest for `owner`.
     ///
-    /// `basis` contains the manifest that the caller's fold published or found
-    /// current and the manifest boundary that the fold read. The call returns `snapshot_unavailable` when the manifest
-    /// stopped being current before the snapshot's verification, so the caller
-    /// can fold and take a snapshot again. Returns the snapshot record with
-    /// the version that its write stored, and the newest manifest with the
-    /// manifest boundary that the verification read.
+    /// `basis` contains a manifest and the manifest boundary that the caller
+    /// read: the manifest that the caller's fold published or found current,
+    /// or the current manifest that a discovery of the namespace's head
+    /// found, for a snapshot without a fold (format spec, "Creating and
+    /// verifying a snapshot"). The call returns `snapshot_unavailable` when
+    /// the manifest stopped being current before the snapshot's
+    /// verification, so the caller can read a fresh basis and take a snapshot
+    /// again. Returns the snapshot record with the version that its write
+    /// stored, and the newest manifest with the manifest boundary that the
+    /// verification read.
     pub(crate) async fn create_verified_snapshot_record(
         &self,
         owner: SnapshotOwner,
