@@ -62,16 +62,14 @@ pub(crate) fn assemble_tail_content(
 
 /// Where content writes go: the store that contains the content objects, the
 /// permits that bound how many writes run at once, the pool whose prefix
-/// stores the objects, and the namespace whose WAL pieces the writes
-/// store.
+/// stores the objects, and the namespace whose operation writes them.
 pub(crate) struct ContentWrites<'a, S: ?Sized> {
     pub(crate) store: &'a S,
     pub(crate) permits: &'a Permits,
     pub(crate) pool_id: &'a PoolId,
-    /// The namespace whose WAL includes the pieces that the writes store. A
-    /// namespace's WAL includes pieces only for chains that the namespace
-    /// created, so every layout that the writes produce records it as the
-    /// creator.
+    /// The namespace whose fold or validation writes the extents. A layout
+    /// that the writes produce records the chain's creator, which is this
+    /// namespace only for a chain that it created (see [`write_tail_content`]).
     pub(crate) namespace_id: &'a NamespaceId,
 }
 
@@ -102,7 +100,7 @@ impl<S: ?Sized> Copy for ContentWrites<'_, S> {}
 ///
 /// The layout records the chain's creator: the creator that the chain's
 /// layout row records, or, for a chain without a layout row, the namespace
-/// whose own unfolded tail started it, which is `content_writes.namespace_id`.
+/// whose WAL object started it (see [`write_tail_content`]).
 pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: LayoutLookup>(
     content_writes: ContentWrites<'_, S>,
     lookup: &L,
@@ -161,8 +159,13 @@ pub(crate) fn cut_layout(layout: &mut ContentLayout, size_bytes: u64) {
 }
 
 /// Writes a chain's tail pieces as its next extent under the pool's prefix,
-/// and returns the chain's new layout row, which records
-/// `content_writes.namespace_id` as the chain's creator.
+/// and returns the chain's new layout row.
+///
+/// The row records the chain's creator: the creator that the chain's layout
+/// row records, or, for a chain that started in the tail, the namespace whose
+/// WAL object started it. When `content_writes.namespace_id` didn't create the
+/// chain, the pieces are written as one extent that is never combined with
+/// the chain's existing extents (format spec, "Publishing a manifest").
 pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>(
     content_writes: ContentWrites<'_, S>,
     lookup: &L,
@@ -172,11 +175,12 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     let newest = &content.content_ref;
     let pool_id = content_writes.pool_id;
     let TailExtentPlan {
+        creator_namespace_id,
         mut extents,
         retained,
         extent,
         candidate,
-    } = tail_extent_plan(lookup, pool_id, content, pieces).await?;
+    } = tail_extent_plan(lookup, content_writes, content, pieces).await?;
     let object_key = extent_object_key(pool_id, &extent);
     let _permit = content_writes.permits.acquire().await;
     let (sources, expected) = assembly_sources(
@@ -218,7 +222,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         committed_seq: content.committed_seq,
         size_bytes: newest.size_bytes,
         layout: ContentLayout {
-            creator_namespace_id: content_writes.namespace_id.clone(),
+            creator_namespace_id,
             extents,
         },
     })
@@ -231,38 +235,45 @@ pub(crate) fn is_own_extent(extent: &ContentExtent, chain_content_id: &ContentId
     extent.content_id == *chain_content_id
 }
 
-/// What one write of a chain's tail assembles: the chain's extents, how many
-/// of them the new layout keeps, the extent that the write puts after them,
-/// and the bytes that the new extent ends with.
+/// What one write of a chain's tail assembles: the chain's creator, the
+/// chain's extents, how many of them the new layout keeps, the extent that the
+/// write puts after them, and the bytes that the new extent ends with.
 struct TailExtentPlan {
+    creator_namespace_id: NamespaceId,
     extents: Vec<LocatedExtent>,
     retained: usize,
     extent: ContentExtent,
     candidate: Vec<Bytes>,
 }
 
-async fn tail_extent_plan<L: LayoutLookup>(
+async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     lookup: &L,
-    pool_id: &PoolId,
+    content_writes: ContentWrites<'_, S>,
     content: &ProjectedContent,
     pieces: Vec<Bytes>,
 ) -> Result<TailExtentPlan> {
     let newest = &content.content_ref;
+    let pool_id = content_writes.pool_id;
     let mut location = ContentLocation::resolve(lookup, pool_id, Some(content), newest).await?;
     if newest.size_bytes == 0 {
         location.extents.clear();
     }
+    let creator_namespace_id = location
+        .creator_namespace_id
+        .take()
+        .unwrap_or_else(|| content.creator_namespace_id.clone());
+    // A namespace that didn't create the chain never combines the chain's
+    // extents, so it never copies the creator's bytes into an object that
+    // only its own layout lists.
+    let created_here = creator_namespace_id == *content_writes.namespace_id;
+    let own = |extent: &ContentExtent| created_here && is_own_extent(extent, &newest.content_id);
     let mut start = location.extents_length();
     let mut candidate = if content.pieces[0].offset == start {
         pieces
     } else {
         location.pieces().to_vec()
     };
-    if let Some(last) = location
-        .extents
-        .last_mut()
-        .filter(|last| is_own_extent(&last.extent, &newest.content_id))
-    {
+    if let Some(last) = location.extents.last_mut().filter(|last| own(&last.extent)) {
         let full_length = match last.extent.object {
             ExtentObject::Span { start, end } => end - start,
             ExtentObject::Whole => {
@@ -302,7 +313,7 @@ async fn tail_extent_plan<L: LayoutLookup>(
     let CombinePlan {
         retained,
         candidate_length,
-    } = combine_plan(&extents, newest, tail_length);
+    } = combine_plan(&extents, tail_length, own);
     let combined_length = candidate_length - tail_length;
     start -= combined_length;
     // A layout of zero bytes is one whole extent of length zero.
@@ -321,6 +332,7 @@ async fn tail_extent_plan<L: LayoutLookup>(
         length: candidate_length,
     };
     Ok(TailExtentPlan {
+        creator_namespace_id,
         extents,
         retained,
         extent,
@@ -347,14 +359,16 @@ struct CombinePlan {
 
 /// Returns which of `extents` a fold keeps, and how long the extent is that
 /// combines the newest own extents with `tail_length` bytes of tail pieces.
-fn combine_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64) -> CombinePlan {
+/// `own` returns whether an extent is one the fold may combine.
+fn combine_plan(
+    extents: &[LocatedExtent],
+    tail_length: u64,
+    own: impl Fn(&ContentExtent) -> bool,
+) -> CombinePlan {
     let mut retained = extents.len();
     let mut candidate_length = tail_length;
     if tail_length == 0 {
-        if let Some(last) = extents
-            .last()
-            .filter(|last| is_own_extent(&last.extent, &newest.content_id))
-        {
+        if let Some(last) = extents.last().filter(|last| own(&last.extent)) {
             retained -= 1;
             candidate_length = last.extent.length;
         }
@@ -362,18 +376,18 @@ fn combine_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64
     for located in extents[..retained].iter().rev() {
         let extent = &located.extent;
         // A fresh chain keeps its base's extents shared.
-        if !is_own_extent(extent, &newest.content_id) || extent.length > 2 * candidate_length {
+        if !own(extent) || extent.length > 2 * candidate_length {
             break;
         }
         candidate_length += extent.length;
         retained -= 1;
     }
-    let own = |located: &&LocatedExtent| is_own_extent(&located.extent, &newest.content_id);
-    if extents[..retained].iter().filter(own).count() + 1 > MAX_LAYOUT_EXTENTS {
+    let own_located = |located: &&LocatedExtent| own(&located.extent);
+    if extents[..retained].iter().filter(own_located).count() + 1 > MAX_LAYOUT_EXTENTS {
         let largest = extents
             .iter()
             .enumerate()
-            .filter(|(_, extent)| own(extent))
+            .filter(|(_, extent)| own_located(extent))
             .max_by_key(|(index, extent)| (extent.extent.length, std::cmp::Reverse(*index)))
             .map(|(index, _)| index)
             .expect("a chain over its extent bound should have own extents");

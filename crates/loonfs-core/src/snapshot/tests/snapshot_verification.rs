@@ -74,6 +74,77 @@ async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_de
     }
 }
 
+/// Checks that a snapshot without a fold keeps the manifest that the caller
+/// read and leaves the WAL tail unfolded, and that a fold which replaces the
+/// manifest while the snapshot record is written makes the call delete the
+/// snapshot record and return `snapshot_unavailable`, so the caller reads a
+/// fresh basis.
+#[tokio::test]
+async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replaced_by_a_fold() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/one", b"data", None)
+        .await
+        .expect("write");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let owner = SnapshotOwner::User {
+        name: None,
+        expires_at_ms: None,
+        deleted_at_ms: None,
+    };
+    let clock = context.clock();
+    let basis = namespace.load_current_basis().await.expect("discovery");
+    let (created, verified) = namespace
+        .create_verified_snapshot_record(owner.clone(), basis.clone(), &clock)
+        .await
+        .expect("snapshot of the current manifest");
+    assert_eq!(verified.manifest.manifest(), basis.manifest.manifest());
+    assert_eq!(created.record.head_seq, basis.manifest.manifest().head_seq);
+    let head = namespace.load_read_state().await.expect("head");
+    assert!(
+        head.seq > created.record.head_seq,
+        "the tail stays unfolded"
+    );
+    assert_eq!(
+        namespace
+            .load_current_basis()
+            .await
+            .expect("current manifest")
+            .manifest
+            .manifest(),
+        basis.manifest.manifest()
+    );
+
+    store.block_next();
+    let (outcome, ()) = tokio::join!(
+        namespace.create_verified_snapshot_record(owner, basis, &clock),
+        async {
+            store.wait_until_blocked().await;
+            crate::test_support::namespace_store(&store, &namespace_id)
+                .fold_wal()
+                .await
+                .expect("fold");
+            store.release();
+        }
+    );
+    assert_matches!(outcome, Err(CoreError::SnapshotUnavailable(_)));
+    let snapshots = store
+        .list_prefix(&snapshot_prefix(&namespace_id))
+        .await
+        .expect("snapshots");
+    assert_eq!(snapshots.len(), 1, "only the verified snapshot stays");
+}
+
 pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,

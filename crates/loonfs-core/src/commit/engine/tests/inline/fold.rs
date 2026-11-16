@@ -565,7 +565,11 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .expect("WAL object");
         let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("WAL decode");
         expected
-            .push_object(&wal_object.payload().records, bytes.len())
+            .push_object(
+                &wal_object.payload().namespace_id,
+                &wal_object.payload().records,
+                bytes.len(),
+            )
             .expect("later rows");
     }
     let cached = engine
