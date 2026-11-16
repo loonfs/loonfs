@@ -9,6 +9,7 @@ use crate::metadata::view::MetadataView;
 use crate::metadata::{
     AccessRevisionRecord, AttributesRevisionRecord, ContentLayoutRecord, RevisionRecord,
 };
+use crate::segment::BlocksPerRefill;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
@@ -44,12 +45,24 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         inode_id: InodeId,
     ) -> Result<Option<RevisionRecord>> {
+        self.latest_revision_record_with(inode_id, BlocksPerRefill::One)
+            .await
+    }
+
+    /// Returns what [`Self::latest_revision_record`] returns, and fetches the
+    /// manifest's blocks in refills of `blocks_per_refill`.
+    pub(crate) async fn latest_revision_record_with(
+        &self,
+        inode_id: InodeId,
+        blocks_per_refill: BlocksPerRefill,
+    ) -> Result<Option<RevisionRecord>> {
         Ok(newest(
             self.row_latest_revision_by_inode(inode_id),
             manifest_index::latest_revision_by_inode(
                 self.manifest_segments(),
                 inode_id,
                 self.visible_seq(),
+                blocks_per_refill,
             )
             .await?,
             revision_order_key,
@@ -151,6 +164,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         inode_id: InodeId,
     ) -> Result<Option<AttributesRevisionRecord>> {
+        self.latest_attributes_revision_with(inode_id, BlocksPerRefill::One)
+            .await
+    }
+
+    /// Returns what [`Self::latest_attributes_revision`] returns, and fetches
+    /// the manifest's blocks in refills of `blocks_per_refill`.
+    pub(crate) async fn latest_attributes_revision_with(
+        &self,
+        inode_id: InodeId,
+        blocks_per_refill: BlocksPerRefill,
+    ) -> Result<Option<AttributesRevisionRecord>> {
         let row_record = self
             .row_states()
             .flat_map(|state| state.attributes_revisions())
@@ -165,6 +189,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 self.manifest_segments(),
                 inode_id,
                 self.visible_seq(),
+                blocks_per_refill,
             )
             .await?,
             attributes_order_key,
@@ -176,6 +201,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         inode_id: InodeId,
     ) -> Result<Option<AccessRevisionRecord>> {
+        self.latest_access_revision_with(inode_id, BlocksPerRefill::One)
+            .await
+    }
+
+    /// Returns what [`Self::latest_access_revision`] returns, and fetches the
+    /// manifest's blocks in refills of `blocks_per_refill`.
+    pub(crate) async fn latest_access_revision_with(
+        &self,
+        inode_id: InodeId,
+        blocks_per_refill: BlocksPerRefill,
+    ) -> Result<Option<AccessRevisionRecord>> {
         let row_record = self
             .row_states()
             .flat_map(|state| state.access_revisions())
@@ -186,8 +222,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .cloned();
         Ok(newest(
             row_record,
-            manifest_index::access_by_inode(self.manifest_segments(), inode_id, self.visible_seq())
-                .await?,
+            manifest_index::access_by_inode(
+                self.manifest_segments(),
+                inode_id,
+                self.visible_seq(),
+                blocks_per_refill,
+            )
+            .await?,
             access_order_key,
         ))
     }
