@@ -68,17 +68,16 @@ const TOMBSTONE_BYTES: usize = delta_bytes(
     ],
 );
 const DELETE_BYTES: usize = UNBIND_BYTES + TOMBSTONE_BYTES;
+/// The longest checksum: CRC-64/NVME, whose value is 16 hexadecimal characters.
+const CHECKSUM_BYTES: usize = cbor_map_bytes(&[
+    ("algorithm", cbor_string_bytes("crc64nvme".len())),
+    ("value", cbor_string_bytes(16)),
+]);
 const CONTENT_REF_BYTES: usize = cbor_map_bytes(&[
     ("kind", cbor_string_bytes("blob_v1".len())),
     ("content_id", cbor_string_bytes(MAX_ID_BYTES)),
     ("size_bytes", INTEGER_BYTES),
-    (
-        "checksum",
-        cbor_map_bytes(&[
-            ("algorithm", cbor_string_bytes("crc64nvme".len())),
-            ("value", cbor_string_bytes(16)),
-        ]),
-    ),
+    ("checksum", CHECKSUM_BYTES),
 ]);
 const POSITION_BYTES: usize =
     cbor_map_bytes(&[("seq", INTEGER_BYTES), ("delta_index", INDEX_BYTES)]);
@@ -127,10 +126,12 @@ const EXTENT_BYTES: usize = cbor_map_bytes(&[
         "object",
         cbor_map_bytes(&[
             ("kind", cbor_string_bytes("whole".len())),
+            ("object_id", cbor_string_bytes(MAX_ID_BYTES)),
             ("start", INTEGER_BYTES),
             ("end", INTEGER_BYTES),
         ]),
     ),
+    ("object_checksum", CHECKSUM_BYTES),
     ("offset", INTEGER_BYTES),
     ("length", INTEGER_BYTES),
 ]);

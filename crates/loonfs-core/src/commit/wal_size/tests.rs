@@ -117,12 +117,26 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 content_ref: content_ref.clone(),
                 layout: Some(loonfs_types::ContentLayout {
                     creator_namespace_id: namespace_id.clone(),
+                    // Span objects, whose extents are the longest that a
+                    // layout records.
                     extents: (0..16)
-                        .map(|index| loonfs_types::ContentExtent {
-                            content_id: content_ref.content_id.clone(),
-                            object: loonfs_types::ExtentObject::Whole,
-                            offset: 0,
-                            length: if index == 0 { u64::MAX - 15 } else { 1 },
+                        .map(|index| {
+                            let (start, length) = if index == 0 {
+                                (0, u64::MAX - 15)
+                            } else {
+                                (u64::MAX - 16 + index, 1)
+                            };
+                            loonfs_types::ContentExtent {
+                                content_id: content_ref.content_id.clone(),
+                                object: loonfs_types::ExtentObject::Span {
+                                    object_id: loonfs_types::SpanObjectId::generate(),
+                                    start,
+                                    end: start + length,
+                                },
+                                object_checksum: Checksum::crc64nvme(b"extent"),
+                                offset: 0,
+                                length,
+                            }
                         })
                         .collect(),
                 }),
@@ -176,6 +190,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                     extents: vec![loonfs_types::ContentExtent {
                         content_id: log_ref.content_id.clone(),
                         object: loonfs_types::ExtentObject::Whole,
+                        object_checksum: log_ref.checksum.clone(),
                         offset: 0,
                         length: log_ref.size_bytes,
                     }],
@@ -355,6 +370,7 @@ fn a_merges_bound_includes_the_layouts_of_its_proofs() {
             .map(|offset| loonfs_types::ContentExtent {
                 content_id: content_ref.content_id.clone(),
                 object: loonfs_types::ExtentObject::Whole,
+                object_checksum: content_ref.checksum.clone(),
                 offset,
                 length: 1,
             })

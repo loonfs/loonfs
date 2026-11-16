@@ -289,6 +289,15 @@ pub fn required_etag(object_key: &str, etag: Option<String>) -> Result<String> {
     })
 }
 
+/// Requires the stored full-object checksum that a provider returns for an
+/// immutable object, which every supported provider stores (format spec,
+/// "Immutable writes and retries").
+pub fn required_checksum(object_key: &str, checksum: Option<Checksum>) -> Result<Checksum> {
+    checksum.ok_or_else(|| ObjectStoreError::StoredChecksumMissing {
+        object_key: object_key.to_owned(),
+    })
+}
+
 /// A provider-independent category for an object-store error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectStoreErrorKind {

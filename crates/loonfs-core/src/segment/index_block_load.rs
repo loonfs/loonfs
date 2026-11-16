@@ -20,6 +20,7 @@ use loonfs_types::format::segment_blocks::{
     decode_data_block, decode_filter_block, decode_index_block, BlockHandle, SegmentFilter,
     SegmentIndexEntry,
 };
+use loonfs_types::Checksum;
 use std::sync::Arc;
 
 pub(crate) fn segment_block_cache_key(
@@ -77,6 +78,25 @@ pub(super) async fn load_section_bytes<S: ObjectStore + ?Sized>(
         });
     }
     Ok(bytes.to_vec())
+}
+
+/// Checks the bytes of a whole segment object against the stored checksum
+/// that its descriptor records.
+fn verify_whole_segment(
+    descriptor: &MetadataSegmentRef,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<(), ManifestLoadError> {
+    let expected = &descriptor.checksum;
+    let actual = Checksum::compute(expected.algorithm(), bytes);
+    if actual != *expected {
+        return Err(ManifestLoadError::SegmentChecksumMismatch {
+            object_key: object_key.to_owned(),
+            expected: format!("{}:{}", expected.algorithm(), expected.value()),
+            actual: format!("{}:{}", actual.algorithm(), actual.value()),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn segment_codec_error(
@@ -163,6 +183,9 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
         )
         .await?,
     );
+    if whole_object {
+        verify_whole_segment(descriptor, &object_key, &bytes)?;
+    }
     let (index_block, filter_block) = publish_segment_sections(
         segment_cache,
         memo,
@@ -427,6 +450,9 @@ pub(crate) async fn load_segment_index_for_compaction<S: ObjectStore + ?Sized>(
         )
         .await?,
     );
+    if whole_object {
+        verify_whole_segment(descriptor, &object_key, &bytes)?;
+    }
     let stored = section_bytes(&bytes, fetch_offset, &handle).ok_or_else(|| {
         segment_codec_error(&object_key, "index block outside the segment object bounds")
     })?;

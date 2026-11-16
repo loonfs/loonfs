@@ -1,6 +1,6 @@
 //! Ordered immutable objects that store a content chain.
 
-use crate::{ContentId, NamespaceId, SpanObjectId};
+use crate::{Checksum, ContentId, NamespaceId, SpanObjectId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -31,6 +31,11 @@ pub struct ContentExtent {
     pub content_id: ContentId,
     /// Object under the chain's key.
     pub object: ExtentObject,
+    /// The full-object checksum that the store keeps for the object, in the
+    /// store's algorithm. Every extent that points into one object records
+    /// the same value, so a read of the whole object can be checked against
+    /// it. See [metadata rows](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
+    pub object_checksum: Checksum,
     /// Offset of the first byte in the object.
     pub offset: u64,
     /// Number of bytes taken from the object.
@@ -127,6 +132,7 @@ mod tests {
         let whole = ContentExtent {
             content_id: ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content"),
             object: ExtentObject::Whole,
+            object_checksum: Checksum::crc64nvme(b"0123456789"),
             offset: 0,
             length: 10,
         };

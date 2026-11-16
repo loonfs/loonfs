@@ -3,14 +3,16 @@
 use super::content::{
     content_object_key_for_ref, describe_checksum, DurableContentValidationError,
 };
-use super::content_location::{extent_object_key, ContentLocation, LayoutLookup, LocatedExtent};
+use super::content_location::{
+    chain_object_key, extent_object_key, ContentLocation, LayoutLookup, LocatedExtent,
+};
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_LAYOUT_EXTENTS;
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::ProjectedContent;
 use crate::Permits;
 use bytes::Bytes;
-use loonfs_objectstore::{AssemblySource, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{required_checksum, AssemblySource, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ContentExtent, ContentId, ContentLayout,
@@ -185,10 +187,11 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         creator_namespace_id,
         mut extents,
         retained,
-        extent,
+        object,
+        length,
         candidate,
     } = tail_extent_plan(lookup, content_writes, content, pieces).await?;
-    let object_key = extent_object_key(pool_id, &extent);
+    let object_key = chain_object_key(pool_id, &newest.content_id, &object);
     let _permit = content_writes.permits.acquire().await;
     let (sources, expected) = assembly_sources(
         content_writes.store,
@@ -197,33 +200,36 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         &candidate,
     )
     .await?;
-    let written = content_writes
+    let written = match content_writes
         .store
         .assemble(&object_key, &sources, candidate, &expected)
-        .await;
-    if let Err(error) = written {
-        tracing::error!(
-            namespace_id = %content_writes.namespace_id,
-            object_key = %object_key,
-            error = %error,
-            "content write failed"
-        );
-        return Err(match error {
-            ObjectStoreError::Transport { message, .. } => CoreError::store(
-                &object_key,
-                &ObjectStoreError::retryable_transport(&object_key, message),
-            ),
-            ObjectStoreError::ChecksumMismatch {
-                object_key: mismatched,
-            } => CoreError::NamespaceCorrupt(format!(
-                "content object `{mismatched}` does not match its stored checksum"
-            )),
-            error => CoreError::store(&object_key, &error),
-        });
-    }
+        .await
+    {
+        Ok(written) => written,
+        Err(error) => {
+            tracing::error!(
+                namespace_id = %content_writes.namespace_id,
+                object_key = %object_key,
+                error = %error,
+                "content write failed"
+            );
+            return Err(content_write_error(&object_key, error));
+        }
+    };
+    // The extent records the checksum that the store keeps for the new
+    // object, which the assembly checked against the combined checksum of its
+    // sources and tail, so no byte is hashed again.
+    let object_checksum = required_checksum(&object_key, written.checksum)
+        .map_err(|error| CoreError::store(&object_key, &error))?;
     extents.truncate(retained);
     let mut extents: Vec<_> = extents.into_iter().map(|located| located.extent).collect();
-    extents.push(extent);
+    extents.push(ContentExtent {
+        content_id: newest.content_id.clone(),
+        object,
+        object_checksum,
+        offset: 0,
+        length,
+    });
     Ok(ContentLayoutRecord {
         content_id: newest.content_id.clone(),
         committed_seq: content.committed_seq,
@@ -235,6 +241,22 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
     })
 }
 
+/// Returns the error for a failed write of the content object `object_key`.
+fn content_write_error(object_key: &str, error: ObjectStoreError) -> CoreError {
+    match error {
+        ObjectStoreError::Transport { message, .. } => CoreError::store(
+            object_key,
+            &ObjectStoreError::retryable_transport(object_key, message),
+        ),
+        ObjectStoreError::ChecksumMismatch {
+            object_key: mismatched,
+        } => CoreError::NamespaceCorrupt(format!(
+            "content object `{mismatched}` does not match its stored checksum"
+        )),
+        error => CoreError::store(object_key, &error),
+    }
+}
+
 /// Returns whether `extent` stores bytes of the chain `chain_content_id`
 /// itself, rather than bytes of a shared base chain whose extents a new chain
 /// lists first.
@@ -243,13 +265,15 @@ pub(crate) fn is_own_extent(extent: &ContentExtent, chain_content_id: &ContentId
 }
 
 /// What one write of a chain's tail assembles: the chain's creator, the
-/// chain's extents, how many of them the new layout keeps, the extent that the
-/// write puts after them, and the bytes that the new extent ends with.
+/// chain's extents, how many of them the new layout keeps, the object that the
+/// write creates and the length of the extent that lists it after them, and the
+/// bytes that the new extent ends with.
 struct TailExtentPlan {
     creator_namespace_id: NamespaceId,
     extents: Vec<LocatedExtent>,
     retained: usize,
-    extent: ContentExtent,
+    object: ExtentObject,
+    length: u64,
     candidate: Vec<Bytes>,
 }
 
@@ -335,17 +359,12 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
             end: newest.size_bytes,
         }
     };
-    let extent = ContentExtent {
-        content_id: newest.content_id.clone(),
-        object,
-        offset: 0,
-        length: candidate_length,
-    };
     Ok(TailExtentPlan {
         creator_namespace_id,
         extents,
         retained,
-        extent,
+        object,
+        length: candidate_length,
         candidate,
     })
 }

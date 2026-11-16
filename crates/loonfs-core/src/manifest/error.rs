@@ -58,6 +58,14 @@ pub enum ManifestLoadError {
     #[error("metadata segment descriptor mismatch for `{object_key}`: {message}")]
     SegmentDescriptorMismatch { object_key: String, message: String },
     #[error(
+        "metadata segment checksum mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
+    )]
+    SegmentChecksumMismatch {
+        object_key: String,
+        expected: String,
+        actual: String,
+    },
+    #[error(
         "metadata row kind mismatch for `{object_key}` family `{family:?}`: found `{row_kind}`"
     )]
     SegmentRowKindMismatch {
@@ -91,6 +99,7 @@ impl ManifestLoadError {
             | Self::MissingSegment { .. }
             | Self::SegmentCodec { .. }
             | Self::SegmentDescriptorMismatch { .. }
+            | Self::SegmentChecksumMismatch { .. }
             | Self::SegmentRowKindMismatch { .. }
             | Self::DuplicateRevisionRow { .. } => ErrorCode::NamespaceCorrupt,
         }

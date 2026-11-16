@@ -3419,6 +3419,7 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
                 extents: vec![ContentExtent {
                     content_id,
                     object: ExtentObject::Whole,
+                    object_checksum: loonfs_types::Checksum::crc64nvme(b""),
                     offset: 0,
                     length: size_bytes,
                 }],

@@ -211,9 +211,11 @@ impl PreparedContent {
     /// Returns the layout that a revision of the prepared reference records,
     /// in a commit of `namespace_id`.
     ///
-    /// An upload is one whole object, and `namespace_id` is its creator.
-    /// Content from a member of the pool records the source's layout,
-    /// whose creator is the chain's.
+    /// An upload is one whole object, and `namespace_id` is its creator. The
+    /// upload's reference covers the whole object, so its checksum is the
+    /// stored checksum that the upload's completion checked. Content from a
+    /// member of the pool records the source's layout, whose creator is the
+    /// chain's.
     pub(crate) fn revision_layout(&self, namespace_id: &NamespaceId) -> Option<ContentLayout> {
         match &self.kind {
             PreparedContentKind::Inline(_) => None,
@@ -222,6 +224,7 @@ impl PreparedContent {
                 extents: vec![loonfs_types::ContentExtent {
                     content_id: content_ref.content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,
+                    object_checksum: content_ref.checksum.clone(),
                     offset: 0,
                     length: content_ref.size_bytes,
                 }],

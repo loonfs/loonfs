@@ -120,6 +120,26 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].layout.extents[0].object, ExtentObject::Whole);
     assert_eq!(rows[0].size_bytes, 8);
+    // The upload's whole extent records the checksum that the store keeps for
+    // the uploaded object, which is the upload's reference checksum.
+    let uploaded = store
+        .head(&extent_object_key(
+            &pool_id(&store).await,
+            &rows[0].layout.extents[0],
+        ))
+        .await
+        .expect("head")
+        .expect("the uploaded object");
+    for row in &rows {
+        assert_eq!(
+            row.layout.extents[0].object_checksum,
+            stored.content_ref().checksum
+        );
+        assert_eq!(
+            Some(row.layout.extents[0].object_checksum.clone()),
+            uploaded.checksum
+        );
+    }
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
         .await

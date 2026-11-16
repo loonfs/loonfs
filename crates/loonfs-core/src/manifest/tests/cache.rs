@@ -1266,6 +1266,7 @@ async fn multi_block_direntry_segment() -> (
     )
     .await
     .expect("overwrite segment");
+    descriptor.checksum = loonfs_types::Checksum::compute(store.checksum_algorithm(), &built.bytes);
     descriptor.row_count = built.row_count;
     descriptor.min_row_key = built.min_row_key;
     descriptor.max_row_key = built.max_row_key;

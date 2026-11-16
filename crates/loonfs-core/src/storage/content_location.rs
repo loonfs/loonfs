@@ -1,6 +1,8 @@
 //! Resolves a reference through its layout and visible WAL pieces.
 
-use super::content::{content_object_key_for_ref, DurableContentValidationError};
+use super::content::{
+    content_object_key_for_ref, describe_checksum, DurableContentValidationError,
+};
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::object_cache::ObjectCache;
@@ -10,7 +12,9 @@ use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{content_blob, content_blob_name, content_span, content_span_name};
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::{ContentExtent, ContentId, ContentRef, ExtentObject, NamespaceId, PoolId};
+use loonfs_types::{
+    Checksum, ContentExtent, ContentId, ContentRef, ExtentObject, NamespaceId, PoolId,
+};
 
 #[async_trait::async_trait]
 pub(crate) trait LayoutLookup: Sync {
@@ -26,11 +30,19 @@ pub(crate) struct LocatedExtent {
 /// Returns the key of the object that `extent` reads, under the prefix of
 /// `pool_id`, the reading namespace's pool.
 pub(crate) fn extent_object_key(pool_id: &PoolId, extent: &ContentExtent) -> String {
-    match &extent.object {
-        ExtentObject::Whole => content_blob(pool_id, &extent.content_id),
-        ExtentObject::Span { object_id, .. } => {
-            content_span(pool_id, &extent.content_id, object_id)
-        }
+    chain_object_key(pool_id, &extent.content_id, &extent.object)
+}
+
+/// Returns the key of `object` under the key of the chain `content_id`, under
+/// the prefix of `pool_id`.
+pub(crate) fn chain_object_key(
+    pool_id: &PoolId,
+    content_id: &ContentId,
+    object: &ExtentObject,
+) -> String {
+    match object {
+        ExtentObject::Whole => content_blob(pool_id, content_id),
+        ExtentObject::Span { object_id, .. } => content_span(pool_id, content_id, object_id),
     }
 }
 
@@ -131,8 +143,9 @@ impl ContentLocation {
         })
     }
 
-    /// Returns the location of a reference whose bytes are the start of the
-    /// whole object under the prefix of `pool_id`, such as an upload's.
+    /// Returns the location of a reference whose bytes are the whole object
+    /// under the prefix of `pool_id`, such as an upload's. The reference's
+    /// checksum is then the object's checksum.
     pub(crate) fn whole(pool_id: &PoolId, content_ref: &ContentRef) -> Self {
         let object_key = content_object_key_for_ref(pool_id, content_ref);
         Self {
@@ -141,6 +154,7 @@ impl ContentLocation {
                 extent: ContentExtent {
                     content_id: content_ref.content_id.clone(),
                     object: ExtentObject::Whole,
+                    object_checksum: content_ref.checksum.clone(),
                     offset: 0,
                     length: content_ref.size_bytes,
                 },
@@ -198,14 +212,18 @@ impl ContentLocation {
                     start_inclusive: located.extent.offset + start.max(offset) - offset,
                     end_exclusive: located.extent.offset + end.min(extent_end) - offset,
                 };
-                requests.push((located.object_key.clone(), range));
+                // A read of a whole span object is checked against the
+                // checksum that the store keeps for the object.
+                let object_checksum = reads_whole_object(&located.extent, &range)
+                    .then(|| located.extent.object_checksum.clone());
+                requests.push((located.object_key.clone(), range, object_checksum));
             }
             offset = extent_end;
         }
         // `buffered` keeps the parts in extent order, which is the byte order
         // of the requested range.
         let mut parts: Vec<Bytes> = stream::iter(requests)
-            .map(|(object_key, range)| async move {
+            .map(|(object_key, range, object_checksum)| async move {
                 if let Some(cached) = object_cache
                     .and_then(|cache| cache.get_content(&object_key, range.end_exclusive))
                 {
@@ -232,6 +250,9 @@ impl ContentLocation {
                         expected,
                         actual: bytes.len() as u64,
                     });
+                }
+                if let Some(object_checksum) = object_checksum {
+                    verify_object_checksum(object_key, &object_checksum, &bytes)?;
                 }
                 Ok(bytes)
             })
@@ -274,4 +295,35 @@ impl ContentLocation {
         }
         Ok(bytes.to_vec())
     }
+}
+
+/// Returns whether `range` of the object that `extent` lies in is the whole
+/// object. A span object's extent records the object's size (`end - start`),
+/// and a whole object's extent records only the bytes that it takes from the
+/// object, so a read of a whole object is never known to cover all of it.
+fn reads_whole_object(extent: &ContentExtent, range: &ByteRange) -> bool {
+    match extent.object {
+        ExtentObject::Span { start, end, .. } => {
+            range.start_inclusive == 0 && range.end_exclusive == end - start
+        }
+        ExtentObject::Whole => false,
+    }
+}
+
+/// Checks the bytes of a whole content object against the stored checksum
+/// that the extents listing the object record.
+fn verify_object_checksum(
+    object_key: String,
+    expected: &Checksum,
+    bytes: &[u8],
+) -> std::result::Result<(), DurableContentValidationError> {
+    let actual = Checksum::compute(expected.algorithm(), bytes);
+    if actual != *expected {
+        return Err(DurableContentValidationError::ContentChecksumMismatch {
+            object_key,
+            expected: describe_checksum(expected),
+            actual: describe_checksum(&actual),
+        });
+    }
+    Ok(())
 }

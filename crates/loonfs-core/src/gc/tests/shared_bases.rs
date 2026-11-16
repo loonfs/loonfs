@@ -31,6 +31,7 @@ fn shared_layout(namespace_id: &NamespaceId, index: usize) -> ContentLayoutRecor
                 .map(|content_id| ContentExtent {
                     content_id,
                     object: ExtentObject::Whole,
+                    object_checksum: loonfs_types::Checksum::crc64nvme(b"x"),
                     offset: 0,
                     length: 1,
                 })
@@ -251,6 +252,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
                     content_id: ContentId::parse(format!("con_3{:025}", chain * 25 + object))
                         .expect("object id"),
                     object: ExtentObject::Whole,
+                    object_checksum: loonfs_types::Checksum::crc64nvme(b"x"),
                     offset: object,
                     length: 1,
                 })
@@ -332,6 +334,7 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
             extents: vec![ContentExtent {
                 content_id: chain.clone(),
                 object,
+                object_checksum: loonfs_types::Checksum::crc64nvme(b"x"),
                 offset: 0,
                 length: size_bytes,
             }],

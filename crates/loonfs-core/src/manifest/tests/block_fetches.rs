@@ -605,3 +605,37 @@ async fn a_cold_listing_page_fetches_its_blocks_in_one_get() {
         assert!(end - start <= crate::limits::MAX_SCAN_REFILL_BYTES);
     }
 }
+
+/// Checks that a segment that a read fetches whole is checked against the
+/// checksum that its descriptor records, by a lookup's index load and by a
+/// compaction's, and that a wrong recorded checksum is corruption.
+#[tokio::test]
+async fn a_segment_read_whole_is_checked_against_its_descriptors_checksum() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let (descriptor, _) = segment_with_block_target(&store, &rows(0, 2, 1), 64 * 1024).await;
+    assert!(
+        index_block_load::segment_object_bytes(&descriptor) <= 256 * 1024,
+        "the fixture segment is small enough to fetch whole"
+    );
+    index_block_load::load_segment_index_for_compaction(&store, &descriptor)
+        .await
+        .expect("a segment that matches its checksum loads");
+    let mut wrong = descriptor;
+    wrong.checksum = loonfs_types::Checksum::crc64nvme(b"another segment");
+    let object_key = metadata_segment_object_key(&wrong);
+    assert_matches!(
+        index_block_load::load_segment_index(&store, None, &SessionBlockMemo::default(), &wrong)
+            .await,
+        Err(ManifestLoadError::SegmentChecksumMismatch { object_key: key, .. })
+            if key == object_key
+    );
+    let error = index_block_load::load_segment_index_for_compaction(&store, &wrong)
+        .await
+        .expect_err("a compaction's whole read checks the checksum too");
+    assert_matches!(
+        &error,
+        ManifestLoadError::SegmentChecksumMismatch { object_key: key, .. } if *key == object_key
+    );
+    assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
+}

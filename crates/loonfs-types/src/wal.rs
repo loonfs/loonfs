@@ -1148,6 +1148,7 @@ mod tests {
                 extents: vec![crate::ContentExtent {
                     content_id: content_ref.content_id.clone(),
                     object: crate::ExtentObject::Whole,
+                    object_checksum: crate::Checksum::crc64nvme(b""),
                     offset: 0,
                     length: 3,
                 }],
@@ -1283,6 +1284,7 @@ mod tests {
                     content_id: ContentId::parse("con_7yvjx9gxjm688fxq5tk1v58cgg")
                         .expect("content"),
                     object: crate::ExtentObject::Whole,
+                    object_checksum: crate::Checksum::crc64nvme(b""),
                     offset: 0,
                     length,
                 }],

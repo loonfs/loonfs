@@ -334,6 +334,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                     extents: vec![loonfs_types::ContentExtent {
                         content_id: sample_content_ref().content_id,
                         object: loonfs_types::ExtentObject::Whole,
+                        object_checksum: sample_content_ref().checksum,
                         offset: 0,
                         length: sample_content_ref().size_bytes,
                     }],
@@ -395,6 +396,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                     extents: vec![loonfs_types::ContentExtent {
                         content_id: sample_content_ref().content_id,
                         object: loonfs_types::ExtentObject::Whole,
+                        object_checksum: sample_content_ref().checksum,
                         offset: 0,
                         length: sample_content_ref().size_bytes,
                     }],
@@ -520,6 +522,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
                 extents: vec![loonfs_types::ContentExtent {
                     content_id: sample_content_ref().content_id,
                     object: loonfs_types::ExtentObject::Whole,
+                    object_checksum: sample_content_ref().checksum,
                     offset: 0,
                     length: 6,
                 }],
@@ -609,6 +612,11 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
             segments: vec![MetadataSegmentRef {
                 owner_namespace_id: namespace_id(),
                 segment_id: segment_id(),
+                checksum: Checksum::new(
+                    ChecksumAlgorithm::Crc64nvme,
+                    ChecksumHex::parse("5d0c9e2b7a41f386").expect("a lowercase hex checksum"),
+                )
+                .expect("a CRC-64/NVME checksum"),
                 family: MetadataRowFamily::Inodes,
                 encoding: METADATA_SEGMENT_ENCODING,
                 row_count: 6,
@@ -638,6 +646,11 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
     publication.family = MetadataRowFamily::ContentLayouts;
     publication.segment_id =
         MetadataSegmentId::parse("seg_014d2pf2dbsqqg28t5cy4tqkfe").expect("segment id");
+    publication.checksum = Checksum::new(
+        ChecksumAlgorithm::Crc64nvme,
+        ChecksumHex::parse("a83f61d0c25e94b7").expect("a lowercase hex checksum"),
+    )
+    .expect("a CRC-64/NVME checksum");
     publication.min_row_key = sample_content_layout_row().row_key();
     publication.max_row_key = publication.min_row_key.clone();
     publication.row_count = 1;
@@ -1006,6 +1019,63 @@ fn manifest_without_required_fields_is_rejected() {
                 .contains(&format!("missing field `{field}`")),
             "the rejection should name the field: {error}"
         );
+    }
+}
+
+/// Checks that a segment descriptor and a layout extent are rejected without
+/// the stored checksum of their object, or with one that isn't well formed.
+#[test]
+fn descriptors_and_extents_require_a_well_formed_object_checksum() {
+    let malformed = [
+        serde_json::json!({"algorithm": "crc64nvme", "value": "abc"}),
+        serde_json::json!({"algorithm": "crc64nvme", "value": "00112233"}),
+        serde_json::json!({"algorithm": "crc64nvme", "value": "5D0C9E2B7A41F386"}),
+        serde_json::json!({"algorithm": "sha256", "value": "5d0c9e2b7a41f386"}),
+        serde_json::json!({"algorithm": "crc64nvme"}),
+        serde_json::json!("5d0c9e2b7a41f386"),
+    ];
+    let MetadataRow::ContentLayout(layout_row) = sample_content_layout_row() else {
+        panic!("the sample layout row should be a layout row");
+    };
+    let cases = [
+        (
+            serde_json::to_value(sample_manifest_payload()).expect("encode manifest"),
+            "/runs/0/segments/0",
+            "checksum",
+        ),
+        (
+            serde_json::to_value(&layout_row.layout).expect("encode layout"),
+            "/extents/1",
+            "object_checksum",
+        ),
+    ];
+    for (document, path, field) in cases {
+        let decode = |document: serde_json::Value| {
+            if field == "checksum" {
+                serde_json::from_value::<NamespaceManifestPayload>(document).map(drop)
+            } else {
+                serde_json::from_value::<loonfs_types::ContentLayout>(document).map(drop)
+            }
+        };
+        decode(document.clone()).expect("the sample should decode");
+        let mut missing = document.clone();
+        missing
+            .pointer_mut(path)
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("the object that records the checksum")
+            .remove(field);
+        let error = decode(missing).expect_err("a missing checksum should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("missing field `{field}`")),
+            "{path}: {error}"
+        );
+        for checksum in &malformed {
+            let mut edited = document.clone();
+            edited.pointer_mut(path).expect("the object")[field] = checksum.clone();
+            decode(edited).expect_err("a malformed checksum should be rejected");
+        }
     }
 }
 
@@ -1937,6 +2007,7 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
         "/activity",
         "/runs/0",
         "/runs/0/segments/0",
+        "/runs/0/segments/0/checksum",
         "/runs/0/segments/0/index_block",
         "/runs/0/segments/0/filter_block",
     ] {
@@ -3031,6 +3102,7 @@ fn sample_content_layout_row() -> MetadataRow {
                 loonfs_types::ContentExtent {
                     content_id: reference.content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,
+                    object_checksum: Checksum::crc64nvme(b"golden b"),
                     offset: 0,
                     length: 8,
                 },
@@ -3044,6 +3116,7 @@ fn sample_content_layout_row() -> MetadataRow {
                         start: 8,
                         end: 12,
                     },
+                    object_checksum: Checksum::crc64nvme(b"ytes"),
                     offset: 0,
                     length: 4,
                 },

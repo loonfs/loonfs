@@ -89,6 +89,7 @@ async fn fixture<S: ObjectStore>(
                 start: offset,
                 end: offset + length as u64,
             },
+            object_checksum: Checksum::crc64nvme(&bytes),
             offset: 0,
             length: length as u64,
         };
@@ -179,6 +180,7 @@ async fn large_extents_assemble_with_only_source_heads_and_write_again_under_a_n
     let key = extent_object_key(&HEAD.pool_id, extent);
     let metadata = store.head(&key).await.expect("head").expect("span");
     assert_eq!(metadata.checksum, Some(reference.checksum.clone()));
+    assert_eq!(extent.object_checksum, reference.checksum);
     let again = write_tail_content(
         ContentWrites::new(&store, &permits, &HEAD),
         &layout,
@@ -197,6 +199,7 @@ async fn large_extents_assemble_with_only_source_heads_and_write_again_under_a_n
     let again_metadata = store.head(&again_key).await.expect("head").expect("span");
     assert_eq!(again_metadata.checksum, metadata.checksum);
     assert_eq!(again_metadata.size_bytes, metadata.size_bytes);
+    assert_eq!(again_extent.object_checksum, extent.object_checksum);
 }
 
 #[tokio::test]
@@ -233,6 +236,19 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
     assert_matches!(
         operations.last(),
         Some(RecordedOperation::Assemble { sources, .. }) if sources.len() == MAX_LAYOUT_EXTENTS - 1
+    );
+    let new_object = store
+        .head(&extent_object_key(
+            &HEAD.pool_id,
+            &written.layout.extents[2],
+        ))
+        .await
+        .expect("head")
+        .expect("the new object");
+    assert_eq!(
+        Some(written.layout.extents[2].object_checksum.clone()),
+        new_object.checksum,
+        "the new extent records the checksum that the store keeps for the assembled object"
     );
     assert_eq!(store.counts().gets, 0);
 }
@@ -317,7 +333,55 @@ async fn local_large_tail_assembles_without_sources() {
         .expect("checksum")
         .expect("object");
     assert_eq!(stored.size_bytes, reference.size_bytes);
+    assert_eq!(
+        written.layout.extents[0].object_checksum,
+        reference.checksum
+    );
     assert_eq!(stored.checksum, Some(reference.checksum));
+}
+
+/// Checks that a read of a whole span object is checked against the object
+/// checksum that the extent records, that a read of part of the object isn't,
+/// and that a wrong recorded checksum is corruption that identifies the
+/// object.
+#[tokio::test]
+async fn a_read_of_a_whole_span_object_checks_the_extents_object_checksum() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (mut layout, _, reference) = fixture(&store, &[6, 4], false, 0).await;
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    assert_eq!(
+        location
+            .read_range(&store, None, 0, 10)
+            .await
+            .expect("read"),
+        Bytes::from_static(b"aaaaaabbbb")
+    );
+    layout.0.layout.extents[1].object_checksum = Checksum::crc64nvme(b"cccc");
+    let object_key = extent_object_key(&HEAD.pool_id, &layout.0.layout.extents[1]);
+    let location = ContentLocation::resolve(&layout, &HEAD.pool_id, None, &reference)
+        .await
+        .expect("location");
+    for (start, end) in [(0, 10), (6, 10)] {
+        let error = location
+            .read_range(&store, None, start, end)
+            .await
+            .expect_err("a whole object that doesn't match its recorded checksum");
+        assert_matches!(
+            &error,
+            DurableContentValidationError::ContentChecksumMismatch { object_key: key, .. }
+                if *key == object_key
+        );
+        assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
+    }
+    for (start, end) in [(0, 6), (0, 9), (7, 10)] {
+        location
+            .read_range(&store, None, start, end)
+            .await
+            .expect("a read of part of an object isn't checked against its checksum");
+    }
 }
 
 #[tokio::test]
