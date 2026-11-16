@@ -77,7 +77,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -123,9 +123,9 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .gc(&context(setup.now_ms + GC_GRACE_WINDOW_MS).clock())
         .await
         .expect("release fork snapshot with retained session");
-    // A fork's retirement deletes its fork snapshot and its member entry, and
-    // makes no other request under its pool's prefix.
-    assert_eq!(first.deleted_snapshots_by_owner.fork, 1);
+    // A fork's retirement deletes its two fork snapshots and its member
+    // entry, and makes no other request under its pool's prefix.
+    assert_eq!(first.deleted_snapshots_by_owner.fork, 2);
     assert_eq!(
         store.take(),
         [loonfs_test_support::stores::RecordedOperation::Delete {
@@ -296,7 +296,7 @@ async fn an_unrecognized_snapshot_key_is_kept_and_blocks_retirement() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -327,5 +327,5 @@ async fn an_unrecognized_snapshot_key_is_kept_and_blocks_retirement() {
         .gc(&retirement.clock())
         .await
         .expect("retirement");
-    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 2);
 }

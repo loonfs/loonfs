@@ -205,6 +205,54 @@ pub(crate) async fn load_replayed_wal_tail<S: ObjectStore + ?Sized>(
     replay_discovered_tail(base_head, base_metadata_state, &tail)
 }
 
+/// Loads and replays the WAL objects after `base_head` through the first
+/// whose head is `through_seq`, a head that a reader found earlier, with
+/// each object validated as the contiguous successor of the one before and
+/// a writer epoch at most `epoch_bound`.
+///
+/// A missing number returns `MissingWalObject`. The walk reads one object at
+/// a time, because it doesn't know the WAL number whose head is
+/// `through_seq`, and it reads no further than the tail that the earlier
+/// reader read.
+pub(crate) async fn load_replayed_wal_tail_through_seq<S: ObjectStore + ?Sized>(
+    store: &S,
+    base_head: &NamespaceReadState,
+    base_metadata_state: &MetadataState,
+    through_seq: CommitSeq,
+    epoch_bound: WriterEpoch,
+) -> Result<ReplayedWalTail, MetadataProjectionLoadError> {
+    let mut walk = WalWalk::after(
+        &base_head.namespace_id,
+        base_head.wal_no,
+        base_head.seq,
+        epoch_bound,
+    );
+    let mut objects = Vec::new();
+    while walk.seq() < through_seq {
+        let LoadedWalObject {
+            object_key,
+            envelope,
+        } = load_wal_object(store, &base_head.namespace_id, WalNo(walk.wal_no.0 + 1)).await;
+        let envelope = envelope?.ok_or_else(|| WalTailLoadError::MissingWalObject {
+            object_key: object_key.clone(),
+        })?;
+        objects.push(walk.validate(object_key, envelope)?);
+    }
+    if walk.seq() != through_seq {
+        return Err(WalTailLoadError::HeadSeqMismatch {
+            object_key: walk.object_key(),
+            expected: through_seq,
+            actual: walk.seq(),
+        }
+        .into());
+    }
+    replay_discovered_tail(
+        base_head,
+        base_metadata_state,
+        &ValidatedWalTail::new(objects),
+    )
+}
+
 pub(crate) fn replay_discovered_tail(
     base_head: &NamespaceReadState,
     base_metadata_state: &MetadataState,

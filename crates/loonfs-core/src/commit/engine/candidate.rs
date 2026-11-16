@@ -42,7 +42,7 @@ pub(crate) struct MergeIntent {
     /// The fork and the range of its commits that the merge applies.
     pub(crate) record: MergeRecord,
     /// The sequence of this namespace that the fork was made at, from the
-    /// fork's manifest (`fork_basis.manifest.head_seq`). The fork's first merge
+    /// fork's fork basis (`fork_basis.fork_point_seq`). The fork's first merge
     /// starts after it.
     pub(crate) fork_point_seq: CommitSeq,
     /// The fork's ID of the inode that each create operation makes, by the

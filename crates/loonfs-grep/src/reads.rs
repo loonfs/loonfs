@@ -142,26 +142,30 @@ impl NamespaceReads {
 
     /// Lists one page of a fork's "gap" after `after_seq`, which is the
     /// source's commits above `after_seq` and at or below the fork point,
-    /// read through the fork snapshot as a rebase reads its source.
+    /// read through the fork's fork point snapshot as a rebase reads the
+    /// state its new fork started from.
     ///
-    /// A fork's own feed starts at the fork point, which is its first
-    /// retention floor, so grep reads the commits below the fork point that
-    /// the fork's index doesn't cover from the source.
+    /// A fork's own feed starts at the fork point, which is the retention
+    /// floor of its active manifest, so grep reads the commits below the fork
+    /// point that the fork's index doesn't cover from the fork's manifest at
+    /// the fork point, which lists the source's runs and the fork's fold of
+    /// the source's WAL tail. Grep reads nothing from the source for the gap.
     ///
     /// The gap's last page ends at the fork point. When the fork has commits
     /// of its own, that page's `next_after_seq` is the fork point, so a
     /// caller that follows the pages continues in the fork's own feed.
     ///
-    /// The source is read through the runtime without a subject, as the
+    /// The snapshot is read through the runtime without a subject, as the
     /// fork's own feed is read, and a query checks the subject's rights on
     /// each matching file in the fork, as it does for any file of the tail.
     ///
     /// `error` is what the fork's own feed returned for `after_seq`. The gap
     /// is read only when that's `below_retention_floor` and `after_seq` is
     /// below the fork point of a fork, and `error` is returned otherwise.
-    /// `error` is also returned when the source can't serve the gap, such as
-    /// when the source's retention floor was above `after_seq` when the fork
-    /// was made, so the index is rebuilt as it is after any rebootstrap.
+    /// `error` is also returned when the snapshot can't serve the gap,
+    /// because the source's retention floor was above `after_seq` when the
+    /// fork was made, so the index is rebuilt as it is after any
+    /// rebootstrap.
     async fn list_fork_gap_after(
         &self,
         after_seq: CommitSeq,
@@ -182,12 +186,12 @@ impl NamespaceReads {
             return Err(error.into());
         };
         let options = ListChangesOptions {
-            at: ReadAt::Snapshot(basis.source_snapshot_id),
+            at: ReadAt::Snapshot(basis.fork_point_snapshot_id),
             ..ListChangesOptions::default()
         };
         match self
             .runtime
-            .namespace(&basis.source_namespace_id)
+            .namespace(&metadata.namespace_id)
             .list_changes_with_options(after_seq, &options)
             .page_limit(page_limit(limit))
             .page()
@@ -199,12 +203,7 @@ impl NamespaceReads {
                 }
                 Ok(page)
             }
-            Err(loonfs::Error::Core(
-                CoreError::BelowRetentionFloor { .. }
-                | CoreError::SnapshotNotFound { .. }
-                | CoreError::SnapshotUnavailable(_),
-            )) => Err(error.into()),
-            Err(other) if other.code().is_namespace_gone() => Err(error.into()),
+            Err(loonfs::Error::Core(CoreError::BelowRetentionFloor { .. })) => Err(error.into()),
             Err(other) => Err(other.into()),
         }
     }

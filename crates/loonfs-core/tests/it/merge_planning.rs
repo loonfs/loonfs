@@ -108,7 +108,7 @@ impl Family {
                     .await
                     .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
-                loonfs_core::test_support::folded_manifest(
+                loonfs_core::test_support::fold_before_fork(
                     &loonfs_core::test_support::namespace_store(&self.store, &self.main),
                 )
                 .await

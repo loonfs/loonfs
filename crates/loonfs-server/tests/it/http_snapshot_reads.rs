@@ -388,19 +388,16 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
         "inode-reads",
         10_000,
     );
+    let fork_id = namespace_id("snapshot-inode-reads-fork");
     let fork = harness
         .client
-        .fork_namespace(
-            &namespace,
-            &namespace_id("snapshot-inode-reads-fork"),
-            &loonfs_test_support::test_actor(),
-        )
+        .fork_namespace(&namespace, &fork_id, &loonfs_test_support::test_actor())
         .await
         .expect("fork namespace");
-    let fork_snapshot_id = fork
+    let fork_point_snapshot_id = fork
         .fork_basis
         .expect("a fork has a fork basis")
-        .source_snapshot_id;
+        .fork_point_snapshot_id;
     harness
         .client
         .put_file_with_options(
@@ -441,7 +438,10 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
             .expect("current read by inode"),
         b"current bytes"
     );
-    for snapshot_id in [&snapshot.snapshot_id, &fork_snapshot_id] {
+    for (namespace, snapshot_id) in [
+        (&namespace, &snapshot.snapshot_id),
+        (&fork_id, &fork_point_snapshot_id),
+    ] {
         let snapshot_options = ReadFileOptions {
             at: ReadAt::Snapshot(snapshot_id.clone()),
         };
@@ -449,7 +449,7 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
             harness
                 .client
                 .read_file_revision_stream_by_inode_with_options(
-                    &namespace,
+                    namespace,
                     inode_id,
                     RevisionNo(revision_no),
                     &snapshot_options,

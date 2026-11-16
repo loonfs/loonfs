@@ -10,6 +10,7 @@
 pub(crate) mod error;
 pub(crate) mod extension;
 pub(crate) mod fold;
+pub(crate) mod fork_tail;
 pub(crate) mod load;
 pub(crate) mod publish;
 pub(crate) mod published;
@@ -22,6 +23,7 @@ pub(crate) mod validate;
 pub use self::error::ManifestLoadError;
 pub use self::extension::{ExtensionBasis, ExtensionPublication};
 pub use self::fold::{FoldWalOutcome, FoldWalResponse, FoldedWalTail};
+pub(crate) use self::fork_tail::ForkPointTail;
 pub(crate) use self::published::move_read_basis;
 pub use self::published::{PublicationReport, PublishedManifest};
 pub use self::retention::{FloorObjectReport, RetentionPlan, RetentionTarget};

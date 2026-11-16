@@ -404,10 +404,12 @@ pub(crate) async fn half_done_fork<S: ObjectStore + Clone>(
         loonfs_test_support::test_actor(),
         ForkBasis {
             manifest: temporary.manifest(),
+            fork_point_seq: temporary.head_seq,
             source_snapshot_id: loonfs_types::SnapshotId::generate(
                 temporary.snapshot_id.manifest_no(),
             ),
             forked_from_snapshot_id: temporary.snapshot_id.clone(),
+            fork_point_snapshot_id: loonfs_types::SnapshotId::generate(loonfs_types::ManifestNo(1)),
             rebased_from: None,
         },
         source_manifest.payload(),
@@ -509,9 +511,21 @@ pub async fn load_catalog<S: ObjectStore>(
         .expect("the namespace should have a catalog")
 }
 
+/// Folds the WAL tail of `namespace`, a fork's source, and returns no writer
+/// position for the fork.
+///
+/// The fork's discovery then finds the folded manifest and no WAL tail, so
+/// the fork has no manifest 2.
+pub async fn fold_before_fork<S: ObjectStore>(
+    namespace: &NamespaceStore<S>,
+) -> crate::Result<Option<crate::commit::publish_view::WriterPosition>> {
+    folded_manifest(namespace).await?;
+    Ok(None)
+}
+
 /// Folds the namespace's WAL tail and returns the manifest that covers it,
 /// with the manifest boundary that the fold read: the basis that a snapshot
-/// or a fork of the current head keeps.
+/// of the current head keeps.
 pub async fn folded_manifest<S: ObjectStore>(
     namespace: &NamespaceStore<S>,
 ) -> crate::Result<PublicationBasis> {

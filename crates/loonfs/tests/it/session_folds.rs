@@ -46,8 +46,6 @@ struct Family {
 enum Operation {
     /// A snapshot of the fork.
     Snapshot,
-    /// A fork of the fork's head.
-    Fork,
     /// [`Maintenance::fold_wal`] on the fork.
     FoldWal,
     /// [`Maintenance::maintain_metadata_while_due_with_options`] on the fork,
@@ -155,12 +153,6 @@ impl Family {
                     .await
                     .expect("the snapshot");
             }
-            Operation::Fork => {
-                self.runtime
-                    .fork_namespace(fork_id, &namespace_id("fork-copy"), &actor())
-                    .await
-                    .expect("the fork");
-            }
             Operation::FoldWal => {
                 self.maintenance()
                     .fold_wal(fork_id)
@@ -208,15 +200,11 @@ impl Family {
 /// waits for that fold instead of folding the same tail at the same time,
 /// so each of the tail's content objects is written once, and no manifest
 /// put of the fork or of main fails. (A merge plans from the fork's tail
-/// without a fold, so it isn't one of the operations.)
+/// without a fold, and a fork of the fork folds the tail into itself, so
+/// neither is one of the operations.)
 #[tokio::test]
 async fn folds_of_a_namespace_wait_for_its_sessions_fold() {
-    for operation in [
-        Operation::Snapshot,
-        Operation::Fork,
-        Operation::FoldWal,
-        Operation::Metadata,
-    ] {
+    for operation in [Operation::Snapshot, Operation::FoldWal, Operation::Metadata] {
         let family = family().await;
         family.write_fork_and_park_its_fold().await;
         family
@@ -234,11 +222,11 @@ async fn folds_of_a_namespace_wait_for_its_sessions_fold() {
 /// Checks that each operation that folds a fork without a session in the
 /// runtime folds the fork's tail itself, once. The fork writes one file
 /// fewer than its fold trigger, so its session ends with the whole tail
-/// unfolded. A snapshot needs the fork's session, so it isn't one of the
-/// operations.
+/// unfolded. A snapshot needs the fork's session, and a fork of the fork
+/// folds the tail into itself, so neither is one of the operations.
 #[tokio::test]
 async fn folds_of_a_namespace_without_a_session_fold_its_tail_once() {
-    for operation in [Operation::Fork, Operation::FoldWal, Operation::Metadata] {
+    for operation in [Operation::FoldWal, Operation::Metadata] {
         let family = family().await;
         family.write_fork(FILES - 1).await;
         family
@@ -292,29 +280,15 @@ async fn a_delete_waits_for_a_requested_fold() {
     family.runtime.shutdown().await.expect("shutdown");
 }
 
-/// A snapshot of a namespace's current head, which folds the namespace's WAL tail
-/// before the snapshot.
-#[derive(Debug, Clone, Copy)]
-enum HeadSnapshot {
-    Snapshot,
-    Fork,
-}
-
-/// Checks that a fold of the namespace's session waits for a snapshot's or a
-/// fork's snapshot until the snapshot is verified, so the snapshot isn't written again. The
-/// snapshot put is parked while more commits make the session's fold due. No
-/// manifest is published while the snapshot is parked, the snapshot keeps the
-/// manifest of its own fold, and the session's fold publishes once the snapshot
-/// returns.
+/// Checks that a fold of the namespace's session waits for a snapshot until
+/// the snapshot is verified, so the snapshot isn't written again. The snapshot
+/// put is parked while more commits make the session's fold due. No manifest
+/// is published while the snapshot is parked, the snapshot keeps the manifest
+/// of its own fold, and the session's fold publishes once the snapshot
+/// returns. (A fork of the head folds nothing of the namespace, so it doesn't
+/// hold back the session's fold.)
 #[tokio::test]
-async fn a_sessions_fold_waits_for_a_snapshot_or_a_fork_to_verify_its_snapshot_record() {
-    for head_snapshot in [HeadSnapshot::Snapshot, HeadSnapshot::Fork] {
-        fold_beside_a_parked_snapshot(head_snapshot).await;
-    }
-}
-
-async fn fold_beside_a_parked_snapshot(head_snapshot: HeadSnapshot) {
-    let fork_id = namespace_id("snapshot-wait-fork");
+async fn a_sessions_fold_waits_for_a_snapshot_to_verify_its_snapshot_record() {
     let namespace_id = namespace_id("snapshot-wait");
     let snapshots = KeyPredicate::prefix(loonfs_objectstore::keys::snapshot_prefix(&namespace_id));
     let blocking = Arc::new(BlockingStore::new(
@@ -359,29 +333,19 @@ async fn fold_beside_a_parked_snapshot(head_snapshot: HeadSnapshot) {
     store.reset();
     blocking.block_next();
     let created = async {
-        match head_snapshot {
-            HeadSnapshot::Snapshot => namespace
-                .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
-                    name: Some("parked".to_owned()),
-                    ..loonfs::CreateSnapshotOptions::default()
-                })
-                .await
-                .expect("the snapshot")
-                .snapshot_id
-                .manifest_no(),
-            HeadSnapshot::Fork => runtime
-                .fork_namespace(&namespace_id, &fork_id, &actor())
-                .await
-                .expect("the fork")
-                .fork_basis
-                .expect("a fork basis")
-                .source_snapshot_id
-                .manifest_no(),
-        }
+        namespace
+            .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
+                name: Some("parked".to_owned()),
+                ..loonfs::CreateSnapshotOptions::default()
+            })
+            .await
+            .expect("the snapshot")
+            .snapshot_id
+            .manifest_no()
     };
     tokio::pin!(created);
     tokio::select! {
-        _ = &mut created => panic!("{head_snapshot:?}: the snapshot finished without writing its record"),
+        _ = &mut created => panic!("the snapshot finished without writing its record"),
         () = blocking.wait_until_blocked() => {}
     }
     let folded = current_manifest_no().await;
@@ -396,26 +360,17 @@ async fn fold_beside_a_parked_snapshot(head_snapshot: HeadSnapshot) {
     assert_eq!(
         write_keys(&parked, &KeyPredicate::manifest(&namespace_id)),
         Vec::<String>::new(),
-        "{head_snapshot:?}: no fold publishes while the snapshot is parked"
+        "no fold publishes while the snapshot is parked"
     );
     blocking.release();
-    assert_eq!(created.await, folded, "{head_snapshot:?}");
+    assert_eq!(created.await, folded);
     namespace.wait_for_fold().await.expect("the session's fold");
-    assert_eq!(
-        current_manifest_no().await.0,
-        folded.0 + 1,
-        "{head_snapshot:?}"
-    );
+    assert_eq!(current_manifest_no().await.0, folded.0 + 1);
     let operations = [before, parked, store.take()].concat();
-    // A fork writes its temporary snapshot and then its fork snapshot.
-    let snapshot_puts = match head_snapshot {
-        HeadSnapshot::Snapshot => 1,
-        HeadSnapshot::Fork => 2,
-    };
     assert_eq!(
         write_keys(&operations, &snapshots).len(),
-        snapshot_puts,
-        "{head_snapshot:?}: snapshot record puts"
+        1,
+        "snapshot record puts"
     );
     runtime.shutdown().await.expect("shutdown");
 }

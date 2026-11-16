@@ -62,7 +62,7 @@ impl Family {
                     .await
                     .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
-                loonfs_core::test_support::folded_manifest(&namespace_store(
+                loonfs_core::test_support::fold_before_fork(&namespace_store(
                     &family.store,
                     &family.main,
                 ))
@@ -104,7 +104,7 @@ impl Family {
             &loonfs_test_support::test_actor(),
             &self.fork,
             fork_point_seq,
-            loonfs_core::test_support::folded_manifest(
+            loonfs_core::test_support::fold_before_fork(
                 &loonfs_core::test_support::namespace_store(&self.store, &self.main),
             )
             .await
@@ -112,6 +112,8 @@ impl Family {
         )
         .await
         .expect("the rebase's new fork")
+        .created()
+        .expect("a fork of a tail with no old commit")
     }
 
     fn request(&self, commit_id: &str, through_seq: Option<CommitSeq>) -> MergeRequest {
@@ -125,21 +127,22 @@ impl Family {
         }
     }
 
-    /// Reads `main` through the new fork's snapshot.
+    /// Reads the new fork through its fork point snapshot, which is `main` at
+    /// the new fork's fork point.
     async fn snapshot_context(&self) -> RuntimeReadContext {
-        let snapshot_id = read_context(&self.store, &self.rebase)
-            .await
+        let live = read_context(&self.store, &self.rebase).await;
+        let snapshot_id = live
             .read_basis
             .head
             .fork_basis
+            .clone()
             .expect("the new fork's basis")
-            .source_snapshot_id;
-        let live = read_context(&self.store, &self.main).await;
+            .fork_point_snapshot_id;
         RuntimeReadContext {
-            read_basis: namespace_store(&self.store, &self.main)
+            read_basis: namespace_store(&self.store, &self.rebase)
                 .load_snapshot_read_basis(&live.read_basis.head, &snapshot_id)
                 .await
-                .expect("main through the snapshot"),
+                .expect("the new fork through its fork point snapshot"),
             tail: None,
             visible_seq: None,
         }
@@ -156,7 +159,6 @@ impl Family {
         let request = self.request(commit_id, through_seq);
         let rebase = namespace_engine(&self.store, &self.rebase, &self.writer);
         let fork = namespace_engine(&self.store, &self.fork, &self.writer);
-        let main = namespace_engine(&self.store, &self.main, &self.writer);
         let rebase_context = read_context(&self.store, &self.rebase).await;
         if let Some((commit, conflicts)) = rebase.find_merge(&rebase_context, &request).await? {
             return Ok(Replay { commit, conflicts });
@@ -174,7 +176,7 @@ impl Family {
                 &rebase_context,
                 &fork,
                 &read_context(&self.store, &self.fork).await,
-                &main,
+                &rebase,
                 &self.snapshot_context().await,
                 &request,
                 self.writer.now_ms,

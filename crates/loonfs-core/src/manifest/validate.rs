@@ -43,9 +43,13 @@ pub(super) fn validate_manifest(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
+    // A fork's initializing manifests keep the source's floor, and its
+    // active manifest raises the floor to the fork point (format spec,
+    // "Forking a namespace").
     if payload.fork_basis.as_ref().is_some_and(|basis| {
         basis.manifest.owner_namespace_id == payload.namespace_id
-            || basis.manifest.head_seq > payload.retention_floor_seq
+            || basis.manifest.head_seq > basis.fork_point_seq
+            || (payload.status.is_active() && basis.fork_point_seq > payload.retention_floor_seq)
     }) {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),

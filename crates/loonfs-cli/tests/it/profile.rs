@@ -1314,7 +1314,7 @@ fn external_remote_profile_executes_through_http() {
             "fork_basis": {
                 "source_namespace_id": "demo",
                 "fork_point_seq": 0,
-                "source_snapshot_id": json_data(&fork)["fork_basis"]["source_snapshot_id"]
+                "fork_point_snapshot_id": json_data(&fork)["fork_basis"]["fork_point_snapshot_id"]
             },
             "pool_id": json_data(&create)["pool_id"],
             "head_seq": 0,

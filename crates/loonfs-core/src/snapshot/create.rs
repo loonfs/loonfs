@@ -114,6 +114,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Creates a verified snapshot of `basis`'s manifest for `owner`, and returns the
     /// snapshot record with the newest manifest and the manifest boundary that
     /// the verification read (see [`Self::create_verified_snapshot_record`]).
+    #[cfg(test)]
     pub(crate) async fn create_snapshot_record(
         &self,
         owner: SnapshotOwner,

@@ -124,7 +124,7 @@ impl PoolDeletedObjectCounts {
 pub struct DeletedSnapshotsByOwner {
     /// The user snapshots that the collection deleted after they expired or their namespace was deleted.
     pub user: u64,
-    /// The fork snapshot on the namespace's source that the collection deleted when it retired the namespace (0 or 1).
+    /// The fork snapshots that the collection deleted when it retired the namespace, the one on the namespace's source and the namespace's own fork point snapshot (0 to 2).
     pub fork: u64,
 }
 

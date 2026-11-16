@@ -347,7 +347,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &child))
+            loonfs_core::test_support::fold_before_fork(&namespace_store(&store, &child))
                 .await
                 .expect("fold the WAL tail"),
         )

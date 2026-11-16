@@ -233,7 +233,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `namespace_not_found` | 404 | The namespace has no manifest, or its newest manifest is initializing. Every request except a create, a fork, or a delete with its ID treats an initializing namespace as missing. |
 | `pool_not_found` | 404 | No object is under the pool's prefix, so the pool doesn't exist and the pool's collection deletes nothing. |
 | `namespace_deleted` | 410 | The namespace ID is deleted or [retired](format.md#95-retirement), and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
-| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, retrieve, fork, or extension found the snapshot expired. The snapshot inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
+| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, retrieve, fork, or extension found the snapshot expired. A fork that folds the source's WAL tail also returns this code when 5 minutes have passed since the first call's temporary snapshot was created, and when a call that finishes an initializing fork finds that a WAL object of the source's tail that the fork folds is gone. The snapshot inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
 | `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
@@ -931,7 +931,7 @@ A pool's GC response has no `deleted_snapshots_by_owner`, and its `deleted` cont
 
 A pool's response doesn't report the deletion of a member entry.
 
-Each deletion is counted once. When a fork's target namespace deletes its fork snapshot, the deletion counts toward `fork` if the snapshot was present before the deletion, and repeating that deletion on an absent snapshot adds nothing. Every count field is present, including fields whose value is zero.
+Each deletion is counted once. When a fork's target namespace deletes its fork snapshots, each deletion counts toward `fork` if the snapshot was present before the deletion, and repeating that deletion on an absent snapshot adds nothing. Every count field is present, including fields whose value is zero.
 
 Every core GC response also includes `retained`, which counts the candidates the collection kept, grouped by the reason each one was kept. The reasons are a closed set, so every field of the response's `retained` is always present, a zero means nothing was kept for that reason, and the fields sum to the total. A namespace's response has the first five reasons in this table and `fences_and_floor_objects`, and a pool's response has the first four and the two upload session reasons:
 
@@ -1001,7 +1001,7 @@ In an ACL namespace, creating, retrieving, listing, extending, and deleting snap
 
 The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. The path content and path download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision content read (`GET /inodes/{inode_id}/revisions/{revision_no}/content`) identifies its revision in the route, and with `snapshot_id` it reads that revision in the snapshot's state, and the snapshot keeps that revision readable after the namespace's retention floor passes it. The inode revision download route rejects `snapshot_id` with `invalid_request`. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
 
-A read also accepts one of the namespace's fork snapshots as `snapshot_id`, because a fork snapshot keeps a manifest just as a user snapshot does. A fork's `fork_basis.source_snapshot_id` is the ID of its fork snapshot in the source namespace (see [`POST /forks`](#613-post-forks)), so a client can read the source as it was at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point. For example, a client that compares a file in a fork with the file's version at the fork point reads that version from the source with `GET /inodes/{inode_id}/revisions/{revision_no}/content` and `snapshot_id` set to the fork's `source_snapshot_id`. A fork snapshot doesn't expire. The snapshot routes and `POST /forks` still refuse a fork snapshot's ID with `snapshot_not_found`, because those routes manage only user snapshots.
+A read also accepts one of the namespace's fork snapshots as `snapshot_id`, because a fork snapshot keeps a manifest just as a user snapshot does. A fork's `fork_basis.fork_point_snapshot_id` is the ID of its fork point snapshot, a fork snapshot on the fork itself that keeps the fork's state at the fork point, which is the source's state at the fork point (see [`POST /forks`](#613-post-forks)). So a client can read the fork as the source was at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point. For example, a client that compares a file in a fork with the file's version at the fork point reads that version from the fork with `GET /inodes/{inode_id}/revisions/{revision_no}/content` and `snapshot_id` set to the fork's `fork_point_snapshot_id`. A fork snapshot doesn't expire. The snapshot routes and `POST /forks` still refuse a fork snapshot's ID with `snapshot_not_found`, because those routes manage only user snapshots.
 
 When an embedded read sets `snapshot_id` in its options, the read opens a read view of that snapshot, as the HTTP request does. A read view of a snapshot accepts options that refer to the same snapshot, and it rejects any other snapshot ID with `invalid_request`.
 
@@ -1316,9 +1316,9 @@ Create and fork first look for the namespace ID's newest manifest, and a call th
 
 A plain create generates a pool ID after the lookup, and writes manifest 1 with the status `initializing` and that pool ID with a conditional put. Then it writes the namespace's [member entry](glossary.md#member-entry) in the pool (`pools/{pool_id}/members/{namespace_id}.json`), and writes manifest 2 with the status `active` (see [Creating a namespace](format.md#91-creating-a-namespace)).
 
-If the request identifies no snapshot, a fork first takes a temporary snapshot of the source's head (a user snapshot with no name that expires after 5 minutes). Then it writes the fork's manifest 1 with the status `initializing`, writes the fork snapshot on the source and the fork's member entry in its source's pool, and writes manifest 2 with the status `active` (see [Forking a namespace](format.md#92-forking-a-namespace)).
+If the request identifies no snapshot, a fork first reads the source's head and takes a temporary snapshot of the source's current manifest (a user snapshot with no name that expires 5 minutes after the fork call started). Then it writes the fork's manifest 1 with the status `initializing`, folds the source's WAL tail into the fork's manifest 2 when the source has one, writes the fork point snapshot on the fork, the fork snapshot on the source, and the fork's member entry in its source's pool, and writes the active manifest (see [Forking a namespace](format.md#92-forking-a-namespace)). The source publishes nothing.
 
-A create or fork that stops between manifest 1 and manifest 2 leaves the namespace initializing, and every request except a create, a fork, or a delete with its ID returns `namespace_not_found` for it. A later request that matches the first one finishes the namespace, a delete request removes it, and the namespace's collection removes an initializing namespace whose manifest 1 is more than 24 hours old (see [Deleting a namespace](format.md#94-deleting-a-namespace)). A create request never finishes an initializing fork, and a fork request never finishes an initializing create. Both return `namespace_exists`.
+A create or fork that stops between manifest 1 and the active manifest leaves the namespace initializing, and every request except a create, a fork, or a delete with its ID returns `namespace_not_found` for it. A later request that matches the first one finishes the namespace, a delete request removes it, and the namespace's collection removes an initializing namespace whose manifest 1 is more than 24 hours old (see [Deleting a namespace](format.md#94-deleting-a-namespace)). A create request never finishes an initializing fork, and a fork request never finishes an initializing create. Both return `namespace_exists`.
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
@@ -1352,7 +1352,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `access` | The access mode, either `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork snapshot that keeps the source's state at that sequence readable (`source_snapshot_id`) and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork point snapshot, which keeps the namespace's state at that sequence readable (`fork_point_snapshot_id`), and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
 | `pool_id` | The namespace's [pool](glossary.md#pool), whose prefix stores the namespace's content objects and upload records (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork records a pool ID that its create call generated, and a fork has the same pool as its source. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
@@ -1373,7 +1373,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `namespace_id` | The durable namespace ID. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the source's fork snapshot (`source_snapshot_id`) and, for a namespace that a rebase created, `rebased_from`. Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork point snapshot (`fork_point_snapshot_id`) and, for a namespace that a rebase created, `rebased_from`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
 | `current_manifest_no` | The current manifest number, present from namespace creation. |
@@ -2679,7 +2679,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 418,
-    "source_snapshot_id": "snp_00000000000000000031-00000000003f9c2a7d41e05b68"
+    "fork_point_snapshot_id": "snp_00000000000000000002-00000000003f9c2a7d41e05b68"
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
@@ -2693,14 +2693,15 @@ The `fork_basis` object identifies the captured source:
 | --- | --- |
 | `source_namespace_id` | The namespace that the fork captured. |
 | `fork_point_seq` | The fork point: the source namespace's sequence at which the fork was taken. |
-| `source_snapshot_id` | The fork snapshot in the source that keeps the source's state at `fork_point_seq`. A read of the source accepts it as `snapshot_id` (see [Snapshots](#snapshots)). |
+| `fork_point_snapshot_id` | The fork point snapshot, a fork snapshot on this namespace that keeps its state at `fork_point_seq`. That state is the source's state at the fork point. A read of this namespace accepts the ID as `snapshot_id` (see [Snapshots](#snapshots)). |
 | `rebased_from` | The fork whose unmerged commits a rebase replays into this namespace (`source_namespace_id`), and the fork sequence that the fork's next merge would have started after when the rebase created this namespace (`resume_after_seq`). Only a namespace that a rebase created has this field, and a fork that this route creates never does. |
 
 The optional `snapshot_id` request field selects an unexpired snapshot of the source namespace. Without it, the server captures the current head.
 
-The snapshot that the fork is built from (the snapshot that `snapshot_id` identifies, or the temporary snapshot that the server takes of the current head) has to stay unexpired, and the source namespace has to stay live, while the server writes and verifies the fork snapshot. A temporary snapshot expires 5 minutes after the server takes it. The server returns these errors:
+The snapshot that the fork is built from (the snapshot that `snapshot_id` identifies, or the temporary snapshot that the server takes of the source's current manifest) has to stay unexpired, and the source namespace has to stay live, while the server writes and verifies the fork snapshot. A fork of the head whose source has commits in its WAL tail folds that tail, and it has to make the new namespace active within 5 minutes of the start of the first call, which took the temporary snapshot. Extending the temporary snapshot doesn't lengthen that time. A fork that folds no tail has no such limit. The server returns these errors:
 
 - A missing or expired snapshot (including one that's deleted or expires during fork verification), a fork snapshot's ID, or an ID owned by another namespace returns `snapshot_not_found`.
+- A fork that folds the source's WAL tail returns `snapshot_not_found` once 5 minutes have passed since the first call started, and so does a call that finishes an initializing fork when a WAL object of the source's tail that the fork folds is gone, because the source folded the tail and its collection deleted the WAL object.
 - A source deleted during fork verification returns `namespace_deleted`.
 
 When either error happens during fork verification, the new namespace's manifest 1 already exists, so the namespace stays initializing until a delete request or the namespace's collection removes it, and its ID can't be used again.
@@ -2709,15 +2710,16 @@ Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn'
 
 The new namespace has the same pool as its source. It reads inherited content under the pool's prefix, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
 
-1. Might first fold the source's outstanding WAL tail, if the fork captures the current head. The fold writes that tail's inline content to content objects.
-2. Takes a temporary snapshot of the source's head, if the request doesn't identify a snapshot.
-3. Writes the target's manifest 1 with the status `initializing` and a conditional put. The manifest records the fork snapshot's ID for the target's lifetime.
-4. Writes the fork snapshot in the source and verifies it, so the source-owned immutable metadata segments stay available for as long as the target might still read them. It also writes the target's [member entry](glossary.md#member-entry) in the pool.
-5. Writes manifest 2 with the status `active`.
+1. If the request doesn't identify a snapshot, reads the source's head (its current manifest and WAL tail). If a commit in the tail that the server read is more than 11 hours and 45 minutes old, the server writes nothing for the fork, folds the source, and reads and checks the source's head again, so the check applies to the tail that the fork folds. It then takes a temporary snapshot of the current manifest. The fork point is the head that the server read, or the snapshot's head.
+2. Writes the target's manifest 1 with the status `initializing` and a conditional put. The manifest records the fork point and the IDs of the fork snapshot and the fork point snapshot for the target's lifetime.
+3. If the source's WAL tail has commits, folds the tail into the target: it writes the tail's pending pieces to content objects, with the source as their chains' creator, writes the target's own metadata segments for the tail's commits, and writes the target's manifest 2, still `initializing`, at the fork point. The source publishes nothing.
+4. Writes the fork point snapshot on the target's newest manifest, so a read of the target at the fork point works for as long as the target exists.
+5. Writes the fork snapshot in the source and verifies it, so the source-owned immutable metadata segments stay available for as long as the target might still read them. It also writes the target's [member entry](glossary.md#member-entry) in the pool.
+6. Writes the active manifest, which raises the target's retention floor to the fork point.
 
-The response contains the new namespace's initial state. Its head sequence and retention floor equal the captured basis sequence, and the target's first data commit is one sequence above that head. Inherited file history follows the floor rule from the start. After the target's first base compaction, each inherited file keeps its newest revision at or below the fork point, plus the revisions the target adds.
+The response contains the new namespace's initial state. Its head sequence and retention floor equal the fork point, and the target's first data commit is one sequence above that head. Inherited file history follows the floor rule from the start. After the target's first base compaction, each inherited file keeps its newest revision at or below the fork point, plus the revisions the target adds.
 
-If the target ID is active, the server returns `namespace_exists` before it writes anything. If the target ID is deleted, the server returns `namespace_deleted` before it writes anything. If the target is an initializing fork whose first manifest matches the request, the server finishes the fork from step 4 and returns success, and if the first manifest doesn't match, it returns `namespace_exists` (see [Creating and forking namespaces](#creating-and-forking-namespaces)). If the temporary snapshot can't be verified, the server returns `snapshot_unavailable` before it writes a manifest.
+If the target ID is active, the server returns `namespace_exists` before it writes anything. If the target ID is deleted, the server returns `namespace_deleted` before it writes anything. If the target is an initializing fork whose first manifest matches the request, the server finishes the fork from the step after the target's newest manifest and returns success, and if the first manifest doesn't match, it returns `namespace_exists` (see [Creating and forking namespaces](#creating-and-forking-namespaces)). If the temporary snapshot can't be verified, the server returns `snapshot_unavailable` before it writes a manifest.
 
 ### 6.14 `POST /merges`
 
@@ -2782,7 +2784,7 @@ To merge a fork, the server:
 3. Checks that the fork was made from this namespace, and reads the fork point.
 4. Refuses a fork point below this namespace's retention floor with `below_retention_floor`.
 5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's newest merge, which sets where the range starts, and refuses a start below the fork's own retention floor with `below_retention_floor`.
-6. Reads the fork's current manifest and WAL tail, and takes an unnamed user snapshot of that manifest without a fold. The snapshot keeps the manifest and the content that its layouts refer to, and step 8 writes the pieces in the tail that the merge needs. The server deletes the snapshot after the commit at step 9, and the snapshot expires 5 minutes after the plan started if the delete fails. If a commit in the fork's tail is more than 11 hours and 45 minutes old, the server folds the fork first and takes the snapshot of the manifest that the fold published (see [Cross-namespace copies and moves](format.md#97-cross-namespace-copies-and-moves)).
+6. Reads the fork's current manifest and WAL tail, and takes an unnamed user snapshot of that manifest without a fold. The snapshot keeps the manifest and the content that its layouts refer to, and step 8 writes the pieces in the tail that the merge needs. The server deletes the snapshot after the commit at step 9, and the snapshot expires 5 minutes after this step started if the delete fails. If a commit in the fork's tail is more than 11 hours and 45 minutes old, the server folds the fork first and takes the snapshot of the manifest that the fold published (see [Cross-namespace copies and moves](format.md#97-cross-namespace-copies-and-moves)).
 7. Computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` with a split hint (described below) if the range's commits touched more inodes than one WAL object could contain an operation for, or if the commit wouldn't fit one WAL object or the merge allowance.
 8. Classifies the change against this namespace's head under the conflict rule ([Validation](format.md#62-validation)), writes the pieces in the fork's tail that the merge's content references need as content objects, so each reference in the commit has a layout, and returns `merge_conflict` if any inode conflicts, or `merge_too_large` if the commit with its layouts doesn't fit one WAL object. A refused merge leaves the content objects it wrote to garbage collection.
 9. Commits the merge as the only commit in its WAL object. If the commit fails because this namespace changed after the plan, with a code from the table below, the server keeps the reservation, goes back to step 1, and plans the same range again, up to three times, before it returns the commit's error. A later plan reports a row that changed in between, and that isn't the fork's own, as `merge_conflict`. For example, a name that another inode took is a `name` conflict. Another merge of the fork that committed in between makes the later plan return `merge_range_conflict`.
@@ -2928,7 +2930,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 431,
-    "source_snapshot_id": "snp_00000000000000000035-00000000005c2e8f1a9b7d4e60",
+    "fork_point_snapshot_id": "snp_00000000000000000002-00000000005c2e8f1a9b7d4e60",
     "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
@@ -2961,6 +2963,7 @@ Errors:
 | --- | --- | --- |
 | `namespace_exists` | 409 | `new_namespace_id` is an active namespace. |
 | `below_retention_floor` | 409 | The fork point is below this namespace's retention floor, or the start of the fork's next merge is below the fork's own floor. The details say which. |
+| `snapshot_not_found` | 404 | The new fork folds this namespace's WAL tail and wasn't active within 5 minutes of the start of the call that took its temporary snapshot, or a call that finishes an initializing new fork found that a WAL object of this namespace's tail that the new fork folds is gone, as for [`POST /forks`](#613-post-forks). |
 | `namespace_not_found`, `namespace_deleted` | 404, 410 | This namespace or the fork doesn't exist or was deleted, or `new_namespace_id` was deleted. `details.namespace_id` identifies which namespace. |
 | `invalid_request` | 400 | The fork wasn't made from this namespace (`param` is `/source_namespace_id`). |
 | `not_supported` | 501 | The deployment has merges disabled (in the reference server, `max_merge_bytes` is zero). The error has `filesystem.merges` in its `feature` field, and the server reads and writes nothing. |
@@ -2971,7 +2974,7 @@ The new fork takes ordinary commits while a rebase runs, so the replay commit's 
 
 The conflict rule is the one that a merge applies (see [`POST /merges`](#614-post-merges)), with the new fork in place of this namespace. The new fork supplies the current values, the preconditions, and the name and visibility checks. A row at or below the new fork's fork point is the fork's own when this namespace's commit that wrote it is at or below the fork's fork point or is a merge of the fork. A row above the new fork's fork point is the fork's own when a replay commit wrote it, and a row that any other commit in the new fork wrote, such as a commit that resolves a conflict, is foreign. A file that the fork deleted, merged, and then restored is a `visibility` conflict, because every deletion that the new fork inherits has expired there.
 
-Each conflict entry has the shape of a `merge_conflict` error's `conflict` (see [`POST /merges`](#614-post-merges)), and `kind` can also be `dependency`. For a `dependency` entry, `theirs` is the fork's version of the inode whose change was skipped (the directory, or the moved inode), so its path is the `ours` path of that inode's own entry. A client reads `base` from this namespace with the inode revision content route and `snapshot_id` set to the new fork's `fork_basis.source_snapshot_id` (see [Snapshots](#snapshots)). The fork snapshot keeps this namespace's state at the new fork's fork point for as long as the new fork exists, so the base revision stays readable after this namespace's retention floor passes it.
+Each conflict entry has the shape of a `merge_conflict` error's `conflict` (see [`POST /merges`](#614-post-merges)), and `kind` can also be `dependency`. For a `dependency` entry, `theirs` is the fork's version of the inode whose change was skipped (the directory, or the moved inode), so its path is the `ours` path of that inode's own entry. A client reads `base` from the new fork with the inode revision content route and `snapshot_id` set to the new fork's `fork_basis.fork_point_snapshot_id` (see [Snapshots](#snapshots)). The fork point snapshot keeps this namespace's state at the new fork's fork point, under the new fork's ID, for as long as the new fork exists, so the base revision stays readable after this namespace's retention floor passes it.
 
 ### 6.17 `POST /replays`
 
@@ -3000,7 +3003,7 @@ Representative response:
     "fork_basis": {
       "source_namespace_id": "demo",
       "fork_point_seq": 431,
-      "source_snapshot_id": "snp_00000000000000000035-00000000005c2e8f1a9b7d4e60",
+      "fork_point_snapshot_id": "snp_00000000000000000002-00000000005c2e8f1a9b7d4e60",
       "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
     },
     "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
@@ -3034,7 +3037,7 @@ To make the replay commit, the server:
 2. Reserves part of the merge allowance, as a merge does.
 3. Checks that the new fork's `rebased_from` identifies the fork, and finds where the range starts: after the new fork's previous replay commit, or after `resume_after_seq` for the first replay commit. It refuses a start below the fork's own retention floor, or a new fork whose retention floor is above the new fork's own fork point, with `below_retention_floor`.
 4. Takes a snapshot of the fork's current manifest, as a merge does, and folds the fork first only when a merge would. It computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` if the replay commit doesn't fit, as a merge does.
-5. Classifies the change under the conflict rule against the new fork's head, reads the history of the namespace that the new fork was forked from, up to the new fork's fork point, through the new fork's fork snapshot, and writes the pieces in the fork's tail that the replay commit's content references need, as a merge does.
+5. Classifies the change under the conflict rule against the new fork's head, reads the history of the namespace that the new fork was forked from, up to the new fork's fork point, through the new fork's fork point snapshot, and writes the pieces in the fork's tail that the replay commit's content references need, as a merge does.
 6. Commits the changes that don't conflict into the new fork as one replay commit, and returns the new fork and the conflict report. If the commit fails because the new fork changed after the plan, the server keeps the reservation, goes back to step 1, and plans the same range again, up to three times, before it returns the commit's error, as a merge does. A later plan reports a row that changed in between, and that isn't the fork's own, in the conflict report.
 
 A replay commit that fails leaves the new fork in place, because a later replay commit continues into it. Steps 1 to 5 read one view of the new fork's head and one of the fork's, and read a replaced manifest once more from the current one, as a merge does.

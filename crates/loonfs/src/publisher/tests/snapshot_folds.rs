@@ -1,5 +1,5 @@
-//! Snapshot and fork creation fold the WAL tail under the fold permits of
-//! the runtime's execution budget.
+//! Snapshot and fork creation fold a WAL tail under the fold permits of the
+//! runtime's execution budget.
 
 use super::*;
 
@@ -9,7 +9,9 @@ async fn seed_unfolded_tail<S: ObjectStore + ?Sized>(store: &S, namespace_id: &N
         namespace_id,
         &WriterAt {
             writer_id: loonfs_types::WriterId::parse("tail-seed").expect("valid writer id"),
-            now_ms: 1_000,
+            // A current time, so a fork of the namespace doesn't find a commit
+            // older than the max tail age and fold the namespace first.
+            now_ms: loonfs_test_support::clock::ManualClock::at_system_time().now_ms(),
         },
     )
     .append_wal_objects(2)
@@ -113,10 +115,10 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     let permits = hold_every_fold_permit(&writer).await;
     let mut creations = start_creations(&writer, &unfolded);
     creations.extend(start_creations(&writer, &folded));
-    // The creations of one namespace fold under its fold lock, one at a
-    // time, so one creation of each namespace waits for a permit, and the
-    // other waits for the lock.
-    wait_for_fold_waiters(&writer, 2).await;
+    // A snapshot folds under its namespace's fold lock, and a fork folds the
+    // source's tail into itself without that lock, so the snapshot and the
+    // fork of each namespace both wait for a permit.
+    wait_for_fold_waiters(&writer, 4).await;
     bounded(
         Duration::from_secs(10),
         writer.fork_namespace_with_options(

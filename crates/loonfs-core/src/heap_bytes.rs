@@ -752,6 +752,7 @@ impl HeapBytes for ForkBasis {
         self.manifest.heap_bytes()
             + self.source_snapshot_id.heap_bytes()
             + self.forked_from_snapshot_id.heap_bytes()
+            + self.fork_point_snapshot_id.heap_bytes()
             + self.rebased_from.heap_bytes()
     }
 }

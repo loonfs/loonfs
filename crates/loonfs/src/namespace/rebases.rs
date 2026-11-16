@@ -53,7 +53,7 @@ impl LoonFs<Writable> {
                         .fork_point_for_rebase(&main.context, &fork.engine, &fork.context)
                         .await?
                 };
-                self.install_fork(namespace_id, |engine, basis| {
+                self.install_fork(namespace_id, |engine, held| {
                     let target = target.clone();
                     async move {
                         engine
@@ -62,7 +62,7 @@ impl LoonFs<Writable> {
                                 actor,
                                 source_namespace_id,
                                 fork_point_seq,
-                                basis,
+                                held,
                             )
                             .await
                     }
@@ -155,7 +155,8 @@ impl Namespace<Writable> {
     /// The plan checks that this namespace is a rebase's new fork for the
     /// fork and checks both floors, takes a snapshot of the fork as a merge
     /// does (see [`Self::snapshot_fork`]), and plans against this namespace's
-    /// head, reading the source through this namespace's fork snapshot.
+    /// head, reading the source as it was at this namespace's fork point
+    /// through this namespace's fork point snapshot.
     pub(crate) async fn plan_replay(
         &self,
         request: &MergeRequest,
@@ -191,10 +192,7 @@ impl Namespace<Writable> {
                 let planned = async {
                     let source = self
                         .core
-                        .pinned_read_at_snapshot(
-                            &basis.manifest.owner_namespace_id,
-                            &basis.source_snapshot_id,
-                        )
+                        .pinned_read_at_snapshot(&self.namespace_id, &basis.fork_point_snapshot_id)
                         .await?;
                     let plan = new_fork
                         .engine

@@ -30,12 +30,14 @@ async fn a_create_generates_a_pool_and_every_fork_records_its_source_pool() {
                     .await
                     .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
-                crate::test_support::folded_manifest(&fixture.namespace)
+                crate::test_support::fold_before_fork(&fixture.namespace)
                     .await
                     .expect("fold the WAL tail"),
             )
             .await
-            .expect("fork");
+            .expect("fork")
+            .created()
+            .expect("a fork of a tail with no old commit");
         assert_eq!(forked.pool_id, pool_id, "the fork `{target}`");
     }
     // A successor of the first manifest keeps the value.

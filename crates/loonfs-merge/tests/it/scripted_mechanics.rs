@@ -438,7 +438,7 @@ fn namespace(
     let mut basis = json!({
         "source_namespace_id": source_namespace_id,
         "fork_point_seq": 10,
-        "source_snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
+        "fork_point_snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
     });
     if let Some(rebased_from) = rebased_from {
         basis["rebased_from"] =

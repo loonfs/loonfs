@@ -13,6 +13,7 @@ mod common;
 mod content_retirement_model;
 mod differential;
 mod fork_lifecycle;
+mod fork_tail;
 mod inode_mutations;
 mod layout_acceptance;
 mod manifest_statistics;

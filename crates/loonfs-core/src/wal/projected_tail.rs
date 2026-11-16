@@ -187,6 +187,23 @@ impl ProjectedWalTail {
         self.visible_chunks(visible_seq).map(|chunk| &chunk.rows)
     }
 
+    /// Returns whether a commit that a view at `visible_seq` can see is older
+    /// than [`MAX_TAIL_COMMIT_AGE_MS`](crate::limits::MAX_TAIL_COMMIT_AGE_MS)
+    /// at `now_ms`, by the commit's `committed_at_ms`.
+    pub(crate) fn has_commit_older_than_max_age(
+        &self,
+        visible_seq: CommitSeq,
+        now_ms: u64,
+    ) -> bool {
+        self.row_states(visible_seq)
+            .flat_map(MetadataState::commits)
+            .map(|commit| commit.committed_at_ms)
+            .min()
+            .is_some_and(|committed_at_ms| {
+                now_ms.saturating_sub(committed_at_ms) > crate::limits::MAX_TAIL_COMMIT_AGE_MS
+            })
+    }
+
     /// Every chunk a view at `visible_seq` can see, newest first.
     pub(crate) fn visible_chunks(
         &self,

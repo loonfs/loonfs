@@ -435,8 +435,9 @@ impl NamespaceManifestPayload {
 
     /// Constructs manifest 1 of a fork of `source` at `fork_basis`, with the
     /// status `initializing`, which lists the runs and copies the extension
-    /// entries of `source`, records the pool of `source`, and starts its
-    /// retention floor at the fork's head.
+    /// entries of `source`, records the pool of `source`, and keeps the
+    /// retention floor of `source`, so a read at the fork point sees the
+    /// source's history above that floor.
     pub fn initial_fork(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -444,13 +445,12 @@ impl NamespaceManifestPayload {
         fork_basis: ForkBasis,
         source: &Self,
     ) -> Self {
-        let fork_seq = fork_basis.manifest.head_seq;
         Self {
             retention_window_ms: source.retention_window_ms,
             fork_basis: Some(fork_basis),
             head_seq: source.head_seq,
             next_run_no: source.next_run_no,
-            retention_floor_seq: fork_seq,
+            retention_floor_seq: source.retention_floor_seq,
             runs: source.runs.clone(),
             extensions: source.extensions.clone(),
             status: NamespaceStatus::Initializing {},
@@ -464,11 +464,16 @@ impl NamespaceManifestPayload {
         }
     }
 
-    /// Returns manifest 2 of an initializing namespace: this manifest with the
-    /// status `active`. The publication assigns the number.
+    /// Returns the active manifest of an initializing namespace: this
+    /// manifest with the status `active`, and for a fork, with its retention
+    /// floor raised to the fork point. The publication assigns the number.
     pub fn activated(&self) -> Self {
         Self {
             status: NamespaceStatus::Active {},
+            retention_floor_seq: self
+                .fork_basis
+                .as_ref()
+                .map_or(self.retention_floor_seq, |basis| basis.fork_point_seq),
             ..self.clone()
         }
     }
@@ -542,9 +547,21 @@ impl NamespaceManifestPayload {
         match &self.fork_basis {
             Some(basis) => {
                 if basis.manifest.head_seq != self.head_seq
-                    || self.retention_floor_seq != self.head_seq
+                    || basis.fork_point_seq < self.head_seq
+                    || self.retention_floor_seq > self.head_seq
                 {
                     return invalid("head_seq");
+                }
+                // The fork point snapshot is on manifest 2 exactly when the
+                // fork folds the source's WAL tail, which it does when the
+                // fork point is above manifest 1's head.
+                let snapshot_manifest_no = ManifestNo(if basis.fork_point_seq > self.head_seq {
+                    2
+                } else {
+                    1
+                });
+                if basis.fork_point_snapshot_id.manifest_no() != snapshot_manifest_no {
+                    return invalid("fork_basis");
                 }
             }
             None => {
@@ -636,9 +653,16 @@ impl NamespaceManifestPayload {
             return invalid("status");
         }
         match (self.status, successor.status) {
+            (NamespaceStatus::Initializing {}, NamespaceStatus::Initializing {}) => {
+                if !self.is_followed_by_fork_point_manifest(successor) {
+                    return invalid("status");
+                }
+            }
             (_, NamespaceStatus::Initializing {}) => return invalid("status"),
-            // Manifest 2 of an initializing namespace changes only its status,
-            // so it's manifest 1 activated or manifest 1's tombstone.
+            // An active manifest or a tombstone after an initializing manifest
+            // changes only the status, and a fork's active manifest also
+            // raises the floor to the fork point, so it's the initializing
+            // manifest activated or its tombstone.
             (NamespaceStatus::Initializing {}, status) if next => {
                 let expected = match status {
                     NamespaceStatus::Deleted { deleted_at_ms } => self.tombstone(deleted_at_ms),
@@ -664,6 +688,34 @@ impl NamespaceManifestPayload {
             return invalid("activity");
         }
         Ok(())
+    }
+
+    /// Returns whether `successor` is the manifest 2 of a fork whose manifest
+    /// 1 is this manifest: this manifest with the fork's fold of the source's
+    /// WAL tail, which lists one new run at the fork point and raises the head
+    /// to the fork point, and nothing else (format spec, "Forking a
+    /// namespace").
+    fn is_followed_by_fork_point_manifest(&self, successor: &Self) -> bool {
+        let Some(basis) = &self.fork_basis else {
+            return false;
+        };
+        let Some((kept, [run])) = successor.runs.split_at_checked(self.runs.len()) else {
+            return false;
+        };
+        let expected = Self {
+            manifest_no: ManifestNo(2),
+            head_seq: basis.fork_point_seq,
+            next_run_no: successor.next_run_no,
+            runs: successor.runs.clone(),
+            ..self.clone()
+        };
+        self.manifest_no == ManifestNo(1)
+            && basis.fork_point_seq > self.head_seq
+            && *successor == expected
+            && kept == self.runs.as_slice()
+            && run.run_no == self.next_run_no
+            && run.run_seq == basis.fork_point_seq
+            && self.next_run_no.successor().ok() == Some(successor.next_run_no)
     }
 }
 
@@ -836,12 +888,17 @@ mod tests {
                             head_seq: CommitSeq(0),
                             payload_checksum: crate::sha256_digest(b"source"),
                         },
+                        fork_point_seq: CommitSeq(0),
                         source_snapshot_id: crate::SnapshotId::parse(
                             "snp_00000000000000000001-00000000000000000000000001",
                         )
                         .expect("snapshot"),
                         forked_from_snapshot_id: crate::SnapshotId::parse(
                             "snp_00000000000000000001-00000000000000000000000002",
+                        )
+                        .expect("snapshot"),
+                        fork_point_snapshot_id: crate::SnapshotId::parse(
+                            "snp_00000000000000000001-00000000000000000000000003",
                         )
                         .expect("snapshot"),
                         rebased_from: None,
@@ -914,8 +971,10 @@ mod tests {
                 head_seq: CommitSeq(0),
                 payload_checksum: crate::sha256_digest(b"source"),
             },
+            fork_point_seq: CommitSeq(0),
             source_snapshot_id: snapshot_id(1),
             forked_from_snapshot_id: snapshot_id(2),
+            fork_point_snapshot_id: snapshot_id(3),
             rebased_from: None,
         };
         let initializing = NamespaceManifestPayload::initial_fork(
@@ -966,6 +1025,135 @@ mod tests {
                     .expect_err("manifest 1 should be initializing")
                     .field,
                 "status"
+            );
+        }
+    }
+
+    /// A fork of a head whose WAL tail has commits publishes a manifest 2 that
+    /// folds the tail at the fork point, still initializing, with manifest
+    /// 1's retention floor, and its active manifest 3 raises the floor to the
+    /// fork point.
+    #[test]
+    fn a_forks_manifest_2_folds_the_tail_and_its_activation_raises_the_floor() {
+        let source = NamespaceManifestPayload::initial(
+            NamespaceId::parse("source").expect("namespace"),
+            pool_id(),
+            1_000,
+            crate::ActorId::parse("test").expect("actor"),
+            super::NamespaceAccess::Unrestricted {},
+        )
+        .activated();
+        let snapshot_id = |manifest_no: u8, random: u8| {
+            crate::SnapshotId::parse(format!(
+                "snp_0000000000000000000{manifest_no}-0000000000000000000000000{random}"
+            ))
+            .expect("snapshot")
+        };
+        let fork_basis = crate::control::ForkBasis {
+            manifest: crate::control::ManifestRef {
+                owner_namespace_id: source.namespace_id.clone(),
+                manifest_no: ManifestNo(1),
+                head_seq: CommitSeq(0),
+                payload_checksum: crate::sha256_digest(b"source"),
+            },
+            fork_point_seq: CommitSeq(5),
+            source_snapshot_id: snapshot_id(1, 1),
+            forked_from_snapshot_id: snapshot_id(1, 2),
+            fork_point_snapshot_id: snapshot_id(2, 3),
+            rebased_from: None,
+        };
+        let manifest_1 = NamespaceManifestPayload::initial_fork(
+            NamespaceId::parse("fork").expect("namespace"),
+            2_000,
+            crate::ActorId::parse("test").expect("actor"),
+            fork_basis.clone(),
+            &source,
+        );
+        manifest_1
+            .ensure_first_manifest()
+            .expect("manifest 1 is at the source manifest's head");
+        let manifest_2 = NamespaceManifestPayload {
+            manifest_no: ManifestNo(2),
+            head_seq: CommitSeq(5),
+            next_run_no: crate::RunNo(1),
+            runs: vec![super::MetadataRunRef {
+                run_no: crate::RunNo(0),
+                run_seq: CommitSeq(5),
+                tier: super::RunTier::Base,
+                segments: Vec::new(),
+            }],
+            ..manifest_1.clone()
+        };
+        manifest_1
+            .ensure_successor(&manifest_2)
+            .expect("manifest 2 folds the tail at the fork point");
+        let active = NamespaceManifestPayload {
+            manifest_no: ManifestNo(3),
+            ..manifest_2.activated()
+        };
+        assert_eq!(active.retention_floor_seq, CommitSeq(5));
+        manifest_2
+            .ensure_successor(&active)
+            .expect("manifest 3 activates manifest 2 at the fork point");
+
+        for refused in [
+            NamespaceManifestPayload {
+                head_seq: CommitSeq(4),
+                ..manifest_2.clone()
+            },
+            NamespaceManifestPayload {
+                head_seq: CommitSeq(6),
+                ..manifest_2.clone()
+            },
+            NamespaceManifestPayload {
+                retention_floor_seq: CommitSeq(3),
+                ..manifest_2.clone()
+            },
+            NamespaceManifestPayload {
+                runs: Vec::new(),
+                next_run_no: crate::RunNo(0),
+                ..manifest_2.clone()
+            },
+            NamespaceManifestPayload {
+                retention_window_ms: std::num::NonZeroU64::new(60_000),
+                ..manifest_2.clone()
+            },
+        ] {
+            manifest_1
+                .ensure_successor(&refused)
+                .expect_err("manifest 2 should fold the tail at the fork point");
+        }
+        let unraised = NamespaceManifestPayload {
+            retention_floor_seq: manifest_2.retention_floor_seq,
+            ..active
+        };
+        manifest_2
+            .ensure_successor(&unraised)
+            .expect_err("the active manifest raises the floor to the fork point");
+
+        let mut snapshot_on_manifest_1 = fork_basis.clone();
+        snapshot_on_manifest_1.fork_point_snapshot_id = snapshot_id(1, 3);
+        let mut no_tail_on_manifest_2 = fork_basis;
+        no_tail_on_manifest_2.fork_point_seq = CommitSeq(0);
+        for (refused, reason) in [
+            (
+                snapshot_on_manifest_1,
+                "a fork point above manifest 1 has its snapshot on manifest 2",
+            ),
+            (
+                no_tail_on_manifest_2,
+                "a fork point at manifest 1's head has its snapshot on manifest 1",
+            ),
+        ] {
+            assert_eq!(
+                NamespaceManifestPayload {
+                    fork_basis: Some(refused),
+                    ..manifest_1.clone()
+                }
+                .ensure_first_manifest()
+                .expect_err(reason)
+                .field,
+                "fork_basis"
             );
         }
     }

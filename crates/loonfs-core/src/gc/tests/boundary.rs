@@ -345,7 +345,7 @@ async fn deleted_fork<S: ObjectStore>(
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -462,7 +462,7 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
     let setup = context(1_000);
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
     fixture.create().await.expect("create the source");
-    let manifest = crate::test_support::folded_manifest(&fixture.namespace)
+    let held = crate::test_support::fold_before_fork(&fixture.namespace)
         .await
         .expect("fold the WAL tail");
     fixture
@@ -474,7 +474,7 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            manifest,
+            held,
         )
         .await
         .expect("fork");

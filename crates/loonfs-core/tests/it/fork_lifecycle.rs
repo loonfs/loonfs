@@ -41,17 +41,22 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
-    let manifest =
-        loonfs_core::test_support::folded_manifest(&namespace_store(store, source_namespace_id))
+    let held =
+        loonfs_core::test_support::fold_before_fork(&namespace_store(store, source_namespace_id))
             .await?;
     let engine = namespace_engine(store, source_namespace_id, context);
     engine
         .fork_namespace(
             engine.find_fork_target(new_namespace_id).await?,
             &loonfs_test_support::test_actor(),
-            manifest,
+            held,
         )
         .await
+        .map(|outcome| {
+            outcome
+                .created()
+                .expect("a fork of a tail with no old commit")
+        })
 }
 
 async fn load_snapshot_record<S: ObjectStore + ?Sized>(
@@ -306,10 +311,6 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
     let (result, ()) = tokio::join!(forking, deleting);
     let error = result.expect_err("snapshot deleted");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
-    assert_eq!(
-        namespace_keys(&store, &target).await,
-        [metadata_manifest_object(&target, &ManifestNo(1))]
-    );
     let manifest_1 = namespace_store(&store, &target)
         .load_current_manifest()
         .await
@@ -318,12 +319,20 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
         manifest_1.payload().status,
         loonfs_types::format::control::NamespaceStatus::Initializing {}
     );
-    let fork_snapshot_id = &manifest_1
+    let fork_basis = manifest_1
         .payload()
         .fork_basis
         .as_ref()
-        .expect("a fork basis")
-        .source_snapshot_id;
+        .expect("a fork basis");
+    // The fork point snapshot is written before the fork snapshot.
+    assert_eq!(
+        namespace_keys(&store, &target).await,
+        [
+            metadata_manifest_object(&target, &ManifestNo(1)),
+            snapshot_record(&target, &fork_basis.fork_point_snapshot_id),
+        ]
+    );
+    let fork_snapshot_id = &fork_basis.source_snapshot_id;
     let mut expected = vec![
         snapshot_record(&source, &snapshot.snapshot_id),
         snapshot_record(&source, fork_snapshot_id),
@@ -538,21 +547,17 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
         });
     let first = first.expect("the first fork succeeds");
     assert_eq!(finisher.expect("the same request succeeds"), first);
+    let fork_basis = head_state(store.as_ref(), &target)
+        .await
+        .fork_basis
+        .expect("a fork basis");
+    let source_snapshot_id = fork_basis.source_snapshot_id;
     let fork_snapshots = store
         .list_prefix(&snapshot_prefix(&source))
         .await
         .expect("list snapshots")
         .into_iter()
-        .filter(|key| {
-            key.contains(
-                first
-                    .fork_basis
-                    .as_ref()
-                    .expect("a fork basis")
-                    .source_snapshot_id
-                    .as_str(),
-            )
-        })
+        .filter(|key| key.contains(source_snapshot_id.as_str()))
         .count();
     assert_eq!(fork_snapshots, 1);
     assert_eq!(
@@ -560,6 +565,7 @@ async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
         [
             metadata_manifest_object(&target, &ManifestNo(1)),
             metadata_manifest_object(&target, &ManifestNo(2)),
+            snapshot_record(&target, &fork_basis.fork_point_snapshot_id),
         ]
     );
 
@@ -674,16 +680,17 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         "fork should validate manifest descriptors without loading metadata segment payloads"
     );
 
+    let clone_head = head_state(&store, &clone_namespace_id).await;
+    let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(
         namespace_keys(&store, &clone_namespace_id).await,
         vec![
             metadata_manifest_object(&clone_namespace_id, &ManifestNo(1)),
             metadata_manifest_object(&clone_namespace_id, &ManifestNo(2)),
+            snapshot_record(&clone_namespace_id, &fork_basis.fork_point_snapshot_id),
         ],
-        "a fork target writes only its own manifests"
+        "a fork target writes only its own manifests and its fork point snapshot"
     );
-
-    let clone_head = head_state(&store, &clone_namespace_id).await;
 
     assert_eq!(clone_head.seq, CommitSeq(1));
     let clone_status = namespace_store(&store, &clone_namespace_id)
@@ -693,9 +700,8 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(
         clone_status.retention_floor_seq,
         CommitSeq(1),
-        "a fork's first manifest starts its retention floor at the fork point"
+        "a fork's active manifest starts its retention floor at the fork point"
     );
-    let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
     assert_eq!(fork_basis.manifest.head_seq, CommitSeq(1));
     assert_eq!(
@@ -1120,8 +1126,8 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let released = namespace_store(&store, &parent)
         .gc(&aged.clock())
         .await
-        .expect("parent releases its fork snapshot");
-    assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
+        .expect("parent releases its fork snapshots");
+    assert_eq!(released.deleted_snapshots_by_owner.fork, 2);
     assert_eq!(released.retires_at_ms, Some(parent_deadline));
     let released = namespace_store(&store, &ancestor)
         .gc(&aged.clock())
@@ -1875,7 +1881,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .gc(&aged.clock())
             .await
             .expect("retire leaf");
-        assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 2);
         assert_eq!(
             store
                 .snapshot()

@@ -156,7 +156,7 @@ async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() 
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -195,7 +195,7 @@ async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() 
         .gc(&context(setup.now_ms + GC_GRACE_WINDOW_MS).clock())
         .await
         .expect("retire the fork");
-    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 2);
     // The fork's temporary snapshot keeps the same source manifest until the
     // grace window after its expiry, and the collection that deletes its
     // record still keeps the manifest that it listed.

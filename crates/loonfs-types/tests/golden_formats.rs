@@ -760,8 +760,8 @@ fn sample_extensions_manifest() -> NamespaceManifestPayload {
     }
 }
 
-/// A fork manifest records its fork snapshot and manifest, and its source's
-/// pool.
+/// A fork manifest records its fork point, its two fork snapshots and its
+/// source's manifest, and its source's pool.
 fn sample_fork_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         fork_basis: Some(ForkBasis {
@@ -772,9 +772,13 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                 head_seq: CommitSeq(2),
                 payload_checksum: payload_checksum(),
             },
+            fork_point_seq: CommitSeq(2),
             source_snapshot_id: snapshot_id("snp_00000000000000000002-00000000000000000000000002"),
             forked_from_snapshot_id: snapshot_id(
                 "snp_00000000000000000002-00000000000000000000000001",
+            ),
+            fork_point_snapshot_id: snapshot_id(
+                "snp_00000000000000000001-00000000000000000000000003",
             ),
             rebased_from: None,
         }),
@@ -798,8 +802,8 @@ fn sample_rebase_manifest() -> NamespaceManifestPayload {
     }
 }
 
-/// A fork's manifest 1 is initializing, has no writer, and starts its
-/// retention floor at the fork's head.
+/// A fork's manifest 1 is initializing, has no writer, and keeps its source
+/// manifest's retention floor.
 fn sample_initializing_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         status: NamespaceStatus::Initializing {},
@@ -808,7 +812,7 @@ fn sample_initializing_manifest() -> NamespaceManifestPayload {
         writer_epoch: WriterEpoch(0),
         folded_wal_no: WalNo(0),
         activity: loonfs_types::format::manifest::ManifestActivity::default(),
-        retention_floor_seq: CommitSeq(2),
+        retention_floor_seq: CommitSeq(1),
         ..sample_rebase_manifest()
     }
 }
