@@ -910,7 +910,7 @@ A GC response includes `next_reclamation_at_ms` when the collection finds a futu
 - the end of the grace window after the creation of an initializing namespace, when the call doesn't publish its tombstone yet, or
 - the deletion time of a retained snapshot.
 
-In a pool's response, the time is an upload session's cleanup time, which is the lease plus grace, the abort grace, or the completed-content grace.
+In a pool's response, the time is an upload session's cleanup time, which is the lease plus grace, the abort grace, the completed-content grace, or the retirement deadline of the session's deleted namespace.
 
 The value is the earliest of those future times that the collection examined. Fork snapshots have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
 
@@ -1052,7 +1052,7 @@ A pool's collection reclaims a content object once it's older than the grace win
 
 The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../jobs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`, and the reference server advances it on a schedule under each namespace's [retention window](glossary.md#retention-window), as described below. After the floor advances, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
 
-Completed upload sessions in active namespaces keep their records for the completed-content grace, which is eight days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a collection after the record is removed.
+Completed upload sessions in active namespaces keep their records for the completed-content grace, which is eight days. A deleted namespace's sessions keep their records until the namespace's retirement deadline. After the deadline, they follow the rules of a retired namespace, even while a snapshot keeps the namespace from retirement (see [Upload-session cleanup](format.md#116-upload-session-cleanup)). A session record protects its content from collection, so GC reclaims staged content that no commit published on a collection after the record is removed.
 
 GC needs to run repeatedly, including after a collection finds nothing left to delete. A presigned upload URL that was issued before the deletion can still write an object after the deletion, and a late write that one listing misses is found by the next collection. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, snapshot cleanup, or maintenance that isn't running.
 

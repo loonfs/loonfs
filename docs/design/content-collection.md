@@ -20,7 +20,7 @@ The members are the namespaces that have a [member entry](../specs/glossary.md#m
 
 The same rule covers every way that content becomes garbage:
 
-- **Completed session.** Cleanup removes the session's record, but not its object, after the completed-content grace. A later collection deletes the object if nothing published it.
+- **Completed session.** Cleanup removes the session's record, but not its object, after the completed-content grace. In a deleted namespace, cleanup removes the record at the namespace's retirement deadline instead. A later collection deletes the object if nothing published it.
 - **Aborted session.** Cleanup deletes the session's object right away, and the collection deletes anything that a late write leaves after the record is gone.
 - **Retired fork.** A fork's retirement deletes the fork snapshot on the fork's source and the fork's member entry, raises the fork's manifest boundary to retired, and deletes no content. The objects that the fork wrote stay while another member's view refers to those objects, and the rest become unreferenced candidates.
 - **Retired last member.** Each fork keeps a fork snapshot on its source, so the namespace that was created with the pool is retired after every fork of it. Once every member is retired, the pool has no member entries and no roots, so the same rule applies with no roots, and later collections of the pool delete the pool's content under the age rule.
@@ -35,7 +35,7 @@ A reader or writer in any member works from a manifest that's current or that a 
 
 A fork snapshot keeps the source manifest that its fork reads through as a rooted view of the source, so the fork's inherited revisions and layouts are protected through that view.
 
-The collection lists sessions before it reads any member's tail, and it reads the extent filters after it loads the roots. A session record is removed only after any admission evidence it could issue has expired. A session that the collection doesn't list was either created after the listing or removed before it:
+The collection lists sessions before it reads any member's tail, and it reads the extent filters after it loads the roots. A session record is removed only once no commit can admit its content: after any admission evidence it could issue has expired, or once the session's namespace is retired or past its retirement deadline. A session that the collection doesn't list was either created after the listing or removed before it:
 
 - The content of a session created later is younger than `T`.
 - Every commit that refers to the content of a removed session succeeded before the tail was read, so the tail or a rooted manifest refers to that content.
