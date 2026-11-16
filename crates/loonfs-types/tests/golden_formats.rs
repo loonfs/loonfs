@@ -3036,7 +3036,14 @@ fn sample_content_layout_row() -> MetadataRow {
                 },
                 loonfs_types::ContentExtent {
                     content_id: reference.content_id,
-                    object: loonfs_types::ExtentObject::Span { start: 8, end: 12 },
+                    object: loonfs_types::ExtentObject::Span {
+                        object_id: loonfs_types::SpanObjectId::parse(
+                            "span_3fz8k1cm7d0q5wvbn2xh6atg9r",
+                        )
+                        .expect("span object id"),
+                        start: 8,
+                        end: 12,
+                    },
                     offset: 0,
                     length: 4,
                 },

@@ -241,13 +241,27 @@ async fn read_file(
         .bytes
 }
 
-/// Returns the key of the object that a fold writes for the whole value of
-/// `content_ref`: a span from offset 0, or the whole object for zero bytes.
-fn folded_key(pool_id: &loonfs_types::PoolId, content_ref: &ContentRef) -> String {
-    match content_ref.size_bytes {
-        0 => loonfs_objectstore::keys::content_blob(pool_id, &content_ref.content_id),
-        size => loonfs_objectstore::keys::content_span(pool_id, &content_ref.content_id, 0, size),
+/// Returns the key of the object that a write of the whole value of
+/// `content_ref` stored: the chain's one span object, or the whole object for
+/// zero bytes.
+async fn folded_key(store: &RecordingStore<LocalFsStore>, content_ref: &ContentRef) -> String {
+    let pool_id = pool_id(store).await;
+    if content_ref.size_bytes == 0 {
+        return loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
     }
+    let keys =
+        crate::test_support::span_object_keys(store, &pool_id, &content_ref.content_id).await;
+    let [key] = <[String; 1]>::try_from(keys).expect("the value should have one span object");
+    key
+}
+
+/// Selects the keys of the span objects of the chain of `content_ref`, which
+/// a fold writes for a value of more than zero bytes.
+async fn span_keys(store: &RecordingStore<LocalFsStore>, content_ref: &ContentRef) -> KeyPredicate {
+    KeyPredicate::prefix(format!(
+        "{}-",
+        loonfs_objectstore::keys::content_blob(&pool_id(store).await, &content_ref.content_id)
+    ))
 }
 
 fn assert_no_writes(store: &RecordingStore<LocalFsStore>) {
@@ -526,7 +540,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
             fold::assert_content_before_metadata(&store, values.len());
             for value in &values {
-                let key = folded_key(&pool_id(&store).await, value.content_ref());
+                let key = folded_key(&store, value.content_ref()).await;
                 assert_eq!(
                     store
                         .get(&key, None)

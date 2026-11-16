@@ -139,6 +139,54 @@ async fn a_fork_folds_the_sources_tail_into_itself_and_the_source_publishes_noth
     );
 }
 
+/// Checks that the fork's fold of the source's tail and the source's own
+/// later fold each write a span object of the tail's pieces, and that each
+/// namespace reads the bytes through its own layout.
+#[tokio::test]
+async fn the_forks_fold_and_the_sources_fold_write_their_own_span_objects() {
+    let forked = forked_tail().await;
+    let fs = &forked.fs;
+    let read = fs
+        .reader
+        .namespace(&forked.source)
+        .read_file("/file.txt")
+        .await
+        .expect("read the source");
+    let content_id = read
+        .entry
+        .content_ref()
+        .expect("file content")
+        .content_id
+        .clone();
+    let objects = store(forked.temp_dir.path());
+    let pool_id = loonfs_core::test_support::load_pool_id(&objects, &forked.source).await;
+    let forks = loonfs_core::test_support::span_object_keys(&objects, &pool_id, &content_id).await;
+    assert_eq!(forks.len(), 1, "the fork's fold writes the source's pieces");
+    fs.maintenance
+        .fold_wal(&forked.source)
+        .await
+        .expect("fold the source");
+    let both = loonfs_core::test_support::span_object_keys(&objects, &pool_id, &content_id).await;
+    assert_eq!(
+        both.len(),
+        2,
+        "the source's fold writes a span object of its own"
+    );
+    assert!(both.contains(&forks[0]));
+    let reader = loonfs::test_support::fresh_reader(objects.clone()).await;
+    for namespace_id in [&forked.source, &forked.fork] {
+        assert_eq!(
+            reader
+                .namespace(namespace_id)
+                .read_file("/file.txt")
+                .await
+                .expect("read")
+                .bytes,
+            b"second"
+        );
+    }
+}
+
 /// Checks that a read of the fork through its fork point snapshot returns
 /// the source's state at the fork point: the source's change feed up to the
 /// fork point, the current revision, and the revision that a later commit in

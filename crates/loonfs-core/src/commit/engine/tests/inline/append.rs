@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::error::ErrorCode;
-use loonfs_objectstore::keys::{content_blob, content_span};
+use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::PutMode;
 use loonfs_types::{Checksum, ContentRefKind};
 use std::assert_matches;
@@ -149,6 +149,7 @@ async fn same_chain_appends_keep_pending_bytes_in_the_wal_without_content_writes
 async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
     let (_directory, store, mut engine, context) = setup().await;
     let (_, original) = folded_file(&store, &mut engine, &context, b"hello").await;
+    let first_span = folded_key(&store, &original).await;
     engine.invalidate_projection();
     publish(
         &mut engine,
@@ -189,10 +190,9 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
             .await
             .expect("fold");
     }
-    let pool_id = pool_id(&store).await;
     assert_eq!(
         store
-            .get(&content_span(&pool_id, &original.content_id, 0, 5), None)
+            .get(&first_span, None)
             .await
             .expect("get")
             .expect("object"),

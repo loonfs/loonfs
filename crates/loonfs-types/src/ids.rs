@@ -457,6 +457,21 @@ impl ContentId {
 }
 
 string_id! {
+    /// The random identity of one span object, a content object that stores
+    /// one byte range of a chain.
+    ///
+    /// Every write of a span object generates a new ID, so two writers of the
+    /// same chain bytes write two objects, and each layout reads the object
+    /// that its own extent lists.
+    SpanObjectId,
+    prefix = "span",
+    schema(
+        pattern = r"^span_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        example = "span_1q8yd3a2gxmz0w4pke6tcv5rhb"
+    )
+}
+
+string_id! {
     /// Durable id for one metadata segment.
     MetadataSegmentId,
     prefix = "seg"

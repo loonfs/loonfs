@@ -29,7 +29,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
     let namespaces =
         ["root", "middle", "leaf"].map(|name| NamespaceId::parse(name).expect("namespace"));
     let setup = context(1_000);
-    let mut keys = Vec::new();
+    let mut content_ids = Vec::new();
     let mut pool_id = None;
     for (index, namespace_id) in namespaces.iter().enumerate() {
         if index == 0 {
@@ -57,7 +57,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
                 .await
                 .expect("fork");
         }
-        keys.push(publish_inline(&store, namespace_id, index, &setup).await);
+        content_ids.push(publish_inline(&store, namespace_id, index, &setup).await);
     }
     let pool_id = pool_id.expect("the pool of the chain");
     let middle_snapshot = read_fork_record(&store, &namespaces[0]).await;
@@ -105,6 +105,12 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
             .await
             .expect("ancestors still kept by unretired descendants");
         assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
+    }
+    let mut keys = Vec::new();
+    for content_id in &content_ids {
+        let chain = crate::test_support::span_object_keys(&store, &pool_id, content_id).await;
+        assert!(!chain.is_empty(), "every member's file has a span object");
+        keys.extend(chain);
     }
     for index in [2, 1, 0] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])

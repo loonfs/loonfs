@@ -537,8 +537,10 @@ async fn inline_checksum_failures_match_object_validation() {
         .await
         .expect_err("corrupt download");
     assert_eq!(download_error.to_string(), error.to_string());
+    // The download checks the pieces before it writes anything, and it sends
+    // no request.
     assert_no_writes(&store);
-    assert_eq!(store.counts().heads, 1);
+    assert_eq!(store.counts().heads, 0);
     assert_eq!(store.counts().gets, 0);
     let fold_error =
         crate::test_support::namespace_store(&store, &publisher.namespace.namespace_id)
@@ -641,6 +643,7 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
     let (_directory, store, mut publisher, context) = setup().await;
     let namespace_id = publisher.namespace.namespace_id.clone();
     let (inode_id, original) = folded_file(&store, &mut publisher, &context, b"hello").await;
+    let key = folded_key(&store, &original).await;
     commit_piece(
         &store,
         &namespace_id,
@@ -651,8 +654,6 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
         None,
     )
     .await;
-    let pool_id = pool_id(&store).await;
-    let key = loonfs_objectstore::keys::content_span(&pool_id, &original.content_id, 0, 5);
     let engine =
         NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
     let read_context = fresh_context(&store, &namespace_id).await;
@@ -735,7 +736,11 @@ async fn a_reference_older_than_its_object_reads_only_its_prefix() {
         .await
         .expect("fold the append");
     let pool_id = pool_id(&store).await;
-    let key = loonfs_objectstore::keys::content_span(&pool_id, &original.content_id, 0, 11);
+    let row = crate::test_support::content_layout(&store, &namespace_id, &original.content_id)
+        .await
+        .expect("the folded layout");
+    assert_eq!(row.extents.len(), 1);
+    let key = crate::storage::content_location::extent_object_key(&pool_id, &row.extents[0]);
 
     store.reset();
     assert_eq!(

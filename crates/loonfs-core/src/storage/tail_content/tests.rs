@@ -23,6 +23,15 @@ static HEAD: std::sync::LazyLock<NamespaceReadState> = std::sync::LazyLock::new(
 
 struct Layout(ContentLayoutRecord);
 
+/// Returns the chain offsets that `object` stores, or `None` for a whole
+/// object.
+fn span_bounds(object: &ExtentObject) -> Option<(u64, u64)> {
+    match object {
+        ExtentObject::Span { start, end, .. } => Some((*start, *end)),
+        ExtentObject::Whole => None,
+    }
+}
+
 #[async_trait::async_trait]
 impl LayoutLookup for Layout {
     async fn content_layout(&self, _: &ContentId) -> Result<Option<ContentLayoutRecord>> {
@@ -76,6 +85,7 @@ async fn fixture<S: ObjectStore>(
                 content_id.clone()
             },
             object: ExtentObject::Span {
+                object_id: SpanObjectId::generate(),
                 start: offset,
                 end: offset + length as u64,
             },
@@ -120,8 +130,11 @@ async fn fixture<S: ObjectStore>(
     (layout, tail, reference)
 }
 
+/// Checks that a large write sends only the sources' HEAD requests before its
+/// assembly, and that a second write of the same pieces assembles a second
+/// object under a new key with the same bytes.
 #[tokio::test]
-async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes() {
+async fn large_extents_assemble_with_only_source_heads_and_write_again_under_a_new_key() {
     let directory = tempfile::tempdir().expect("directory");
     let local = std::sync::Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -143,13 +156,7 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     .expect("assembly");
     assert_eq!(written.layout.extents.len(), 1);
     let extent = &written.layout.extents[0];
-    assert_eq!(
-        extent.object,
-        ExtentObject::Span {
-            start: 0,
-            end: reference.size_bytes
-        }
-    );
+    assert_eq!(span_bounds(&extent.object), Some((0, reference.size_bytes)));
     let operations = store.snapshot();
     assert_eq!(operations.len(), 3);
     assert!(operations[..2]
@@ -172,17 +179,24 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     let key = extent_object_key(&HEAD.pool_id, extent);
     let metadata = store.head(&key).await.expect("head").expect("span");
     assert_eq!(metadata.checksum, Some(reference.checksum.clone()));
-    local.reset();
-    let retried = write_tail_content(
+    let again = write_tail_content(
         ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         &content,
         assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
     )
     .await
-    .expect("retry");
-    assert_eq!(retried, written);
-    assert_eq!(local.counts().puts, 0);
+    .expect("second write");
+    let again_extent = &again.layout.extents[0];
+    assert_eq!(
+        span_bounds(&again_extent.object),
+        span_bounds(&extent.object)
+    );
+    assert_ne!(again_extent.object, extent.object);
+    let again_key = extent_object_key(&HEAD.pool_id, again_extent);
+    let again_metadata = store.head(&again_key).await.expect("head").expect("span");
+    assert_eq!(again_metadata.checksum, metadata.checksum);
+    assert_eq!(again_metadata.size_bytes, metadata.size_bytes);
 }
 
 #[tokio::test]
@@ -317,6 +331,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let (mut layout, tail, reference) = fixture(&store, &[6], false, 4).await;
         let extent = &mut layout.0.layout.extents[0];
         extent.object = ExtentObject::Span {
+            object_id: SpanObjectId::generate(),
             start: 0,
             end: size,
         };
@@ -439,10 +454,7 @@ async fn another_members_chain_keeps_its_creator_and_its_extents() {
                 assert!(sources.is_empty());
                 assert_eq!(written.extents.len(), 2);
                 assert_eq!(written.extents[0], layout.0.layout.extents[0]);
-                assert_eq!(
-                    written.extents[1].object,
-                    ExtentObject::Span { start: 6, end: 10 }
-                );
+                assert_eq!(span_bounds(&written.extents[1].object), Some((6, 10)));
                 assert_eq!(written.extents[1].length, 4);
             }
         }
@@ -474,8 +486,5 @@ async fn a_chain_that_started_in_another_members_tail_records_that_member_as_cre
     .await
     .expect("write");
     assert_eq!(written.layout.creator_namespace_id, source);
-    assert_eq!(
-        written.layout.extents[0].object,
-        ExtentObject::Span { start: 0, end: 4 }
-    );
+    assert_eq!(span_bounds(&written.layout.extents[0].object), Some((0, 4)));
 }

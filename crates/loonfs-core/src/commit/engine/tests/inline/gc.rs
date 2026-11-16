@@ -66,10 +66,9 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         .await
         .expect("list WAL");
     assert!(!wal_before.is_empty());
-    let key = folded_key(&pool_id(&store).await, values[1].content_ref());
     let blocked = BlockingStore::new(
         store.clone(),
-        KeyPredicate::exact(&key),
+        span_keys(&store, values[1].content_ref()).await,
         OperationSelector::Put,
     );
     blocked.block_next();
@@ -79,11 +78,13 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
     let fold = namespace.fold_wal_tail(engine.writer_position(), &deadline);
     let collect_during_fold = async {
         blocked.wait_until_blocked().await;
-        assert!(store
-            .get(&key, None)
-            .await
-            .expect("get blocked object")
-            .is_none());
+        assert!(crate::test_support::span_object_keys(
+            &store,
+            &pool_id(&store).await,
+            &values[1].content_ref().content_id
+        )
+        .await
+        .is_empty());
         collect_aged_wal(&store, namespace_id, &context).await;
         assert_eq!(
             store

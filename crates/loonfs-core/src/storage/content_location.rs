@@ -26,18 +26,20 @@ pub(crate) struct LocatedExtent {
 /// Returns the key of the object that `extent` reads, under the prefix of
 /// `pool_id`, the reading namespace's pool.
 pub(crate) fn extent_object_key(pool_id: &PoolId, extent: &ContentExtent) -> String {
-    match extent.object {
+    match &extent.object {
         ExtentObject::Whole => content_blob(pool_id, &extent.content_id),
-        ExtentObject::Span { start, end } => content_span(pool_id, &extent.content_id, start, end),
+        ExtentObject::Span { object_id, .. } => {
+            content_span(pool_id, &extent.content_id, object_id)
+        }
     }
 }
 
 /// Returns the name of the object that `extent` reads: its key with the
 /// pool's content prefix removed, the same under every pool.
 pub(crate) fn extent_object_name(extent: &ContentExtent) -> String {
-    match extent.object {
+    match &extent.object {
         ExtentObject::Whole => content_blob_name(&extent.content_id),
-        ExtentObject::Span { start, end } => content_span_name(&extent.content_id, start, end),
+        ExtentObject::Span { object_id, .. } => content_span_name(&extent.content_id, object_id),
     }
 }
 

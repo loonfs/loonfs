@@ -32,7 +32,7 @@ use loonfs_types::{
     Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
     MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PoolId, PrincipalId,
-    PrincipalScope, SnapshotId, Subject, SubjectId, UploadId, WriterId,
+    PrincipalScope, SnapshotId, SpanObjectId, Subject, SubjectId, UploadId, WriterId,
 };
 use loonfs_types::{DiffEntry, FilesystemEvent, MergeConflict, MergeConflictVersion};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -178,6 +178,7 @@ text_heap_bytes!(
     PoolId,
     PrincipalId,
     PrincipalScope,
+    SpanObjectId,
     SubjectId,
     UploadId,
     WriterId,
@@ -791,6 +792,15 @@ impl HeapBytes for SegmentIndexEntry {
     }
 }
 
+impl HeapBytes for loonfs_types::ExtentObject {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            loonfs_types::ExtentObject::Whole => 0,
+            loonfs_types::ExtentObject::Span { object_id, .. } => object_id.heap_bytes(),
+        }
+    }
+}
+
 impl HeapBytes for loonfs_types::ContentLayout {
     fn heap_bytes(&self) -> usize {
         self.creator_namespace_id.heap_bytes()
@@ -798,7 +808,7 @@ impl HeapBytes for loonfs_types::ContentLayout {
             + self
                 .extents
                 .iter()
-                .map(|extent| extent.content_id.heap_bytes())
+                .map(|extent| extent.content_id.heap_bytes() + extent.object.heap_bytes())
                 .sum::<usize>()
     }
 }
@@ -806,7 +816,33 @@ impl HeapBytes for loonfs_types::ContentLayout {
 #[cfg(test)]
 mod tests {
     use super::HeapBytes;
-    use loonfs_types::AccessGrants;
+    use loonfs_types::{
+        AccessGrants, ContentExtent, ContentId, ContentLayout, ExtentObject, NamespaceId,
+        SpanObjectId,
+    };
+
+    #[test]
+    fn a_layout_is_charged_for_each_span_extents_object_id() {
+        let content_id = ContentId::generate();
+        let span_object_id = SpanObjectId::generate();
+        let layout = |object: ExtentObject| ContentLayout {
+            creator_namespace_id: NamespaceId::parse("main").expect("namespace"),
+            extents: vec![ContentExtent {
+                content_id: content_id.clone(),
+                object,
+                offset: 0,
+                length: 10,
+            }],
+        };
+        let whole = layout(ExtentObject::Whole);
+        let span = layout(ExtentObject::Span {
+            object_id: span_object_id.clone(),
+            start: 0,
+            end: 10,
+        });
+        assert_eq!(span_object_id.as_str().len(), 31);
+        assert_eq!(span.heap_bytes(), whole.heap_bytes() + 31);
+    }
 
     #[test]
     fn a_decoded_grant_map_is_charged_for_every_level_of_nodes() {

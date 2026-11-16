@@ -500,7 +500,11 @@ mod tests {
         let content_id = ContentId::generate();
         let extent = ContentExtent {
             content_id: content_id.clone(),
-            object: ExtentObject::Span { start: 0, end: 4 },
+            object: ExtentObject::Span {
+                object_id: loonfs_types::SpanObjectId::generate(),
+                start: 0,
+                end: 4,
+            },
             offset: 0,
             length: 4,
         };

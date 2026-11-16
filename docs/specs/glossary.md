@@ -152,7 +152,7 @@ The ordered list of extents that together make up a chain's bytes, along with th
 
 ### Span object
 
-A content object that stores one byte range of a chain. The content object at a chain's own key (`content/{content_id}`) is called the "whole object". Every other content object of the chain is a span object, and its key is the chain's key followed by the start and end offsets of its range (`{content_id}-{start:020}-{end:020}`).
+A content object that stores one byte range of a chain. The content object at a chain's own key (`content/{content_id}`) is called the "whole object". Every other content object of the chain is a span object, and its key is the chain's key followed by a random span object ID that each write generates (`{content_id}-{span_object_id}`, for example `con_4z59p0wjvx9a8b2frdhhf6mat1-span_1q8yd3a2gxmz0w4pke6tcv5rhb`). The extent that lists the object records the range of chain bytes that the object stores. For example, a fold that writes bytes 100 to 130 of a chain writes a new span object, and the chain's new layout records the object's ID with the start 100 and the end 130. Two writes of the same bytes store two span objects.
 
 ### Piece
 

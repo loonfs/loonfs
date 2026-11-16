@@ -80,14 +80,30 @@ async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
     // Twelve one-line tails leave extents of 8, 3, and 1 lines.
     let content_id = &read.entry.content_ref().expect("file content").content_id;
     let pool_id = loonfs_core::test_support::load_pool_id(recording.inner(), &namespace_id).await;
-    let expected_keys = [(0, 8), (8, 11), (11, 12)].map(|(start_line, end_line)| {
-        content_span(
-            &pool_id,
-            content_id,
-            start_line * LINE_BYTES,
-            end_line * LINE_BYTES,
-        )
-    });
+    let layout =
+        loonfs_core::test_support::content_layout(recording.inner(), &namespace_id, content_id)
+            .await
+            .expect("the folded layout");
+    let expected_keys: Vec<String> = [(0, 8), (8, 11), (11, 12)]
+        .into_iter()
+        .zip(&layout.extents)
+        .map(|((start_line, end_line), extent)| {
+            let loonfs_types::ExtentObject::Span {
+                object_id,
+                start,
+                end,
+            } = &extent.object
+            else {
+                panic!("every extent is a span object: {extent:?}");
+            };
+            assert_eq!(
+                (*start, *end),
+                (start_line * LINE_BYTES, end_line * LINE_BYTES)
+            );
+            content_span(&pool_id, content_id, object_id)
+        })
+        .collect();
+    assert_eq!(layout.extents.len(), expected_keys.len());
     // The extent GETs run concurrently, so the order of the GETs in the log
     // varies from run to run.
     let operations = recording.take();

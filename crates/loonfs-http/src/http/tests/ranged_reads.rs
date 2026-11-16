@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use axum::http::{header, HeaderMap, StatusCode};
 use loonfs::{LoonFs, SharedObjectStore};
 use loonfs_client::{ClientError, NamespacePath, ReadRange};
-use loonfs_objectstore::keys::{content_prefix, content_span};
+use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -100,6 +100,11 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
     writer.shutdown().await.expect("writer shutdown");
     let content_ref = entry.content_ref().expect("file content");
     let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+    let [folded_object] = <[String; 1]>::try_from(
+        loonfs_core::test_support::span_object_keys(&store, &pool_id, &content_ref.content_id)
+            .await,
+    )
+    .expect("the fold wrote one span object");
     let mut options = test_options(directory.path(), "ranged-server");
     options.grep = JobMode::Disabled;
     configure(&mut options);
@@ -113,7 +118,7 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
     .await
     .expect("app");
     Fixture {
-        folded_object: content_span(&pool_id, &content_ref.content_id, 0, FOLDED_BYTES as u64),
+        folded_object,
         _directory: directory,
         recording,
         router,

@@ -325,7 +325,10 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
             .await
             .expect("cold fold result");
         assert_eq!(held.head, cold.head);
-        assert_eq!(held.metadata_state, cold.metadata_state);
+        assert_eq!(
+            held.metadata_state.without_span_object_ids(),
+            cold.metadata_state.without_span_object_ids()
+        );
         assert_eq!(layout(&held.manifest), layout(&cold.manifest));
     }
 }

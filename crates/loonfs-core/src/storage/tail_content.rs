@@ -14,7 +14,7 @@ use loonfs_objectstore::{AssemblySource, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{
     Checksum, ChecksumAlgorithm, ChecksumDigest, ContentExtent, ContentId, ContentLayout,
-    ContentRef, ExtentObject, NamespaceId, PoolId,
+    ContentRef, ExtentObject, NamespaceId, PoolId, SpanObjectId,
 };
 
 /// Checks whole values before any chain writes its content. `pool_id`
@@ -161,6 +161,13 @@ pub(crate) fn cut_layout(layout: &mut ContentLayout, size_bytes: u64) {
 /// Writes a chain's tail pieces as its next extent under the pool's prefix,
 /// and returns the chain's new layout row.
 ///
+/// The extent is a new span object under a fresh ID (format spec, "File
+/// contents and ownership"), so two writes of the same pieces, such as a
+/// validation's and a later fold's, store two objects, and each layout lists
+/// its own. An object at the new key is corruption, because no other write
+/// generates the same ID. (The store accepts an object with the same stored
+/// checksum, which only this write's own retry of the put can have written.)
+///
 /// The row records the chain's creator: the creator that the chain's layout
 /// row records, or, for a chain that started in the tail, the namespace whose
 /// WAL object started it. When `content_writes.namespace_id` didn't create the
@@ -275,7 +282,7 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     };
     if let Some(last) = location.extents.last_mut().filter(|last| own(&last.extent)) {
         let full_length = match last.extent.object {
-            ExtentObject::Span { start, end } => end - start,
+            ExtentObject::Span { start, end, .. } => end - start,
             ExtentObject::Whole => {
                 let row = lookup
                     .content_layout(&newest.content_id)
@@ -316,11 +323,14 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     } = combine_plan(&extents, tail_length, own);
     let combined_length = candidate_length - tail_length;
     start -= combined_length;
-    // A layout of zero bytes is one whole extent of length zero.
+    // A layout of zero bytes is one whole extent of length zero. Every other
+    // write is a new span object with an ID of its own, so no other write,
+    // in this namespace or another member of the pool, writes its key.
     let object = if newest.size_bytes == 0 {
         ExtentObject::Whole
     } else {
         ExtentObject::Span {
+            object_id: SpanObjectId::generate(),
             start,
             end: newest.size_bytes,
         }

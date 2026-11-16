@@ -479,6 +479,33 @@ pub async fn content_layout<S: ObjectStore>(
         .map(|row| row.layout)
 }
 
+/// Lists, in key order, the keys of the span objects of the chain
+/// `content_id` under the prefix of `pool_id`.
+///
+/// A span object's key is random, so a test that checks which objects the
+/// writes of a chain's pieces stored finds them by listing, or through the
+/// layout that lists them.
+pub async fn span_object_keys<S: ObjectStore + ?Sized>(
+    store: &S,
+    pool_id: &PoolId,
+    content_id: &loonfs_types::ContentId,
+) -> Vec<String> {
+    use loonfs_objectstore::ObjectStoreExtension;
+    let chain = format!(
+        "{}-",
+        loonfs_objectstore::keys::content_blob(pool_id, content_id)
+    );
+    let mut keys: Vec<_> = store
+        .list_prefix(&loonfs_objectstore::keys::content_prefix(pool_id))
+        .await
+        .expect("list the pool's content objects")
+        .into_iter()
+        .filter(|key| key.starts_with(&chain))
+        .collect();
+    keys.sort();
+    keys
+}
+
 /// Lists the keys of the WAL objects of `namespace_id` that are commit
 /// objects, which a collection deletes once they're folded and old enough.
 /// The fences and floor objects that the listing leaves out stay.

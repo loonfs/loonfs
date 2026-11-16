@@ -5,7 +5,7 @@
 use loonfs_types::format::manifest::{ExtensionSegmentRef, MetadataSegmentRef};
 use loonfs_types::{
     ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId, PoolId,
-    ProbeId, SnapshotId, UploadId, WalNo,
+    ProbeId, SnapshotId, SpanObjectId, UploadId, WalNo,
 };
 
 /// Prefix for objects created by store probes.
@@ -209,20 +209,27 @@ pub fn content_blob_name(content_id: &ContentId) -> String {
     content_id.to_string()
 }
 
-/// Builds the immutable key of the span object that stores one run of chain
-/// bytes, under the prefix of the reading namespace's pool.
-pub fn content_span(pool_id: &PoolId, content_id: &ContentId, start: u64, end: u64) -> String {
+/// Builds the immutable key of the span object `span_object_id` of the chain
+/// `content_id`, under the prefix of the reading namespace's pool.
+pub fn content_span(
+    pool_id: &PoolId,
+    content_id: &ContentId,
+    span_object_id: &SpanObjectId,
+) -> String {
     format!(
         "{}{}",
         content_prefix(pool_id),
-        content_span_name(content_id, start, end)
+        content_span_name(content_id, span_object_id)
     )
 }
 
 /// Builds the name of a span object: its key with the pool's content prefix
 /// removed.
-pub fn content_span_name(content_id: &ContentId, start: u64, end: u64) -> String {
-    format!("{content_id}-{start:020}-{end:020}")
+///
+/// The name is the chain's content ID, a hyphen, and the span object's ID,
+/// each spelled with its prefix as in every other object key.
+pub fn content_span_name(content_id: &ContentId, span_object_id: &SpanObjectId) -> String {
+    format!("{content_id}-{span_object_id}")
 }
 
 /// Builds a fresh key for a temporary object that an assembly of one of a
@@ -269,14 +276,19 @@ mod tests {
     use loonfs_types::format::segment_blocks::BlockHandle;
     use loonfs_types::{
         ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
-        PoolId, ProbeId, SnapshotId, UploadId, WalNo,
+        PoolId, ProbeId, SnapshotId, SpanObjectId, UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_5bsqqg28t5cy4tqkff04hmasw9";
+    const SPAN_OBJECT_ID: &str = "span_00000000000000000000000002";
     const PROBE_RUN_ID: &str = "probe_00000000000000000000000001";
 
     fn content_id() -> ContentId {
         ContentId::parse(CONTENT_ID).expect("valid content id")
+    }
+
+    fn span_object_id() -> SpanObjectId {
+        SpanObjectId::parse(SPAN_OBJECT_ID).expect("valid span object id")
     }
 
     fn namespace_id() -> NamespaceId {
@@ -366,8 +378,7 @@ mod tests {
                 .replace("{extension_name}", "grep")
                 .replace("{segment_id}", segment_id)
                 .replace("{upload_id}", "upl_00000000000000000000000001")
-                .replace("{start:020}", "00000000000000000002")
-                .replace("{end:020}", "00000000000000000019")
+                .replace("{span_object_id}", SPAN_OBJECT_ID)
                 .replace("{content_id}", CONTENT_ID)
                 .replace("{temporary_id}", &temporary_id)
         };
@@ -402,7 +413,7 @@ mod tests {
             ("Content objects", content_blob(&pool_id(), &content_id())),
             (
                 "Content span objects",
-                content_span(&pool_id(), &content_id(), 2, 19),
+                content_span(&pool_id(), &content_id(), &span_object_id()),
             ),
             ("Temporary objects", temporary),
         ];
@@ -451,8 +462,11 @@ mod tests {
             format!("{prefix}{}", content_blob_name(&content_id()))
         );
         assert_eq!(
-            content_span(&pool_id(), &content_id(), 2, 19),
-            format!("{prefix}{}", content_span_name(&content_id(), 2, 19))
+            content_span(&pool_id(), &content_id(), &span_object_id()),
+            format!(
+                "{prefix}{}",
+                content_span_name(&content_id(), &span_object_id())
+            )
         );
     }
 
