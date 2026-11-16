@@ -26,6 +26,7 @@ mod content_ref_read_access;
 mod content_request_accounting;
 mod deletion_expiry;
 mod derived_paths;
+mod diff_reads;
 mod direct_put;
 mod directory_page_reads;
 mod expired_deletions;

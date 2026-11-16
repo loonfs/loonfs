@@ -262,6 +262,7 @@ pub(super) async fn latest_revision_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     visible_seq: CommitSeq,
+    blocks_per_refill: BlocksPerRefill,
 ) -> Result<Option<RevisionRecord>> {
     newest_row_under_prefix(
         segments,
@@ -269,6 +270,7 @@ pub(super) async fn latest_revision_by_inode<S: ObjectStore + ?Sized>(
         lookup_keys::revision_prefix(inode_id),
         lookup_keys::revision_probe(inode_id),
         visible_seq,
+        blocks_per_refill,
         revision_from_manifest_row,
         |record| record.committed_seq,
     )
@@ -380,6 +382,7 @@ pub(super) async fn newest_tombstone_for_root<S: ObjectStore + ?Sized>(
         lookup_keys::tombstone_prefix(root_inode_id),
         lookup_keys::tombstone_probe(root_inode_id),
         visible_seq,
+        BlocksPerRefill::One,
         tombstone_from_manifest_row,
         |record| record.committed_seq,
     )
@@ -457,6 +460,7 @@ pub(super) async fn newest_merge<S: ObjectStore + ?Sized>(
         lookup_keys::merge_prefix(source_namespace_id),
         lookup_keys::merge_probe(source_namespace_id),
         visible_seq,
+        BlocksPerRefill::One,
         merge_index_from_manifest_row,
         |record| record.committed_seq,
     )
@@ -472,6 +476,7 @@ pub(super) async fn attributes_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     visible_seq: CommitSeq,
+    blocks_per_refill: BlocksPerRefill,
 ) -> Result<Option<AttributesRevisionRecord>> {
     newest_row_under_prefix(
         segments,
@@ -479,6 +484,7 @@ pub(super) async fn attributes_by_inode<S: ObjectStore + ?Sized>(
         lookup_keys::attributes_prefix(inode_id),
         lookup_keys::attributes_probe(inode_id),
         visible_seq,
+        blocks_per_refill,
         attributes_revision_from_manifest_row,
         |record| record.committed_seq,
     )
@@ -489,6 +495,7 @@ pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     visible_seq: CommitSeq,
+    blocks_per_refill: BlocksPerRefill,
 ) -> Result<Option<AccessRevisionRecord>> {
     newest_row_under_prefix(
         segments,
@@ -496,6 +503,7 @@ pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
         lookup_keys::access_prefix(inode_id),
         lookup_keys::access_probe(inode_id),
         visible_seq,
+        blocks_per_refill,
         access_revision_from_manifest_row,
         |record| record.committed_seq,
     )
@@ -512,12 +520,22 @@ pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
 /// A read that sees every row of the manifest takes the first row of the
 /// newest run that has one. A read below a run's sequence merges every run,
 /// because the newest run's rows could all be above the read.
+///
+/// With [`BlocksPerRefill::One`], the lookup fetches the blocks that contain
+/// the prefix's rows and no others. With [`BlocksPerRefill::ReadAhead`], a
+/// fetch continues into the blocks after the prefix's rows, which helps a
+/// read that looks up the rows of many inodes in turn.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each family's lookup passes its own prefix, probe, and row decoder"
+)]
 async fn newest_row_under_prefix<S, R>(
     segments: &VerifiedMetadataSegments<'_, S>,
     family: MetadataRowFamily,
     prefix: String,
     filter_probe: String,
     visible_seq: CommitSeq,
+    blocks_per_refill: BlocksPerRefill,
     decode: fn(MetadataRow) -> Result<R>,
     committed_seq: fn(&R) -> CommitSeq,
 ) -> Result<Option<R>>
@@ -532,7 +550,7 @@ where
                 &prefix,
                 &filter_probe,
                 1,
-                BlocksPerRefill::One,
+                blocks_per_refill,
             )
             .await?
             .into_iter()
@@ -540,6 +558,11 @@ where
             .map(|(_, row)| decode(row))
             .transpose();
     }
+    // A merge of the runs reads the prefix as a key range.
+    let blocks_per_refill = match blocks_per_refill {
+        BlocksPerRefill::One => BlocksPerRefill::KeyRange,
+        reads_more => reads_more,
+    };
     let upper_bound = string_prefix_upper_bound(&prefix);
     let mut lower_bound = prefix;
     loop {
@@ -550,7 +573,7 @@ where
                 upper_bound.as_deref(),
                 WHOLE_STATE_RAW_SCAN_LIMIT,
                 Some(&filter_probe),
-                BlocksPerRefill::KeyRange,
+                blocks_per_refill,
             )
             .await?;
         let page_len = page.len();

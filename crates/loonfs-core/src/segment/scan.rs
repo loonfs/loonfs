@@ -63,7 +63,9 @@ pub(crate) enum BlocksPerRefill {
     /// within the same caps as `KeyRange`. A scan of one directory's children
     /// uses this mode, because a recursive listing scans a tree's directories
     /// one after another and the next directory's rows are often in the
-    /// blocks that follow (see [What a read fetches](https://github.com/loonfs/loonfs/blob/main/docs/design/block-cache.md#what-a-read-fetches)).
+    /// blocks that follow, and so does a diff page's lookup of an inode's
+    /// rows, because the inodes that a series of commits touches often have
+    /// their rows in the blocks that follow (see [What a read fetches](https://github.com/loonfs/loonfs/blob/main/docs/design/block-cache.md#what-a-read-fetches)).
     /// The scan keeps a refill's blocks as it does for `KeyRange`, and the
     /// refill inserts every block that it fetches into the block cache.
     /// Without a block cache, a scan in this mode reads no further than a

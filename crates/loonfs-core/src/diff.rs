@@ -11,6 +11,7 @@ use crate::metadata::{
 };
 use crate::path::mutation_path::name_keys;
 use crate::path::read::{resolve_visible_inode, LoadedMetadataView};
+use crate::segment::BlocksPerRefill;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{
     semantic_operation_groups, WalCommitDelta, WalCommitPayload, WalDelta,
@@ -472,17 +473,35 @@ impl<'a, 'store, S: ObjectStore + ?Sized> End<'a, 'store, S> {
     /// Reads the inode's newest revision, attribute, and access rows at this
     /// end's sequence, and returns their numbers and the newest row's
     /// sequence.
+    ///
+    /// A page reads these rows for every inode that its commits touch. The
+    /// inodes that consecutive commits touch often have their rows in the
+    /// blocks that follow, so each lookup reads ahead past the inode's rows
+    /// (see [`BlocksPerRefill::ReadAhead`]). If each lookup fetched only the
+    /// block with the inode's rows, the page would send a GET for each block
+    /// of rows that it reaches.
     async fn revisions(
         &self,
         inode_id: InodeId,
         inode_kind: InodeKind,
     ) -> Result<(Revisions, Option<CommitSeq>)> {
+        let refill = BlocksPerRefill::ReadAhead;
         let revision = match inode_kind {
-            InodeKind::File => self.view.latest_revision_record(inode_id).await?,
+            InodeKind::File => {
+                self.view
+                    .latest_revision_record_with(inode_id, refill)
+                    .await?
+            }
             InodeKind::Directory => None,
         };
-        let attributes = self.view.latest_attributes_revision(inode_id).await?;
-        let access = self.view.latest_access_revision(inode_id).await?;
+        let attributes = self
+            .view
+            .latest_attributes_revision_with(inode_id, refill)
+            .await?;
+        let access = self
+            .view
+            .latest_access_revision_with(inode_id, refill)
+            .await?;
         let newest_seq = [
             revision.as_ref().map(|row| row.committed_seq),
             attributes.as_ref().map(|row| row.committed_seq),
