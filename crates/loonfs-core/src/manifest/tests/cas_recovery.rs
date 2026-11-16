@@ -124,8 +124,10 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
             payload.namespace_id = NamespaceId::parse("fork").expect("namespace");
             payload.fork_basis = Some(ForkBasis {
                 manifest: current.manifest(),
+                fork_point_seq: current.manifest().head_seq,
                 source_snapshot_id: SnapshotId::generate(current.manifest().manifest_no),
                 forked_from_snapshot_id: SnapshotId::generate(current.manifest().manifest_no),
+                fork_point_snapshot_id: SnapshotId::generate(ManifestNo(1)),
                 rebased_from: None,
             });
             payload.status = loonfs_types::format::control::NamespaceStatus::Initializing {};

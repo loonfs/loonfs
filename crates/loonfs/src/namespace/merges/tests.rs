@@ -1115,13 +1115,14 @@ async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
         // `main`'s position with a successor HEAD and a boundary read. The
         // checks before the plan, and the plan's read of the fork, read the
         // fork's position as it is and send no request.
-        "head main MetadataManifest 00000000000000000005",
+        "head main MetadataManifest 00000000000000000004",
         "get main Boundary",
-        // The snapshot of the fork's current manifest 3, without a fold: the
-        // record write, then the verification that manifest 3 is still
-        // current.
+        // The snapshot of the fork's current manifest 4, without a fold: the
+        // record write, then the verification that manifest 4 is still
+        // current. (The fork folded `main`'s tail into its own manifest 2,
+        // so `main` is still at manifest 3.)
         "put main-fork Snapshot",
-        "head main-fork MetadataManifest 00000000000000000004",
+        "head main-fork MetadataManifest 00000000000000000005",
         "get main-fork Boundary",
         // The plan writes `/b.txt`'s piece from the fork's tail as one
         // extent under the pool's prefix, so the commit's reference has a
@@ -1149,9 +1150,9 @@ async fn the_next_merge_range_with_fresh_positions_checks_each_position() {
     assert_eq!(
         request_lines(&store.take()),
         [
-            "head main MetadataManifest 00000000000000000005",
+            "head main MetadataManifest 00000000000000000004",
             "get main Boundary",
-            "head main-fork MetadataManifest 00000000000000000004",
+            "head main-fork MetadataManifest 00000000000000000005",
             "get main-fork Boundary",
         ]
     );

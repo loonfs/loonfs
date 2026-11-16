@@ -39,28 +39,39 @@ impl<S: ObjectStore> NamespaceStore<S> {
         )
     }
 
-    pub(super) async fn delete_source_snapshot(&self, basis: &ForkBasis) -> Result<bool> {
-        let key = loonfs_objectstore::keys::snapshot_record(
-            &basis.manifest.owner_namespace_id,
-            &basis.source_snapshot_id,
-        );
-        let present = self
-            .store
-            .get_with_metadata(&key)
-            .await
-            .map_err(|error| CoreError::store(&key, &error))?
-            .is_some();
-        self.with_namespace(basis.manifest.owner_namespace_id.clone())
-            .delete_snapshot_record(&basis.source_snapshot_id)
-            .await?;
-        Ok(present)
+    /// Deletes the two fork snapshots that `basis`, this namespace's fork
+    /// basis, records: the fork snapshot on the source and this namespace's
+    /// own fork point snapshot. Returns how many of them were present.
+    pub(super) async fn delete_fork_snapshots(&self, basis: &ForkBasis) -> Result<u64> {
+        let mut deleted = 0;
+        for (namespace_id, snapshot_id) in [
+            (
+                &basis.manifest.owner_namespace_id,
+                &basis.source_snapshot_id,
+            ),
+            (&self.namespace_id, &basis.fork_point_snapshot_id),
+        ] {
+            let key = loonfs_objectstore::keys::snapshot_record(namespace_id, snapshot_id);
+            let present = self
+                .store
+                .get_with_metadata(&key)
+                .await
+                .map_err(|error| CoreError::store(&key, &error))?
+                .is_some();
+            self.with_namespace(namespace_id.clone())
+                .delete_snapshot_record(snapshot_id)
+                .await?;
+            deleted += u64::from(present);
+        }
+        Ok(deleted)
     }
 }
 
 /// Decides what to do with the snapshot at `key`, whose record is `record`.
 ///
-/// The source's collection keeps every fork snapshot, because the target's
-/// retirement deletes it (format spec, "Snapshot cleanup").
+/// The source's collection keeps every fork snapshot, and a fork's own
+/// collection keeps its fork point snapshot, because the target's retirement
+/// deletes both (format spec, "Snapshot cleanup").
 pub(super) fn sweep_snapshot_record(
     key: &str,
     record: &SnapshotPayload,

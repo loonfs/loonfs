@@ -105,14 +105,17 @@ async fn snapshot_fold_reads(creation: SnapshotCreation, max_segment_bytes: usiz
     store.inner().release();
     operation.await;
     let reads = store.count(OperationSelector::Read);
-    assert_eq!(
-        loonfs_core::test_support::namespace_store(store.as_ref(), &demo())
-            .load_diagnostics()
-            .await
-            .expect("diagnostics after creation")
-            .wal_tail_objects,
-        0
-    );
+    let tail_objects = loonfs_core::test_support::namespace_store(store.as_ref(), &demo())
+        .load_diagnostics()
+        .await
+        .expect("diagnostics after creation")
+        .wal_tail_objects;
+    // A fork folds the source's tail into its own manifest, and the source
+    // keeps its tail.
+    match creation {
+        SnapshotCreation::Fold | SnapshotCreation::Snapshot => assert_eq!(tail_objects, 0),
+        SnapshotCreation::Fork => assert!(tail_objects > 0),
+    }
     runtime.shutdown().await.expect("shut down writer");
     reads
 }

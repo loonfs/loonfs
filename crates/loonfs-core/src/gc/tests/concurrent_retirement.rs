@@ -31,7 +31,7 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
                     .await
                     .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
-                crate::test_support::folded_manifest(&fixture.namespace)
+                crate::test_support::fold_before_fork(&fixture.namespace)
                     .await
                     .expect("fold the WAL tail"),
             )
@@ -119,7 +119,9 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
             .gc(&deadline.clock())
             .await
             .expect("second collector retries from the beginning");
-        assert_eq!(retried.deleted_snapshots_by_owner.fork, 0);
+        // The lost acknowledgement stopped the first collector before it
+        // deleted the target's fork point snapshot, so only that one is left.
+        assert_eq!(retried.deleted_snapshots_by_owner.fork, 1);
         assert!(snapshot_record_exists(store.inner(), &source, &sibling_snapshot).await);
         store.release();
     });

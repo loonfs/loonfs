@@ -53,7 +53,7 @@ async fn fork<S: ObjectStore + Clone>(store: S, source: &NamespaceId, target: &N
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -347,7 +347,7 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_forks_deadli
     assert!(!exists(&store, &referenced).await);
     assert!(exists(&store, &pool_member(&pool_id, fork)).await);
     let retired = collect(&store, fork, deadline_ms).await;
-    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 2);
     assert!(!exists(&store, &pool_member(&pool_id, fork)).await);
 }
 
@@ -546,7 +546,7 @@ async fn a_deleted_members_own_content_is_deleted_at_its_deadline_while_its_fork
         .retires_at_ms
         .expect("the fork's deadline");
     let report = collect(&store, &fork_id, retired_ms).await;
-    assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 2);
     collect(&store, first, retired_ms).await;
     assert!(!exists(&store, &pool_member(&pool_id, first)).await);
     let report = collect_pool_at(&store, &pool_id, retired_ms).await;
@@ -688,7 +688,7 @@ async fn a_deleted_forks_sessions_stay_until_the_fork_is_retired() {
         .await,
     );
     let retired = collect(&store, fork, aged.now_ms).await;
-    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 2);
     let report = collect_pool_at(&store, &pool_id, aged.now_ms).await;
     assert_eq!(report.deleted.upload_sessions, 3);
     for session in &sessions {

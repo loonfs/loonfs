@@ -163,7 +163,10 @@ async fn find_rebased_forks(
             else {
                 continue;
             };
+            // A namespace that's itself a fork lists its own fork point
+            // snapshot, whose target is the namespace.
             if target_namespace_id == *original_fork_id
+                || target_namespace_id == *namespace_id
                 || rebased
                     .iter()
                     .any(|fork| fork.namespace_id == target_namespace_id)

@@ -125,9 +125,10 @@ pub struct NamespaceForkBasis {
     pub source_namespace_id: NamespaceId,
     /// The source namespace's sequence that the fork captured.
     pub fork_point_seq: CommitSeq,
-    /// The fork snapshot that keeps the source's state at `fork_point_seq` readable. A read of the
-    /// source namespace accepts it as `snapshot_id`.
-    pub source_snapshot_id: SnapshotId,
+    /// The fork point snapshot, which keeps this namespace's state at `fork_point_seq` readable.
+    /// That state is the source's state at the fork point. A read of this namespace accepts the
+    /// ID as `snapshot_id`.
+    pub fork_point_snapshot_id: SnapshotId,
     /// The fork whose unmerged commits a rebase replays into this namespace. Only a namespace that
     /// a rebase created has this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]

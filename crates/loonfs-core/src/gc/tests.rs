@@ -497,7 +497,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -1356,7 +1356,9 @@ async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> Snapsho
         let record = decode_control_object::<SnapshotPayload>(&bytes, ControlObjectKind::Snapshot)
             .expect("decode record")
             .into_payload();
-        if matches!(record.owner, SnapshotOwner::Fork { .. }) {
+        // A source that's a fork also has its own fork point snapshot.
+        if matches!(&record.owner, SnapshotOwner::Fork { target_namespace_id } if target_namespace_id != source)
+        {
             return record;
         }
     }
@@ -1385,7 +1387,7 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -1443,7 +1445,8 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .expect_err("a failed fork snapshot delete should fail the collection");
     assert!(snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
     let released = collect(&store, &clone, &aged).await;
-    assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
+    // The fork snapshot on the source and the clone's fork point snapshot.
+    assert_eq!(released.deleted_snapshots_by_owner.fork, 2);
     assert!(!snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
     // The repeated collection finds the clone retired and sends no delete.
     let repeated = collect(&store, &clone, &aged).await;
@@ -1486,7 +1489,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -2334,7 +2337,7 @@ async fn a_source_collection_keeps_every_fork_snapshot_and_reads_no_target() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -2352,7 +2355,7 @@ async fn a_source_collection_keeps_every_fork_snapshot_and_reads_no_target() {
                     .await
                     .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
-                crate::test_support::folded_manifest(&fixture.namespace)
+                crate::test_support::fold_before_fork(&fixture.namespace)
                     .await
                     .expect("fold the WAL tail"),
             )
@@ -2370,8 +2373,9 @@ async fn a_source_collection_keeps_every_fork_snapshot_and_reads_no_target() {
             .await
             .expect("fork snapshots")
             .len(),
-        // The fork snapshots of six targets, and six temporary snapshots.
-        12
+        // The fork snapshots of six targets, six temporary snapshots, and
+        // the source's own fork point snapshot.
+        13
     );
 }
 

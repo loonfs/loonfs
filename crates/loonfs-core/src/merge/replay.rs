@@ -132,9 +132,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 
     /// Plans a replay commit of `fork`, read at `fork_context`, into this
     /// namespace, a rebase's new fork read at `context`. `source`, read at
-    /// `source_context`, is the namespace that the rebase forked, read
-    /// through this namespace's fork snapshot, and a context at another manifest
-    /// returns `namespace_corrupt`, as a context of another namespace does
+    /// `source_context`, is this namespace read through its fork point
+    /// snapshot, which describes the namespace that the rebase forked at the
+    /// new fork's fork point, and a context at another manifest returns
+    /// `namespace_corrupt`, as a context of another namespace does
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
     ///
     /// The plan takes the range's start from this namespace's own replay
@@ -176,14 +177,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             source_after_seq,
         } = replay_range_start(&new_fork, &fork_view, request).await?;
         let snapshot = source.namespace.load_metadata_view(source_context).await?;
-        if snapshot.head().namespace_id != basis.manifest.owner_namespace_id
-            || snapshot.anchor.manifest_no != basis.manifest.manifest_no
+        let new_fork_id = &new_fork.head().namespace_id;
+        let snapshot_manifest_no = basis.fork_point_snapshot_id.manifest_no();
+        if snapshot.head().namespace_id != *new_fork_id
+            || snapshot.anchor.manifest_no != snapshot_manifest_no
         {
             return Err(CoreError::NamespaceCorrupt(format!(
-                "a replay commit reads `{}` at manifest `{}` through the new fork's snapshot, but \
-                 its context is at manifest `{}` of `{}`",
-                basis.manifest.owner_namespace_id,
-                basis.manifest.manifest_no,
+                "a replay commit reads `{new_fork_id}` at manifest `{snapshot_manifest_no}` \
+                 through its fork point snapshot, but its context is at manifest `{}` of `{}`",
                 snapshot.anchor.manifest_no,
                 snapshot.head().namespace_id
             )));

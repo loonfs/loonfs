@@ -265,8 +265,12 @@ pub struct ForkBasis {
     /// Source manifest used as the target's initial state. Its owner must
     /// differ from the target namespace.
     pub manifest: ManifestRef,
+    /// The fork point: the source's head that the fork was made at. It's at
+    /// or above the head of `manifest`, and the source's commits between the
+    /// two are the WAL tail that the fork folds into its own manifest 2.
+    pub fork_point_seq: CommitSeq,
     /// The fork snapshot on the source, which keeps `manifest` for as long as
-    /// the target lives. The fork call records its ID in manifest 1 and writes
+    /// the target exists. The fork call records its ID in manifest 1 and writes
     /// the snapshot after.
     pub source_snapshot_id: SnapshotId,
     /// The snapshot of the source that the fork was built from, which kept
@@ -274,6 +278,12 @@ pub struct ForkBasis {
     /// the caller identified, or the temporary snapshot that the fork call took
     /// of the source's head.
     pub forked_from_snapshot_id: SnapshotId,
+    /// The fork point snapshot, a fork snapshot on the target itself that
+    /// keeps the target's manifest at the fork point for as long as the
+    /// target exists. The fork call records its ID in manifest 1, and writes
+    /// the snapshot later, on manifest 2 when the fork folds the source's WAL
+    /// tail and on manifest 1 otherwise.
+    pub fork_point_snapshot_id: SnapshotId,
     /// The fork whose commits a rebase replays into the target, which only a
     /// rebase's new fork records.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -163,7 +163,7 @@ async fn the_first_commit_after_a_create_claims_on_the_created_manifest() {
     let requests = store.take();
     assert_eq!(
         requests.iter().map(kind_and_key).collect::<Vec<_>>(),
-        first_commit_requests(&namespace_id),
+        first_commit_requests(&namespace_id, ManifestNo(3)),
         "{requests:?}"
     );
     writer.shutdown().await.expect("shutdown");
@@ -207,10 +207,11 @@ async fn the_first_read_after_a_create_sends_no_request() {
 }
 
 /// Checks that the first commit on a fork's new namespace in the runtime
-/// that forked it builds its claim on the fork's manifest 2, with the same
-/// seven requests as the first commit after a create. The commit's planning
-/// reads the source's segments from the segment cache, because the fork's
-/// fold of the source's WAL tail wrote them in this runtime.
+/// that forked it builds its claim on the fork's active manifest 3, with the
+/// same seven requests as the first commit after a create. The fork folded
+/// the source's WAL tail into its manifest 2, and the commit's planning reads
+/// the segments of that fold from the segment cache, because the fork wrote
+/// them in this runtime.
 #[tokio::test]
 async fn the_first_commit_after_a_fork_claims_on_the_forked_manifest() {
     let directory = tempfile::tempdir().expect("directory");
@@ -249,7 +250,7 @@ async fn the_first_commit_after_a_fork_claims_on_the_forked_manifest() {
     let requests = store.take();
     assert_eq!(
         requests.iter().map(kind_and_key).collect::<Vec<_>>(),
-        first_commit_requests(&fork_id),
+        first_commit_requests(&fork_id, ManifestNo(4)),
         "{requests:?}"
     );
     writer.shutdown().await.expect("shutdown");
@@ -394,18 +395,18 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
 /// of `namespace_id` without a request first: the claim's put and the
 /// boundary read after the put, a WAL read for the tip, the fence, the
 /// successor check and boundary read after the fence, and the commit.
-fn first_commit_requests(namespace_id: &NamespaceId) -> Vec<(&'static str, String)> {
+fn first_commit_requests(
+    namespace_id: &NamespaceId,
+    claim_no: ManifestNo,
+) -> Vec<(&'static str, String)> {
     vec![
-        (
-            "put",
-            metadata_manifest_object(namespace_id, &ManifestNo(3)),
-        ),
+        ("put", metadata_manifest_object(namespace_id, &claim_no)),
         ("get", boundary(namespace_id)),
         ("get", "wal 1".to_owned()),
         ("put", "wal 1".to_owned()),
         (
             "head",
-            metadata_manifest_object(namespace_id, &ManifestNo(4)),
+            metadata_manifest_object(namespace_id, &ManifestNo(claim_no.0 + 1)),
         ),
         ("get", boundary(namespace_id)),
         ("put", "wal 2".to_owned()),

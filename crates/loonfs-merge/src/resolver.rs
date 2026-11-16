@@ -11,9 +11,10 @@ use std::future::Future;
 /// A resolver reads each conflict's versions through the ordinary read
 /// routes: `ours` from the fork that the new fork's
 /// `fork_basis.rebased_from` identifies, `theirs` from the namespace that the
-/// session merges into, and the base from that namespace through the new
-/// fork's snapshot of its source (API spec, `POST /rebases`). It writes the resolved
-/// content into the new fork with ordinary commits.
+/// session merges into, and the base from the new fork through its fork
+/// point snapshot, which `fork_basis.fork_point_snapshot_id` identifies (API
+/// spec, `POST /rebases`). It writes the resolved content into the new fork
+/// with ordinary commits.
 pub trait Resolver: Send + Sync {
     /// Writes resolutions of the changes that `reports` list into
     /// `new_fork_id`, and returns once the new fork is ready to merge.

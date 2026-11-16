@@ -1,0 +1,163 @@
+//! Folds a source's WAL tail into a fork's own manifest 2, so the fork has a
+//! manifest at its fork point and the source publishes nothing
+//! ([format spec](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#92-forking-a-namespace)).
+
+use super::fold::ManifestProjection;
+use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
+use super::publish::ManifestChange;
+use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::namespace::basis::{MetadataBasis, PublicationBasis};
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::fork::ForkDeadline;
+use crate::namespace::state::NamespaceReadState;
+use crate::namespace::store::NamespaceStore;
+use crate::time::OperationClock;
+use crate::wal::{load_replayed_wal_tail_through_seq, ProjectedWalTail, WalTailLoadError};
+use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::{ForkBasis, NamespaceStatus};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::{CommitSeq, ManifestNo, WriterEpoch};
+use std::sync::Arc;
+
+/// The source's WAL tail above the source manifest that a fork is built
+/// from, through the fork point.
+pub(crate) struct ForkPointTail {
+    /// The fork point, the head that replaying the tail reached.
+    pub(crate) seq: CommitSeq,
+    pub(crate) tail: Arc<ProjectedWalTail>,
+}
+
+impl ForkPointTail {
+    /// Returns the tail of `projection`, the source's head view.
+    pub(crate) fn from_projection<S: ObjectStore + ?Sized>(
+        projection: &ManifestProjection<'_, S>,
+    ) -> Self {
+        Self {
+            seq: projection.head.seq,
+            tail: Arc::clone(&projection.tail_state),
+        }
+    }
+}
+
+impl<S: ObjectStore> NamespaceStore<S> {
+    /// Loads the WAL tail of this namespace, a fork's source, at the fork
+    /// point that `fork_basis` records, for a call that finishes the fork
+    /// from its manifest 1.
+    ///
+    /// The tail is the WAL objects above the `folded_wal_no` of the source
+    /// manifest that `fork_basis` refers to, through the first whose head is
+    /// the fork point, read whether or not this namespace has folded them
+    /// since, with writer epochs at most `epoch_bound`. A WAL object that's
+    /// gone returns `snapshot_not_found` for the snapshot that the fork was
+    /// built from, as a finishing call does after that snapshot ended.
+    pub(crate) async fn load_fork_point_tail(
+        &self,
+        fork_basis: &ForkBasis,
+        epoch_bound: WriterEpoch,
+    ) -> Result<ForkPointTail> {
+        let basis = load_basis_metadata_segments(
+            &self.store,
+            Some(&self.segment_cache),
+            &MetadataBasis::new(fork_basis.manifest.clone()),
+        )
+        .await?;
+        let base_head = NamespaceReadState::from(basis.segments.manifest().payload());
+        let replayed = load_replayed_wal_tail_through_seq(
+            &self.store,
+            &base_head,
+            &basis.base_state,
+            fork_basis.fork_point_seq,
+            epoch_bound,
+        )
+        .await
+        .map_err(|error| match error {
+            MetadataProjectionLoadError::WalTailLoad(WalTailLoadError::MissingWalObject {
+                ..
+            }) => CoreError::SnapshotNotFound {
+                snapshot_id: fork_basis.forked_from_snapshot_id.clone(),
+            },
+            error => CoreError::MetadataProjection(error),
+        })?;
+        Ok(ForkPointTail {
+            seq: replayed.resulting_head.seq,
+            tail: Arc::new(replayed.projected_tail),
+        })
+    }
+
+    /// Publishes this fork's manifest 2, which folds `tail` (the source's WAL
+    /// tail through the fork point) on top of `manifest_1`, and returns the
+    /// fork's newest manifest after the publication.
+    ///
+    /// The fold writes each chain's pending pieces as one extent under the
+    /// pool's prefix, with the source as the chain's creator, and a metadata
+    /// segment under this namespace's prefix for each family that the tail's
+    /// commits touched. Manifest 2 is still initializing. It lists manifest
+    /// 1's runs and the new run, and its head is the fork point. Its
+    /// retention floor, writer epoch, folded WAL number, and activity counters
+    /// stay manifest 1's. The floor objects in the tail aren't applied,
+    /// because a call that folds the tail again reads it only through the
+    /// fork point and can't see a floor object after the last commit, and the
+    /// activity counters stay because the source's commits are the source's
+    /// activity. The tail has at least one commit above manifest 1's head.
+    ///
+    /// If another call's manifest 2 won the put, or another call already made
+    /// the fork active, this function returns that newest manifest. If the
+    /// newest manifest is a tombstone, it returns `namespace_deleted`. The
+    /// call checks `deadline` with the publication budget, after the
+    /// materialization and before the manifest, and writes no manifest past
+    /// either.
+    pub(crate) async fn publish_fork_point_manifest(
+        &self,
+        manifest_1: PublicationBasis,
+        tail: &ForkPointTail,
+        deadline: &ForkDeadline,
+        clock: &OperationClock,
+    ) -> Result<PublicationBasis> {
+        let payload = manifest_1.manifest.payload();
+        assert!(
+            tail.seq > payload.head_seq,
+            "a fork publishes manifest 2 only for a tail with commits"
+        );
+        let projection = ManifestProjection {
+            head: NamespaceReadState {
+                seq: tail.seq,
+                ..NamespaceReadState::from(payload)
+            },
+            basis: MetadataBasis::new(manifest_1.manifest.manifest()),
+            boundary: manifest_1.boundary.clone(),
+            manifest_segments: metadata_basis_from_manifest(
+                &self.store,
+                Some(&self.segment_cache),
+                &manifest_1.manifest,
+            )
+            .segments,
+            tail_state: Arc::clone(&tail.tail),
+        };
+        let layouts = self.materialize_tail_content(&projection).await?;
+        clock.ensure_metadata_publication_budget(&self.namespace_id)?;
+        deadline.ensure_before(clock)?;
+        let manifest_2 = NamespaceManifestPayload {
+            activity: payload.activity,
+            ..self
+                .build_namespace_manifest_for_projection(&projection, &layouts)
+                .await?
+        };
+        let update = self
+            .update_manifest(Some(manifest_1), clock, |current: LoadedManifest| {
+                let changed = match current.payload().status {
+                    NamespaceStatus::Initializing {}
+                        if current.payload().manifest_no == ManifestNo(1) =>
+                    {
+                        Ok(ManifestChange::Next(Box::new(manifest_2.clone()), ()))
+                    }
+                    NamespaceStatus::Initializing {} | NamespaceStatus::Active {} => {
+                        Ok(ManifestChange::Finished(()))
+                    }
+                    NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
+                };
+                async move { changed }
+            })
+            .await?;
+        Ok(update.current)
+    }
+}

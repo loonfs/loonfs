@@ -24,16 +24,18 @@
 //! `builder_with_store` only when the supplied store is safe to use from
 //! that Tokio runtime.
 
-use crate::publisher::{NamespaceChange, NamespaceSession, PublisherRegistry};
+use crate::publisher::{FoldWhen, NamespaceChange, NamespaceSession, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
-use crate::trace::{self, operation_span};
+use crate::trace::{self, operation_span, phase_span};
 use crate::{
     ActorId, CapabilityDocument, CreateNamespaceOptions, Error, ExecutionBudget,
     ForkNamespaceOptions, InlineContentPolicy, Maintenance, MetadataCache, Namespace, NamespaceId,
     Result, SharedObjectStore, StoreConfig,
 };
-use loonfs_core::control::{ForkTarget, PublicationBasis};
-use loonfs_core::NamespaceWriterEngine;
+use loonfs_core::control::{ForkOutcome, ForkTarget};
+use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
+use loonfs_core::publish::WriterPosition;
+use loonfs_core::{CoreError, NamespaceWriterEngine, Phase};
 use loonfs_types::{
     u64_from_usize, CompactorEpoch, Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
     FEATURE_MERGES, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
@@ -41,6 +43,7 @@ use loonfs_types::{
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use tracing::Instrument;
 
 mod builder;
 
@@ -431,12 +434,16 @@ impl LoonFs<Writable> {
 
     /// Forks `source_namespace_id` into `new_namespace_id` at the selected current head or unexpired snapshot.
     ///
-    /// A fork of the current head folds the source's WAL tail first when it
-    /// is not folded, and waits for a fold permit from the runtime's
-    /// execution budget either way. The fold is the source's one fold path,
-    /// so it waits for a fold in progress, such as the fold of the source's
-    /// writer session, and it starts from that session's position. A fork of
-    /// a snapshot never folds and takes no fold permit.
+    /// A fork of the current head folds the source's WAL tail into the fork's
+    /// own manifest, and the source publishes nothing, unless a commit in the
+    /// tail is older than
+    /// [`MAX_TAIL_COMMIT_AGE_MS`](loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS)
+    /// (11 hours and 45 minutes). The source is then folded first, and the
+    /// fork starts from the manifest that the fold published. The fork waits
+    /// for a fold permit from the runtime's execution budget whether or not
+    /// the source has a tail, and it reads the source's head from the
+    /// position of the source's writer session in this runtime, when there is
+    /// one. A fork of a snapshot never folds and takes no fold permit.
     pub async fn fork_namespace_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -463,9 +470,9 @@ impl LoonFs<Writable> {
                         self.finish_fork(source_namespace_id, result).await
                     }
                     None => {
-                        self.install_fork(source_namespace_id, |engine, basis| {
+                        self.install_fork(source_namespace_id, |engine, held| {
                             let target = target.clone();
-                            async move { engine.fork_namespace(target, actor, basis).await }
+                            async move { engine.fork_namespace(target, actor, held).await }
                         })
                         .await
                     }
@@ -478,8 +485,8 @@ impl LoonFs<Writable> {
     /// Finds `new_namespace_id` for a fork of `source_namespace_id`, and
     /// returns `namespace_exists` or `namespace_deleted` when the ID is taken
     /// (see [`NamespaceWriterEngine::find_fork_target`]). A fork finds its
-    /// target with this before it folds the source, so a fork into an
-    /// existing namespace folds nothing, and it passes the target to core,
+    /// target with this before it reads the source, so a fork into an
+    /// existing namespace writes nothing, and it passes the target to core,
     /// which doesn't find it again. If a concurrent caller creates the target
     /// in between, the fork's manifest 1 put fails, and core finds the target
     /// again.
@@ -498,24 +505,55 @@ impl LoonFs<Writable> {
     /// makes with the source's engine, and keeps this runtime's views of the
     /// source (see [`Self::finish_fork`]).
     ///
-    /// The source's WAL tail is folded first, through the source's one fold
-    /// path, and `fork` takes a snapshot of the fold's manifest (see
-    /// [`PublisherRegistry::snapshot_after_fold`]).
+    /// The fork folds the source's WAL tail into its own manifest, so it
+    /// waits for a fold permit, and `fork` reads the source's head from the
+    /// position of the source's writer session in this runtime, when there is
+    /// one. When a commit in the tail that `fork` read is older than
+    /// [`MAX_TAIL_COMMIT_AGE_MS`](loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS),
+    /// `fork` writes nothing, and the call releases its permit, folds the
+    /// source through the namespace's one fold path, and runs `fork` again,
+    /// up to `MAX_CONTENTION_ATTEMPTS` times in all, and then returns
+    /// `snapshot_unavailable`. The fold runs without the fork's permit, so
+    /// the two folds never hold permits at the same time.
     pub(crate) async fn install_fork<Fork>(
         &self,
         source_namespace_id: &NamespaceId,
-        mut fork: impl FnMut(NamespaceWriterEngine<SharedObjectStore>, PublicationBasis) -> Fork,
+        fork: impl Fn(NamespaceWriterEngine<SharedObjectStore>, Option<WriterPosition>) -> Fork,
     ) -> Result<crate::NamespaceMetadata>
     where
-        Fork: std::future::Future<Output = loonfs_core::Result<crate::NamespaceMetadata>>,
+        Fork: std::future::Future<Output = loonfs_core::Result<ForkOutcome>>,
     {
-        let result = self
-            .mode
-            .publisher
-            .snapshot_after_fold(source_namespace_id, |basis| {
-                fork(self.engine(source_namespace_id), basis)
-            })
-            .await;
+        let result = async {
+            for _ in 0..MAX_CONTENTION_ATTEMPTS {
+                let outcome = {
+                    let _permit = self
+                        .core
+                        .fold_permit()
+                        .instrument(phase_span!(
+                            self.core,
+                            Phase::WaitForFoldPermit,
+                            source_namespace_id
+                        ))
+                        .await;
+                    let held = self.mode.publisher.current_position(source_namespace_id);
+                    fork(self.engine(source_namespace_id), held).await?
+                };
+                match outcome {
+                    ForkOutcome::Created(created) => return Ok(created),
+                    ForkOutcome::SourceTailTooOld => {
+                        self.mode
+                            .publisher
+                            .fold_namespace(source_namespace_id, FoldWhen::Always)
+                            .await?;
+                    }
+                }
+            }
+            Err(Error::from(CoreError::SnapshotUnavailable(format!(
+                "the WAL tail of namespace `{source_namespace_id}` still had a commit older \
+                 than the max age after each of {MAX_CONTENTION_ATTEMPTS} folds"
+            ))))
+        }
+        .await;
         self.finish_fork(source_namespace_id, result).await
     }
 
@@ -526,13 +564,11 @@ impl LoonFs<Writable> {
         source_namespace_id: &NamespaceId,
         result: Result<crate::NamespaceMetadata>,
     ) -> Result<crate::NamespaceMetadata> {
-        // The fork folded the source through this runtime's fold path, which
-        // moved the source's views onto the fold's manifest, and then wrote
-        // snapshot records on the source, which no view tracks. So the
-        // source's views stay, as they do after a user snapshot. The runtime's
-        // view of the new namespace is the manifest 2 that the fork published
-        // or found, which the fork installed as the new namespace's cached
-        // head.
+        // The fork wrote snapshot records on the source, which no view
+        // tracks, and published nothing of the source. So the source's views
+        // stay, as they do after a user snapshot. The runtime's view of the
+        // new namespace is the active manifest that the fork published or
+        // found, which the fork installed as the new namespace's cached head.
         self.mode
             .publisher
             .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unchanged)
@@ -600,17 +636,17 @@ mod tests {
     }
 
     /// A writer runtime on a store that records every request, with a
-    /// namespace `source` that has one folded commit, and a handle that keeps
-    /// the source's writer session open.
-    struct FoldedSource {
+    /// namespace `source` that has one commit in its WAL tail, and a handle
+    /// that keeps the source's writer session open.
+    struct SourceWithATail {
         _temp_dir: tempfile::TempDir,
         store: Arc<RecordingStore<LocalFsStore>>,
         runtime: LoonFs<Writable>,
         _source: crate::Namespace<Writable>,
     }
 
-    /// Returns a [`FoldedSource`] with the log cleared.
-    async fn folded_source() -> FoldedSource {
+    /// Returns a [`SourceWithATail`] with the log cleared.
+    async fn source_with_a_tail() -> SourceWithATail {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -627,14 +663,9 @@ mod tests {
         source
             .put_file("/file.txt", b"body", &actor)
             .await
-            .expect("a commit in the source");
-        runtime
-            .maintenance(loonfs_test_support::ids::writer_id("fork-writer"))
-            .fold_wal(&source_id)
-            .await
-            .expect("fold the source");
+            .expect("a commit in the source's tail");
         store.reset();
-        FoldedSource {
+        SourceWithATail {
             _temp_dir: temp_dir,
             store,
             runtime,
@@ -642,22 +673,32 @@ mod tests {
         }
     }
 
-    /// Checks the exact requests of a fork of a folded namespace in a writer
-    /// runtime whose writer session has a fresh position on the source.
+    /// Checks the exact requests of a fork of a namespace with a WAL tail in
+    /// a writer runtime whose writer session has a fresh position on the
+    /// source. The source publishes nothing.
     ///
-    /// The fork finds the target's newest manifest once, before the fold,
-    /// with a boundary read, a listing, and a second boundary read, and finds
-    /// no namespace. The source's tail is empty, so the fold sends nothing.
-    /// The temporary snapshot is a record put, verified with a successor HEAD
-    /// on the source and a boundary read. Manifest 1 is a put and a boundary
-    /// read. The member entry is one put. The fork snapshot is a record put,
-    /// and the check after it sends a successor HEAD and a boundary read to
-    /// find the source active, and reads the temporary snapshot's record to
-    /// find it live. Manifest 2 is a put and a boundary read.
+    /// - The target: the fork finds the target's newest manifest once, with
+    ///   a boundary read, a listing, and a second boundary read, and finds no
+    ///   namespace.
+    /// - The source's head: the fork reads it from the session's position,
+    ///   which sends nothing.
+    /// - The temporary snapshot: a record put on the source's manifest 3,
+    ///   verified with a successor HEAD on the source and a boundary read.
+    /// - Manifest 1: a put and a boundary read.
+    /// - The fold of the source's tail into the fork: one content write for
+    ///   the tail's pieces, a metadata segment under the fork's prefix for
+    ///   each family that the commit touched, and manifest 2, a put and a
+    ///   boundary read.
+    /// - The fork point snapshot: a record put on the fork's manifest 2.
+    /// - The member entry: one put.
+    /// - The fork snapshot: a record put on the source, and the check after
+    ///   it, a successor HEAD and a boundary read to find the source active,
+    ///   and a read of the temporary snapshot's record to find it live.
+    /// - The active manifest 3: a put and a boundary read.
     #[tokio::test]
     async fn a_fork_with_a_fresh_position_sends_these_requests_in_order() {
-        let folded = folded_source().await;
-        folded
+        let source = source_with_a_tail().await;
+        source
             .runtime
             .fork_namespace(
                 &namespace_id("source"),
@@ -667,22 +708,33 @@ mod tests {
             .await
             .expect("the fork");
         assert_eq!(
-            request_lines(&folded.store.take()),
+            request_lines(&source.store.take()),
             [
                 "get source-fork Boundary",
                 "list namespaces/source-fork/manifests/",
                 "get source-fork Boundary",
                 "put source Snapshot",
-                "head source MetadataManifest 00000000000000000005",
+                "head source MetadataManifest 00000000000000000004",
                 "get source Boundary",
                 "put source-fork MetadataManifest 00000000000000000001",
                 "get source-fork Boundary",
+                "assemble pool ContentBlob",
+                "put source-fork MetadataSegment",
+                "put source-fork MetadataSegment",
+                "put source-fork MetadataSegment",
+                "put source-fork MetadataSegment",
+                "put source-fork MetadataSegment",
+                "put source-fork MetadataSegment",
+                "put source-fork MetadataSegment",
+                "put source-fork MetadataManifest 00000000000000000002",
+                "get source-fork Boundary",
+                "put source-fork Snapshot",
                 "put pool PoolMember",
                 "put source Snapshot",
-                "head source MetadataManifest 00000000000000000005",
+                "head source MetadataManifest 00000000000000000004",
                 "get source Boundary",
                 "get source Snapshot",
-                "put source-fork MetadataManifest 00000000000000000002",
+                "put source-fork MetadataManifest 00000000000000000003",
                 "get source-fork Boundary",
             ]
         );
@@ -691,18 +743,31 @@ mod tests {
     /// Checks the exact requests of a fork of a folded namespace in a writer
     /// runtime with nothing cached.
     ///
-    /// The requests are those of
-    /// `a_fork_with_a_fresh_position_sends_these_requests_in_order`, with the
-    /// fold's load of the source after the requests that find the target: the
-    /// source's newest manifest from the boundary (a boundary read, a listing,
-    /// the manifest, and a second boundary read), a read of the WAL object
-    /// after the folded one, which finds the tail empty, and a successor HEAD
-    /// and a boundary read.
+    /// - The target: a boundary read, a listing, and a second boundary read,
+    ///   as in `a_fork_with_a_fresh_position_sends_these_requests_in_order`.
+    /// - The source's head: the runtime has no writer session on the source,
+    ///   so core's fork reads the source with a discovery, which finds the
+    ///   newest manifest from the boundary (a boundary read, a listing, the
+    ///   manifest, and a second boundary read), reads the WAL object after the
+    ///   folded one, which finds the tail empty, and checks the manifest with
+    ///   a successor HEAD and a boundary read. The check of the tail's age
+    ///   reads that head and sends no request.
+    /// - The temporary snapshot and manifest 1, as with a fresh position.
+    /// - The tail is empty, so the fork has no manifest 2, and the fork point
+    ///   snapshot is a record put on the fork's manifest 1.
+    /// - The member entry, the fork snapshot and its check, and the active
+    ///   manifest 2, as with a fresh position.
     #[tokio::test]
     async fn a_fork_with_nothing_cached_sends_these_requests_in_order() {
-        let folded = folded_source().await;
-        let runtime = crate::test_support::writer(folded.store.clone(), "cold-writer").await;
-        folded.store.reset();
+        let source = source_with_a_tail().await;
+        source
+            .runtime
+            .maintenance(loonfs_test_support::ids::writer_id("fork-writer"))
+            .fold_wal(&namespace_id("source"))
+            .await
+            .expect("fold the source");
+        let runtime = crate::test_support::writer(source.store.clone(), "cold-writer").await;
+        source.store.reset();
         runtime
             .fork_namespace(
                 &namespace_id("source"),
@@ -712,7 +777,7 @@ mod tests {
             .await
             .expect("the fork");
         assert_eq!(
-            request_lines(&folded.store.take()),
+            request_lines(&source.store.take()),
             [
                 "get source-fork Boundary",
                 "list namespaces/source-fork/manifests/",
@@ -729,6 +794,7 @@ mod tests {
                 "get source Boundary",
                 "put source-fork MetadataManifest 00000000000000000001",
                 "get source-fork Boundary",
+                "put source-fork Snapshot",
                 "put pool PoolMember",
                 "put source Snapshot",
                 "head source MetadataManifest 00000000000000000005",

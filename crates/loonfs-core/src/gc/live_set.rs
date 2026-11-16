@@ -17,7 +17,7 @@ use futures::TryStreamExt;
 use loonfs_objectstore::keys::{extension_segment_object_key, metadata_segment_object_key};
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::NamespaceStatus;
+use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{GcResponse, ManifestNo, RetainedReason, WalNo};
 
@@ -83,8 +83,9 @@ pub(super) struct LiveSet {
     /// listing reported them.
     pub(super) snapshot_listed_bytes: u64,
     pub(super) memory: CollectionMemory,
-    /// Whether the snapshot listing returned any key, recognized or not, which
-    /// keeps a tombstone from retirement.
+    /// Whether the snapshot listing returned a key, recognized or not, that
+    /// keeps a tombstone from retirement: any key other than the namespace's
+    /// own fork point snapshot.
     has_snapshots: bool,
     pub(super) now_ms: u64,
     live_folded_wal_no: Option<WalNo>,
@@ -179,7 +180,8 @@ impl LiveSet {
     /// decision about each listed key.
     ///
     /// A snapshot whose manifest is missing fails the collection unless snapshot cleanup
-    /// would delete the snapshot.
+    /// would delete the snapshot, or the snapshot is a deleted namespace's own fork point
+    /// snapshot, which retirement deletes.
     async fn load_snapshots<S: ObjectStore>(
         &mut self,
         namespace: &NamespaceStore<S>,
@@ -188,9 +190,9 @@ impl LiveSet {
     ) -> Result<()> {
         let mut snapshots = namespace.list_snapshot_records(current_manifest_no);
         while let Some(listed) = snapshots.try_next().await? {
-            self.has_snapshots = true;
             let (snapshot, record) = match listed {
                 ListedSnapshotKey::Unrecognized { size_bytes } => {
+                    self.has_snapshots = true;
                     self.snapshot_listed_bytes += size_bytes;
                     self.snapshot_decisions.push_back(Decision::retain(
                         RetainedReason::UnrecognizedKey,
@@ -201,6 +203,17 @@ impl LiveSet {
                 }
                 ListedSnapshotKey::Snapshot(snapshot, record) => (snapshot, record),
             };
+            let own_fork_point = record.as_ref().is_some_and(|record| {
+                matches!(
+                    &record.owner,
+                    SnapshotOwner::Fork { target_namespace_id }
+                        if *target_namespace_id == namespace.namespace_id
+                )
+            });
+            // The namespace's own fork point snapshot doesn't keep it from
+            // retirement, which deletes that snapshot (format spec,
+            // "Retirement").
+            self.has_snapshots |= !own_fork_point;
             self.snapshot_listed_bytes += snapshot.size_bytes;
             if let SnapshotManifest::Loaded(manifest) = &snapshot.manifest {
                 self.protect_manifest(manifest)?;
@@ -215,7 +228,17 @@ impl LiveSet {
                 // the snapshot can have been released after the listing read it.
                 (SnapshotManifest::Missing(manifest_no), _) => {
                     let decision = namespace.sweep_snapshot(&snapshot.key, self, clock).await?;
-                    if let Decision::Retain { .. } = decision {
+                    // A call that finishes a fork can find an initializing
+                    // manifest that's already older than the grace window,
+                    // and a delete and a collection can remove that manifest
+                    // during the call, which then writes the fork point
+                    // snapshot on the deleted manifest. Nothing reads through a
+                    // deleted namespace's fork point snapshot, and the
+                    // tombstone lists the same runs, so the collection loses no
+                    // root by keeping the snapshot for retirement, which
+                    // deletes it by ID (format spec, "Snapshot cleanup").
+                    let left_to_retirement = own_fork_point && self.current_tombstone.is_some();
+                    if matches!(decision, Decision::Retain { .. }) && !left_to_retirement {
                         return Err(missing_root_manifest(
                             &namespace.namespace_id,
                             *manifest_no,

@@ -987,7 +987,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
+            loonfs_core::test_support::fold_before_fork(&namespace_store(&store, &source))
                 .await
                 .expect("fold the WAL tail"),
         )

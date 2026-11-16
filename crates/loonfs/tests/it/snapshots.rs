@@ -693,12 +693,13 @@ async fn shared_file_and_download_options_select_the_snapshot() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a read of the source through a fork snapshot returns a revision
-/// after the source's retention floor and a compaction removed it from the
-/// source's live history, and that a fork snapshot's ID still isn't a user snapshot
-/// to fork from.
+/// Checks that a read of a fork through its fork point snapshot returns a
+/// revision that a later commit in the source's unfolded WAL tail replaced,
+/// after the source's retention floor and a compaction removed the revision
+/// from the source's live history, and that a fork point snapshot's ID isn't a
+/// user snapshot to fork from.
 #[tokio::test]
-async fn a_fork_snapshot_reads_a_revision_after_the_sources_floor_passes_it() {
+async fn a_fork_point_snapshot_reads_a_revision_that_the_sources_tail_replaced() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_compacting_runtime_with_async(
         store(temp_dir.path()),
@@ -707,23 +708,37 @@ async fn a_fork_snapshot_reads_a_revision_after_the_sources_floor_passes_it() {
     )
     .await;
     let actor = loonfs_test_support::test_actor();
-    let source = namespace_id("source");
+    let [source, fork] = ["source", "fork"].map(namespace_id);
     fs.create_namespace(&source, &actor)
         .await
         .expect("create source namespace");
-    fs.put_file(&source, "/file.txt", b"forked", &actor)
-        .await
-        .expect("put the forked revision");
-    let forked = fs
-        .writer
-        .fork_namespace(&source, &namespace_id("fork"), &actor)
-        .await
-        .expect("fork source namespace");
-    let snapshot_id = forked.fork_basis.expect("fork basis").source_snapshot_id;
     let replace = loonfs::PutFileOptions {
         behavior: loonfs::DestinationBehavior::Replace,
         ..Default::default()
     };
+    for (bytes, options) in [
+        (&b"forked"[..], loonfs::PutFileOptions::default()),
+        (&b"replaced"[..], replace.clone()),
+    ] {
+        fs.put_file_with_options(&source, "/file.txt", bytes, &actor, &options)
+            .await
+            .expect("put a revision in the source's tail");
+    }
+    let forked = fs
+        .writer
+        .fork_namespace(&source, &fork, &actor)
+        .await
+        .expect("fork source namespace");
+    let snapshot_id = forked
+        .fork_basis
+        .expect("fork basis")
+        .fork_point_snapshot_id;
+    // The source folds its tail, then a later revision, so the compaction
+    // has two runs to combine.
+    fs.maintenance
+        .fold_wal(&source)
+        .await
+        .expect("fold the source's tail");
     fs.put_file_with_options(&source, "/file.txt", b"later", &actor, &replace)
         .await
         .expect("put a later revision");
@@ -740,10 +755,15 @@ async fn a_fork_snapshot_reads_a_revision_after_the_sources_floor_passes_it() {
 
     // A fresh reader reads the compacted manifest instead of a cached view.
     let reader = loonfs::test_support::fresh_reader(store(temp_dir.path())).await;
-    let namespace = reader.namespace(&source);
-    let inode_id = namespace.stat("/file.txt").await.expect("stat").inode_id;
+    let inode_id = reader
+        .namespace(&source)
+        .stat("/file.txt")
+        .await
+        .expect("stat")
+        .inode_id;
     expect_code(
-        namespace
+        reader
+            .namespace(&source)
             .read_file_revision_stream_by_inode(inode_id, RevisionNo(1))
             .await
             .map(drop),
@@ -753,10 +773,11 @@ async fn a_fork_snapshot_reads_a_revision_after_the_sources_floor_passes_it() {
         at: ReadAt::Snapshot(snapshot_id.clone()),
         ..Default::default()
     };
-    let mut stream = namespace
+    let mut stream = reader
+        .namespace(&fork)
         .read_file_revision_stream_by_inode_with_options(inode_id, RevisionNo(1), &snapshot_options)
         .await
-        .expect("read the revision through the fork snapshot");
+        .expect("read the revision through the fork point snapshot");
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next_chunk().await.expect("verified chunk") {
         bytes.extend_from_slice(&chunk);
@@ -766,7 +787,7 @@ async fn a_fork_snapshot_reads_a_revision_after_the_sources_floor_passes_it() {
     expect_code(
         fs.writer
             .fork_namespace_with_options(
-                &source,
+                &fork,
                 &namespace_id("again"),
                 &actor,
                 &ForkNamespaceOptions {

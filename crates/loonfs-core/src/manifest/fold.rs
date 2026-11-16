@@ -85,15 +85,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await
     }
 
-    async fn materialize_tail_content(
+    /// Writes the pending pieces of each chain in the projection's tail to
+    /// content objects under the pool's prefix, and returns each chain's
+    /// layout, which records the chain's creator.
+    pub(super) async fn materialize_tail_content(
         &self,
         projection: &ManifestProjection<'_, S>,
     ) -> Result<HashMap<ContentId, ContentLayoutRecord>> {
         let tail = projection.tail_state.as_ref();
-        // The fold writes every extent under the pool's prefix and
-        // records this namespace as the creator of every layout it writes,
-        // because this namespace's WAL includes pieces only for chains that
-        // it created.
+        // Each layout records the chain's creator, which is this namespace
+        // for every chain in its own tail, and the source for a chain in the
+        // source's tail that a fork folds.
         let head = &projection.head;
         let assembled = tail
             .contents()
@@ -158,27 +160,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         held: Option<WriterPosition>,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
-        let held = match held {
-            Some(held) => self
-                .load_held_manifest(held.read_basis.basis.manifest(), held.boundary.clone())
-                .await?
-                .map(|segments| (held, segments)),
-            None => None,
-        };
-        let projection = match held {
-            Some((held, manifest_segments)) => ManifestProjection {
-                manifest_segments,
-                head: held.read_basis.head,
-                basis: held.read_basis.basis,
-                boundary: held.boundary,
-                tail_state: held.tail,
-            },
-            None => self.load_fold_projection(clock.observe()).await?,
-        };
-        let publication_basis = PublicationBasis {
-            manifest: projection.manifest_segments.loaded_manifest(),
-            boundary: projection.boundary.clone(),
-        };
+        let projection = self.load_head_projection(held, clock).await?;
+        let publication_basis = projection.publication_basis();
         if publication_basis.manifest.folded_wal_no() == projection.head.wal_no {
             // No store observation confirms the basis here, so the manifest has
             // no start observation.
@@ -227,6 +210,34 @@ impl<S: ObjectStore> NamespaceStore<S> {
         ))
     }
 
+    /// Returns the manifest and the WAL tail of this namespace's head:
+    /// `held`, a writer session's position, whatever its age, or what a
+    /// discovery finds when `held` is `None` or its manifest is at or below
+    /// the manifest boundary (see `load_held_manifest`).
+    pub(crate) async fn load_head_projection(
+        &self,
+        held: Option<WriterPosition>,
+        clock: &OperationClock,
+    ) -> Result<ManifestProjection<'_, S>> {
+        let held = match held {
+            Some(held) => self
+                .load_held_manifest(held.read_basis.basis.manifest(), held.boundary.clone())
+                .await?
+                .map(|segments| (held, segments)),
+            None => None,
+        };
+        match held {
+            Some((held, manifest_segments)) => Ok(ManifestProjection {
+                manifest_segments,
+                head: held.read_basis.head,
+                basis: held.read_basis.basis,
+                boundary: held.boundary,
+                tail_state: held.tail,
+            }),
+            None => self.load_fold_projection(clock.observe()).await,
+        }
+    }
+
     pub(super) async fn load_manifest_projection(
         &self,
         observed: Observation,
@@ -247,7 +258,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    async fn build_namespace_manifest_for_projection(
+    pub(super) async fn build_namespace_manifest_for_projection(
         &self,
         projection: &ManifestProjection<'_, S>,
         layouts: &HashMap<ContentId, ContentLayoutRecord>,
@@ -463,20 +474,31 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
     }
 }
 
-pub(super) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
-    pub(super) head: NamespaceReadState,
-    pub(super) basis: MetadataBasis,
+/// A namespace's head: a manifest, its WAL tail, and the head that replaying
+/// the tail reached.
+pub(crate) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
+    pub(crate) head: NamespaceReadState,
+    pub(crate) basis: MetadataBasis,
     /// The manifest boundary as the check that confirmed `basis` read it.
-    pub(super) boundary: Option<LoadedBoundary>,
-    pub(super) manifest_segments: VerifiedMetadataSegments<'a, S>,
+    pub(crate) boundary: Option<LoadedBoundary>,
+    pub(crate) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
-    pub(super) tail_state: Arc<ProjectedWalTail>,
+    pub(crate) tail_state: Arc<ProjectedWalTail>,
 }
 
 impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
-    pub(super) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
+    pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
         MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state)
+    }
+
+    /// Returns the manifest that the tail was read above, with the manifest
+    /// boundary that the check that confirmed it read.
+    pub(crate) fn publication_basis(&self) -> PublicationBasis {
+        PublicationBasis {
+            manifest: self.manifest_segments.loaded_manifest(),
+            boundary: self.boundary.clone(),
+        }
     }
 }
 

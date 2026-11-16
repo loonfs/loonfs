@@ -537,9 +537,10 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
     let fork_basis = fork.fork_basis.expect("a fork has a fork basis");
     assert_eq!(fork_basis.source_namespace_id, source);
     assert_eq!(fork_basis.fork_point_seq, snapshot.captured_seq);
-    assert_ne!(
-        fork_basis.source_snapshot_id, snapshot.snapshot_id,
-        "a fork of a snapshot keeps the snapshot's manifest with a fork snapshot of its own"
+    assert_eq!(
+        fork_basis.fork_point_snapshot_id.manifest_no(),
+        loonfs_types::ManifestNo(1),
+        "a fork of a snapshot keeps its manifest 1 with its fork point snapshot"
     );
     harness.server.abort();
 }

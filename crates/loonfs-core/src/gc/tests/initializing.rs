@@ -110,3 +110,58 @@ async fn snapshot_cleanup_keeps_a_fork_snapshot_whose_target_is_initializing() {
     assert_eq!(recording.count(OperationSelector::Any), 0);
     assert!(snapshot_record_exists(&store, &source, &basis.source_snapshot_id).await);
 }
+
+/// Checks that the collection of a deleted namespace keeps the namespace's
+/// own fork point snapshot whose manifest is missing, without an error, and
+/// that retirement deletes the snapshot. A call that finishes a fork writes
+/// such a snapshot when it found an initializing manifest that a delete and a
+/// collection then removed during the call.
+#[tokio::test]
+async fn a_deleted_namespaces_fork_point_snapshot_on_a_missing_manifest_is_left_to_retirement() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (source, target) = source_and_target();
+    let (_, manifest_1) = half_done_fork(&store, &source, &target, &context(1_000)).await;
+    let namespace = crate::test_support::namespace_store(&store, &target);
+    let crate::namespace::control::NewestManifest::Manifest(found) = namespace
+        .find_newest_manifest()
+        .await
+        .expect("find manifest 1")
+    else {
+        panic!("manifest 1 is the newest manifest");
+    };
+    let deleted_at_ms = 1_000 + GC_GRACE_WINDOW_MS;
+    namespace
+        .tombstone_initializing_namespace(found.clone(), &context(deleted_at_ms).clock())
+        .await
+        .expect("delete the target");
+    let aged = MetadataMapStore::aged(
+        &store,
+        KeyPredicate::exact(metadata_manifest_object(&target, &ManifestNo(1))),
+    );
+    collect(&aged, &target, &context(deleted_at_ms)).await;
+    assert!(namespace
+        .load_manifest_by_no(ManifestNo(1))
+        .await
+        .expect("load manifest 1")
+        .is_none());
+
+    namespace
+        .write_fork_point_snapshot(&found, &context(deleted_at_ms).clock())
+        .await
+        .expect("the stale call's fork point snapshot");
+    let fork_point_snapshot_id = &manifest_1
+        .fork_basis
+        .as_ref()
+        .expect("a fork basis")
+        .fork_point_snapshot_id;
+    collect(&store, &target, &context(deleted_at_ms + 1)).await;
+    assert!(snapshot_record_exists(&store, &target, fork_point_snapshot_id).await);
+    collect(
+        &store,
+        &target,
+        &context(deleted_at_ms + GC_GRACE_WINDOW_MS),
+    )
+    .await;
+    assert!(!snapshot_record_exists(&store, &target, fork_point_snapshot_id).await);
+}

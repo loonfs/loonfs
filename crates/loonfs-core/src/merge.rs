@@ -20,8 +20,7 @@ use crate::commit::candidates::commit_response_from_commit_receipt;
 use crate::commit::engine::CommitCandidate;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, HistoryPosition, MergeBound, Result};
-use crate::limits::MAX_TAIL_COMMIT_AGE_MS;
-use crate::metadata::{MetadataState, MetadataView};
+use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::read::LoadedMetadataView;
 use crate::path::write::{merge_fingerprint, CommitIntent, PublishPlanningSession};
@@ -381,12 +380,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Returns whether a commit in this namespace's WAL tail, read at
-    /// `context`, is older than [`MAX_TAIL_COMMIT_AGE_MS`] at `now_ms`.
+    /// `context`, is older than
+    /// [`MAX_TAIL_COMMIT_AGE_MS`](crate::limits::MAX_TAIL_COMMIT_AGE_MS) at
+    /// `now_ms`.
     ///
-    /// When it's true, an operation of another namespace that reads the tail,
-    /// such as a merge or a replay commit prepared at `now_ms`, folds this
-    /// namespace before planning (format spec, "Cross-namespace copies and
-    /// moves"). The commit times come from the writers' clocks, as a
+    /// When it's true, a merge or a replay commit prepared at `now_ms`, which
+    /// reads the tail for another namespace, folds this namespace first
+    /// (format spec, "Cross-namespace copies and moves").
+    /// The commit times come from the writers' clocks, as a
     /// retention advance reads them, and `now_ms` from this host's clock.
     pub async fn tail_exceeds_max_commit_age(
         &self,
@@ -394,15 +395,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         now_ms: u64,
     ) -> Result<bool> {
         let view = self.namespace.load_metadata_view(context).await?;
-        let oldest_at_ms = view
+        Ok(view
             .wal_tail
-            .row_states(view.visible_seq())
-            .flat_map(MetadataState::commits)
-            .map(|commit| commit.committed_at_ms)
-            .min();
-        Ok(oldest_at_ms.is_some_and(|committed_at_ms| {
-            now_ms.saturating_sub(committed_at_ms) > MAX_TAIL_COMMIT_AGE_MS
-        }))
+            .has_commit_older_than_max_age(view.visible_seq(), now_ms))
     }
 
     /// Returns the commit request of a merge with `operations` and
@@ -471,8 +466,7 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
     fork_point_seq: CommitSeq,
 ) -> Result<std::result::Result<MergeStart, FloorRefusal>> {
     let rebase = rebase_basis(head, source_namespace_id);
-    let checked_fork_point_seq =
-        rebase.map_or(fork_point_seq, |(basis, _)| basis.manifest.head_seq);
+    let checked_fork_point_seq = rebase.map_or(fork_point_seq, |(basis, _)| basis.fork_point_seq);
     let retention_floor_seq = view.retention_floor_seq();
     if checked_fork_point_seq < retention_floor_seq {
         return Ok(Err(FloorRefusal {
@@ -487,7 +481,7 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
         // The new fork inherited the source's merge index rows at or below
         // its own fork point, and only its own replay rows count.
         Some((basis, rebased_from)) => (
-            newest.filter(|previous| previous.committed_seq > basis.manifest.head_seq),
+            newest.filter(|previous| previous.committed_seq > basis.fork_point_seq),
             rebased_from.resume_after_seq,
         ),
         None => (newest, fork_point_seq),
@@ -572,14 +566,13 @@ fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-/// Returns the fork point of the fork whose head is `fork_head`, which is the
-/// folded head of the fork's basis manifest, a sequence of `namespace_id`. A
-/// namespace whose basis manifest belongs to another namespace isn't a fork
-/// of `namespace_id`.
+/// Returns the fork point of the fork whose head is `fork_head`, which its
+/// fork basis records, a sequence of `namespace_id`. A namespace whose basis
+/// manifest belongs to another namespace isn't a fork of `namespace_id`.
 fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Result<CommitSeq> {
     match &fork_head.fork_basis {
         Some(basis) if basis.manifest.owner_namespace_id == *namespace_id => {
-            Ok(basis.manifest.head_seq)
+            Ok(basis.fork_point_seq)
         }
         _ => Err(CoreError::InvalidMerge {
             param: "source_namespace_id",

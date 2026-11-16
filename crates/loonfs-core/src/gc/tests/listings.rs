@@ -69,7 +69,7 @@ async fn only_a_pool_collection_heads_a_successor() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -85,7 +85,7 @@ async fn only_a_pool_collection_heads_a_successor() {
         .gc(&context(1_000 + GC_GRACE_WINDOW_MS).clock())
         .await
         .expect("retire fork");
-    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 2);
     // A tombstone needs no successor check.
     assert_eq!(recorded.counts().heads, 0);
 }

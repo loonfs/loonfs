@@ -50,7 +50,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
                         .await
                         .expect("find the fork target"),
                     &loonfs_test_support::test_actor(),
-                    crate::test_support::folded_manifest(&fixture.namespace)
+                    crate::test_support::fold_before_fork(&fixture.namespace)
                         .await
                         .expect("fold the WAL tail"),
                 )
@@ -112,9 +112,9 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
             .await
             .expect("retire from leaf to root");
         if index > 0 {
-            // A fork's retirement releases its fork snapshot and deletes no
-            // content.
-            assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
+            // A fork's retirement releases its two fork snapshots and
+            // deletes no content.
+            assert_eq!(report.deleted_snapshots_by_owner.fork, 2);
             for key in &keys {
                 assert!(store.head(key).await.expect("pool object").is_some());
             }

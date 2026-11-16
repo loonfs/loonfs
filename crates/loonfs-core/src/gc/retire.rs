@@ -9,9 +9,10 @@ use loonfs_types::GcResponse;
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Retires the namespace once its tombstone is eligible (format spec,
     /// "Retiring an eligible tombstone") in three steps: deletes the fork
-    /// snapshot that the tombstone's fork basis refers to, deletes the
-    /// namespace's member entry, and then raises the manifest boundary to
-    /// retired. A namespace created without a source has no fork snapshot.
+    /// snapshot on the source and the fork point snapshot that the
+    /// tombstone's fork basis refers to, deletes the namespace's member entry,
+    /// and then raises the manifest boundary to retired. A namespace created
+    /// without a source has no fork snapshots.
     ///
     /// The tombstone records the pool ID and the fork basis, which can't
     /// change after manifest 1, and the tombstone stays until the boundary is
@@ -31,9 +32,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .as_ref()
             .expect("eligible namespace should have a tombstone");
         if let Some(basis) = &tombstone.fork_basis {
-            if self.delete_source_snapshot(basis).await? {
-                report.deleted_snapshots_by_owner.fork += 1;
-            }
+            report.deleted_snapshots_by_owner.fork += self.delete_fork_snapshots(basis).await?;
         }
         self.delete_member_entry(&tombstone.pool_id).await?;
         self.retire_boundary().await

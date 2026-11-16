@@ -1,10 +1,14 @@
 //! Namespace installation, numbered publication, and fork ownership contracts.
 
 use crate::commit::engine::NamespaceCommitEngine;
-use crate::limits::OPERATION_SNAPSHOT_TTL_MS;
+use crate::limits::{
+    MAX_TAIL_COMMIT_AGE_MS, METADATA_PUBLICATION_BUDGET_MS, OPERATION_SNAPSHOT_TTL_MS,
+};
 use crate::manifest::tests::control_requests;
 use crate::namespace::basis::PublicationBasis;
-use crate::test_support::WriterAt;
+use crate::namespace::fork::ForkOutcome;
+use crate::namespace::store::NamespaceStore;
+use crate::test_support::{NamespaceFixture, WriterAt};
 use crate::wal::tests::publish;
 use crate::CoreError;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -14,6 +18,7 @@ use loonfs_objectstore::{
     local_fs_store::LocalFsStore,
     ObjectStore,
 };
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
@@ -21,8 +26,9 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner, SnapshotPayload};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::options::AttributeInclusion;
-use loonfs_types::{ErrorCode, ManifestNo, NamespaceId, SnapshotId};
+use loonfs_types::{DestinationBehavior, ErrorCode, ManifestNo, NamespaceId, SnapshotId};
 use std::assert_matches;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 /// The store operations of the create in
@@ -32,10 +38,11 @@ const CREATE_STORE_OPERATIONS: usize = 8;
 
 /// The store operations of the fork in
 /// `a_new_namespace_is_looked_up_before_its_first_write`, with the fold of
-/// the source's WAL tail before it: 16 for the fold, and 15 for the fork, of
-/// which 2 are the check of the snapshot that the fork is built from and 1 is
-/// the member entry.
-const FORK_STORE_OPERATIONS: usize = 31;
+/// the source's WAL tail before it: 16 for the fold, and 23 for the fork, of
+/// which 7 are the discovery of the folded source, 2 are the check of the
+/// snapshot that the fork is built from, 1 is the fork point snapshot, and 1
+/// is the member entry.
+const FORK_STORE_OPERATIONS: usize = 39;
 
 /// The store operations of the deletion in
 /// `a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a_writer_session`.
@@ -365,12 +372,14 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
         .await
-        .expect("fork");
+        .expect("fork")
+        .created()
+        .expect("a fork of a tail with no old commit");
     let operations = store.take();
     let manifest_2 = metadata_manifest_object(&target, &ManifestNo(2));
     assert_eq!(
@@ -408,9 +417,11 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     let target_entry = position(&pool_member(&created.pool_id, &target));
+    // The fork point snapshot's put comes between manifest 1's boundary read
+    // and the member entry.
     assert!(
         temporary_put < position(&metadata_manifest_object(&target, &ManifestNo(1)))
-            && target_boundary_reads[2] + 1 == target_entry
+            && target_boundary_reads[2] + 2 == target_entry
             && target_entry < fork_put
             && fork_put < position(&manifest_2),
         "{operations:?}"
@@ -522,12 +533,14 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
                 .await
                 .expect("find the fork target"),
             &actor_id,
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
         .await
-        .expect("fork snapshot proves authorship from matching bytes");
+        .expect("fork snapshot proves authorship from matching bytes")
+        .created()
+        .expect("a fork of a tail with no old commit");
     assert!(forked.fork_basis.is_some());
     assert_eq!(store.attempts(), 1);
     assert_eq!(store.remaining(), 0);
@@ -663,7 +676,7 @@ async fn a_create_never_finishes_a_fork_and_a_fork_never_finishes_a_create() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -749,7 +762,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -784,7 +797,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -907,7 +920,7 @@ async fn a_fork_that_loses_target_publication_writes_no_fork_snapshot() {
                 .await
                 .expect("find the fork target"),
             &actor,
-            crate::test_support::folded_manifest(&engine.namespace)
+            crate::test_support::fold_before_fork(&engine.namespace)
                 .await
                 .expect("fold the WAL tail"),
         );
@@ -1043,7 +1056,7 @@ async fn a_fork_that_stopped_after_manifest_one_is_finished_by_the_same_request(
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            crate::test_support::folded_manifest(&fixture.namespace)
+            crate::test_support::fold_before_fork(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -1066,10 +1079,12 @@ async fn a_fork_that_stopped_after_manifest_one_is_finished_by_the_same_request(
     );
     assert_eq!(
         forked,
-        crate::test_support::namespace_store(&store, &target)
-            .load_metadata()
-            .await
-            .expect("load the fork")
+        ForkOutcome::Created(
+            crate::test_support::namespace_store(&store, &target)
+                .load_metadata()
+                .await
+                .expect("load the fork")
+        )
     );
 }
 
@@ -1098,7 +1113,7 @@ async fn a_fork_request_that_differs_from_manifest_one_returns_namespace_exists(
                 .await
                 .expect("find the fork target"),
             &actor,
-            crate::test_support::folded_manifest(&other_fixture.namespace)
+            crate::test_support::fold_before_fork(&other_fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
@@ -1297,7 +1312,7 @@ async fn a_finishing_fork_whose_snapshot_ended_returns_snapshot_not_found_and_le
                     .await
                     .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
-                crate::test_support::folded_manifest(&fixture.namespace)
+                crate::test_support::fold_before_fork(&fixture.namespace)
                     .await
                     .expect("fold the WAL tail"),
             )
@@ -1321,11 +1336,6 @@ async fn a_finishing_fork_whose_source_was_deleted_returns_namespace_deleted() {
     let (_, manifest_1) =
         crate::test_support::half_done_fork(&store, &source, &target, &context()).await;
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
-    let source_basis = fixture
-        .namespace
-        .load_current_basis()
-        .await
-        .expect("the source's basis");
     fixture
         .engine()
         .delete_namespace(Default::default())
@@ -1340,7 +1350,7 @@ async fn a_finishing_fork_whose_source_was_deleted_returns_namespace_deleted() {
                 .await
                 .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            source_basis,
+            None,
         )
         .await;
     assert_matches!(finished, Err(CoreError::NamespaceDeleted { .. }));
@@ -1370,11 +1380,6 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
     crate::test_support::write_fork_snapshot(&store, &manifest_1).await;
     let written = snapshot_records(&store, &source).await;
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
-    let head = fixture
-        .namespace
-        .load_current_basis()
-        .await
-        .expect("the source's basis");
     store.inner().reset();
     store.block_next();
     let finisher = fixture.engine();
@@ -1405,7 +1410,7 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
     };
     let actor = loonfs_test_support::test_actor();
     let (finished, ()) = tokio::join!(
-        finisher.fork_namespace(fork_target, &actor, head),
+        finisher.fork_namespace(fork_target, &actor, None),
         other_finisher
     );
     let finished = finished.expect("the finisher returns success");
@@ -1432,9 +1437,298 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
     assert_eq!(snapshot_records(&store, &source).await, written);
     assert_eq!(
         finished,
-        crate::test_support::namespace_store(&store, &target)
-            .load_metadata()
-            .await
-            .expect("load the fork")
+        ForkOutcome::Created(
+            crate::test_support::namespace_store(&store, &target)
+                .load_metadata()
+                .await
+                .expect("load the fork")
+        )
     );
+}
+
+/// Returns the fixture of `namespace_id` at `writer`'s time whose operation
+/// clocks read `timer`, so a test sets how much time passes during a call.
+fn fixture_with_timer<S: ObjectStore + Clone>(
+    store: S,
+    namespace_id: &NamespaceId,
+    writer: &WriterAt,
+    timer: Arc<ManualClock>,
+) -> NamespaceFixture<S> {
+    let fixture = NamespaceFixture::new(store, namespace_id, writer);
+    NamespaceFixture {
+        namespace: NamespaceStore {
+            timer,
+            ..fixture.namespace
+        },
+        ..fixture
+    }
+}
+
+/// Forks the head of `fixture`'s namespace into `target`, reading the head
+/// with a discovery.
+async fn fork_head<S: ObjectStore + Clone>(
+    fixture: &NamespaceFixture<S>,
+    target: &NamespaceId,
+) -> crate::Result<ForkOutcome> {
+    let engine = fixture.engine();
+    engine
+        .fork_namespace(
+            engine.find_fork_target(target).await?,
+            &loonfs_test_support::test_actor(),
+            None,
+        )
+        .await
+}
+
+/// Checks that the fork of `source` into `target` stopped after its
+/// `manifest_count` initializing manifests: the target has no other
+/// manifest, no fork point snapshot, and no member entry, and the source has
+/// no fork snapshot.
+async fn assert_fork_stopped_after_manifests<S: ObjectStore>(
+    store: &S,
+    source: &NamespaceId,
+    target: &NamespaceId,
+    manifest_count: usize,
+) {
+    let manifests = manifest_payloads(store, target).await;
+    assert_eq!(manifests.len(), manifest_count, "{manifests:?}");
+    assert!(manifests
+        .iter()
+        .all(|manifest| manifest.status == NamespaceStatus::Initializing {}));
+    assert!(snapshot_records(store, target).await.is_empty());
+    assert!(!member_entry_keys(store)
+        .await
+        .contains(&pool_member(&manifests[0].pool_id, target)));
+    assert!(fork_snapshots(store, source).await.is_empty());
+}
+
+/// Checks that a fork of a head whose WAL tail has a commit older than
+/// `MAX_TAIL_COMMIT_AGE_MS` returns `SourceTailTooOld` and writes nothing:
+/// no object under the target's prefix, no member entry, and no snapshot
+/// record on the source.
+#[tokio::test]
+async fn a_fork_of_a_head_whose_tail_has_an_old_commit_writes_nothing() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (source, target) = source_and_target();
+    let fixture = NamespaceFixture::new(&store, &source, &context());
+    fixture.create().await.expect("create the source");
+    fixture
+        .put_file("/old.txt", b"old", DestinationBehavior::NoReplace, None)
+        .await
+        .expect("a commit in the source's tail");
+    let members = member_entry_keys(&store).await;
+    let later =
+        crate::test_support::writer_at("writer", context().now_ms + MAX_TAIL_COMMIT_AGE_MS + 1);
+    let forked = fork_head(&NamespaceFixture::new(&store, &source, &later), &target)
+        .await
+        .expect("the fork");
+    assert_eq!(forked, ForkOutcome::SourceTailTooOld);
+    assert!(store
+        .list_prefix(&loonfs_objectstore::keys::namespace_prefix(&target))
+        .await
+        .expect("list the target")
+        .is_empty());
+    assert_eq!(member_entry_keys(&store).await, members);
+    assert!(snapshot_records(&store, &source).await.is_empty());
+}
+
+/// Starts a fork of the head of `source` into `target` in the store at
+/// `root`, where `source`'s WAL tail has a commit, and stops it after
+/// manifest 1, because the store refuses manifest 2's put. Returns the ID of
+/// the fork's temporary snapshot.
+async fn fork_of_a_tail_stopped_after_manifest_one(
+    root: &std::path::Path,
+    source: &NamespaceId,
+    target: &NamespaceId,
+) -> SnapshotId {
+    let store = LocalFsStore::new(root).expect("store");
+    let fixture = NamespaceFixture::new(&store, source, &context());
+    fixture.create().await.expect("create the source");
+    fixture
+        .put_file("/tail.txt", b"tail", DestinationBehavior::NoReplace, None)
+        .await
+        .expect("a commit in the source's tail");
+    let refusing = FailStore::new(
+        LocalFsStore::new(root).expect("store"),
+        KeyPredicate::exact(metadata_manifest_object(target, &ManifestNo(2))),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::PermissionDenied("refused".to_owned()),
+    );
+    refusing.fail_next(1);
+    fork_head(
+        &NamespaceFixture::new(&refusing, source, &context()),
+        target,
+    )
+    .await
+    .expect_err("the fork stops at manifest 2");
+    let manifests = manifest_payloads(&store, target).await;
+    let [manifest_1] = &manifests[..] else {
+        panic!("manifest 1 alone, got {manifests:?}");
+    };
+    manifest_1
+        .fork_basis
+        .as_ref()
+        .expect("a fork basis")
+        .forked_from_snapshot_id
+        .clone()
+}
+
+/// Checks that a call that finishes a fork that folds the source's WAL tail
+/// succeeds until `OPERATION_SNAPSHOT_TTL_MS` after the temporary snapshot
+/// was created, and from then on returns `snapshot_not_found` and writes
+/// nothing, although a caller extended the temporary snapshot to 48 hours.
+#[tokio::test]
+async fn a_finishing_fork_of_a_tail_ends_when_its_temporary_snapshot_would_have_expired() {
+    for elapsed_ms in [OPERATION_SNAPSHOT_TTL_MS - 1, OPERATION_SNAPSHOT_TTL_MS] {
+        let directory = tempdir().expect("directory");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let (source, target) = source_and_target();
+        let temporary =
+            fork_of_a_tail_stopped_after_manifest_one(directory.path(), &source, &target).await;
+        NamespaceFixture::new(&store, &source, &context())
+            .engine()
+            .extend_snapshot(&temporary, context().now_ms + 48 * 60 * 60 * 1_000)
+            .await
+            .expect("extend the temporary snapshot");
+        let later = crate::test_support::writer_at("writer", context().now_ms + elapsed_ms);
+        let finished = fork_head(
+            &fixture_with_timer(&store, &source, &later, Arc::new(ManualClock::new(0))),
+            &target,
+        )
+        .await;
+        if elapsed_ms < OPERATION_SNAPSHOT_TTL_MS {
+            assert_matches!(finished, Ok(ForkOutcome::Created(_)));
+        } else {
+            assert_matches!(
+                finished,
+                Err(CoreError::SnapshotNotFound { snapshot_id }) if snapshot_id == temporary
+            );
+            assert_fork_stopped_after_manifests(&store, &source, &target, 1).await;
+        }
+    }
+}
+
+/// Checks that a fork of a head whose WAL tail has no commits has no
+/// deadline: a call later than `OPERATION_SNAPSHOT_TTL_MS` after the
+/// temporary snapshot was created, which a caller extended so that it's
+/// still live, finishes the fork that stopped after manifest 1.
+#[tokio::test]
+async fn a_finishing_fork_that_folds_no_tail_has_no_deadline() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let (source, target) = source_and_target();
+    let (temporary, manifest_1) =
+        crate::test_support::half_done_fork(&store, &source, &target, &context()).await;
+    NamespaceFixture::new(&store, &source, &context())
+        .engine()
+        .extend_snapshot(
+            &temporary.snapshot_id,
+            context().now_ms + 48 * 60 * 60 * 1_000,
+        )
+        .await
+        .expect("extend the temporary snapshot");
+    let later =
+        crate::test_support::writer_at("writer", context().now_ms + OPERATION_SNAPSHOT_TTL_MS + 1);
+    let finished = fork_head(
+        &fixture_with_timer(&store, &source, &later, Arc::new(ManualClock::new(0))),
+        &target,
+    )
+    .await;
+    assert_matches!(finished, Ok(ForkOutcome::Created(_)));
+    assert_eq!(
+        manifest_payloads(&store, &target).await,
+        [
+            manifest_1.clone(),
+            NamespaceManifestPayload {
+                manifest_no: ManifestNo(2),
+                ..manifest_1.activated()
+            }
+        ]
+    );
+}
+
+/// Checks that a first fork call whose clock reaches
+/// `OPERATION_SNAPSHOT_TTL_MS` after its temporary snapshot's creation while
+/// it publishes manifest 2 returns `snapshot_not_found` and writes nothing
+/// more.
+#[tokio::test]
+async fn a_fork_of_the_head_that_runs_out_of_time_after_manifest_two_writes_nothing_more() {
+    let directory = tempdir().expect("directory");
+    let (source, target) = source_and_target();
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(metadata_manifest_object(&target, &ManifestNo(2))),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let fixture = NamespaceFixture::new(&store, &source, &context());
+    fixture.create().await.expect("create the source");
+    fixture
+        .put_file("/tail.txt", b"tail", DestinationBehavior::NoReplace, None)
+        .await
+        .expect("a commit in the source's tail");
+    let timer = Arc::new(ManualClock::new(0));
+    let forking = fixture_with_timer(&store, &source, &context(), Arc::clone(&timer));
+    store.block_next();
+    let (forked, ()) = tokio::join!(fork_head(&forking, &target), async {
+        store.wait_until_blocked().await;
+        timer.advance_ms(OPERATION_SNAPSHOT_TTL_MS);
+        store.release();
+    });
+    assert_matches!(forked, Err(CoreError::SnapshotNotFound { .. }));
+    assert_fork_stopped_after_manifests(&store, &source, &target, 2).await;
+}
+
+/// Checks that a fork call whose timer passes `METADATA_PUBLICATION_BUDGET_MS`
+/// after manifest 1 returns `metadata_publication_budget_exceeded` before the
+/// fork point snapshot's write, and writes neither fork snapshot, no member
+/// entry, and no active manifest.
+#[tokio::test]
+async fn a_fork_past_its_budget_writes_no_fork_point_snapshot() {
+    let directory = tempdir().expect("directory");
+    let (source, target) = source_and_target();
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(metadata_manifest_object(&target, &ManifestNo(1))),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let fixture = NamespaceFixture::new(&store, &source, &context());
+    fixture.create().await.expect("create the source");
+    let named = fixture
+        .namespace
+        .create_snapshot_record(
+            SnapshotOwner::User {
+                name: Some("named".to_owned()),
+                expires_at_ms: None,
+                deleted_at_ms: None,
+            },
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+            &context().clock(),
+        )
+        .await
+        .map(|(record, _)| record)
+        .expect("take a named snapshot");
+    let timer = Arc::new(ManualClock::new(0));
+    let engine = fixture_with_timer(&store, &source, &context(), Arc::clone(&timer)).engine();
+    let fork_target = engine
+        .find_fork_target(&target)
+        .await
+        .expect("find the fork target");
+    store.block_next();
+    let actor = loonfs_test_support::test_actor();
+    let (forked, ()) = tokio::join!(
+        engine.fork_namespace_at_snapshot(fork_target, &actor, &named.snapshot_id),
+        async {
+            store.wait_until_blocked().await;
+            timer.advance_ms(METADATA_PUBLICATION_BUDGET_MS + 1);
+            store.release();
+        }
+    );
+    assert_matches!(
+        forked,
+        Err(CoreError::MetadataPublicationBudgetExceeded { .. })
+    );
+    assert_fork_stopped_after_manifests(&store, &source, &target, 1).await;
 }
