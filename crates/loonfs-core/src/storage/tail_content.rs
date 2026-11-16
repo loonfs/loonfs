@@ -461,6 +461,15 @@ async fn assembly_sources<S: ObjectStore + ?Sized>(
             .clone()
             .filter(|checksum| checksum.algorithm() == store.checksum_algorithm())
             .ok_or_else(corrupt)?;
+        if checksum != located.extent.object_checksum {
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "content object `{source_key}` is stored with checksum `{}:{}`, not the `{}:{}` that its extent records",
+                checksum.algorithm(),
+                checksum.value(),
+                located.extent.object_checksum.algorithm(),
+                located.extent.object_checksum.value()
+            )));
+        }
         expected = expected
             .crc_combine(&checksum, stored.size_bytes)
             .ok_or_else(corrupt)?;

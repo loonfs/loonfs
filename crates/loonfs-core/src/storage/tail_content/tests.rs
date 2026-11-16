@@ -285,6 +285,35 @@ async fn assembly_sources_require_whole_extents_and_stored_checksums_in_the_stor
     }
 }
 
+/// Checks that an assembly rejects a source object whose stored checksum
+/// differs from the checksum that its extent records, with a corruption error
+/// that identifies the source object's key.
+#[tokio::test]
+async fn an_assembly_source_is_stored_with_the_checksum_that_its_extent_records() {
+    let directory = tempfile::tempdir().expect("directory");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let (layout, _, _) = fixture(&local, &[12], false, 0).await;
+    let extent = layout.0.layout.extents[0].clone();
+    assert_eq!(extent.object_checksum, Checksum::crc64nvme(&[b'a'; 12]));
+    let algorithm = local.checksum_algorithm();
+    let store = MetadataMapStore::new(&local, KeyPredicate::any(), move |mut metadata| {
+        metadata.checksum = Some(Checksum::compute(algorithm, &[b'b'; 12]));
+        metadata
+    });
+    let located = LocatedExtent {
+        object_key: extent_object_key(&HEAD.pool_id, &extent),
+        extent,
+    };
+    let source_key = located.object_key.clone();
+    let error = assembly_sources(&store, "destination", &[located], &[])
+        .await
+        .expect_err("a source stored with another checksum");
+    assert_matches!(
+        &error,
+        CoreError::NamespaceCorrupt(message) if message.contains(&source_key)
+    );
+}
+
 #[tokio::test]
 async fn local_large_tail_assembles_without_sources() {
     let directory = tempfile::tempdir().expect("directory");
@@ -400,7 +429,6 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
             end: size,
         };
         extent.length = layout_size;
-        let key = extent_object_key(&HEAD.pool_id, extent);
         let bytes = Bytes::from(
             [
                 b"aaaaaa".as_slice(),
@@ -408,6 +436,8 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
             ]
             .concat(),
         );
+        extent.object_checksum = Checksum::crc64nvme(&bytes);
+        let key = extent_object_key(&HEAD.pool_id, extent);
         store
             .put_immutable_verified(&key, bytes)
             .await
@@ -523,6 +553,60 @@ async fn another_members_chain_keeps_its_creator_and_its_extents() {
             }
         }
     }
+}
+
+/// Checks that a fold onto a chain whose source object now stores other bytes
+/// of the same length fails with a corruption error after the source's HEAD
+/// request, without writing a span object from those bytes.
+#[tokio::test]
+async fn a_fold_onto_a_source_object_with_other_bytes_writes_no_span_object() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    // The chain's 6-byte extent is at most twice the 4 tail bytes, so the
+    // fold assembles the extent's object into the new span object.
+    let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
+    let source_key = extent_object_key(&HEAD.pool_id, &layout.0.layout.extents[0]);
+    let etag = store
+        .head(&source_key)
+        .await
+        .expect("head")
+        .and_then(|metadata| metadata.etag)
+        .expect("the source's etag");
+    store
+        .put(
+            &source_key,
+            Bytes::from_static(b"cccccc"),
+            loonfs_objectstore::PutMode::CompareAndSwap {
+                expected_etag: etag,
+            },
+        )
+        .await
+        .expect("other bytes under the source's key");
+    let content = tail.content(&reference).expect("content");
+    store.reset();
+    let error = write_tail_content(
+        ContentWrites::new(
+            &store,
+            &Permits::new(std::num::NonZeroUsize::MIN, None),
+            &HEAD,
+        ),
+        &layout,
+        &content,
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
+    )
+    .await
+    .expect_err("a fold onto a source object with other bytes");
+    assert_matches!(
+        &error,
+        CoreError::NamespaceCorrupt(message) if message.contains(&source_key)
+    );
+    assert_eq!(
+        store.snapshot(),
+        vec![RecordedOperation::Head { key: source_key }]
+    );
 }
 
 /// Checks that a chain without a layout row takes its creator from the WAL
