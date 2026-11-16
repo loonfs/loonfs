@@ -20,7 +20,8 @@ use crate::commit::candidates::commit_response_from_commit_receipt;
 use crate::commit::engine::CommitCandidate;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, HistoryPosition, MergeBound, Result};
-use crate::metadata::MetadataView;
+use crate::limits::MAX_TAIL_COMMIT_AGE_MS;
+use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::read::LoadedMetadataView;
 use crate::path::write::{merge_fingerprint, CommitIntent, PublishPlanningSession};
@@ -44,8 +45,8 @@ pub use replay::ReplayPlan;
 pub struct MergeRequest {
     /// The fork whose commits the merge applies.
     pub source_namespace_id: NamespaceId,
-    /// The fork sequence to merge through, or `None` for the fork's folded
-    /// head.
+    /// The fork sequence to merge through, or `None` for the head of the
+    /// fork's view that the merge plans from.
     pub through_seq: Option<CommitSeq>,
     /// The fork sequence that the range has to start after, or `None` to
     /// take the start from the merge index. A caller that plans a merge again
@@ -266,19 +267,22 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// merge's content expire one direct transfer lifetime after
     /// `prepared_at_ms`.
     ///
-    /// The plan reads the content layouts that the fork's fold wrote, so the
-    /// caller folds the fork first, and the range ends at the fork's folded
-    /// head unless the request sets an earlier `through_seq`. When the
-    /// merge deletes or moves a directory, its commit expects this
-    /// namespace's head to be the one that the plan read, because another
-    /// writer can add an item below the directory without changing a row
-    /// that the commit's other preconditions cover. The commit also expects
-    /// the head when the merge moves an inode through a temporary name,
-    /// because the move off the temporary name finds the inode and its new
-    /// directory by path, and another writer can rename a directory on
-    /// either path without changing a row that those preconditions cover.
-    /// A file's delete expects the file's revision, because another writer
-    /// can change the file's content without changing its binding version.
+    /// The plan reads the fork's current manifest and WAL tail at
+    /// `fork_context`, and the range ends at the head of that view unless the
+    /// request sets an earlier `through_seq`. Before it returns, the plan
+    /// writes the pieces in the fork's tail that the merge's content references
+    /// need as extents, so every reference in the commit has a layout (see
+    /// [`Self::tail_exceeds_max_commit_age`] for when the caller folds the fork
+    /// first instead). When the merge deletes or moves a directory, its commit
+    /// expects this namespace's head to be the one that the plan read, because
+    /// another writer can add an item below the directory without changing a
+    /// row that the commit's other preconditions cover. The commit also expects
+    /// the head when the merge moves an inode through a temporary name, because
+    /// the move off the temporary name finds the inode and its new directory by
+    /// path, and another writer can rename a directory on either path without
+    /// changing a row that those preconditions cover. A file's delete expects
+    /// the file's revision, because another writer can change the file's
+    /// content without changing its binding version.
     ///
     /// In a namespace with ACLs, the plan also plans the merge's commit as
     /// the writer does, against the head that the plan read, and returns the
@@ -360,8 +364,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Checks that `fork`, read at `fork_context`, is a fork of this
     /// namespace, read at `context`, and that the merge's range starts at or
     /// above both namespaces' retention floors, as [`Self::plan_merge`]
-    /// does. A caller runs the checks before it folds the fork, so a request
-    /// that would fail them folds nothing.
+    /// does. A caller runs the checks before it takes a snapshot of the fork,
+    /// so a request that would fail them writes nothing.
     pub async fn check_merge<F>(
         &self,
         context: &RuntimeReadContext,
@@ -374,6 +378,31 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         range_start(&main, &fork_view, request, &main.head().namespace_id)
             .await
             .map(|_| ())
+    }
+
+    /// Returns whether a commit in this namespace's WAL tail, read at
+    /// `context`, is older than [`MAX_TAIL_COMMIT_AGE_MS`] at `now_ms`.
+    ///
+    /// When it's true, an operation of another namespace that reads the tail,
+    /// such as a merge or a replay commit prepared at `now_ms`, folds this
+    /// namespace before planning (format spec, "Cross-namespace copies and
+    /// moves"). The commit times come from the writers' clocks, as a
+    /// retention advance reads them, and `now_ms` from this host's clock.
+    pub async fn tail_exceeds_max_commit_age(
+        &self,
+        context: &RuntimeReadContext,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let view = self.namespace.load_metadata_view(context).await?;
+        let oldest_at_ms = view
+            .wal_tail
+            .row_states(view.visible_seq())
+            .flat_map(MetadataState::commits)
+            .map(|commit| commit.committed_at_ms)
+            .min();
+        Ok(oldest_at_ms.is_some_and(|committed_at_ms| {
+            now_ms.saturating_sub(committed_at_ms) > MAX_TAIL_COMMIT_AGE_MS
+        }))
     }
 
     /// Returns the commit request of a merge with `operations` and
@@ -564,21 +593,21 @@ fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Res
 
 /// Returns the fork sequence that a merge whose range starts after
 /// `after_seq` applies the fork's commits through, which is `requested` or
-/// the fork's folded head, `folded_seq`.
+/// the head of the fork's view, `head_seq`.
 fn through_seq(
     fork: &NamespaceId,
-    folded_seq: CommitSeq,
+    head_seq: CommitSeq,
     after_seq: CommitSeq,
     requested: Option<CommitSeq>,
 ) -> Result<CommitSeq> {
-    let through_seq = requested.unwrap_or(folded_seq);
+    let through_seq = requested.unwrap_or(head_seq);
     let refused = |message: String| CoreError::InvalidMerge {
         param: "through_seq",
         message,
     };
-    if through_seq > folded_seq {
+    if through_seq > head_seq {
         return Err(refused(format!(
-            "`{through_seq}` is ahead of fork `{fork}`'s head `{folded_seq}`"
+            "`{through_seq}` is ahead of fork `{fork}`'s head `{head_seq}`"
         )));
     }
     if through_seq <= after_seq {

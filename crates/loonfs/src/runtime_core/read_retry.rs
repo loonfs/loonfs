@@ -141,18 +141,27 @@ impl RuntimeCore {
         if !matches!(result, Err(Error::Core(CoreError::ManifestReplaced { .. }))) {
             return result;
         }
-        // The position becomes the cached head when it's dropped, so the head
-        // is dropped after the position, and then loaded from the store,
-        // which finds the manifest that replaced the read's basis.
-        self.drop_writer_position(namespace_id).await;
-        self.invalidate_namespace_read_cache(namespace_id);
-        self.reload_namespace_head(namespace_id).await?;
+        self.reload_replaced_head(namespace_id).await?;
         let pinned = self
             .pinned_read(namespace_id, confirmation)
             .instrument(phase_span!(self, Phase::PinRead, namespace_id))
             .await?;
         let context = pinned.context.clone();
         classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await
+    }
+
+    /// Loads the namespace's head from the store after a newer manifest
+    /// replaced the manifest that this runtime's head of the namespace
+    /// reads, so the next read starts from the newer manifest.
+    ///
+    /// The position becomes the cached head when it's dropped, so the head
+    /// is dropped after the position, and then loaded from the store, which
+    /// finds the manifest that replaced the read's basis.
+    pub(crate) async fn reload_replaced_head(&self, namespace_id: &NamespaceId) -> Result<()> {
+        self.drop_writer_position(namespace_id).await;
+        self.invalidate_namespace_read_cache(namespace_id);
+        self.reload_namespace_head(namespace_id).await?;
+        Ok(())
     }
 
     /// Returns whether a read confirmed as `confirmation` reads an `eventual`

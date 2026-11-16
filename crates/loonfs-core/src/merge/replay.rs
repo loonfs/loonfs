@@ -115,7 +115,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// starts at or above both floors, as [`Self::plan_replay`] does, and
     /// returns this namespace's fork basis, which identifies the snapshot that
     /// the plan reads the source through. A caller runs the checks before it
-    /// folds the fork, so a request that would fail them folds nothing.
+    /// takes a snapshot of the fork, so a request that would fail them writes
+    /// nothing.
     pub async fn check_replay<F>(
         &self,
         context: &RuntimeReadContext,

@@ -3,7 +3,7 @@
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#the-split-hint)).
 
 use super::memory::PlanningMemory;
-use super::net_change::{fork_layout, inode_change, touched_inodes, InodeChange};
+use super::net_change::{fork_layout_extents, inode_change, touched_inodes, InodeChange};
 use super::operations::{
     access_update, attributes_update, binding_change, create_plan, revision_update, InodePlan,
 };
@@ -176,6 +176,7 @@ async fn measure_net_change<S: ObjectStore + ?Sized>(
     allowance: &MergeAllowance,
 ) -> Result<()> {
     let fork = &fork_view.head().namespace_id;
+    let pool_id = &fork_view.head().pool_id;
     let end = fork_view.metadata_view_at(through_seq);
     let start = fork_view.metadata_view_at(after_seq);
     let memory = PlanningMemory::new(allowance.clone());
@@ -191,7 +192,9 @@ async fn measure_net_change<S: ObjectStore + ?Sized>(
         };
         for operation in plan.iter().flat_map(InodePlan::operations) {
             let layout_extents = match operation.content_ref() {
-                Some(content_ref) => Some(fork_layout(end, fork, content_ref).await?.extents.len()),
+                Some(content_ref) => {
+                    Some(fork_layout_extents(end, &fork_view.wal_tail, pool_id, content_ref).await?)
+                }
                 None => None,
             };
             planned_bytes =

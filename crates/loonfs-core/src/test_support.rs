@@ -458,6 +458,25 @@ pub async fn load_pool_id<S: ObjectStore>(store: S, namespace_id: &NamespaceId) 
         .clone()
 }
 
+/// Returns the layout that the current view of `namespace_id` (its current
+/// manifest and WAL tail) records for the chain `content_id`, for a test that
+/// checks a layout's creator or extents.
+pub async fn content_layout<S: ObjectStore>(
+    store: S,
+    namespace_id: &NamespaceId,
+    content_id: &loonfs_types::ContentId,
+) -> Option<loonfs_types::ContentLayout> {
+    namespace_store(store, namespace_id)
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view")
+        .metadata_view()
+        .content_layout(content_id)
+        .await
+        .expect("look up the layout")
+        .map(|row| row.layout)
+}
+
 /// Lists the keys of the WAL objects of `namespace_id` that are commit
 /// objects, which a collection deletes once they're folded and old enough.
 /// The fences and floor objects that the listing leaves out stay.

@@ -146,7 +146,8 @@ impl Family {
     }
 
     /// Replays the fork into the new fork as the route does: the receipt
-    /// lookup, the checks, the fork's fold, the plan, and the commit.
+    /// lookup, the checks, the plan from the fork's current manifest and WAL
+    /// tail, and the commit.
     async fn replay(
         &self,
         commit_id: &str,
@@ -168,7 +169,6 @@ impl Family {
                 &request,
             )
             .await?;
-        fork.fold_wal().await?;
         let plan = rebase
             .plan_replay(
                 &rebase_context,

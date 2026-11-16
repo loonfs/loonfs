@@ -1,17 +1,23 @@
 //! The fork's net change over a range of its commits: the inodes that the
 //! range's commits touched, what the fork changed in each of them, and the
-//! layouts that the change's content references record.
+//! layout of each content reference in the change, after the merge writes
+//! the reference's pieces from the fork's WAL tail.
 
 use super::memory::PlanningMemory;
 use super::state::{InodeState, StateReader};
 use crate::commit::wal_size::{MAX_MERGED_INODES, MIN_MERGE_OPERATION_BYTES};
 use crate::error::{CoreError, MergeBound, Result};
 use crate::heap_bytes::HeapBytes;
+use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataView;
+use crate::storage::content_location::ContentLocation;
+use crate::storage::tail_content::{cut_layout, materialize_content_layout, ContentWrites};
+use crate::wal::ProjectedWalTail;
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES;
-use loonfs_types::{CommitSeq, ContentLayout, ContentRef, InodeId, NamespaceId};
-use std::collections::BTreeSet;
+use loonfs_types::{CommitSeq, ContentId, ContentLayout, ContentRef, InodeId, NamespaceId, PoolId};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem::size_of;
 
 /// The most of the fork's commits that one read of a merge's range returns.
@@ -162,22 +168,73 @@ pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Returns the layout of `content_ref` in `view`, a view of `fork`. The
-/// fork's fold before a merge wrote a layout for each content reference that
-/// the fork's commits made.
-pub(super) async fn fork_layout<S: ObjectStore + ?Sized>(
+/// Returns the number of extents in the layout that [`fork_layouts`] returns
+/// for `content_ref` in `view`, a view of the fork whose WAL tail is `tail`,
+/// without writing anything.
+///
+/// The layout lists the extents that the chain's layout row records for the
+/// bytes before the tail's pieces, and then one extent for the pieces, or for
+/// an empty chain in the tail. The namespace that the merge commits into
+/// didn't create the chain, so it never combines that extent with the others
+/// (format spec, "Publishing a manifest"). `pool_id` is the pool of both
+/// namespaces.
+pub(super) async fn fork_layout_extents<S: ObjectStore + ?Sized>(
     view: MetadataView<'_, '_, S>,
-    fork: &NamespaceId,
+    tail: &ProjectedWalTail,
+    pool_id: &PoolId,
     content_ref: &ContentRef,
-) -> Result<ContentLayout> {
-    Ok(view
-        .content_layout(&content_ref.content_id)
-        .await?
-        .ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "fork `{fork}` has no layout for content `{}` after its fold",
-                content_ref.content_id
-            ))
-        })?
-        .layout)
+) -> Result<usize> {
+    let content = tail.content(content_ref);
+    let location = ContentLocation::resolve(&view, pool_id, content.as_ref(), content_ref).await?;
+    let pending = location.has_pieces() || (content_ref.size_bytes == 0 && location.is_resident());
+    Ok(location.extents.len() + usize::from(pending))
+}
+
+/// Returns the layout of each of `content_refs` in `view`, a view of the fork
+/// whose WAL tail is `tail`, after writing the pieces in `tail` that each
+/// reference's bytes need to content objects through `content_writes`, which
+/// writes under the pool's prefix with the content-write permits of the
+/// namespace that the merge commits into (format spec, "Cross-namespace
+/// copies and moves").
+///
+/// The pieces of each chain are written once, as the chain's next extent, for
+/// the chain's longest reference, and a shorter reference to the same chain
+/// gets that layout cut to its size. Each layout records the chain's creator
+/// as the fork's rows record it, which is the fork for every chain that has
+/// pieces in the tail. The writes run [`STORE_WRITES_IN_FLIGHT`] at a time.
+pub(super) async fn fork_layouts<S: ObjectStore + ?Sized>(
+    content_writes: ContentWrites<'_, S>,
+    view: MetadataView<'_, '_, S>,
+    tail: &ProjectedWalTail,
+    content_refs: &HashSet<&ContentRef>,
+) -> Result<Vec<(ContentRef, ContentLayout)>> {
+    let mut longest: HashMap<&ContentId, &ContentRef> = HashMap::new();
+    for content_ref in content_refs {
+        let chain = longest
+            .entry(&content_ref.content_id)
+            .or_insert(content_ref);
+        if content_ref.size_bytes > chain.size_bytes {
+            *chain = content_ref;
+        }
+    }
+    let longest: Vec<ContentRef> = longest.into_values().cloned().collect();
+    let chains: HashMap<ContentId, ContentLayout> = stream::iter(longest)
+        .map(|content_ref| async move {
+            let content = tail.content(&content_ref);
+            let layout =
+                materialize_content_layout(content_writes, &view, content.as_ref(), &content_ref)
+                    .await?;
+            Ok::<_, CoreError>((content_ref.content_id, layout))
+        })
+        .buffer_unordered(STORE_WRITES_IN_FLIGHT)
+        .try_collect()
+        .await?;
+    Ok(content_refs
+        .iter()
+        .map(|content_ref| {
+            let mut layout = chains[&content_ref.content_id].clone();
+            cut_layout(&mut layout, content_ref.size_bytes);
+            ((*content_ref).clone(), layout)
+        })
+        .collect())
 }

@@ -4,7 +4,7 @@
 //! and plans what the merge's commit does to each inode.
 
 use super::memory::PlanningMemory;
-use super::net_change::{fork_layout, inode_change, touched_inodes, Changed, InodeChange};
+use super::net_change::{fork_layout_extents, inode_change, touched_inodes, Changed, InodeChange};
 use super::operations::{
     access_update, attributes_update, binding_change, create_plan, revision_update, BindingChange,
     InodePlan,
@@ -16,13 +16,13 @@ use crate::commit::wal_size::{conflict_bytes, merge_operation_bytes};
 use crate::error::{CoreError, Result};
 use crate::path::mutation_path::name_keys;
 use crate::path::read::LoadedMetadataView;
+use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::options::DiffOptions;
 use loonfs_types::{
-    AbsolutePath, AccessRight, CommitSeq, ContentLayout, ContentRef, DisplayName, InodeId,
-    InodeKind, MergeConflict, MergeConflictKind, MergeConflictVersion, NameKey, MAX_PATH_DEPTH,
-    ROOT_INODE_ID,
+    AbsolutePath, AccessRight, CommitSeq, ContentRef, DisplayName, InodeId, InodeKind,
+    MergeConflict, MergeConflictKind, MergeConflictVersion, NameKey, MAX_PATH_DEPTH, ROOT_INODE_ID,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -49,6 +49,9 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     pub(super) base: StateReader<'v, 'v, S>,
     /// The fork's state at the end of the range.
     pub(super) ours: StateReader<'v, 'v, S>,
+    /// The fork's WAL tail, whose pieces the merge writes for its content
+    /// references.
+    pub(super) fork_tail: &'v ProjectedWalTail,
     /// The fork's state at the start of the range.
     pub(super) before: StateReader<'v, 'v, S>,
     /// The subject's authority on the fork, which has to read each inode
@@ -64,9 +67,6 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     /// It grows with the rows that the merge replaces.
     pub(super) own_seqs: HashMap<CommitSeq, bool>,
     pub(super) plans: Vec<InodePlan>,
-    /// The layout of each content reference that the plans write, from the
-    /// fork's view after the fork's fold.
-    pub(super) layouts: HashMap<ContentRef, ContentLayout>,
     /// An upper bound on the commit's planned WAL record so far.
     pub(super) planned_bytes: usize,
     /// The directories that the fork deleted or moved with no other
@@ -342,7 +342,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         }
         for operation in &operations {
             let layout_extents = match operation.content_ref() {
-                Some(content_ref) => Some(self.layout(content_ref).await?.extents.len()),
+                Some(content_ref) => Some(self.layout_extents(content_ref).await?),
                 None => None,
             };
             self.planned_bytes = self
@@ -354,19 +354,16 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         Ok(())
     }
 
-    /// Returns the layout of `content_ref` in the fork's view, which the
-    /// commit's proofs record.
-    async fn layout(&mut self, content_ref: &ContentRef) -> Result<&ContentLayout> {
-        if !self.layouts.contains_key(content_ref) {
-            let layout = fork_layout(
-                self.ours.view(),
-                &self.record.source_namespace_id,
-                content_ref,
-            )
-            .await?;
-            self.layouts.insert(content_ref.clone(), layout);
-        }
-        Ok(&self.layouts[content_ref])
+    /// Returns the number of extents in the layout that the commit's proof
+    /// of `content_ref` records (see [`fork_layout_extents`]).
+    async fn layout_extents(&self, content_ref: &ContentRef) -> Result<usize> {
+        fork_layout_extents(
+            self.ours.view(),
+            self.fork_tail,
+            &self.main.head().pool_id,
+            content_ref,
+        )
+        .await
     }
 
     /// Returns whether the row committed at `seq` is the fork's own. A row is

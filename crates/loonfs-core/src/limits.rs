@@ -352,6 +352,31 @@ const _: () = assert!(
         < GC_GRACE_WINDOW_MS
 );
 
+/// The greatest age of a commit in a namespace's WAL tail at which another
+/// namespace's operation still plans from that tail.
+///
+/// A merge or a rebase's replay commit reads its fork's tail, and folds the
+/// fork instead of planning from the tail when a commit in the tail is older
+/// than this (format spec, "Cross-namespace copies and moves").
+///
+/// The merge's snapshot keeps the fork's manifest, not its WAL tail. A
+/// revision that the plan reads from the tail, and that a later commit in
+/// the tail replaced, stays in the fork until a retention advance passes the
+/// replacing commit, which is at least the grace window after that commit.
+/// While no commit in the tail is older than this when the merge is
+/// prepared, a pool's collection that read the namespace that the merge
+/// commits into before the merge's commit reads the fork before that
+/// advance, by the inequality above, so the collection finds the revision's
+/// layout in the fork. With the current values the limit is 11 hours and 45
+/// minutes.
+pub const MAX_TAIL_COMMIT_AGE_MS: u64 = GC_GRACE_WINDOW_MS
+    - (POOL_ROOTS_READ_BUDGET_MS
+        + GC_SAFETY_MARGIN_MS
+        + OPERATION_SNAPSHOT_TTL_MS
+        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS);
+
+const _: () = assert!(MAX_TAIL_COMMIT_AGE_MS == 42_300_000);
+
 /// A retention advance moves the floor only past commits at least the grace
 /// window old, so a revision stays referenced for at least that long after a
 /// commit replaces it. A view at most the revalidation bound old, and a
