@@ -4,15 +4,17 @@
 
 use super::{Maintenance, MetadataCompactionOutcome};
 use crate::publisher::NamespaceChange;
+use crate::trace::phase_span;
 use crate::{Error, Result};
 use crate::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, NamespaceId, SharedObjectStore,
 };
 use loonfs_core::control::{ensure_namespace_live, PublicationBasis};
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{CoreError, MetadataCompactionCancellation};
+use loonfs_core::{CoreError, MetadataCompactionCancellation, Phase};
 use loonfs_types::CompactorEpoch;
 use std::ops::ControlFlow;
+use tracing::Instrument;
 
 /// Abandoned compaction units in a row after which
 /// [`Maintenance::compact_namespace`] stops, so a loop whose units
@@ -367,7 +369,11 @@ impl Maintenance {
         let _turn = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Ok(MetadataCompactionOutcome::Cancelled),
-            turn = turns.compaction.lock() => turn,
+            turn = turns.compaction.lock().instrument(phase_span!(
+                self.core,
+                Phase::WaitForCompactionLock,
+                namespace_id
+            )) => turn,
         };
         let claimed = self
             .writer
@@ -383,7 +389,11 @@ impl Maintenance {
         let _permit = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Ok(MetadataCompactionOutcome::Cancelled),
-            permit = self.core.compaction_permit() => permit,
+            permit = self.core.compaction_permit().instrument(phase_span!(
+                self.core,
+                Phase::WaitForCompactionPermit,
+                namespace_id
+            )) => permit,
         };
         let (compactor_epoch, basis) = self.compactor_epoch(namespace_id, basis).await?;
         // A claim that this call made returns its own manifest, which the

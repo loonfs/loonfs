@@ -945,6 +945,70 @@ async fn a_compaction_whose_kept_inode_walk_reaches_its_limit_skips_hidden_row_r
     );
 }
 
+/// Checks that the walk that builds a compaction unit's kept inode filter
+/// reads each block of the slot index once, through the namespace's block
+/// cache, however many directories share the block.
+///
+/// The walk scans one directory at a time, and a scan of a key range keeps
+/// its data blocks in the block cache and not in its memo. Without the cache,
+/// a unit would fetch a block again for each directory whose rows the block
+/// contains, so each base compaction unit over this chain of 1,000
+/// directories would send about 1,000 GETs to the slot index. With the cache,
+/// a unit reads each segment of the slot index once for its walk, and a unit
+/// of the `bindings` group reads each segment once more as its input.
+#[tokio::test]
+async fn a_compaction_unit_reads_each_slot_index_segment_at_most_twice() {
+    let temp = tempdir().expect("tempdir");
+    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("walk-reads").expect("namespace id");
+    let context = writer_at("writer-1", 5_000);
+    expire_old(&store, &namespace_id, &context).await;
+    create_directory_chain(&store, &namespace_id, &context, 1_000).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold the chain");
+    let segment_cache = Arc::new(crate::test_support::segment_cache());
+    let mut walked_units = 0;
+    loop {
+        let current = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("load the current manifest");
+        let slot_index = segment_keys(
+            &runs_newest_first(current.payload()),
+            ApiMetadataRowFamily::DirentryBinds,
+        );
+        let mut fixture =
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
+        fixture.namespace.segment_cache = Arc::clone(&segment_cache);
+        store.reset();
+        let outcome = fixture
+            .engine()
+            .compact_metadata_unit(
+                None,
+                current.payload().compactor_epoch,
+                &MetadataCompactionCancellation::default(),
+            )
+            .await
+            .expect("run a compaction unit");
+        let slot_index_reads = reads_of(&store.take_gets(), &slot_index);
+        match outcome {
+            CompactionUnitOutcome::Published { .. } => {}
+            CompactionUnitOutcome::NotNeeded => break,
+            other => panic!("no other publisher runs in this test, got {other:?}"),
+        }
+        assert!(
+            slot_index_reads <= 2 * slot_index.len(),
+            "a unit read the slot index's {} segments {slot_index_reads} times",
+            slot_index.len()
+        );
+        walked_units += usize::from(slot_index_reads > 0);
+    }
+    assert!(walked_units > 0, "a base compaction unit walks the tree");
+}
+
 /// Checks that a compaction whose window skips a group's oldest run keeps
 /// every row of an expired deletion's inodes, and a base compaction of the
 /// same groups then removes them.
@@ -1109,8 +1173,8 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
             }
         }
         assert!(seeded, "{inode_rows:?}: a seed with no false positive");
-        // The compaction walks through an empty block cache of its own, as a
-        // runtime's compaction does.
+        // The compaction's walk reads through an empty block cache, as a
+        // runtime's compaction reads through its namespace's cache.
         let cache = crate::test_support::segment_cache();
         let mut walked_basis =
             super::super::metadata_basis_from_manifest(&store, Some(&cache), &current).segments;
