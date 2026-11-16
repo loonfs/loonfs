@@ -7,7 +7,7 @@
 
 use super::block_memo::SessionBlockMemo;
 use super::cache::SegmentBlockKind;
-use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache};
+use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::index_block_load::{
     load_section_bytes, section_bytes, segment_block_cache_key, segment_codec_error,
 };
@@ -56,12 +56,103 @@ pub(crate) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
     entries: &[SegmentIndexEntry],
 ) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
     let mut blocks = vec![None; entries.len()];
+    load_cached_data_blocks(segment_cache, memo, descriptor, entries, &mut blocks).await;
+    fetch_missing_data_blocks(store, segment_cache, memo, descriptor, entries, blocks).await
+}
+
+/// Loads a prefix of `entries` for one refill of a scan, in order, without
+/// the memo. The first `range_blocks` entries are the blocks of the scan's
+/// key range, and the entries after them are blocks to read ahead.
+///
+/// Every block that the refill returns counts toward `max_decoded_bytes`,
+/// whether the block cache had it or the refill fetched it, and the bytes
+/// that the refill fetches count toward `max_stored_bytes`. The first block
+/// is always taken, whatever its size. A refill whose first block is in the
+/// block cache returns cached blocks of its key range only, and ends at the
+/// first block that the cache doesn't have, so every fetch starts a refill of
+/// its own with the full caps, and a page whose blocks are cached sends no
+/// GET. A refill whose first block isn't cached fetches it, and takes the
+/// blocks after it, cached or not and past the key range too, up to the caps.
+/// The refill looks each block up in the cache in order and stops at a cap,
+/// so it reads no block past the cap from the cache's SSD tier.
+pub(crate) async fn load_segment_data_block_refill<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
+    descriptor: &MetadataSegmentRef,
+    entries: &[SegmentIndexEntry],
+    range_blocks: usize,
+    max_stored_bytes: u64,
+    max_decoded_bytes: usize,
+) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
+    let mut blocks = Vec::with_capacity(entries.len());
+    let (mut stored_bytes, mut decoded_bytes, mut fetches) = (0, 0, false);
+    let mut probe_key = segment_block_cache_key(descriptor, SegmentBlockKind::Data, 0);
+    for (position, entry) in entries.iter().enumerate() {
+        let (block_stored, block_decoded) = (
+            u64::from(entry.block.stored_bytes),
+            entry.block.decoded_bytes as usize,
+        );
+        if position > 0 && decoded_bytes + block_decoded > max_decoded_bytes {
+            break;
+        }
+        let cached = cached_data_block(segment_cache, &mut probe_key, entry).await;
+        match (&cached, position) {
+            (None, 0) => fetches = true,
+            (None, _) if !fetches || stored_bytes + block_stored > max_stored_bytes => break,
+            (Some(_), _) if !fetches && position >= range_blocks => break,
+            _ => {}
+        }
+        if cached.is_none() {
+            stored_bytes += block_stored;
+        }
+        decoded_bytes += block_decoded;
+        blocks.push(cached);
+    }
+    let count = blocks.len();
+    fetch_missing_data_blocks(
+        store,
+        segment_cache,
+        None,
+        descriptor,
+        &entries[..count],
+        blocks,
+    )
+    .await
+}
+
+/// Returns the data block of `entry` when the block cache has it.
+/// `probe_key` is the segment's data block key, reused across lookups.
+async fn cached_data_block(
+    segment_cache: Option<&MetadataSegmentCache>,
+    probe_key: &mut MetadataSegmentCacheKey,
+    entry: &SegmentIndexEntry,
+) -> Option<Arc<DecodedDataBlock>> {
+    probe_key.block_offset = entry.block.offset;
+    match segment_cache?
+        .blocks()
+        .get_block(probe_key, &entry.block)
+        .await
+    {
+        Some(DecodedMetadataSegmentBlock::Data { block, .. }) => Some(block),
+        _ => None,
+    }
+}
+
+/// Fetches every block of `entries` whose slot in `blocks` is empty, and
+/// returns all of the blocks in order.
+async fn fetch_missing_data_blocks<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: Option<&MetadataSegmentCache>,
+    memo: Option<&SessionBlockMemo>,
+    descriptor: &MetadataSegmentRef,
+    entries: &[SegmentIndexEntry],
+    mut blocks: Vec<Option<Arc<DecodedDataBlock>>>,
+) -> Result<Vec<Arc<DecodedDataBlock>>, ManifestLoadError> {
     // A load that loses the single flight on a span's first block finds the
     // span's other blocks in the block cache on the next pass, and fetches a
     // block that the cache evicted since the winner inserted it. Each pass
     // resolves at least the first block of every span.
     loop {
-        load_cached_data_blocks(segment_cache, memo, descriptor, entries, &mut blocks).await;
         let spans = missing_block_spans(entries, &blocks);
         if spans.is_empty() {
             break;
@@ -83,6 +174,7 @@ pub(crate) async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
                 *slot = Some(block);
             }
         }
+        load_cached_data_blocks(segment_cache, memo, descriptor, entries, &mut blocks).await;
     }
     Ok(blocks
         .into_iter()

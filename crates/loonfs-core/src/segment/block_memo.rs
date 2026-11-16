@@ -3,22 +3,22 @@
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
 use crate::block_cache::DecodedBlock;
 use crate::heap_bytes::{arc_bytes, hash_map_table_bytes};
-use crate::read_working_memory::ReadWorkingMemory;
+use crate::limits::MAX_BLOCK_MEMO_BYTES;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// The decoded index, filter, and lookup blocks that one read has loaded,
-/// charged to the read working memory and evicted oldest first when the read
-/// working memory is full, until the read ends.
+/// kept until the read ends. The memo has a budget of its own, and past
+/// that budget it evicts its oldest blocks first.
 #[derive(Debug)]
 pub(crate) struct SessionBlockMemo {
-    read_working_memory: Arc<ReadWorkingMemory>,
+    max_bytes: usize,
     inner: Mutex<SessionBlockMemoInner>,
 }
 
 impl Default for SessionBlockMemo {
     fn default() -> Self {
-        Self::new(super::cache::unshared_read_working_memory())
+        Self::with_max_bytes(MAX_BLOCK_MEMO_BYTES)
     }
 }
 
@@ -27,7 +27,6 @@ struct SessionBlockMemoInner {
     blocks: HashMap<Arc<MetadataSegmentCacheKey>, DecodedMetadataSegmentBlock>,
     insertion_order: VecDeque<Arc<MetadataSegmentCacheKey>>,
     entry_bytes: usize,
-    reserved_bytes: usize,
 }
 
 impl SessionBlockMemoInner {
@@ -43,9 +42,10 @@ fn key_bytes(key: &MetadataSegmentCacheKey) -> usize {
 }
 
 impl SessionBlockMemo {
-    pub(crate) fn new(read_working_memory: Arc<ReadWorkingMemory>) -> Self {
+    /// Returns an empty memo that keeps at most `max_bytes`.
+    pub(crate) fn with_max_bytes(max_bytes: usize) -> Self {
         Self {
-            read_working_memory,
+            max_bytes,
             inner: Mutex::default(),
         }
     }
@@ -60,11 +60,6 @@ impl SessionBlockMemo {
             .blocks
             .get(cache_key)
             .cloned()
-    }
-
-    /// Returns the read working memory that the memo is charged to.
-    pub(super) fn read_working_memory(&self) -> &Arc<ReadWorkingMemory> {
-        &self.read_working_memory
     }
 
     pub(super) fn record(
@@ -87,43 +82,32 @@ impl SessionBlockMemo {
             inner.insertion_order.push_back(Arc::clone(&cache_key));
             inner.blocks.insert(cache_key, block);
         }
-        loop {
-            let bytes = inner.bytes();
-            if bytes <= inner.reserved_bytes {
-                self.read_working_memory
-                    .release(inner.reserved_bytes - bytes);
-                inner.reserved_bytes = bytes;
-                break;
-            }
-            if self
-                .read_working_memory
-                .try_reserve(bytes - inner.reserved_bytes)
-            {
-                inner.reserved_bytes = bytes;
-                break;
-            }
+        // The memo keeps its newest block even when that block alone exceeds
+        // the budget, so repeated lookups in one block larger than the budget
+        // (a block of one large row) decode it once. The containers keep
+        // their capacity as blocks leave, so a memo at its budget doesn't
+        // rebuild its table on every eviction.
+        while inner.bytes() > self.max_bytes && inner.insertion_order.len() > 1 {
             let oldest = inner
                 .insertion_order
                 .pop_front()
-                .expect("accounted blocks should have an insertion-order entry");
+                .expect("a memo with more than one block has an oldest block");
             let evicted = inner
                 .blocks
                 .remove(&oldest)
                 .expect("session block memo queue and map should stay one-to-one");
             inner.entry_bytes -= evicted.weight() + key_bytes(&oldest);
-            inner.blocks.shrink_to_fit();
-            inner.insertion_order.shrink_to_fit();
         }
     }
-}
 
-impl Drop for SessionBlockMemo {
-    fn drop(&mut self) {
-        let inner = self
-            .inner
-            .get_mut()
-            .expect("session block memo lock should not be poisoned");
-        self.read_working_memory.release(inner.reserved_bytes);
+    /// Returns the bytes that the memo keeps, counted as its budget counts
+    /// them.
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("session block memo lock should not be poisoned")
+            .bytes()
     }
 }
 
@@ -152,26 +136,46 @@ mod tests {
     }
 
     #[test]
-    fn replacement_and_eviction_release_reservations_without_invalidating_borrows() {
-        let read_working_memory = Arc::new(ReadWorkingMemory::new(4096, None));
-        let memo = SessionBlockMemo::new(Arc::clone(&read_working_memory));
+    fn a_memo_evicts_its_oldest_blocks_at_its_budget_and_keeps_its_newest_one() {
+        let memo = SessionBlockMemo::with_max_bytes(4096);
         let block = data_block(2048);
         memo.record(&key(1), &block);
-        let recorded_bytes = read_working_memory.in_use();
+        let recorded_bytes = memo.bytes();
         assert!(recorded_bytes > 2048);
         let borrowed = memo.get(&key(1)).expect("decoded block");
         memo.record(&key(1), &block);
-        assert_eq!(read_working_memory.in_use(), recorded_bytes);
+        assert_eq!(
+            memo.bytes(),
+            recorded_bytes,
+            "a replacement keeps the bytes"
+        );
         memo.record(&key(2), &block);
-        assert!(memo.get(&key(1)).is_none());
+        assert!(memo.get(&key(1)).is_none(), "the oldest block left first");
         assert!(memo.get(&key(2)).is_some());
-        assert!(read_working_memory.in_use() <= 4096);
-        memo.record(&key(3), &data_block(4096));
+        assert!(memo.bytes() <= 4096);
+        memo.record(&key(3), &data_block(8192));
+        assert!(
+            memo.get(&key(3)).is_some(),
+            "the newest block stays, even above the whole budget"
+        );
+        assert!(memo.get(&key(2)).is_none(), "every older block left");
+        memo.record(&key(4), &block);
         assert!(memo.get(&key(3)).is_none());
-        assert_eq!(read_working_memory.in_use(), 0);
+        assert!(memo.get(&key(4)).is_some());
+        assert!(memo.bytes() <= 4096);
         assert_eq!(borrowed.weight(), 2048);
-        memo.record(&key(2), &block);
-        drop(memo);
-        assert_eq!(read_working_memory.in_use(), 0);
+    }
+
+    #[test]
+    fn the_default_memo_keeps_blocks_up_to_its_fixed_budget() {
+        let memo = SessionBlockMemo::default();
+        let block_bytes = 64 * 1024;
+        let blocks = MAX_BLOCK_MEMO_BYTES / block_bytes;
+        for offset in 0..2 * blocks as u64 {
+            memo.record(&key(offset), &data_block(block_bytes));
+            assert!(memo.bytes() <= MAX_BLOCK_MEMO_BYTES);
+        }
+        assert!(memo.get(&key(0)).is_none());
+        assert!(memo.get(&key(2 * blocks as u64 - 1)).is_some());
     }
 }

@@ -236,8 +236,7 @@ impl TestCore {
     }
 
     fn open(self, store: SharedStore) -> RuntimeCore {
-        let metadata_cache =
-            MetadataCache::default().bind(&store, self.execution_budget.read_working_memory());
+        let metadata_cache = MetadataCache::default().bind(&store);
         RuntimeCore::open(
             store,
             self.config,

@@ -2,18 +2,19 @@
 
 use super::block_memo::SessionBlockMemo;
 use super::cache::MetadataSegmentCache;
-use super::data_block_load::load_segment_data_block_span;
+use super::data_block_load::{load_segment_data_block_refill, load_segment_data_block_span};
 use super::index_block_load::load_segment_index;
 use super::scan::BlocksPerRefill;
-use crate::compaction::run_iterator::{LoadedBlocks, SegmentBlockLoader};
+use crate::compaction::run_iterator::SegmentBlockLoader;
 use crate::limits::MAX_SCAN_REFILL_BYTES;
 use crate::manifest::error::ManifestLoadError;
 use crate::manifest::validate::validate_manifest_row_seq_range;
-use crate::read_working_memory::{ReadReservation, ReadWorkingMemory};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataSegmentRef};
-use loonfs_types::format::segment_blocks::{index_blocks_for_key_range, SegmentIndexEntry};
+use loonfs_types::format::segment_blocks::{
+    index_blocks_for_key_range, DecodedDataBlock, SegmentIndexEntry,
+};
 use loonfs_types::CommitSeq;
 use std::sync::Arc;
 
@@ -29,9 +30,6 @@ pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {
     pub(super) store: &'a S,
     pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
     pub(super) block_memo: &'a SessionBlockMemo,
-    /// The read working memory that a key-range refill reserves its blocks'
-    /// decoded bytes from.
-    pub(super) read_working_memory: &'a Arc<ReadWorkingMemory>,
     pub(super) blocks_per_refill: BlocksPerRefill,
     pub(super) upper_bound: Option<&'a str>,
 }
@@ -41,35 +39,19 @@ impl<'d, S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor
 {
     type Error = ManifestLoadError;
 
-    fn data_block_count(&self, entries: &[SegmentIndexEntry], max_decoded_bytes: usize) -> usize {
-        let candidates = match self.blocks_per_refill {
-            BlocksPerRefill::One => return entries.len().min(1),
+    /// Asks for every block that the refill may take: the blocks of the key
+    /// range, or for a read-ahead scan with a block cache, every block left
+    /// in the segment. [`Self::load_data_blocks`] stops at the caps.
+    fn data_block_count(&self, entries: &[SegmentIndexEntry], _max_decoded_bytes: usize) -> usize {
+        match self.blocks_per_refill {
+            BlocksPerRefill::One => entries.len().min(1),
             // Without a block cache, the blocks past the range would be
             // fetched, decoded, and dropped.
-            BlocksPerRefill::ReadAhead if self.segment_cache.is_some() => entries,
+            BlocksPerRefill::ReadAhead if self.segment_cache.is_some() => entries.len(),
             BlocksPerRefill::KeyRange | BlocksPerRefill::ReadAhead => {
-                &entries[index_blocks_for_key_range(entries, "", self.upper_bound)]
+                index_blocks_for_key_range(entries, "", self.upper_bound).end
             }
-        };
-        let mut stored_bytes = 0;
-        let mut decoded_bytes = 0;
-        candidates
-            .iter()
-            .take_while(|entry| {
-                let next_stored_bytes = stored_bytes + u64::from(entry.block.stored_bytes);
-                let next_decoded_bytes = decoded_bytes + entry.block.decoded_bytes as usize;
-                // A refill holds its first block whatever its size.
-                if stored_bytes > 0
-                    && (next_stored_bytes > MAX_SCAN_REFILL_BYTES
-                        || next_decoded_bytes > max_decoded_bytes)
-                {
-                    return false;
-                }
-                stored_bytes = next_stored_bytes;
-                decoded_bytes = next_decoded_bytes;
-                true
-            })
-            .count()
+        }
     }
 
     async fn load_index(
@@ -86,34 +68,41 @@ impl<'d, S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor
         Ok((index, segment))
     }
 
+    /// Loads one block through the memo for a lookup. A range refill takes
+    /// the longest prefix in which the blocks that the block cache doesn't
+    /// have fit in `MAX_SCAN_REFILL_BYTES` stored and the segment's share of
+    /// the scan's decoded budget, and reads ahead only when it fetches a
+    /// block of the key range. The memo doesn't record a range refill's
+    /// blocks, because the scan keeps them until it has consumed them.
     async fn load_data_blocks(
         &self,
         segment: ScanDescriptor<'d>,
         entries: Vec<SegmentIndexEntry>,
-    ) -> Result<LoadedBlocks<MetadataRow>, Self::Error> {
-        let (blocks, reservation) = match self.blocks_per_refill {
+        max_decoded_bytes: usize,
+    ) -> Result<Vec<Arc<DecodedDataBlock<MetadataRow>>>, Self::Error> {
+        let blocks = match self.blocks_per_refill {
             BlocksPerRefill::One => {
-                let blocks = load_segment_data_block_span(
+                load_segment_data_block_span(
                     self.store,
                     self.segment_cache,
                     Some(self.block_memo),
                     segment.descriptor,
                     &entries,
                 )
-                .await?;
-                (blocks, None)
+                .await?
             }
             BlocksPerRefill::KeyRange | BlocksPerRefill::ReadAhead => {
-                let (entries, reservation) = self.reserve_refill(&entries);
-                let blocks = load_segment_data_block_span(
+                let range_blocks = index_blocks_for_key_range(&entries, "", self.upper_bound).end;
+                load_segment_data_block_refill(
                     self.store,
                     self.segment_cache,
-                    None,
                     segment.descriptor,
-                    entries,
+                    &entries,
+                    range_blocks,
+                    MAX_SCAN_REFILL_BYTES,
+                    max_decoded_bytes,
                 )
-                .await?;
-                (blocks, Some(reservation))
+                .await?
             }
         };
         validate_manifest_row_seq_range(
@@ -121,48 +110,6 @@ impl<'d, S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor
             blocks.iter().flat_map(|block| block.rows.iter()),
             segment.max_seq,
         )?;
-        Ok(LoadedBlocks {
-            blocks,
-            reservation,
-        })
-    }
-}
-
-impl<S: ObjectStore + ?Sized> ScanLoader<'_, S> {
-    /// Reserves the decoded bytes of the longest prefix of `entries` that the
-    /// read working memory has room for, and always of the first entry, and
-    /// returns that prefix with its reservation.
-    ///
-    /// The scan keeps the reservation until it has consumed the prefix's
-    /// blocks. The first block is reserved even above the limit, so the
-    /// scans that share the read working memory exceed its limit by at most
-    /// one block for each segment that they have open. So `N` scans that
-    /// each have `S` segments open, over blocks of at most `B` decoded bytes,
-    /// exceed the limit by at most `N * S * B`. A read-ahead refill takes its
-    /// blocks past the scan's key range only from what the limit has left, so
-    /// it doesn't raise that bound.
-    fn reserve_refill<'e>(
-        &self,
-        entries: &'e [SegmentIndexEntry],
-    ) -> (&'e [SegmentIndexEntry], ReadReservation) {
-        let decoded_bytes = |entry: &SegmentIndexEntry| entry.block.decoded_bytes as usize;
-        let mut reservation = self.read_working_memory.reserve(
-            entries.iter().map(decoded_bytes).sum(),
-            decoded_bytes(&entries[0]),
-        );
-        let mut kept_bytes = decoded_bytes(&entries[0]);
-        let kept = 1 + entries[1..]
-            .iter()
-            .take_while(|entry| {
-                let next_bytes = kept_bytes + decoded_bytes(entry);
-                if next_bytes > reservation.bytes() {
-                    return false;
-                }
-                kept_bytes = next_bytes;
-                true
-            })
-            .count();
-        reservation.shrink_to(kept_bytes);
-        (&entries[..kept], reservation)
+        Ok(blocks)
     }
 }

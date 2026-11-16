@@ -177,6 +177,11 @@ impl RuntimeCore {
         self.inner.execution_budget.compaction_permit().await
     }
 
+    /// Waits for a collection permit from the execution budget.
+    pub(crate) async fn collection_permit(&self) -> BudgetPermit<'_> {
+        self.inner.execution_budget.collection_permit().await
+    }
+
     /// Returns the largest file content that one buffered read returns.
     pub(crate) fn max_read_content_bytes(&self) -> u64 {
         self.inner.config.max_read_content_bytes

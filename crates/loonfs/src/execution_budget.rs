@@ -1,7 +1,6 @@
 //! The work in flight that one or more runtimes share.
 
 use crate::metrics::{MetricsRecorder, NoopMetricsRecorder};
-use loonfs_core::cache::ReadWorkingMemory;
 pub(crate) use loonfs_core::BudgetPermit;
 use loonfs_core::Permits;
 use metrics::{AdmissionInstruments, ExecutionBudgetInstruments};
@@ -23,9 +22,12 @@ pub const DEFAULT_MAX_CONCURRENT_FOLDS: NonZeroUsize = NonZeroUsize::new(2).unwr
 pub const DEFAULT_MAX_CONCURRENT_COMPACTIONS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 /// Default maximum public reads that runtimes sharing one budget run at once.
 pub const DEFAULT_MAX_CONCURRENT_READS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
-pub(crate) const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
-/// Default bytes retained across read, publication, and fold memos.
-pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
+/// Default maximum publication batches that runtimes sharing one budget run
+/// at once.
+pub const DEFAULT_MAX_CONCURRENT_PUBLICATIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+/// Default maximum garbage collections that the runtimes sharing one budget
+/// run at once.
+pub const DEFAULT_MAX_CONCURRENT_COLLECTIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// Default maximum content object writes that the runtimes sharing one
 /// budget run at once.
 pub const DEFAULT_MAX_CONCURRENT_CONTENT_WRITES: NonZeroUsize = NonZeroUsize::new(32).unwrap();
@@ -44,8 +46,8 @@ pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
 /// Work in flight that one or more runtimes share.
 ///
 /// It covers admitted publication requests, running reads and publications, WAL
-/// folds, metadata compactions, the decoded input one compaction may keep, content
-/// writes, and retained read working memory.
+/// folds, metadata compactions, the decoded input one compaction may keep, and
+/// content writes.
 ///
 /// Each [`LoonFs`](crate::LoonFs) built with the budget charges the
 /// publication requests it admits to the budget's totals, and takes its
@@ -71,12 +73,12 @@ pub struct ExecutionBudget {
 }
 
 struct ExecutionBudgetInner {
-    read_working_memory: Arc<ReadWorkingMemory>,
     admission: AdmittedTotals,
     reads: Permits,
     publications: Permits,
     folds: Permits,
     compactions: Permits,
+    collections: Permits,
     max_compaction_input_bytes: NonZeroUsize,
     content_writes: Arc<Permits>,
 }
@@ -101,7 +103,6 @@ impl ExecutionBudget {
     /// recorder.
     pub fn builder() -> ExecutionBudgetBuilder {
         ExecutionBudgetBuilder {
-            max_read_working_bytes: DEFAULT_MAX_READ_WORKING_BYTES,
             max_admitted_requests: DEFAULT_MAX_ADMITTED_REQUESTS,
             max_admitted_bytes: DEFAULT_MAX_ADMITTED_BYTES,
             max_merge_bytes: DEFAULT_MAX_MERGE_BYTES,
@@ -109,6 +110,7 @@ impl ExecutionBudget {
             max_concurrent_publications: DEFAULT_MAX_CONCURRENT_PUBLICATIONS,
             max_concurrent_folds: DEFAULT_MAX_CONCURRENT_FOLDS,
             max_concurrent_compactions: DEFAULT_MAX_CONCURRENT_COMPACTIONS,
+            max_concurrent_collections: DEFAULT_MAX_CONCURRENT_COLLECTIONS,
             max_compaction_input_bytes:
                 loonfs_types::format::segment_blocks::DEFAULT_MAX_COMPACTION_INPUT_BYTES,
             max_concurrent_content_writes: DEFAULT_MAX_CONCURRENT_CONTENT_WRITES,
@@ -126,7 +128,6 @@ impl ExecutionBudget {
         let compactions = self.inner.compactions.counts();
         let content_writes = self.inner.content_writes.counts();
         ExecutionBudgetStats {
-            read_working_bytes: self.inner.read_working_memory.in_use(),
             admitted_requests: admitted.requests,
             admitted_bytes: admitted.bytes,
             admitted_merges: admitted.merges,
@@ -146,10 +147,6 @@ impl ExecutionBudget {
 
     pub(crate) fn content_writes(&self) -> Arc<Permits> {
         Arc::clone(&self.inner.content_writes)
-    }
-
-    pub(crate) fn read_working_memory(&self) -> Arc<ReadWorkingMemory> {
-        Arc::clone(&self.inner.read_working_memory)
     }
 
     /// Charges one admitted publication request to the totals. A request
@@ -232,6 +229,14 @@ impl ExecutionBudget {
         self.inner.compactions.acquire().await
     }
 
+    /// Waits for a collection permit. Every garbage collection of a
+    /// namespace or a pool takes one, whether the maintenance scheduler or a
+    /// caller starts it, so the number of collections that run at once has a
+    /// limit, and so does the memory of their live sets.
+    pub(crate) async fn collection_permit(&self) -> BudgetPermit<'_> {
+        self.inner.collections.acquire().await
+    }
+
     /// The decoded metadata bytes one compaction may keep.
     pub(crate) fn max_compaction_input_bytes(&self) -> NonZeroUsize {
         self.inner.max_compaction_input_bytes
@@ -241,7 +246,6 @@ impl ExecutionBudget {
 /// Builder for an [`ExecutionBudget`].
 #[must_use]
 pub struct ExecutionBudgetBuilder {
-    max_read_working_bytes: usize,
     max_admitted_requests: NonZeroUsize,
     max_admitted_bytes: NonZeroUsize,
     max_merge_bytes: usize,
@@ -249,21 +253,13 @@ pub struct ExecutionBudgetBuilder {
     max_concurrent_publications: NonZeroUsize,
     max_concurrent_folds: NonZeroUsize,
     max_concurrent_compactions: NonZeroUsize,
+    max_concurrent_collections: NonZeroUsize,
     max_compaction_input_bytes: NonZeroUsize,
     max_concurrent_content_writes: NonZeroUsize,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
 impl ExecutionBudgetBuilder {
-    /// Sets the bytes retained by read, publication, and fold memos across
-    /// all runtimes sharing this budget. When the budget is used up, a memo
-    /// evicts its own entries or leaves blocks unretained. Reads never wait or fail for
-    /// memory. Defaults to 256 MiB; zero disables retention.
-    pub fn max_read_working_bytes(mut self, bytes: usize) -> Self {
-        self.max_read_working_bytes = bytes;
-        self
-    }
-
     /// Sets the maximum publication requests admitted and not yet settled,
     /// across every namespace of every runtime that shares the budget. Every
     /// admitted caller counts, including duplicate commits and namespace
@@ -340,6 +336,18 @@ impl ExecutionBudgetBuilder {
         self
     }
 
+    /// Sets the maximum number of garbage collections run at once, whether
+    /// [`Maintenance::gc`](crate::Maintenance::gc) and
+    /// [`Maintenance::gc_pool`](crate::Maintenance::gc_pool) calls come from a
+    /// scheduler or a caller. Each collection keeps a live set of up to
+    /// [`MAX_COLLECTION_BYTES`](crate::MAX_COLLECTION_BYTES). The reference
+    /// server sets this to its `max_concurrent_maintenance`. Defaults to
+    /// [`DEFAULT_MAX_CONCURRENT_COLLECTIONS`].
+    pub fn max_concurrent_collections(mut self, limit: NonZeroUsize) -> Self {
+        self.max_concurrent_collections = limit;
+        self
+    }
+
     /// Sets the decoded metadata bytes one compaction keeps in memory at once,
     /// whatever the size of its window. Defaults to 64 MiB.
     pub fn max_compaction_input_bytes(mut self, max_compaction_input_bytes: NonZeroUsize) -> Self {
@@ -375,17 +383,12 @@ impl ExecutionBudgetBuilder {
             folds,
             compactions,
             content_writes,
-            read_working_memory,
         } = match &self.metrics_recorder {
             Some(recorder) => ExecutionBudgetInstruments::new(recorder.as_ref()),
             None => ExecutionBudgetInstruments::new(&NoopMetricsRecorder),
         };
         ExecutionBudget {
             inner: Arc::new(ExecutionBudgetInner {
-                read_working_memory: Arc::new(ReadWorkingMemory::new(
-                    self.max_read_working_bytes,
-                    Some(read_working_memory),
-                )),
                 admission: AdmittedTotals {
                     max_requests: self.max_admitted_requests,
                     max_bytes: self.max_admitted_bytes,
@@ -397,6 +400,7 @@ impl ExecutionBudgetBuilder {
                 publications: Permits::new(self.max_concurrent_publications, Some(publications)),
                 folds: Permits::new(self.max_concurrent_folds, Some(folds)),
                 compactions: Permits::new(self.max_concurrent_compactions, Some(compactions)),
+                collections: Permits::new(self.max_concurrent_collections, None),
                 max_compaction_input_bytes: self.max_compaction_input_bytes,
                 content_writes: Arc::new(Permits::new(
                     self.max_concurrent_content_writes,
@@ -411,8 +415,6 @@ impl ExecutionBudgetBuilder {
 /// over every runtime that shares it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExecutionBudgetStats {
-    /// Bytes retained by metadata block memos, including index and filter sections.
-    pub read_working_bytes: usize,
     /// Publication requests admitted and not yet settled.
     pub admitted_requests: usize,
     /// Estimated retained bytes of the publication requests admitted and not

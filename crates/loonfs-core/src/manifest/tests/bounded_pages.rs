@@ -592,12 +592,7 @@ async fn a_prefix_scan_through_a_small_block_cache_fetches_and_decodes_each_bloc
         memory: MemorySegmentBlocks::new(Arc::clone(&shared), ObjectStoreScope::new(0)),
         data_inserts: Mutex::default(),
     });
-    let cache = MetadataSegmentCache::with_blocks(
-        blocks.clone(),
-        shared,
-        ObjectStoreScope::new(0),
-        crate::segment::cache::unshared_read_working_memory(),
-    );
+    let cache = MetadataSegmentCache::with_blocks(blocks.clone(), shared, ObjectStoreScope::new(0));
     let runs = vec![MetadataRunManifest {
         run_no: RunNo(1),
         run_seq: CommitSeq(96),
@@ -806,8 +801,7 @@ async fn a_damaged_block_fails_only_the_reads_that_decode_it() {
 }
 
 #[tokio::test]
-async fn read_working_memory_counts_large_indexes_and_filters() {
-    use crate::cache::ReadWorkingMemory;
+async fn a_memo_counts_large_indexes_and_filters() {
     use crate::heap_bytes::index_block_heap_bytes;
 
     let temp = tempdir().expect("tempdir");
@@ -826,8 +820,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
     }
     let mut descriptor = segment(&store, &expected).await;
     descriptor.filter_inline = None;
-    let read_working_memory = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
-    let memo = SessionBlockMemo::new(Arc::clone(&read_working_memory));
+    let memo = SessionBlockMemo::with_max_bytes(64 * 1024 * 1024);
     store.reset();
     let index = index_block_load::load_segment_index(&store, None, &memo, &descriptor)
         .await
@@ -841,7 +834,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         index_bytes > stored_data_bytes,
         "index {index_bytes}, stored data {stored_data_bytes}"
     );
-    let index_reservation = read_working_memory.in_use();
+    let index_reservation = memo.bytes();
     assert!(
         index_reservation > index_bytes,
         "the index and memo containers are charged"
@@ -851,7 +844,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         .await
         .expect("filter");
     let filter_bytes = filter.decoded_bytes() + 2 * std::mem::size_of::<usize>();
-    assert!(read_working_memory.in_use() >= index_reservation + filter_bytes);
+    assert!(memo.bytes() >= index_reservation + filter_bytes);
     assert_eq!(store.count(OperationSelector::Read), 2);
     assert_eq!(
         *index_block_load::load_segment_index(&store, None, &memo, &descriptor)
@@ -860,8 +853,6 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         *index
     );
     assert_eq!(store.count(OperationSelector::Read), 2);
-    drop(memo);
-    assert_eq!(read_working_memory.in_use(), 0);
     assert_eq!(index.len(), 2048);
     assert!(filter.may_contain(&expected[0].filter_key_for_family(FAMILY)));
 }

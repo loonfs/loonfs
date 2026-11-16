@@ -64,6 +64,57 @@ pub const SSD_WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 /// about as much as a GET of one block.
 pub const MAX_SCAN_REFILL_BYTES: u64 = 1024 * 1024;
 
+/// Most decoded bytes of data blocks that one refill of a scan returns,
+/// shared equally by the segments that the scan has open.
+///
+/// A scan with two segments open takes up to 1 MiB (16 blocks of the 64 KiB
+/// data-block target) from each one in a refill. Every block that a refill
+/// returns counts, whether the block cache had it or the refill fetched it,
+/// so a warm scan keeps no more than a cold one. A refill that starts with a
+/// cached block returns cached blocks only, and ends at the first block that
+/// the cache doesn't have, so a fetch always starts a refill of its own with
+/// the full budget. A refill still takes its first block when the segment's
+/// share is smaller than that block, so a scan with more than 32 segments
+/// open takes one block from each. Blocks of directory rows compress to about
+/// 5 KB stored for each 64 KiB decoded, so this budget, not
+/// [`MAX_SCAN_REFILL_BYTES`], limits how far a read-ahead refill of those
+/// blocks reaches. A cold recursive page of 1,000 entries over a tree of
+/// 4,368 directories sends one data GET to each segment with a 2 MiB budget.
+/// On a tree of 100,000 files, an 8 MiB budget cut a recursive walk's
+/// requests further, but made a cold first page of a small directory about
+/// 75 ms slower, because the refill decoded blocks that the page never used.
+/// Every operation that reads a namespace keeps at most this many bytes of
+/// blocks for each range scan that it runs, on top of its block memo
+/// ([`MAX_BLOCK_MEMO_BYTES`]).
+pub const MAX_SCAN_DECODED_BYTES: usize = 2 * 1024 * 1024;
+
+/// Most decoded bytes that one operation's block memo keeps: the index,
+/// filter, and lookup blocks that the operation has read.
+///
+/// The index and filter blocks of a full metadata segment take at most about
+/// 160 KiB in memory. An 8 MiB segment has about 128 data blocks of the
+/// 64 KiB target, whose index entries take about 72 KiB when the rows have
+/// 200-byte names, and a segment of 65,536 rows has an 80 KiB filter at 10
+/// bits for each key. So the memo keeps those blocks for about 12 segments,
+/// which covers a lookup in each of 8 delta runs of a family and a few base
+/// runs. The memo evicts its oldest blocks past this budget, but keeps its
+/// newest block even when that block alone is larger. A read inserts every
+/// block that it fetches into the block cache too, so a block that the memo
+/// evicted costs a cache lookup, not a GET, while the block cache still has
+/// the block.
+pub const MAX_BLOCK_MEMO_BYTES: usize = 2 * 1024 * 1024;
+
+/// Most bytes that one garbage collection keeps in its live set.
+///
+/// The live set is the object keys that the roots protect and the
+/// collection's pending decisions, and for a pool's collection also the
+/// content IDs, upload records, layout segments, and extent filters.
+/// A collection whose live set would exceed this budget fails with
+/// `server_error`. The budget has room for about 400,000 object keys of a
+/// namespace, or the extent filters of about 26 million content objects of
+/// a pool at 20 bits for each object name.
+pub const MAX_COLLECTION_BYTES: usize = 64 * 1024 * 1024;
+
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
 /// content writes.

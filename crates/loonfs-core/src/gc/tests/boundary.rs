@@ -225,24 +225,23 @@ async fn the_boundary_ends_at_the_highest_deleted_manifest() {
     assert_eq!(recorded.count(OperationSelector::Put), 0);
 }
 
-/// Runs one collection of `namespace_id` at `NOW_MS` with a read working
-/// memory of `limit_bytes`.
+/// Runs one collection of `namespace_id` at `NOW_MS` with a live set of at
+/// most `limit_bytes`.
 async fn collect_within<S: ObjectStore>(
     store: S,
     namespace_id: &NamespaceId,
     limit_bytes: usize,
 ) -> crate::error::Result<GcResponse> {
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(limit_bytes, None));
-    crate::NamespaceStore {
-        segment_cache: Arc::new(root_scan_cache(memory)),
-        ..crate::test_support::namespace_store(store, namespace_id)
-    }
-    .gc(&context(NOW_MS).clock())
-    .await
+    crate::test_support::namespace_store(store, namespace_id)
+        .gc_within(
+            &context(NOW_MS).clock(),
+            crate::gc::charged_set::CollectionMemory::new(namespace_id.to_string(), limit_bytes),
+        )
+        .await
 }
 
-/// Checks that a collection deletes more manifests than its read working
-/// memory can keep at once: under 4 KiB, one collection deletes 100 replaced
+/// Checks that a collection deletes more manifests than its live-set budget
+/// can keep at once: under 4 KiB, one collection deletes 100 replaced
 /// manifests and raises the boundary to the highest of them.
 #[tokio::test]
 async fn a_collection_deletes_more_manifests_than_its_memory_keeps_at_once() {

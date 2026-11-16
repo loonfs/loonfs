@@ -3,9 +3,8 @@
 use crate::{ObjectStore, SharedObjectStore};
 use loonfs_core::cache::{
     CacheScope, CompletedUploadSessionCache, DecodedBlockCacheStats, HeadAndWalTailCache,
-    MemorySegmentBlocks, MetadataSegmentCache, ObjectCache, ObjectStoreScope, ReadWorkingMemory,
-    SegmentFilterStats, SharedCompletedUploadSessions, SharedHeadsAndWalTails, SharedObjects,
-    SharedSegmentBlocks,
+    MemorySegmentBlocks, MetadataSegmentCache, ObjectCache, ObjectStoreScope, SegmentFilterStats,
+    SharedCompletedUploadSessions, SharedHeadsAndWalTails, SharedObjects, SharedSegmentBlocks,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -130,11 +129,7 @@ impl MetadataCache {
     /// content objects under the scope of `store`, and namespace heads,
     /// WAL-tail projections, and completed upload sessions under a new scope
     /// for the runtime.
-    pub(crate) fn bind(
-        &self,
-        store: &SharedObjectStore,
-        read_working_memory: Arc<ReadWorkingMemory>,
-    ) -> MetadataCacheBinding {
+    pub(crate) fn bind(&self, store: &SharedObjectStore) -> MetadataCacheBinding {
         let object_store_scope = self
             .inner
             .object_store_scopes
@@ -156,14 +151,9 @@ impl MetadataCache {
                     Arc::new(TieredSegmentBlocks::new(memory, Arc::clone(ssd), identity)),
                     shared_segment_blocks,
                     object_store_scope,
-                    read_working_memory,
                 )
             }
-            _ => MetadataSegmentCache::new(
-                shared_segment_blocks,
-                object_store_scope,
-                read_working_memory,
-            ),
+            _ => MetadataSegmentCache::new(shared_segment_blocks, object_store_scope),
         };
         MetadataCacheBinding {
             cache: self.clone(),

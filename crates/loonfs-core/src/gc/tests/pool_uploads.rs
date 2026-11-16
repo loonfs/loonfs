@@ -219,18 +219,17 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
         complete_upload_for_gc(store.inner(), &namespace_id, b"unpublished\n", &setup).await;
     }
 
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(1, None));
-    let cache = Arc::new(root_scan_cache(Arc::clone(&memory)));
+    let memory = crate::gc::charged_set::CollectionMemory::new(pool_id.to_string(), 1);
     store.reset();
-    let error = crate::PoolStore {
-        segment_cache: Arc::clone(&cache),
-        ..crate::test_support::pool_store(&store, &pool_id)
-    }
-    .gc(None, &setup.clock())
-    .await
-    .expect_err("the first session's content id does not fit the budget");
+    let error = crate::test_support::pool_store(&store, &pool_id)
+        .gc_within(None, &setup.clock(), memory.clone())
+        .await
+        .expect_err("the first session's content id does not fit the budget");
 
-    assert_matches!(error, CoreError::LiveSetExceedsReadMemory { limit: 1, .. });
+    assert_matches!(
+        error,
+        CoreError::LiveSetExceedsCollectionMemory { limit: 1, .. }
+    );
     let prefix = loonfs_objectstore::keys::upload_session_prefix(&pool_id);
     let session_reads = store
         .snapshot()
@@ -247,7 +246,7 @@ async fn session_content_ids_are_charged_as_their_records_are_read() {
         session_reads <= STORE_READS_IN_FLIGHT,
         "the collection stopped within one window of reads, after {session_reads}"
     );
-    assert_eq!(memory.in_use(), 0);
+    assert_eq!(memory.held_bytes(), 0);
 }
 
 /// Checks that one collection reads each completed upload session record once,

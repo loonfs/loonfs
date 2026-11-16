@@ -4,7 +4,7 @@
 
 use crate::common::{default_writer, namespace_engine, read_context, resolve_path, submit_commit};
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
-use loonfs_core::test_support::{NamespaceFixture, WriterAt};
+use loonfs_core::test_support::{namespace_store_with_segment_cache, NamespaceFixture, WriterAt};
 use loonfs_core::{
     CoreError, CreateNamespaceOptions, MergeAllowance, MergeBound, MergePlan, MergeRequest,
     NamespaceWriterEngine, RetentionTarget,
@@ -235,13 +235,20 @@ impl Family {
             .expect("the next range")
     }
 
-    /// Returns an engine over `namespace_id` that acts as `subject`.
+    /// Returns an engine over `namespace_id` that acts as `subject`, with a
+    /// block cache of its own, as a runtime's engines have. Without one, a
+    /// view's 2 MiB block memo is its only cache, and a merge whose lookups
+    /// cycle through more blocks than that fetches them again for every
+    /// lookup.
     fn engine(
         &self,
         namespace_id: &NamespaceId,
         subject: Option<&Subject>,
     ) -> NamespaceWriterEngine<&LocalFsStore> {
-        let engine = namespace_engine(&self.store, namespace_id, &self.writer);
+        let engine = NamespaceWriterEngine::writer(
+            namespace_store_with_segment_cache(&self.store, namespace_id),
+            self.writer.writer_id.clone(),
+        );
         match subject {
             Some(subject) => engine.with_subject(subject.clone()),
             None => engine,

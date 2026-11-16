@@ -854,16 +854,6 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
 
 #[tokio::test]
 async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct Peak(AtomicUsize);
-    impl crate::cache::ReadWorkingMemoryObserver for Peak {
-        fn in_use(&self, bytes: usize) {
-            self.0.fetch_max(bytes, Ordering::SeqCst);
-        }
-        fn reservation_failed(&self) {}
-    }
-
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -881,16 +871,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
         .await
         .expect("fold the commits");
 
-    let peak = Arc::new(Peak(AtomicUsize::new(0)));
-    let observer: Arc<dyn crate::cache::ReadWorkingMemoryObserver> = peak.clone();
-    let cache = Arc::new(MetadataSegmentCache::new(
-        Arc::new(SharedSegmentBlocks::new(0, 0)),
-        ObjectStoreScope::new(0),
-        Arc::new(crate::cache::ReadWorkingMemory::new(
-            64 * 1024 * 1024,
-            Some(observer),
-        )),
-    ));
+    let cache = Arc::new(MetadataSegmentCache::unshared(usize::MAX));
     let floor = {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &store,
@@ -913,8 +894,8 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
     .retention_floor_seq;
     assert_eq!(floor, CommitSeq(2));
     assert!(
-        peak.0.load(Ordering::SeqCst) > 0,
-        "the cutoff scan charges the caller's read budget"
+        cache.stats().cached_decoded_bytes > 0,
+        "the cutoff scan reads through the caller's cache"
     );
 }
 

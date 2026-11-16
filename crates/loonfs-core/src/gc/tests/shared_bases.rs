@@ -181,7 +181,6 @@ async fn a_collection_reads_each_extent_filter_once_and_lists_content_once() {
             usize::MAX,
         )),
         crate::cache::ObjectStoreScope::new(0),
-        Arc::new(crate::cache::ReadWorkingMemory::new(64 * 1024 * 1024, None)),
     ));
     let prefix = content_prefix(&pool_id);
     for (round, deleted, filter_gets) in [(1, &orphans, reads.len()), (2, &BTreeSet::new(), 0)] {

@@ -98,7 +98,6 @@ mod object_cache;
 mod permits;
 mod phase;
 mod pool_store;
-mod read_working_memory;
 mod recency;
 mod segment;
 mod shared_check;
@@ -148,9 +147,6 @@ pub mod cache {
         CachedHead, HeadAndWalTailCache, SharedHeadsAndWalTails, WalTailCacheKey,
     };
     pub use crate::object_cache::{ObjectCache, SharedObjects};
-    pub use crate::read_working_memory::{
-        ReadReservation, ReadWorkingMemory, ReadWorkingMemoryObserver,
-    };
     pub use crate::recency::Recency;
     pub use crate::segment::{
         decode_stored_block, DecodedMetadataSegmentBlock, DecodedSegmentBlock, LoadedSegmentBlock,
@@ -202,8 +198,8 @@ pub mod publish {
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
 pub use compaction::{
-    refill_iterators, select_next_iterator, CompactionUnitOutcome, LoadedBlocks,
-    MetadataCompactionCancellation, SegmentBlockLoader, SegmentRowIterator,
+    refill_iterators, select_next_iterator, CompactionUnitOutcome, MetadataCompactionCancellation,
+    SegmentBlockLoader, SegmentRowIterator,
 };
 pub use diff::DiffPage;
 pub use engine::RuntimeReadContext;

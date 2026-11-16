@@ -1,15 +1,13 @@
-//! The instruments of an execution budget: its admitted totals, its
-//! permits, and its read working memory.
+//! The instruments of an execution budget: its admitted totals and its
+//! permits.
 
 use crate::metrics::{CounterHandle, GaugeHandle, MetricsRecorder};
-use loonfs_core::cache::ReadWorkingMemoryObserver;
 use loonfs_core::PermitObserver;
 use std::sync::Arc;
 
 /// The instruments of one execution budget, registered when the budget is
 /// built.
 pub(crate) struct ExecutionBudgetInstruments {
-    pub(crate) read_working_memory: Arc<dyn ReadWorkingMemoryObserver>,
     pub(crate) admission: AdmissionInstruments,
     pub(crate) reads: Arc<dyn PermitObserver>,
     pub(crate) publications: Arc<dyn PermitObserver>,
@@ -22,7 +20,6 @@ impl ExecutionBudgetInstruments {
     /// Registers every budget instrument now.
     pub(crate) fn new(recorder: &dyn MetricsRecorder) -> Self {
         Self {
-            read_working_memory: crate::metrics::read_working_memory::register(recorder),
             admission: AdmissionInstruments {
                 requests: recorder.register_gauge(
                     "loonfs.execution_budget.admitted_requests",

@@ -11,7 +11,6 @@ use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::store::NamespaceStore;
-use crate::segment::cache::read_working_memory;
 use crate::time::OperationClock;
 use crate::wal::object_is_required;
 use futures::TryStreamExt;
@@ -111,12 +110,12 @@ impl LiveSet {
     /// [`NamespaceStore::tombstone_initializing_namespace`]), and continues
     /// with the manifest that's current after that publication.
     ///
-    /// The object keys and snapshot decisions that the collection keeps are charged
-    /// to the read working memory of the namespace's segment cache as they
-    /// arrive.
+    /// The object keys and snapshot decisions that the collection keeps are
+    /// charged to `memory` as they arrive.
     pub(super) async fn load<S: ObjectStore>(
         namespace: &NamespaceStore<S>,
         clock: &OperationClock,
+        memory: CollectionMemory,
     ) -> Result<Option<Self>> {
         let namespace_id = &namespace.namespace_id;
         let current = match namespace.find_newest_manifest().await? {
@@ -145,10 +144,6 @@ impl LiveSet {
         } else {
             current
         };
-        let memory = CollectionMemory::new(
-            namespace_id.to_string(),
-            read_working_memory(Some(namespace.segment_cache.as_ref())),
-        );
         let head = current.manifest.payload();
         let mut live = Self {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
@@ -173,7 +168,7 @@ impl LiveSet {
             object_key_bytes = live.objects.reserved_bytes(),
             snapshot_decision_bytes = live.snapshot_decisions.reserved_bytes(),
             live_set_bytes = live.memory.held_bytes(),
-            read_memory_limit_bytes = live.memory.limit(),
+            live_set_limit_bytes = live.memory.limit(),
             complete = outcome.is_ok(),
             "read the live set's roots");
         outcome?;

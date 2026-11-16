@@ -222,9 +222,6 @@ pub struct ServerConfig {
     /// its own takes.
     #[serde(default)]
     pub consistency: ReadConsistency,
-    /// Bytes retained by all read, publication, and fold memos. Zero keeps
-    /// none. Derived when sized; otherwise defaults to 256 MiB.
-    pub max_read_working_bytes: Option<usize>,
     /// How old a WAL tail's newest commit must be before maintenance folds
     /// a tail that is below the fold thresholds, in milliseconds. The
     /// maintenance scheduler and explicit `metadata` requests use the same
@@ -423,9 +420,12 @@ impl ServerConfig {
         };
         let mut builder = ExecutionBudget::builder()
             .max_compaction_input_bytes(positive(memory.compaction_input.bytes))
-            .max_read_working_bytes(memory.read_working.bytes)
             .max_admitted_bytes(positive(memory.admitted.bytes))
             .max_merge_bytes(memory.merge.bytes)
+            // Scheduled and explicit collections share one limit, which is
+            // the count that the memory sizing multiplies the collection
+            // budget by.
+            .max_concurrent_collections(self.max_concurrent_maintenance)
             .metrics_recorder(recorder);
         if let Some(limit) = self.max_concurrent_reads {
             builder = builder.max_concurrent_reads(limit);

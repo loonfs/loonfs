@@ -225,10 +225,10 @@ pub enum CoreError {
     )]
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error(
-        "the garbage collection live set of `{collected_id}` needs {bytes} bytes of \
-         read working memory, above its {limit}-byte limit"
+        "the garbage collection live set of `{collected_id}` needs {bytes} bytes, \
+         above the collection's {limit}-byte limit"
     )]
-    LiveSetExceedsReadMemory {
+    LiveSetExceedsCollectionMemory {
         /// The namespace or the pool whose collection needs the memory.
         collected_id: String,
         bytes: usize,
@@ -530,7 +530,7 @@ impl CoreError {
             CoreError::MetadataPublicationBudgetExceeded { .. } => ErrorCode::MaintenanceRequired,
             // The deployment's read memory cannot fit this namespace's
             // collection live set; an operator raises the limit.
-            CoreError::LiveSetExceedsReadMemory { .. } => ErrorCode::ServerError,
+            CoreError::LiveSetExceedsCollectionMemory { .. } => ErrorCode::ServerError,
             // The namespace's segment descriptors don't fit in one manifest
             // document, and a retry doesn't change that.
             CoreError::ManifestTooLarge { .. } => ErrorCode::ServerError,
@@ -653,7 +653,7 @@ impl CoreError {
             | CoreError::Forbidden { .. }
             | CoreError::NamespaceUnrestricted { .. }
             | CoreError::RootGrantsWithoutAdministrator
-            | CoreError::LiveSetExceedsReadMemory { .. }
+            | CoreError::LiveSetExceedsCollectionMemory { .. }
             | CoreError::ManifestTooLarge { .. }
             | CoreError::StaleHeadPrecondition { .. }
             | CoreError::ManifestReplaced { .. } => None,
