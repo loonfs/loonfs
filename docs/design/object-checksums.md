@@ -47,6 +47,8 @@ A read that already fetches a whole object checks it against the recorded value,
 
 A mismatch is corruption, and the error identifies the object's key, so an operator knows which object to look at, rather than only which file failed its whole-file check.
 
+When LoonFS assembles a new span object from a chain's existing extents (in a fold, in a validation that writes pending pieces, or in a merge's write of a fork's pending pieces), it checks each source object first. The assembly already needs one HEAD request per source object, to get the stored checksum that it combines into the new object's checksum. LoonFS compares that stored checksum with the extent's object checksum, so the check adds no request. A mismatch is corruption, and the write fails instead of assembling a span object from the wrong bytes. (If the write went ahead, the new extent would record a checksum computed from the wrong bytes, and every later check of that span object would pass.)
+
 ## What the checksums don't check
 
 A ranged read inside one object isn't checked. The object checksum is a CRC of the whole object, and a CRC of the whole object can't check a slice taken from the middle of it. For example, a ranged read of bytes 110 to 120 of a chain whose layout lists a span object with the start 100 and the end 130 reads 10 bytes from the middle of that object, and the reader checks only the length of the response.
