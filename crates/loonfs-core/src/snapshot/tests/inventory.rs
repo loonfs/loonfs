@@ -857,7 +857,10 @@ async fn a_deleted_snapshot_is_refused_by_a_host_whose_clock_is_behind() {
     assert_eq!(
         engine
             .fork_namespace_at_snapshot(
-                &NamespaceId::parse("clone").expect("namespace id"),
+                engine
+                    .find_fork_target(&NamespaceId::parse("clone").expect("namespace id"))
+                    .await
+                    .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
                 &snapshot,
             )

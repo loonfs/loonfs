@@ -44,9 +44,10 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     let manifest =
         loonfs_core::test_support::folded_manifest(&namespace_store(store, source_namespace_id))
             .await?;
-    namespace_engine(store, source_namespace_id, context)
+    let engine = namespace_engine(store, source_namespace_id, context);
+    engine
         .fork_namespace(
-            new_namespace_id,
+            engine.find_fork_target(new_namespace_id).await?,
             &loonfs_test_support::test_actor(),
             manifest,
         )
@@ -136,7 +137,10 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     assert!(collected.deleted.metadata_segments > 0);
     let fork = engine
         .fork_namespace_at_snapshot(
-            &target,
+            engine
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             &snapshot.snapshot_id,
         )
@@ -216,7 +220,14 @@ async fn invalid_snapshot_forks_write_nothing() {
     ] {
         store.take();
         let error = engine
-            .fork_namespace_at_snapshot(&target, &loonfs_test_support::test_actor(), &snapshot_id)
+            .fork_namespace_at_snapshot(
+                engine
+                    .find_fork_target(&target)
+                    .await
+                    .expect("find the fork target"),
+                &loonfs_test_support::test_actor(),
+                &snapshot_id,
+            )
             .await
             .expect_err("invalid snapshot");
         assert_eq!(error.code(), expected_code);
@@ -265,7 +276,14 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
     let engine = namespace_engine(&store, &source, &context);
     store.block_next();
     let actor_id = loonfs_test_support::test_actor();
-    let forking = engine.fork_namespace_at_snapshot(&target, &actor_id, &snapshot.snapshot_id);
+    let forking = engine.fork_namespace_at_snapshot(
+        engine
+            .find_fork_target(&target)
+            .await
+            .expect("find the fork target"),
+        &actor_id,
+        &snapshot.snapshot_id,
+    );
     let deleting = async {
         store.wait_until_blocked().await;
         store.inner().block_next();

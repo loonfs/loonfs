@@ -340,7 +340,11 @@ async fn deleted_fork<S: ObjectStore>(
     fixture
         .engine()
         .fork_namespace(
-            target,
+            fixture
+                .engine()
+                .find_fork_target(target)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
@@ -465,9 +469,13 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
     fixture
         .engine()
         .fork_namespace(
-            &target,
+            fixture
+                .engine()
+                .find_fork_target(&target)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
-            manifest.clone(),
+            manifest,
         )
         .await
         .expect("fork");
@@ -520,10 +528,7 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
         Err(CoreError::NamespaceDeleted { .. })
     );
     assert_matches!(
-        fixture
-            .engine()
-            .fork_namespace(&target, &loonfs_test_support::test_actor(), manifest)
-            .await,
+        fixture.engine().find_fork_target(&target).await,
         Err(CoreError::NamespaceDeleted { .. })
     );
     let counts = store.counts();

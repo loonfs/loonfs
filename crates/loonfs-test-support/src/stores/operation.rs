@@ -1,6 +1,7 @@
 //! Object-store operation descriptions used by wrapper predicates and logs.
 
 use bytes::Bytes;
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
 use loonfs_objectstore::{AssemblySource, ByteRange, PutMode};
 use loonfs_types::Checksum;
 
@@ -261,6 +262,49 @@ pub fn write_keys(operations: &[RecordedOperation], keys: &KeyPredicate) -> Vec<
         .map(RecordedOperation::key)
         .filter(|key| keys.matches(key))
         .map(str::to_owned)
+        .collect()
+}
+
+/// Describes each request in `operations` on one line, for a test that pins
+/// an operation's request sequence.
+///
+/// A line has the request's kind (`head`, `get`, `put`, `swap`, `assemble`,
+/// `delete`, or `list`), the namespace that owns the key (`pool` for a key
+/// under a pool), and the key's object family, with the number of a manifest
+/// or a WAL object. The keys include generated IDs, but the lines leave those
+/// IDs out, so the lines are the same in every run.
+pub fn request_lines(operations: &[RecordedOperation]) -> Vec<String> {
+    operations
+        .iter()
+        .map(|operation| {
+            let kind = match operation {
+                RecordedOperation::Head { .. } => "head",
+                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
+                RecordedOperation::Put {
+                    mode: PutMode::CompareAndSwap { .. },
+                    ..
+                } => "swap",
+                RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. } => "put",
+                RecordedOperation::Assemble { .. } => "assemble",
+                RecordedOperation::Delete { .. } => "delete",
+                RecordedOperation::List { .. } => "list",
+            };
+            let Some(parsed) = parse_object_key(operation.key()) else {
+                return format!("{kind} {}", operation.key());
+            };
+            let owner = match parsed.prefix() {
+                KeyPrefix::Namespace(namespace) => namespace,
+                KeyPrefix::Pool(_) => "pool",
+            };
+            let family = parsed.family();
+            match (family, parsed.identifier()) {
+                (
+                    DurableObjectFamily::MetadataManifest | DurableObjectFamily::WalObject,
+                    Some(number),
+                ) => format!("{kind} {owner} {family:?} {number}"),
+                _ => format!("{kind} {owner} {family:?}"),
+            }
+        })
         .collect()
 }
 

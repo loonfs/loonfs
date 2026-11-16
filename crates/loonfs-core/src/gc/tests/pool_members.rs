@@ -47,7 +47,11 @@ async fn fork<S: ObjectStore + Clone>(store: S, source: &NamespaceId, target: &N
     fixture
         .engine()
         .fork_namespace(
-            target,
+            fixture
+                .engine()
+                .find_fork_target(target)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await

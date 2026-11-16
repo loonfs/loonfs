@@ -37,7 +37,9 @@ impl LoonFs<Writable> {
             async {
                 self.core.ensure_merges_enabled()?;
                 self.namespace(namespace_id).ensure_administrator().await?;
-                self.ensure_fork_target_free(new_namespace_id).await?;
+                let target = self
+                    .find_fork_target(namespace_id, new_namespace_id)
+                    .await?;
                 let main = self
                     .core
                     .pinned_read(namespace_id, Consistency::Strong)
@@ -51,16 +53,19 @@ impl LoonFs<Writable> {
                         .fork_point_for_rebase(&main.context, &fork.engine, &fork.context)
                         .await?
                 };
-                self.install_fork(namespace_id, |engine, basis| async move {
-                    engine
-                        .fork_namespace_for_rebase(
-                            new_namespace_id,
-                            actor,
-                            source_namespace_id,
-                            fork_point_seq,
-                            basis,
-                        )
-                        .await
+                self.install_fork(namespace_id, |engine, basis| {
+                    let target = target.clone();
+                    async move {
+                        engine
+                            .fork_namespace_for_rebase(
+                                target,
+                                actor,
+                                source_namespace_id,
+                                fork_point_seq,
+                                basis,
+                            )
+                            .await
+                    }
                 })
                 .await
             },

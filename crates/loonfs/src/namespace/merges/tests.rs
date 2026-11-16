@@ -11,11 +11,9 @@ use crate::{
 };
 use futures::future::BoxFuture;
 use loonfs_core::MergeRequest;
-use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::PutMode;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
+use loonfs_test_support::stores::{request_lines, KeyPredicate, RecordingStore};
 use loonfs_types::{
     AbsolutePath, DeleteDirectoryBehavior, ManifestNo, MergeConflictKind, FEATURE_MERGES,
 };
@@ -1029,45 +1027,6 @@ async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
         .expect("main still takes writes");
 }
 
-/// Lists `operations` as each request's kind and the object it addresses.
-/// A snapshot, segment, or content key is reduced to its family, and a
-/// manifest or WAL key keeps its number, so a sequence reads the same in
-/// every run.
-fn requests(operations: &[RecordedOperation]) -> Vec<String> {
-    operations
-        .iter()
-        .map(|operation| {
-            let kind = match operation {
-                RecordedOperation::Head { .. } => "head",
-                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. } => "get",
-                RecordedOperation::Put {
-                    mode: PutMode::CompareAndSwap { .. },
-                    ..
-                } => "swap",
-                RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. } => "put",
-                RecordedOperation::Assemble { .. } => "assemble",
-                RecordedOperation::Delete { .. } => "delete",
-                RecordedOperation::List { .. } => "list",
-            };
-            let Some(parsed) = parse_object_key(operation.key()) else {
-                return format!("{kind} {}", operation.key());
-            };
-            let owner = match parsed.prefix() {
-                KeyPrefix::Namespace(namespace) => namespace,
-                KeyPrefix::Pool(_) => "pool",
-            };
-            let family = parsed.family();
-            match (family, parsed.identifier()) {
-                (
-                    DurableObjectFamily::MetadataManifest | DurableObjectFamily::WalObject,
-                    Some(number),
-                ) => format!("{kind} {owner} {family:?} {number}"),
-                _ => format!("{kind} {owner} {family:?}"),
-            }
-        })
-        .collect()
-}
-
 /// Returns the family of [`family`] on a store that records every request,
 /// with the log cleared. The runtime's writer sessions on `main` and the fork
 /// have positions that their own commits checked moments ago.
@@ -1115,7 +1074,7 @@ async fn a_merge_with_fresh_positions_sends_these_requests_in_order() {
         "put main WalObject 00000000000000000005",
         "swap main-fork Snapshot",
     ]);
-    assert_eq!(requests(&store.take()), expected);
+    assert_eq!(request_lines(&store.take()), expected);
 }
 
 /// Checks that the next-range query in a writer runtime with fresh
@@ -1130,7 +1089,7 @@ async fn the_next_merge_range_with_fresh_positions_checks_each_position() {
         .await
         .expect("the next range");
     assert_eq!(
-        requests(&store.take()),
+        request_lines(&store.take()),
         [
             "head main MetadataManifest 00000000000000000005",
             "get main Boundary",

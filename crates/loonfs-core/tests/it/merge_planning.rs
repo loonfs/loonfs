@@ -100,9 +100,13 @@ impl Family {
     }
 
     async fn fork_main(&self) {
-        namespace_engine(&self.store, &self.main, &self.writer)
+        let engine = namespace_engine(&self.store, &self.main, &self.writer);
+        engine
             .fork_namespace(
-                &self.fork,
+                engine
+                    .find_fork_target(&self.fork)
+                    .await
+                    .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
                 loonfs_core::test_support::folded_manifest(
                     &loonfs_core::test_support::namespace_store(&self.store, &self.main),

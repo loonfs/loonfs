@@ -44,7 +44,11 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
             fixture
                 .engine()
                 .fork_namespace(
-                    namespace_id,
+                    fixture
+                        .engine()
+                        .find_fork_target(namespace_id)
+                        .await
+                        .expect("find the fork target"),
                     &loonfs_test_support::test_actor(),
                     crate::test_support::folded_manifest(&fixture.namespace)
                         .await

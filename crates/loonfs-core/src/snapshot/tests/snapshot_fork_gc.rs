@@ -197,10 +197,18 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
     let fork = async {
         // The collector has captured its snapshots before this attempt creates one.
         gc_gate.wait_until_blocked().await;
-        crate::test_support::NamespaceFixture::new(&fork_gate, &fixture.source, &fixture.context)
-            .engine()
+        let engine = crate::test_support::NamespaceFixture::new(
+            &fork_gate,
+            &fixture.source,
+            &fixture.context,
+        )
+        .engine();
+        engine
             .fork_namespace_at_snapshot(
-                &fixture.target,
+                engine
+                    .find_fork_target(&fixture.target)
+                    .await
+                    .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
                 &fixture.snapshot.snapshot_id,
             )
@@ -259,8 +267,12 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
     let engine =
         crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
             .engine();
+    let fork_target = engine
+        .find_fork_target(&fixture.target)
+        .await
+        .expect("find the fork target");
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.snapshot_id),
+        engine.fork_namespace_at_snapshot(fork_target, &actor, &fixture.snapshot.snapshot_id),
         async {
             gate.wait_until_blocked().await;
             assert_eq!(fixture.source_snapshot_keys().await.len(), 2);
@@ -314,8 +326,12 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
     let engine =
         crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
             .engine();
+    let fork_target = engine
+        .find_fork_target(&fixture.target)
+        .await
+        .expect("find the fork target");
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.snapshot_id),
+        engine.fork_namespace_at_snapshot(fork_target, &actor, &fixture.snapshot.snapshot_id),
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
@@ -390,8 +406,12 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         fixture
     }
     .engine();
+    let fork_target = namespace
+        .find_fork_target(&target)
+        .await
+        .expect("find the fork target");
     let (fork, ()) = tokio::join!(
-        namespace.fork_namespace_at_snapshot(&target, &actor, &snapshot.snapshot_id),
+        namespace.fork_namespace_at_snapshot(fork_target, &actor, &snapshot.snapshot_id),
         async {
             store.wait_until_blocked().await;
             clock.advance_ms(10);
@@ -462,8 +482,12 @@ async fn snapshot_fork_writes_no_fork_snapshot_after_its_publication_budget() {
         fixture
     }
     .engine();
+    let fork_target = namespace
+        .find_fork_target(&target)
+        .await
+        .expect("find the fork target");
     let (fork, ()) = tokio::join!(
-        namespace.fork_namespace_at_snapshot(&target, &actor, &snapshot.snapshot_id),
+        namespace.fork_namespace_at_snapshot(fork_target, &actor, &snapshot.snapshot_id),
         async {
             store.wait_until_blocked().await;
             clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);

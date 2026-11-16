@@ -35,7 +35,11 @@ async fn fork_for_rebase(
     fixture
         .engine()
         .fork_namespace_for_rebase(
-            target,
+            fixture
+                .engine()
+                .find_fork_target(target)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             &fork(),
             FORK_POINT,

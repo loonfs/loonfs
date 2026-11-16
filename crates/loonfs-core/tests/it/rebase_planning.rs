@@ -54,9 +54,13 @@ impl Family {
                 .await
                 .expect("seed");
         }
-        namespace_engine(&family.store, &family.main, &family.writer)
+        let engine = namespace_engine(&family.store, &family.main, &family.writer);
+        engine
             .fork_namespace(
-                &family.fork,
+                engine
+                    .find_fork_target(&family.fork)
+                    .await
+                    .expect("find the fork target"),
                 &loonfs_test_support::test_actor(),
                 loonfs_core::test_support::folded_manifest(&namespace_store(
                     &family.store,
@@ -94,7 +98,9 @@ impl Family {
             .await
             .expect("the fork point");
         main.fork_namespace_for_rebase(
-            &self.rebase,
+            main.find_fork_target(&self.rebase)
+                .await
+                .expect("find the fork target"),
             &loonfs_test_support::test_actor(),
             &self.fork,
             fork_point_seq,
