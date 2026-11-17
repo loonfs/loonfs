@@ -40,6 +40,7 @@ mod inode_reads;
 mod invalidation;
 mod maintenance;
 mod merge_collection;
+mod merge_reads;
 mod metrics_instruments;
 mod namespace;
 mod pagination;

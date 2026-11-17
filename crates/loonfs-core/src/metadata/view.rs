@@ -336,7 +336,21 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// Opens a fresh session over this view; the view is `Copy`, so the
     /// session owns its copy.
     pub(crate) fn session(self) -> MetadataViewSession<'a, 'store, S> {
-        MetadataViewSession::new(self)
+        self.session_with(BlocksPerRefill::One)
+    }
+
+    /// Opens a fresh session whose lookups of an inode's rows fetch the
+    /// manifest's blocks in refills of `blocks_per_refill`.
+    ///
+    /// A diff page and a merge plan open their sessions with
+    /// [`BlocksPerRefill::ReadAhead`], because they look up the rows of each
+    /// inode that their commits touch, and the inodes that consecutive
+    /// commits touch often have their rows in the blocks that follow.
+    pub(crate) fn session_with(
+        self,
+        blocks_per_refill: BlocksPerRefill,
+    ) -> MetadataViewSession<'a, 'store, S> {
+        MetadataViewSession::new(self, blocks_per_refill)
     }
 
     /// Returns whether the directory has at least one visible child.
@@ -373,6 +387,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     pub(crate) async fn inode_at_seq(&self, inode_id: InodeId) -> Result<Option<InodeRecord>> {
+        self.inode_at_seq_with(inode_id, BlocksPerRefill::One).await
+    }
+
+    /// Returns the same result as [`Self::inode_at_seq`], but fetches the
+    /// manifest's blocks in refills of `blocks_per_refill`.
+    pub(crate) async fn inode_at_seq_with(
+        &self,
+        inode_id: InodeId,
+        blocks_per_refill: BlocksPerRefill,
+    ) -> Result<Option<InodeRecord>> {
         if let Some(inode) = self
             .overlay_states()
             .find_map(|state| state.inode_at_seq(inode_id, self.visible_seq()))
@@ -392,6 +416,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 self.manifest_segments(),
                 inode_id,
                 self.visible_seq(),
+                blocks_per_refill,
             )
             .await?;
         }

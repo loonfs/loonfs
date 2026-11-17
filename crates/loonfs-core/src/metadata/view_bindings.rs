@@ -12,6 +12,7 @@ use crate::metadata::{
     listed_trash_entry_from_record, DirentryBindingRecord, ListedTrashEntry, MetadataState,
     SubtreeTombstoneRecord, TrashRange, TrashRecord,
 };
+use crate::segment::BlocksPerRefill;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{CommitSeq, InodeId, NameKey, ROOT_INODE_ID};
 
@@ -35,7 +36,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         if child_inode_id == ROOT_INODE_ID {
             return Ok(None);
         }
-        let bindings = self.direntry_binds_for_child(child_inode_id).await?;
+        let bindings = self
+            .direntry_binds_for_child(child_inode_id, BlocksPerRefill::One)
+            .await?;
         let latest = latest_visible_binding(bindings.iter(), self.visible_seq());
         Ok(latest)
     }
@@ -74,7 +77,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>> {
-        let tombstones = self.tombstones_for_root(root_inode_id).await?;
+        let tombstones = self
+            .tombstones_for_root(root_inode_id, BlocksPerRefill::One)
+            .await?;
         Ok(super::rows::newest_tombstone_from_records(
             tombstones.iter().cloned(),
             self.visible_seq(),
@@ -86,7 +91,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>> {
-        let tombstones = self.tombstones_for_root(root_inode_id).await?;
+        let tombstones = self
+            .tombstones_for_root(root_inode_id, BlocksPerRefill::One)
+            .await?;
         let hiding = super::rows::hiding_tombstone_from_records(
             tombstones.iter().cloned(),
             self.visible_seq(),
@@ -140,6 +147,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(super) async fn direntry_binds_for_child(
         &self,
         child_inode_id: InodeId,
+        blocks_per_refill: BlocksPerRefill,
     ) -> Result<SharedRows<DirentryBindingRecord>> {
         self.shared_rows(
             |inner| &mut inner.binds_for_child,
@@ -148,6 +156,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 self.manifest_segments(),
                 child_inode_id,
                 self.visible_seq(),
+                blocks_per_refill,
             )),
             MetadataState::direntry_binds,
             |direntry| direntry.child_inode_id == child_inode_id && direntry.is_binding_event(),
@@ -217,10 +226,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 
     /// Returns the root's tombstone events that its newest event at the
     /// view's sequence is among: the manifest's newest event at or below the
-    /// sequence, and the row states' events.
+    /// sequence, and the row states' events. The lookup fetches the
+    /// manifest's blocks in refills of `blocks_per_refill`.
     pub(super) async fn tombstones_for_root(
         &self,
         root_inode_id: InodeId,
+        blocks_per_refill: BlocksPerRefill,
     ) -> Result<SharedRows<SubtreeTombstoneRecord>> {
         let segments = self.manifest_segments();
         let visible_seq = self.visible_seq();
@@ -228,12 +239,15 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             |inner| &mut inner.tombstones_for_root,
             root_inode_id,
             Box::pin(async move {
-                Ok(
-                    manifest_index::newest_tombstone_for_root(segments, root_inode_id, visible_seq)
-                        .await?
-                        .into_iter()
-                        .collect(),
+                Ok(manifest_index::newest_tombstone_for_root(
+                    segments,
+                    root_inode_id,
+                    visible_seq,
+                    blocks_per_refill,
                 )
+                .await?
+                .into_iter()
+                .collect())
             }),
             MetadataState::subtree_tombstones,
             |tombstone| tombstone.root_inode_id == root_inode_id,

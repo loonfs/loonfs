@@ -127,7 +127,7 @@ async fn a_lookup_fetches_exactly_the_block_that_has_its_key() {
         );
         store.reset();
         let found = view
-            .find_row(FAMILY, &key, &probe)
+            .find_row(FAMILY, &key, &probe, scan::BlocksPerRefill::One)
             .await
             .expect("look up the key");
         assert_eq!(found.as_ref(), Some(row));

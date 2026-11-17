@@ -435,6 +435,10 @@ struct CommitPartEntries {
 
 /// One end of a diff: a session over the view at the end's sequence, and the
 /// paths resolved there.
+///
+/// The session's lookups of an inode's row, its parent binding, and the
+/// subtree tombstone that hides it read ahead, for the reason described on
+/// [`Self::revisions`].
 struct End<'a, 'store, S: ObjectStore + ?Sized> {
     view: MetadataView<'a, 'store, S>,
     session: MetadataViewSession<'a, 'store, S>,
@@ -448,7 +452,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> End<'a, 'store, S> {
     fn new(view: MetadataView<'a, 'store, S>) -> Self {
         Self {
             view,
-            session: view.session(),
+            session: view.session_with(BlocksPerRefill::ReadAhead),
             paths: HashMap::new(),
             path_resolutions: 0,
         }
