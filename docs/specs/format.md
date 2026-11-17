@@ -743,9 +743,9 @@ This section describes upload sessions, the ways bytes can be transferred, and t
 
 ### 5.1 Upload sessions
 
-Every uploaded content object is tied to an upload session before a commit can reference it. The content ID is allocated when the session is created, before any file bytes are read, and the content object is stored under the prefix of the namespace's [pool](glossary.md#pool) (see [File contents and ownership](#15-file-contents-and-ownership)). The session's records are stored under the same prefix, and each one records the namespace that created the session.
+Every uploaded content object is tied to an upload session before a commit can reference it, and the session's content ID is allocated when the session is created, before any file bytes are read. The object and the session's records are stored under the prefix of the namespace's [pool](glossary.md#pool) (see [File contents and ownership](#15-file-contents-and-ownership)), and each one stores the namespace that created the session.
 
-An upload session is stored as two records. LoonFS creates each record once, with put-if-absent, and never changes it:
+A session is stored as two records, each created once with put-if-absent and never changed:
 
 - The "session record" is written when the session starts. It contains `namespace_id`, `upload_id`, `content_id`, an optional `subject_id`, a tagged `mode`, and `expires_at_ms`.
 - The "outcome record" is written when the session ends. It records whether the session completed or was aborted, and when.
@@ -770,17 +770,17 @@ A session's status follows from which records exist:
 +---------+
 ```
 
-A session starts open and ends at most once. Completion and abort both create the outcome record with put-if-absent, so the first create to succeed ends the session, and the other request finds that outcome. Completion verifies the content before it creates the outcome record, and abort creates the outcome record before it cleans up the object or the provider transfer. If a request's put has an unknown result, the request reads the outcome record back, and if the stored record is equal to the record it sent, the request treats the create as its own.
+A session starts open and ends at most once. Completion and abort both create the outcome record with put-if-absent, so the first create to succeed ends the session, and the other request finds that outcome. Completion verifies the content before it creates the outcome record, and abort creates the outcome record before it cleans up the object or the provider transfer. After a put with an unknown result, a request reads the outcome record back, and the create is its own if the stored record equals the one it sent.
 
-An outcome record counts only while its session record exists. After a request creates an outcome record, it MUST check that the session record still exists, and it MUST NOT return admission evidence or delete content if the session record is gone. Garbage collection deletes the session record before the outcome record (see [Upload-session cleanup](#116-upload-session-cleanup)).
+An outcome record counts only while its session record exists. After creating an outcome record, a request MUST check that the session record still exists, and if it's gone, MUST NOT return admission evidence or delete content. Garbage collection deletes the session record first (see [Upload-session cleanup](#116-upload-session-cleanup)).
 
-At or after `expires_at_ms`, staging, part signing, and completion refuse an open session, the same way they refuse an aborted one. An expired session can never provide content for a commit, and garbage collection aborts it (see [Upload-session cleanup](#116-upload-session-cleanup)). Status reads and aborts don't check the expiry.
+At or after `expires_at_ms`, staging, part signing, and completion refuse an open session as they refuse an aborted one, so an expired session never provides content for a commit, and garbage collection aborts it (see [Upload-session cleanup](#116-upload-session-cleanup)). Status reads and aborts don't check the expiry.
 
-Upload records don't advance the namespace's sequence, and they aren't change-feed events. Completing an upload doesn't automatically update a file in a LoonFS namespace, and a completed upload might never be referenced by any file.
+Upload records don't advance the namespace's sequence and aren't change-feed events. Completing an upload doesn't automatically update a file in a LoonFS namespace, and a completed upload might never be referenced by any file.
 
-Why does a session have two records instead of one record whose status changes? Some providers allow about one write per second to one object (see the [provider documentation][provider-spec]). With one record, an upload would write it when the session starts and again when the session ends, often less than a second later. With two records, no upload writes the same object twice.
+Why does a session have two records instead of one whose status changes? With one record, an upload would write it at the start and again at the end, often less than a second later, and some providers allow about one write per second to one object (see the [provider documentation][provider-spec]). [Alternatives considered](#13-alternatives-considered) gives the full argument.
 
-Why does a request check the session record after it creates an outcome record? After garbage collection deletes an ended session's records, the outcome key is free again. A completion or abort could read the session as open, pause while the session ends and garbage collection deletes its records, and then create a new outcome record for a session that no longer exists. If the session had been aborted, the completion would then issue evidence for content that the abort deleted. If the session had completed, the abort would delete content that a commit might reference. Because garbage collection deletes the session record first, the check finds the session record missing in exactly those cases.
+Why does a request check the session record after it creates an outcome record? Once garbage collection deletes an ended session's records, the outcome key is free again, so a completion or abort that read the session as open and then paused could create an outcome record for a deleted session. A completion could then issue evidence for content that an abort deleted, or an abort could delete content that a commit might reference. Garbage collection deletes the session record first, so the check catches both cases.
 
 ### 5.2 Transfer modes
 
@@ -792,49 +792,49 @@ Each session uses one transfer mode, which is set when the session is created an
 | `direct_put` | The client writes the whole object directly to the provider, with one presigned PUT. | The selected whole-object `checksum_algorithm` |
 | `direct_multipart` | The client uploads parts directly to the provider. | `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm` |
 
-For a direct multipart upload, the client tracks part progress. The session stores the part size and checksum algorithm so that resumed work uses the same settings, and it stores provider upload identifiers where they're needed to recover completion or to clean up.
+The client tracks multipart progress, and resumed work uses the stored part size and algorithm. Completion and cleanup use the stored provider upload ID.
 
-The content reference in a completed outcome record MUST match the session's content ID, and for a direct upload it MUST use the algorithm recorded in the mode. A record with missing required fields is corrupt, and so is an outcome record that contradicts its session record.
+A completed outcome record's content reference MUST match the session's content ID, and for a direct upload it MUST use the algorithm recorded in the mode. A record with missing required fields is corrupt, and so is an outcome record that contradicts its session record.
 
 ### 5.3 Service-proxied staging
 
-With a service-proxied upload, the client sends the bytes to the LoonFS server, which writes the session's content object. This step is called "staging", and it doesn't write a record. The content object itself shows what was uploaded, because no other session uses its content ID, and the provider stores the object's size and full-object checksum.
+In a service-proxied upload, the server writes the bytes it receives to the session's content object, a step called "staging" that writes no record. The object itself shows what was uploaded, because no other session uses its content ID and the provider stores its size and full-object checksum.
 
-The server writes the content object with put-if-absent, and a large write completes conditionally (see [Immutable writes and retries](#32-immutable-writes-and-retries)). So if two requests upload to one session at the same time, only one of them creates the object. A request that finds the object already written compares the stored size and checksum with its own bytes. The same bytes are accepted as a retry, and different bytes conflict.
+Every request to one session writes the same key, and [Immutable writes and retries](#32-immutable-writes-and-retries) lets only one of them create it. A request that finds the object written accepts it as a retry if its stored size and checksum match the request's bytes, and conflicts otherwise.
 
-Service-proxied staging computes the store's checksum while it streams the bytes. When the body ends, the request reads the session's records again, and it lets the object store finish the write only if the session is still open. After the write, the request reads the records once more, and it reports the uploaded reference only if the session is still open, because an abort during the write deletes the object.
+Staging computes the store's checksum while it streams the bytes. When the body ends, the request rereads the session's records and lets the object store finish the write only if the session is still open. After the write, it rereads them and reports the uploaded reference only if the session is still open, because an abort during the write deletes the object.
 
-Completion reads the content object's stored size and checksum with one HEAD request, and it records them in the outcome record's content reference. If the object doesn't exist yet, completion fails, and the session stays open.
+Completion reads the object's stored size and checksum with one HEAD request and records them in the outcome record's content reference. If the object doesn't exist yet, completion fails, and the session stays open.
 
-Why doesn't staging record the content reference? Recording it would add a write to the session's records during the upload, and the stored object already has the size and checksum that the record would contain. The provider verified that checksum when the object was written, and a direct PUT completion relies on the same stored values.
+Why doesn't staging record the content reference? The stored object already has the size and checksum, which the provider verified on write, so a record would only add a write during the upload. A direct PUT completion relies on the same stored values.
 
 ### 5.4 Direct uploads
 
-A direct upload sends bytes from the client to the provider, using a short-lived presigned URL. The server allocates the content ID and constrains the target key, so clients can't choose an arbitrary object key.
+A direct upload sends bytes from the client to the provider through a short-lived presigned URL. The server allocates the content ID and constrains the target key, so a client can't choose an arbitrary object key.
 
-Direct PUT uses the checksum algorithm selected when the session starts. Direct multipart uses the algorithm stored in the session (currently CRC-64/NVME). The provider MUST enforce the signed transfer constraints, and it MUST expose the stored whole-object checksum in the supported algorithm.
+Direct PUT uses the checksum algorithm selected when the session starts, and direct multipart uses the one stored in the session (currently CRC-64/NVME). The provider MUST enforce the signed transfer constraints and MUST expose the stored whole-object checksum in the supported algorithm.
 
-At completion, the server compares the provider's stored size and checksum with the client's completion claim (a digest supplied by the client isn't enough on its own). After the completion call, the object at the key is the only evidence, whatever the provider's response said. If the stored object doesn't match the claim, the server rejects the claim and changes nothing. The session stays open, and nothing is deleted. A session that can't complete ends with an explicit abort, or when its lease ends (see [Upload-session cleanup](#116-upload-session-cleanup)). The same rules apply to direct PUT and direct multipart.
+At completion of either kind, the server compares the provider's stored size and checksum with the client's claim (a client digest alone isn't enough). After the completion call, only the object at the key counts as evidence, whatever the provider responded. On a mismatch, the server rejects the claim and changes nothing, so the session stays open and nothing is deleted. A session that can't complete ends with an explicit abort, or when its lease ends (see [Upload-session cleanup](#116-upload-session-cleanup)).
 
-Provider-specific checksum headers, completion APIs, and response encodings belong in the provider adapter. A LoonFS checksum has the same canonical representation whether the provider returned it as hexadecimal or base64.
+Provider-specific checksum headers, completion APIs, and response encodings belong in the provider adapter. A LoonFS checksum has one canonical representation, whether the provider returned it as hexadecimal or base64.
 
 ### 5.5 Admission proofs
 
-A commit can reference uploaded content only with "admission evidence", which is proof that the referenced bytes were verified in a completed upload. The evidence is tied to the namespace and the complete content reference, so a match on the content ID alone isn't enough. Admission evidence MUST match the complete reference. Inline content needs no evidence, because it starts a new chain or extends a chain that the committing namespace created (see [Operations and WAL deltas](#66-operations-and-wal-deltas)).
+A commit can reference uploaded content only with "admission evidence", which is proof that the referenced bytes were verified in a completed upload. The evidence is tied to the namespace and MUST match the complete content reference, not only the content ID. Inline content needs no evidence, because it starts a new chain or extends one that the committing namespace created (see [Operations and WAL deltas](#66-operations-and-wal-deltas)).
 
-Admission evidence expires. It's valid while the clock reads before its expiry, and it's expired at the expiry instant. Three windows apply ([Upload admission](#c2-upload-admission) lists the values):
+Admission evidence is valid while the clock reads before its expiry, and expired at the expiry instant. Three windows apply ([Upload admission](#c2-upload-admission) lists the values):
 
 - A completed session can produce evidence only during `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` after its original completion time. A status read or a cached response doesn't restart that window, and nothing is issued at or after its end.
 - A signed token lasts `CONTENT_RECEIPT_TTL_MS` from when it's issued.
 - Evidence prepared in process, without a token, expires at the end of the admission window, `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` after the completion. No token lasts past that window.
 
-The reference HTTP server represents admission evidence as signed content tokens. An embedded implementation doesn't need to issue tokens. The [API specification][api-spec] defines token encoding, signing, and HTTP responses.
+The reference HTTP server represents admission evidence as signed content tokens, which an embedded implementation doesn't need to issue. The [API specification][api-spec] defines token encoding, signing, and HTTP responses.
 
-Immediately before it publishes newly accepted requests, the writer checks that every externally supplied content reference has matching, unexpired admission evidence. This check includes the time spent acquiring or checking the writer, loading the view, planning, and preparing the WAL object. It uses the request clock plus the monotonic time elapsed since the batch call began, including earlier attempts, so retrying doesn't restart the evidence's validity.
+Immediately before publishing, the writer checks that every externally supplied content reference has matching, unexpired evidence (see [Publication and group commit](#63-publication-and-group-commit)). The check includes the time spent acquiring or checking the writer, loading the view, planning, and preparing the WAL object. It uses the request clock plus the monotonic time elapsed since the batch call began, including earlier attempts, so a retry doesn't restart the evidence's validity.
 
-A retained matching commit receipt replays without new admission evidence. Internal copy and restore operations reuse references that the validated namespace state already established, and a merge reuses the fork's. A commit has no other way to reference content that another namespace wrote.
+A retained matching commit receipt replays without new evidence. Internal copy and restore operations reuse references that the validated namespace state already established, and a merge reuses the fork's. A commit has no other way to reference content that another namespace wrote.
 
-Why does admission evidence expire? Garbage collection has to know when it can delete a completed upload that nothing references. If evidence never expired, a commit could reference the upload at any time, and its content could never be deleted safely. The receipt window, the token lifetime, and the publication budget determine the earliest safe deletion time, and [Upload-session cleanup](#116-upload-session-cleanup) and [Appendix C](#appendix-c-timing-and-size-reference) show the exact calculation.
+Why does admission evidence expire? Without an expiry, a commit could reference a completed upload at any time, so garbage collection could never safely delete one that nothing references. The receipt window, token lifetime, and publication budget set the earliest safe deletion time (see [Upload-session cleanup](#116-upload-session-cleanup) and [Appendix C](#appendix-c-timing-and-size-reference)).
 
 ## 6. Publishing a commit
 
