@@ -108,8 +108,8 @@ pub fn ensure_kind(expected: &str, found: &str) -> Result<(), EnvelopeCodecError
     Ok(())
 }
 
-/// Requires the probed format version to be exactly what this build writes
-/// for `kind` — no envelope family tolerates version skew.
+/// Requires the probed format version to equal `supported`, the one version of
+/// `kind` that this build reads and writes.
 pub(crate) fn ensure_version(
     kind: &str,
     found: u32,
