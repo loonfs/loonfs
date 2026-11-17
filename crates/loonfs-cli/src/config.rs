@@ -933,6 +933,7 @@ key_prefiks = "typo"
 
     #[test]
     #[cfg(unix)]
+    #[allow(clippy::print_stderr, reason = "the test says why it skipped")]
     fn unreadable_config_parent_is_not_treated_as_absence() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -945,6 +946,11 @@ key_prefiks = "typo"
             .permissions();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o000))
             .expect("make parent unreadable");
+        if std::fs::metadata(&path).is_ok() {
+            std::fs::set_permissions(directory.path(), permissions).expect("restore permissions");
+            eprintln!("skipped: mode 000 doesn't block access when the test runs as root");
+            return;
+        }
         let result = crate::config_file::load_or_default_config(&path);
         std::fs::set_permissions(directory.path(), permissions).expect("restore permissions");
 

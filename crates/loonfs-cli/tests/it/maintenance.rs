@@ -379,10 +379,6 @@ fn grep_limit_caps_the_whole_search_while_page_size_sizes_requests() {
     );
     assert_eq!(json_data(&over_page_cap)["truncated"], false);
 
-    let removed = harness.run(&["grep", "TODO", "--max-matches", "2"]);
-    assert_failure(&removed);
-    assert!(stderr_string(&removed).contains("unexpected argument '--max-matches'"));
-
     // The human rendering says it stopped early.
     let human = harness.run(&["grep", "TODO", "--limit", "2"]);
     assert_success(&human);

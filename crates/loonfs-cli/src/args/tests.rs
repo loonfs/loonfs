@@ -319,20 +319,97 @@ fn all_json_is_rejected_for_every_paginated_listing() {
 
 #[test]
 fn command_kind_envelope_values_are_pinned() {
+    // The wire strings are written out, so renaming a variant or changing
+    // its string fails this test.
+    let table = [
+        (CommandKind::Completion, "completion"),
+        (CommandKind::Init, "init"),
+        (CommandKind::ProfileCreate, "profile_create"),
+        (CommandKind::ProfileList, "profile_list"),
+        (CommandKind::ProfileShow, "profile_show"),
+        (CommandKind::ProfileUpdate, "profile_update"),
+        (CommandKind::ProfileDelete, "profile_delete"),
+        (CommandKind::ProfileUse, "profile_use"),
+        (CommandKind::NamespaceCreate, "namespace_create"),
+        (CommandKind::NamespaceShow, "namespace_show"),
+        (CommandKind::NamespaceDelete, "namespace_delete"),
+        (CommandKind::NamespaceFork, "namespace_fork"),
+        (CommandKind::NamespaceUse, "namespace_use"),
+        (CommandKind::Merge, "merge"),
+        (CommandKind::SnapshotCreate, "snapshot_create"),
+        (CommandKind::SnapshotList, "snapshot_list"),
+        (CommandKind::SnapshotExtend, "snapshot_extend"),
+        (CommandKind::SnapshotDelete, "snapshot_delete"),
+        (CommandKind::Current, "current"),
+        (CommandKind::FilesystemLs, "filesystem_ls"),
+        (CommandKind::FilesystemStat, "filesystem_stat"),
+        (CommandKind::FilesystemAnnotate, "filesystem_annotate"),
+        (CommandKind::AccessSet, "access_set"),
+        (
+            CommandKind::MaintenanceRecoverAdministrator,
+            "maintenance_recover_administrator",
+        ),
+        (CommandKind::FilesystemCat, "filesystem_cat"),
+        (CommandKind::FilesystemGrep, "filesystem_grep"),
+        (CommandKind::FilesystemGet, "filesystem_get"),
+        (CommandKind::FilesystemPut, "filesystem_put"),
+        (CommandKind::FilesystemAppend, "filesystem_append"),
+        (CommandKind::FilesystemRevisions, "filesystem_revisions"),
+        (CommandKind::FilesystemTrash, "filesystem_trash"),
+        (CommandKind::FilesystemRestore, "filesystem_restore"),
+        (CommandKind::FilesystemMkdir, "filesystem_mkdir"),
+        (CommandKind::FilesystemRm, "filesystem_rm"),
+        (CommandKind::FilesystemMv, "filesystem_mv"),
+        (CommandKind::FilesystemCp, "filesystem_cp"),
+        (CommandKind::Changes, "changes"),
+        (CommandKind::Capabilities, "capabilities"),
+        (CommandKind::Doctor, "doctor"),
+        (
+            CommandKind::MaintenanceSnapshotList,
+            "maintenance_snapshot_list",
+        ),
+        (CommandKind::MaintenanceFold, "maintenance_fold"),
+        (
+            CommandKind::MaintenanceRetentionAdvance,
+            "maintenance_retention_advance",
+        ),
+        (
+            CommandKind::MaintenanceRetentionWindow,
+            "maintenance_retention_window",
+        ),
+        (CommandKind::MaintenanceMetadata, "maintenance_metadata"),
+        (CommandKind::MaintenanceGc, "maintenance_gc"),
+        (CommandKind::MaintenancePoolGc, "maintenance_pool_gc"),
+        (
+            CommandKind::MaintenanceStoreProbe,
+            "maintenance_store_probe",
+        ),
+        (
+            CommandKind::MaintenanceIndexEnable,
+            "maintenance_index_enable",
+        ),
+        (
+            CommandKind::MaintenanceIndexDisable,
+            "maintenance_index_disable",
+        ),
+        (
+            CommandKind::MaintenanceIndexStatus,
+            "maintenance_index_status",
+        ),
+        (CommandKind::ConfigPath, "config_path"),
+        (CommandKind::ConfigShow, "config_show"),
+        (CommandKind::Version, "version"),
+    ];
+    for (kind, wire) in table {
+        assert_eq!(kind.as_str(), wire);
+    }
+    assert_eq!(table.len(), CommandKind::ALL.len());
     for kind in CommandKind::ALL {
-        assert_eq!(kind.as_str(), snake_case(&format!("{kind:?}")));
+        assert!(
+            table.iter().any(|(listed, _)| *listed == kind),
+            "{kind:?} has no wire string in the table"
+        );
     }
-}
-
-fn snake_case(value: &str) -> String {
-    let mut result = String::with_capacity(value.len());
-    for (index, character) in value.chars().enumerate() {
-        if index > 0 && character.is_ascii_uppercase() {
-            result.push('_');
-        }
-        result.push(character.to_ascii_lowercase());
-    }
-    result
 }
 
 #[test]
