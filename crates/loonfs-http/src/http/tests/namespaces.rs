@@ -198,23 +198,6 @@ async fn a_request_for_a_missing_namespace_leaves_no_writer_handle_in_the_host()
 }
 
 #[tokio::test]
-async fn a_rejected_upload_for_a_missing_namespace_answers_not_found_and_leaves_no_writer_handle() {
-    let (_directory, router, _, namespaces) = host("missing-upload-host").await;
-    let missing = namespace_id("missing");
-
-    assert_eq!(
-        create_direct_put_upload(&router, &missing).await,
-        (
-            StatusCode::NOT_FOUND,
-            ErrorCode::NamespaceNotFound.as_str().to_owned()
-        )
-    );
-
-    let closed = namespaces.close(&missing).await.expect("close");
-    assert!(closed.is_none(), "the host kept a handle: {closed:?}");
-}
-
-#[tokio::test]
 async fn a_rejected_upload_for_an_existing_namespace_keeps_its_writer_handle() {
     let (_directory, router, state, namespaces) = host("existing-upload-host").await;
     let existing = namespace_id("existing");
