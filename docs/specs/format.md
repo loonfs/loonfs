@@ -2284,7 +2284,7 @@ An extension entry contains `version`, `runs`, and the members that the extensio
 
 `base_seq` is the oldest non-empty run's sequence, or `head_seq` when there's no such run, and it isn't stored. Extension runs don't count toward it. Segments follow their list order within each family. The owner and segment ID determine the object key, and the descriptor stores no separate path or compaction-job identity.
 
-`MAX_NAMESPACE_MANIFEST_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed manifest document, including its envelope. Readers refuse larger documents, and a publication whose manifest document would be larger fails before its put. A manifest lists every segment of its namespace, so this limit also caps how much metadata a namespace can have. (A namespace of one million files has a manifest document of about 193 KiB, so the limit is reached at about 2.7 billion files.) This is a format constraint, because every published manifest MUST stay readable with bounded decompression.
+`MAX_NAMESPACE_MANIFEST_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed manifest document, including its envelope. Readers refuse larger documents, and a publication whose manifest document would be larger fails before its put. A manifest lists every segment of its namespace, so this limit also caps how much metadata a namespace can have. (A namespace of one million files written in large commits has about 700 segments, and its manifest document is about 440 KiB, so the limit is reached at about 1.2 billion files.) This is a format constraint, because every published manifest MUST stay readable with bounded decompression.
 
 ### A.5 WAL records
 

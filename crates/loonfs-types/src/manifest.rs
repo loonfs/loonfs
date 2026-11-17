@@ -27,9 +27,10 @@ pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 ///
 /// A manifest lists every segment of its namespace, and no other format limit
 /// bounds how many segments that is, so this limit also bounds how much
-/// metadata a namespace can have. A namespace of one million files has a
-/// manifest document of about 193 KiB, so the limit is reached at about 2.7
-/// billion files. The value is the same as
+/// metadata a namespace can have. A namespace of one million files written in
+/// large commits has about 700 segments, and its manifest document is about
+/// 440 KiB, so the limit is reached at about 1.2 billion files. The value is
+/// the same as
 /// [`MAX_WAL_OBJECT_BYTES`](crate::wal::MAX_WAL_OBJECT_BYTES), so a reader
 /// needs at most the same memory to decompress either object. It's a separate
 /// constant, so a change to one limit doesn't change which objects of the
