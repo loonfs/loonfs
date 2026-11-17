@@ -9,6 +9,7 @@ use crate::metadata::{
     RevisionRecord,
 };
 use crate::path::read::{resolve_visible_inode, AncestorPaths};
+use crate::segment::BlocksPerRefill;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::{
@@ -166,7 +167,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> StateReader<'a, 'store, S> {
     pub(super) fn new(view: MetadataView<'a, 'store, S>, memory: &Arc<PlanningMemory>) -> Self {
         Self {
             view,
-            session: view.session(),
+            session: view.session_with(BlocksPerRefill::ReadAhead),
             paths: MeasuredPaths {
                 paths: HashMap::new(),
                 memory: Arc::clone(memory),
@@ -185,6 +186,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> StateReader<'a, 'store, S> {
     /// Reads `inode_id`'s state, or `None` when the inode doesn't exist at
     /// this sequence. The read checks the merge allowance when the plan's
     /// path caches have grown by 1 MiB since the last check.
+    ///
+    /// A plan reads the state of every inode that the fork's commits touch,
+    /// in inode ID order. The inodes that consecutive commits touch often
+    /// have their rows in the blocks that follow, so each lookup reads ahead
+    /// past the inode's rows (see [`BlocksPerRefill::ReadAhead`]). That
+    /// includes the revision, attribute, and access lookups in this function,
+    /// and the inode, parent binding, and subtree tombstone lookups through
+    /// the session that [`Self::new`] opens. If each lookup fetched only the
+    /// block with the inode's rows, the plan would send a GET for each block
+    /// of rows that it reaches.
     pub(super) async fn state(&mut self, inode_id: InodeId) -> Result<Option<InodeState>> {
         let Some(inode) = self.session.inode_at_seq(inode_id).await? else {
             return Ok(None);
@@ -201,16 +212,27 @@ impl<'a, 'store, S: ObjectStore + ?Sized> StateReader<'a, 'store, S> {
                 },
             ),
         });
+        let refill = BlocksPerRefill::ReadAhead;
         let revision = match inode.inode_kind {
-            InodeKind::File => self.view.latest_revision_record(inode_id).await?,
+            InodeKind::File => {
+                self.view
+                    .latest_revision_record_with(inode_id, refill)
+                    .await?
+            }
             InodeKind::Directory => None,
         };
         Ok(Some(InodeState {
             kind: inode.inode_kind,
             visible,
             revision,
-            attributes: self.view.latest_attributes_revision(inode_id).await?,
-            access: self.view.latest_access_revision(inode_id).await?,
+            attributes: self
+                .view
+                .latest_attributes_revision_with(inode_id, refill)
+                .await?,
+            access: self
+                .view
+                .latest_access_revision_with(inode_id, refill)
+                .await?,
         }))
     }
 }

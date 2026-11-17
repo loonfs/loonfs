@@ -167,7 +167,8 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
         .find_row(
             ApiMetadataRowFamily::Inodes,
             &root_inode_key,
-            &root_inode_key
+            &root_inode_key,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("get inode")
@@ -652,7 +653,12 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     store.reset();
     let key = loonfs_types::format::manifest::lookup_keys::inode_key(loonfs_types::ROOT_INODE_ID);
     assert!(segments
-        .find_row(ApiMetadataRowFamily::Inodes, &key, &key)
+        .find_row(
+            ApiMetadataRowFamily::Inodes,
+            &key,
+            &key,
+            scan::BlocksPerRefill::One
+        )
         .await
         .expect("first lookup")
         .is_some());
@@ -660,12 +666,22 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     assert!(first_lookup_gets > 0, "a cold lookup fetches blocks");
 
     assert!(segments
-        .find_row(ApiMetadataRowFamily::Inodes, &key, &key)
+        .find_row(
+            ApiMetadataRowFamily::Inodes,
+            &key,
+            &key,
+            scan::BlocksPerRefill::One
+        )
         .await
         .expect("repeated lookup")
         .is_some());
     assert!(segments
-        .find_row(ApiMetadataRowFamily::Inodes, &other, &other)
+        .find_row(
+            ApiMetadataRowFamily::Inodes,
+            &other,
+            &other,
+            scan::BlocksPerRefill::One
+        )
         .await
         .expect("second-key lookup")
         .is_some());
@@ -724,13 +740,23 @@ async fn reads_and_folds_keep_their_lookup_blocks_in_their_memos_without_a_block
     for segments in [&read_view, &fold_view] {
         store.reset();
         assert!(segments
-            .find_row(ApiMetadataRowFamily::Inodes, &key, &key)
+            .find_row(
+                ApiMetadataRowFamily::Inodes,
+                &key,
+                &key,
+                scan::BlocksPerRefill::One
+            )
             .await
             .expect("first lookup")
             .is_some());
         let first_lookup_reads = store.count(OperationSelector::Read);
         assert!(segments
-            .find_row(ApiMetadataRowFamily::Inodes, &key, &key)
+            .find_row(
+                ApiMetadataRowFamily::Inodes,
+                &key,
+                &key,
+                scan::BlocksPerRefill::One
+            )
             .await
             .expect("repeated lookup")
             .is_some());

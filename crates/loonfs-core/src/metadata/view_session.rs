@@ -12,6 +12,7 @@ use super::{
 use crate::error::{CoreError, Result};
 use crate::metadata::children_page::VisibleChildEntry;
 use crate::path::mutation_path::name_keys;
+use crate::segment::BlocksPerRefill;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
     AbsolutePath, AttributesProjection, CommitSeq, InodeId, NameKey, ROOT_INODE_ID,
@@ -123,6 +124,10 @@ impl MetadataViewSessionCounters {
 /// One loaded-view session with memoized visibility reads.
 pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     pub(crate) base: MetadataView<'a, 'store, S>,
+    /// How many blocks each refill asks for when the session looks up an
+    /// inode's row, parent binding, subtree tombstone, newest revision, or
+    /// access row (see [`MetadataView::session_with`]).
+    blocks_per_refill: BlocksPerRefill,
     // In each cache below whose value is an `Option`, `None` caches an
     // absence: the lookup ran and found nothing, so it isn't read again.
     inode_at_seq_cache: HashMap<InodeId, Option<InodeRecord>>,
@@ -138,9 +143,13 @@ pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
-    pub(super) fn new(base: MetadataView<'a, 'store, S>) -> Self {
+    pub(super) fn new(
+        base: MetadataView<'a, 'store, S>,
+        blocks_per_refill: BlocksPerRefill,
+    ) -> Self {
         Self {
             base,
+            blocks_per_refill,
             inode_at_seq_cache: HashMap::new(),
             visible_inode_cache: HashMap::new(),
             bound_child_cache: HashMap::new(),
@@ -231,7 +240,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         base.latest_parent_binding_for_child(inode_id).await
                     }
                 },
-                base.tombstones_for_root(inode_id),
+                base.tombstones_for_root(inode_id, BlocksPerRefill::One),
             )
         })
         .await?;
@@ -366,7 +375,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         if let Some(cached) = self.cached_inode_at_seq(inode_id) {
             return Ok(cached);
         }
-        let inode = self.base.inode_at_seq(inode_id).await?;
+        let inode = self
+            .base
+            .inode_at_seq_with(inode_id, self.blocks_per_refill)
+            .await?;
         self.inode_at_seq_cache.insert(inode_id, inode.clone());
         Ok(inode)
     }
@@ -385,7 +397,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         if let Some(cached) = self.cached_latest_revision_head_of_visible(inode_id) {
             return Ok(cached);
         }
-        let revision = self.base.latest_revision_record(inode_id).await?;
+        let revision = self
+            .base
+            .latest_revision_record_with(inode_id, self.blocks_per_refill)
+            .await?;
         self.latest_revision_head_cache
             .insert(inode_id, revision.clone());
         Ok(revision)
@@ -418,7 +433,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         if let Some(cached) = self.access_row_cache.get(&inode_id).cloned() {
             return Ok(cached);
         }
-        let access = self.base.latest_access_revision(inode_id).await?;
+        let access = self
+            .base
+            .latest_access_revision_with(inode_id, self.blocks_per_refill)
+            .await?;
         self.access_row_cache.insert(inode_id, access.clone());
         Ok(access)
     }
@@ -513,10 +531,15 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         self.counters.direntry_child_scan_calls =
             self.counters.direntry_child_scan_calls.saturating_add(1);
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let latest = self
-            .base
-            .latest_parent_binding_for_child(child_inode_id)
-            .await?;
+        let latest = if child_inode_id == ROOT_INODE_ID {
+            None
+        } else {
+            let bindings = self
+                .base
+                .direntry_binds_for_child(child_inode_id, self.blocks_per_refill)
+                .await?;
+            super::view::latest_visible_binding(bindings.iter(), self.base.visible_seq())
+        };
         self.latest_parent_binding_cache
             .insert(child_inode_id, latest.clone());
         Ok(latest)
@@ -558,7 +581,14 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             return Ok(cached);
         }
         self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let tombstone = self.base.hiding_subtree_tombstone(root_inode_id).await?;
+        let tombstones = self
+            .base
+            .tombstones_for_root(root_inode_id, self.blocks_per_refill)
+            .await?;
+        let tombstone = super::rows::hiding_tombstone_from_records(
+            tombstones.iter().cloned(),
+            self.base.visible_seq(),
+        );
         self.hiding_tombstone_cache
             .insert(root_inode_id, tombstone.clone());
         Ok(tombstone)

@@ -63,9 +63,11 @@ pub(crate) enum BlocksPerRefill {
     /// within the same caps as `KeyRange`. A scan of one directory's children
     /// uses this mode, because a recursive listing scans a tree's directories
     /// one after another and the next directory's rows are often in the
-    /// blocks that follow, and so does a diff page's lookup of an inode's
-    /// rows, because the inodes that a series of commits touches often have
-    /// their rows in the blocks that follow (see [What a read fetches](https://github.com/loonfs/loonfs/blob/main/docs/design/block-cache.md#what-a-read-fetches)).
+    /// blocks that follow. A diff page and a merge plan use this mode too
+    /// when they look up an inode's rows, because the inodes that a series of
+    /// commits touches often have their rows in the blocks that follow, and a
+    /// merge plan looks up the inodes that the fork's commits touch in ID
+    /// order (see [What a read fetches](https://github.com/loonfs/loonfs/blob/main/docs/design/block-cache.md#what-a-read-fetches)).
     /// The scan keeps a refill's blocks as it does for `KeyRange`, and the
     /// refill inserts every block that it fetches into the block cache.
     /// Without a block cache, a scan in this mode reads no further than a
@@ -219,6 +221,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         family: MetadataRowFamily,
         key: &str,
         filter_probe: &str,
+        blocks_per_refill: BlocksPerRefill,
     ) -> Result<Option<MetadataRow>, ManifestLoadError> {
         // Matching on the stored row key: the scan already selected the rows
         // by that key, and recomputing keys from rows allocates per row.
@@ -229,7 +232,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                 string_prefix_upper_bound(key).as_deref(),
                 usize::MAX,
                 Some(filter_probe),
-                BlocksPerRefill::One,
+                blocks_per_refill,
             )
             .await?
             .into_iter()

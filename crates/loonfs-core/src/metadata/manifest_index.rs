@@ -26,10 +26,11 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     visible_seq: CommitSeq,
+    blocks_per_refill: BlocksPerRefill,
 ) -> Result<Option<InodeRecord>> {
     let key = lookup_keys::inode_key(inode_id);
     Ok(segments
-        .find_row(MetadataRowFamily::Inodes, &key, &key)
+        .find_row(MetadataRowFamily::Inodes, &key, &key, blocks_per_refill)
         .await?
         .map(inode_from_manifest_row)
         .transpose()?
@@ -42,7 +43,7 @@ pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
 ) -> Result<Option<WalCommitPayload>> {
     let key = lookup_keys::commit_row_key(seq);
     segments
-        .find_row(MetadataRowFamily::Commits, &key, &key)
+        .find_row(MetadataRowFamily::Commits, &key, &key, BlocksPerRefill::One)
         .await?
         .map(commit_from_manifest_row)
         .transpose()
@@ -131,6 +132,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     child_inode_id: InodeId,
     visible_seq: CommitSeq,
+    blocks_per_refill: BlocksPerRefill,
 ) -> Result<Vec<DirentryBindingRecord>> {
     newest_edge_rows(
         segments,
@@ -138,7 +140,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
         &lookup_keys::direntry_child_prefix(child_inode_id),
         &lookup_keys::direntry_child_probe(child_inode_id),
         child_edge_end,
-        BlocksPerRefill::One,
+        blocks_per_refill,
         visible_seq,
     )
     .await
@@ -192,6 +194,11 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
     visible_seq: CommitSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
     let newest_run_only = segments.every_row_is_visible_at(visible_seq);
+    // A merge of the runs reads the prefix as a key range.
+    let every_run_refill = match blocks_per_refill {
+        BlocksPerRefill::One => BlocksPerRefill::KeyRange,
+        reads_more => reads_more,
+    };
     let upper_bound = string_prefix_upper_bound(prefix);
     let mut lower_bound = prefix.to_owned();
     let mut edges: Vec<DirentryBindingRecord> = Vec::new();
@@ -215,7 +222,7 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
                     upper_bound.as_deref(),
                     EDGE_WALK_PAGE_ROWS,
                     Some(filter_probe),
-                    BlocksPerRefill::KeyRange,
+                    every_run_refill,
                 )
                 .await?
         };
@@ -375,6 +382,7 @@ pub(super) async fn newest_tombstone_for_root<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     root_inode_id: InodeId,
     visible_seq: CommitSeq,
+    blocks_per_refill: BlocksPerRefill,
 ) -> Result<Option<SubtreeTombstoneRecord>> {
     newest_row_under_prefix(
         segments,
@@ -382,7 +390,7 @@ pub(super) async fn newest_tombstone_for_root<S: ObjectStore + ?Sized>(
         lookup_keys::tombstone_prefix(root_inode_id),
         lookup_keys::tombstone_probe(root_inode_id),
         visible_seq,
-        BlocksPerRefill::One,
+        blocks_per_refill,
         tombstone_from_manifest_row,
         |record| record.committed_seq,
     )
