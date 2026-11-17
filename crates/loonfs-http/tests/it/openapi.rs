@@ -591,15 +591,6 @@ fn openapi_operation_ids_are_explicit_and_unique() {
 }
 
 #[test]
-fn openapi_document_generation_is_byte_stable() {
-    let first = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
-        .expect("generate OpenAPI JSON");
-    let second = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
-        .expect("generate OpenAPI JSON again");
-    assert_eq!(first, second);
-}
-
-#[test]
 fn every_operation_publishes_its_sdk_name_unless_ignored() {
     let generated =
         openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())

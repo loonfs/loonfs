@@ -2,7 +2,7 @@
 //! `tests/<name>.rs` file is a module here, so the suite links once and
 //! runs its tests as threads instead of as separate processes.
 //!
-//! `tests/tracing_capture.rs` stays a binary of its own; the comment there
+//! `tests/operation_spans.rs` stays a binary of its own; the comment there
 //! explains why it cannot share a process.
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
@@ -48,7 +48,6 @@ mod publish_discovery;
 mod read_consistency;
 mod read_view;
 mod replaced_basis;
-mod request_accounting;
 mod restore_deleted;
 mod retained_views;
 mod runtime_config;

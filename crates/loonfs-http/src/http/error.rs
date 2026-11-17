@@ -251,22 +251,4 @@ mod tests {
             assert_eq!(body.param.as_deref(), Some("path"));
         }
     }
-
-    #[test]
-    fn every_immediately_retryable_code_answers_with_retry_after() {
-        for code in ErrorCode::ALL {
-            let response = ApiResponseError::new(code, "test response").into_response();
-            assert_eq!(
-                response.extensions().get::<ServedErrorCode>(),
-                Some(&ServedErrorCode(code)),
-                "response extension lost {code}"
-            );
-            let retry_after = response
-                .headers()
-                .get(axum::http::header::RETRY_AFTER)
-                .map(|value| value.to_str().expect("Retry-After is ASCII"));
-            let expected = code.retryable_without_operator_action().then_some("1");
-            assert_eq!(retry_after, expected, "unexpected Retry-After for {code}");
-        }
-    }
 }

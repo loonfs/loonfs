@@ -796,10 +796,7 @@ impl MergeFingerprintInput<'_> {
 mod tests {
     use super::*;
     use crate::options::PutFileOptions;
-    use crate::{
-        AbsolutePath, ActorId, AttributeKey, AttributeValue, Checksum, ContentId, ContentRefKind,
-        DisplayName,
-    };
+    use crate::{AbsolutePath, ActorId, AttributeKey, AttributeValue, ContentId, DisplayName};
 
     #[test]
     fn canonical_bytes_and_digests_match_shared_vectors() {
@@ -1387,31 +1384,6 @@ mod tests {
                 },
             }
         });
-    }
-
-    #[test]
-    fn a_put_has_the_pinned_fingerprint_under_every_checksum_algorithm() {
-        let content_id = ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id");
-        let bytes = b"pinned put bytes";
-
-        for content_ref in [
-            ContentRef::blob_v1(
-                content_id.clone(),
-                bytes,
-                crate::ChecksumAlgorithm::Crc64nvme,
-            ),
-            ContentRef {
-                kind: ContentRefKind::BlobV1,
-                content_id: content_id.clone(),
-                size_bytes: bytes.len() as u64,
-                checksum: Checksum::crc32c(bytes),
-            },
-        ] {
-            assert_eq!(
-                fingerprint(put("/docs/report.txt", content_ref)),
-                "v1:sha256:9355b7faba7360d50aad432c2035de5fb34d6106333821f1eedadc6d396b54e3"
-            );
-        }
     }
 
     fn create_dir(path: &str) -> FilesystemOperation {

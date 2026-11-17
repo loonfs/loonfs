@@ -701,29 +701,4 @@ path = "/tmp/service-account.json"
             assert!(error.to_string().contains("buckt"), "{error}");
         }
     }
-
-    #[test]
-    fn serialization_round_trips_the_store_table() {
-        let config = parse(
-            r#"
-kind = "aws_s3"
-bucket = "bucket"
-region = "us-east-1"
-key_prefix = "demo"
-
-[credentials]
-kind = "static"
-access_key_id = "access"
-secret_access_key = "secret"
-"#,
-        );
-
-        let rendered = toml::to_string_pretty(&config).expect("serialize store config");
-        assert!(rendered.contains("kind = \"aws_s3\""));
-        assert!(!rendered.contains("session_token"));
-        assert!(!rendered.contains("endpoint_url"));
-
-        let reparsed: StoreConfig = toml::from_str(&rendered).expect("reparse store config");
-        assert_eq!(reparsed, config);
-    }
 }

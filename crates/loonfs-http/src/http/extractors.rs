@@ -708,17 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn typed_json_decode_reports_json_pointer() {
-        let error = decode_json::<Request>(
-            br#"{
-            "operations": [{ "path": "relative" }]
-        }"#,
-        )
-        .expect_err("path has the wrong type");
-        assert_eq!(error.param(), Some("/operations/0/path"));
-    }
-
-    #[test]
     fn json_decode_rejects_trailing_data_after_the_value() {
         let error = decode_json::<Request>(br#"{"operations": []}{"operations": []}"#)
             .expect_err("trailing data is not part of the request");

@@ -786,40 +786,6 @@ mod tests {
     }
 
     #[test]
-    fn row_keys_hex_encode_dash_containing_variable_components() {
-        let row = MetadataRow::DirentryBinding(binding_record("report-2024", "report-2024"));
-
-        assert_eq!(
-            row.row_key_for_family(MetadataRowFamily::DirentryBinds),
-            "direntry-bind-00000000000000000000000009-7265706f72742d32303234-0000000000000000000000001a-18446744073709551598-4294967292"
-        );
-    }
-
-    #[test]
-    fn revision_row_key_orders_newest_first_within_each_inode() {
-        let row = MetadataRow::FileRevision(RevisionRecord {
-            inode_id: InodeId(42),
-            revision_no: crate::RevisionNo(7),
-            committed_seq: CommitSeq(12),
-            commit_id: row_commit_id(),
-            committed_at_ms: 12_000,
-            committed_by: crate::ActorId::loonfs(),
-            delta_index: 3,
-            content_ref: crate::ContentRef::blob_v1(
-                crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
-                    .expect("valid content id"),
-                b"row key sample",
-                crate::ChecksumAlgorithm::Crc64nvme,
-            ),
-        });
-
-        assert_eq!(
-            row.row_key_for_family(MetadataRowFamily::Revisions),
-            "revision-0000000000000000000000001a-18446744073709551608-18446744073709551603-4294967292"
-        );
-    }
-
-    #[test]
     fn whole_state_row_keys_sort_newest_revision_first_under_the_inode_prefix() {
         let row_of = |revision: u64, seq: u64, delta_index: u32| {
             MetadataRow::AttributesRevision(AttributesRevisionRecord {

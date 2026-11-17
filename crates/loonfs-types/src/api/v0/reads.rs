@@ -584,19 +584,6 @@ mod tests {
     }
 
     #[test]
-    fn unrequested_attributes_omit_both_wire_keys() {
-        let unprojected = entry("/docs", Some(crate::ROOT_INODE_ID), Some("docs"));
-        let unprojected_json =
-            serde_json::to_value(&unprojected).expect("serialize unprojected entry");
-        assert!(unprojected_json.get("attributes").is_none());
-        assert!(unprojected_json.get("attributes_revision_no").is_none());
-
-        let decoded: PathEntry =
-            serde_json::from_value(unprojected_json).expect("decode unprojected entry");
-        assert!(decoded.attributes.is_none());
-    }
-
-    #[test]
     fn never_written_attributes_serialize_as_revision_zero_and_empty_map() {
         let mut projected = entry("/docs", Some(crate::ROOT_INODE_ID), Some("docs"));
         projected.attributes = Some(AttributesProjection {

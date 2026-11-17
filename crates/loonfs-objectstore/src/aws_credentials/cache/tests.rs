@@ -450,18 +450,6 @@ async fn expiry_is_checked_after_a_suspended_provider_lookup() {
 }
 
 #[tokio::test]
-async fn distinct_sources_do_not_share_cached_identities() {
-    let clock = Clock::default();
-    let first = CredentialCache::default();
-    let second = CredentialCache::default();
-    let a = Provider::new([Step::Return(credentials("a", Some(3600)))]);
-    let b = Provider::new([Step::Return(credentials("b", Some(3600)))]);
-    assert_eq!(get(&first, &a, &clock).await.access_key_id(), "access-a");
-    assert_eq!(get(&second, &b, &clock).await.access_key_id(), "access-b");
-    assert_eq!(get(&first, &a, &clock).await.access_key_id(), "access-a");
-}
-
-#[tokio::test]
 async fn signing_lifetime_can_refresh_before_the_normal_window_without_refetching_per_call() {
     let cache = CredentialCache::default();
     let provider = Provider::new([

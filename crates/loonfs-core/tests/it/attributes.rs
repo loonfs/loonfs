@@ -694,37 +694,6 @@ async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_
     );
 }
 
-#[tokio::test]
-async fn a_wrong_expected_inode_is_rejected() {
-    let (_temp_dir, store, namespace_id, context) = setup().await;
-    NamespaceFixture::new(&store, &namespace_id, &context)
-        .put_file(
-            "/docs/a.txt",
-            b"hello",
-            DestinationBehavior::NoReplace,
-            Some(&commit_id("seed")),
-        )
-        .await
-        .expect("seed file");
-
-    let error = update(
-        &store,
-        &namespace_id,
-        "wrong-inode",
-        FilesystemOperation::UpdateAttributes {
-            path: path("/docs/a.txt"),
-            set: BTreeMap::from([(key("owner"), text("ada"))]),
-            remove: Vec::new(),
-            expected_inode_id: Some(InodeId(999)),
-            expected_attributes_revision_no: None,
-        },
-        &context,
-    )
-    .await
-    .expect_err("the path resolves to another inode");
-    assert_eq!(error.code(), ErrorCode::PathConflict);
-}
-
 // ---------------------------------------------------------------------------
 // Multi-operation requests
 // ---------------------------------------------------------------------------

@@ -95,14 +95,6 @@ impl MetadataCompactionSpec {
     pub(crate) fn placement(&self) -> CompactionPlacement {
         self.placement
     }
-
-    #[cfg(test)]
-    pub(crate) fn with_frozen_floor_seq(&self, frozen_floor_seq: CommitSeq) -> Self {
-        Self {
-            frozen_floor_seq,
-            ..self.clone()
-        }
-    }
 }
 
 /// Plans the compaction unit that a manifest warrants, from its descriptors.

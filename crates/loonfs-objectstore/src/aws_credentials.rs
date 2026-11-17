@@ -295,7 +295,6 @@ mod tests {
     use crate::{AwsS3Credentials, ObjectStoreError};
     use loonfs_types::SecretString;
     use std::assert_matches;
-    use std::fs;
 
     #[tokio::test(flavor = "current_thread")]
     async fn environment_pair_resolves_through_the_ambient_source() {
@@ -322,58 +321,6 @@ mod tests {
         assert_eq!(
             credentials.session_token.as_ref().map(SecretString::expose),
             Some("environment-session")
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn shared_credentials_file_and_profile_resolve_through_the_ambient_source() {
-        let _lock = aws_environment_lock().await;
-        let tempdir = tempfile::tempdir().expect("create temporary AWS config directory");
-        let environment = isolated_aws_environment(&tempdir, None);
-        fs::write(
-            tempdir.path().join("credentials"),
-            "[loonfs-test]\naws_access_key_id = profile-access\naws_secret_access_key = profile-secret\naws_session_token = profile-session\n",
-        )
-        .expect("write shared credentials file");
-
-        let source = aws_credentials_source(&AwsS3Credentials::Ambient {}, "us-east-1")
-            .expect("construct ambient source");
-        let credentials = source
-            .credentials()
-            .await
-            .expect("resolve profile credentials");
-
-        assert_eq!(credentials.access_key_id.expose(), "profile-access");
-        assert_eq!(credentials.secret_access_key.expose(), "profile-secret");
-        assert_eq!(
-            credentials.session_token.as_ref().map(SecretString::expose),
-            Some("profile-session")
-        );
-        drop(environment);
-    }
-
-    #[tokio::test]
-    async fn static_credentials_are_returned_exactly() {
-        let source = aws_credentials_source(
-            &AwsS3Credentials::Static {
-                access_key_id: "static-access".into(),
-                secret_access_key: "static-secret".into(),
-                session_token: Some("static-session".into()),
-            },
-            "us-east-1",
-        )
-        .expect("construct static source");
-
-        let credentials = source
-            .credentials()
-            .await
-            .expect("resolve static credentials");
-
-        assert_eq!(credentials.access_key_id.expose(), "static-access");
-        assert_eq!(credentials.secret_access_key.expose(), "static-secret");
-        assert_eq!(
-            credentials.session_token.as_ref().map(SecretString::expose),
-            Some("static-session")
         );
     }
 

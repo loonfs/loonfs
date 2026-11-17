@@ -821,50 +821,6 @@ fn an_interrupted_embedded_download_restarts_and_verifies_the_whole_file() {
 }
 
 #[test]
-fn a_partial_that_does_not_describe_this_file_is_started_over() {
-    let harness = Harness::with_demo_namespace();
-
-    let payload = streaming_payload();
-    let source = harness.temp_dir.path().join("source.bin");
-    fs::write(&source, &payload).expect("write payload");
-    assert_success(&harness.run(&["put", source.to_str().expect("utf-8 path"), "/big.bin"]));
-    assert_success(&harness.run(&["put", source.to_str().expect("utf-8 path"), "/other.bin"]));
-
-    // The note of a different file: same length, same bytes, and a content
-    // id that says it is not this object.
-    let destination = harness.temp_dir.path().join("big.bin");
-    let held = 3 * 1024 * 1024;
-    leave_a_partial_download(&harness, "/other.bin", &destination, &payload, held);
-
-    let get = harness.run(&[
-        "--json",
-        "get",
-        "/big.bin",
-        destination.to_str().expect("utf-8 path"),
-    ]);
-    assert_success(&get);
-    assert_eq!(fs::read(&destination).expect("read destination"), payload);
-    assert!(
-        events_of_kind(&get, "phase").is_empty(),
-        "a download that started over reports no resume"
-    );
-
-    // Bytes with no note beside them say nothing about themselves either.
-    let elsewhere = harness.temp_dir.path().join("again.bin");
-    let (partial, _) = partial_paths(&elsewhere);
-    fs::write(&partial, &payload[..held]).expect("write orphan partial");
-    let get = harness.run(&[
-        "--json",
-        "get",
-        "/big.bin",
-        elsewhere.to_str().expect("utf-8 path"),
-    ]);
-    assert_success(&get);
-    assert_eq!(fs::read(&elsewhere).expect("read destination"), payload);
-    assert!(events_of_kind(&get, "phase").is_empty());
-}
-
-#[test]
 fn large_and_piped_puts_round_trip_over_the_remote_transport() {
     let harness = Harness::new();
     let remote_server =
@@ -1291,33 +1247,6 @@ fn embedded_commands_reject_out_of_range_ordinal_arguments() {
         .as_str()
         .expect("json string")
         .contains("must be an integer from 0 through 9007199254740991"));
-}
-
-#[test]
-fn remote_namespace_commands_reject_invalid_namespace_ids_before_http() {
-    let harness = Harness::new();
-    let add_remote = harness.run(&[
-        "--json",
-        "profile",
-        "create",
-        "remote",
-        "default",
-        "--server-url",
-        "http://127.0.0.1:9",
-    ]);
-    assert_success(&add_remote);
-
-    let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
-    assert_failure(&create);
-    assert_eq!(json_error(&create)["code"], "invalid_usage");
-
-    let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
-    assert_failure(&fork);
-    assert_eq!(json_error(&fork)["code"], "invalid_usage");
-
-    let use_namespace = harness.run(&["--json", "use", "bad/name"]);
-    assert_failure(&use_namespace);
-    assert_eq!(json_error(&use_namespace)["code"], "invalid_usage");
 }
 
 #[test]

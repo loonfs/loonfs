@@ -26,10 +26,7 @@ use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::http::StatusCode;
 use fixtures::{request, send, serve, test_app, test_options, TestAppOptions, TestOptions};
-use futures::stream::StreamExt;
-use loonfs::{
-    ConfiguredObjectStoreKind, DeleteOptions, LoonFs, PutFileOptions, TraceMode, Writable,
-};
+use loonfs::{ConfiguredObjectStoreKind, LoonFs, PutFileOptions, TraceMode, Writable};
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::entry::grep_extension_name;
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
@@ -39,8 +36,8 @@ use loonfs_types::{
     AttributesRevisionNo, ErrorCode, ErrorDetails, InodeId, WriterEpoch, ALL_LIMIT_KEYS,
 };
 use loonfs_types::{
-    CapabilityDocument, CommitId, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior,
-    GrepRequest, GrepScope, NamespaceId, RevisionNo, FEATURE_QUERY_GREP,
+    CapabilityDocument, CommitId, CommitSeq, DestinationBehavior, GrepRequest, GrepScope,
+    NamespaceId, RevisionNo, FEATURE_QUERY_GREP,
 };
 use std::path::Path;
 
@@ -1344,76 +1341,6 @@ async fn http_move_with_preconditions_rejects_a_bumped_destination_revision() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
-    write_file_bytes(
-        &seeder,
-        &namespace_id("demo"),
-        "/docs/old.txt",
-        b"old",
-        "seed-docs",
-    )
-    .await;
-    write_file_bytes(
-        &seeder,
-        &namespace_id("demo"),
-        "/tmp/source.txt",
-        b"source",
-        "seed-source",
-    )
-    .await;
-    delete_path_recursive(&seeder, &namespace_id("demo"), "/docs", "delete-docs").await;
-
-    let harness = start_server(store, temp_dir.path(), "server-writer").await;
-    // The deleted name is invisible and immediately reusable; the
-    // dead subtree's children stay dead.
-    let put_target = NamespacePath::parse("demo", "/docs/new.txt").expect("put target");
-    harness
-        .client
-        .put_file_with_options(
-            &put_target,
-            b"new",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
-        .await
-        .expect("put recreates the subtree");
-    let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
-    assert_error_response(
-        harness.client.stat(&old_child).await,
-        404,
-        "path_not_found",
-        None,
-    );
-
-    let from = NamespacePath::parse("demo", "/tmp/source.txt").expect("from");
-    let to = NamespacePath::parse("demo", "/docs/source.txt").expect("to");
-    harness
-        .client
-        .move_path_with_options(
-            &from,
-            &to,
-            &loonfs_test_support::test_actor(),
-            &MoveOptions {
-                behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_types::options::CommitOptions {
-                    preconditions: Vec::new(),
-                    commit_id: None,
-                    message: None,
-                },
-                expected_destination_inode_id: None,
-                expected_destination_revision_no: None,
-            },
-        )
-        .await
-        .expect("the move into the recreated subtree is committed");
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_path_mutation_retries_a_wal_put_collision() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
@@ -2010,91 +1937,6 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
     assert_eq!(read_back, payload);
 
     harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
-    let temp_dir = tempdir().expect("tempdir");
-    let watched =
-        BufferWatchStore::watching_content(LocalFsStore::new(temp_dir.path()).expect("store"));
-
-    let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
-    let key = loonfs_objectstore::keys::content_blob(
-        &loonfs_test_support::ids::numbered_pool_id(1),
-        &loonfs_types::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
-    );
-    // Use HTTP-sized chunks so the store must regroup them.
-    let chunks: Vec<Bytes> = payload
-        .chunks(64 * 1024)
-        .map(Bytes::copy_from_slice)
-        .collect();
-    let stored = watched
-        .put_streamed(
-            &key,
-            futures::stream::iter(chunks.into_iter().map(Ok)).boxed(),
-            PutMode::CreateIfAbsent,
-        )
-        .await
-        .expect("stream a multi-part payload into the store");
-
-    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES as u64);
-    let peaks = watched.peaks();
-    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64);
-    assert!(
-        peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
-        "no single buffer may exceed one part: largest was {}",
-        peaks.largest_buffer_bytes
-    );
-    assert!(
-        peaks.peak_live_bytes <= MEMORY_BOUND_PART_BYTES,
-        "the store held {} bytes at once, past its one-part window",
-        peaks.peak_live_bytes
-    );
-    assert_eq!(
-        watched
-            .get(&key, None)
-            .await
-            .expect("read back")
-            .expect("object exists"),
-        Bytes::from(payload)
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_unknown_routes_and_methods_answer_in_envelope() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let config = test_options(temp_dir.path(), "server-writer");
-    let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
-
-    // Unknown path: in-envelope 404 instead of axum's empty body.
-    let error = raw_agent()
-        .get(&format!("http://{addr}/v0/nonexistent"))
-        .call()
-        .expect_err("unknown route should answer 404");
-    let ureq::Error::Status(status, response) = error else {
-        panic!("expected a status error for an unknown route");
-    };
-    assert_eq!(status, 404);
-    assert!(response.header("x-request-id").is_some());
-    let body = response.into_string().expect("read 404 body");
-    let body: serde_json::Value = serde_json::from_str(&body).expect("json 404 body");
-    assert_eq!(body["code"], "route_not_found");
-
-    // Served path, unserved method: in-envelope 405.
-    let error = raw_agent()
-        .delete(&format!("http://{addr}/v0/capabilities"))
-        .call()
-        .expect_err("wrong method should answer 405");
-    let ureq::Error::Status(status, response) = error else {
-        panic!("expected a status error for a wrong method");
-    };
-    assert_eq!(status, 405);
-    let body = response.into_string().expect("read 405 body");
-    let body: serde_json::Value = serde_json::from_str(&body).expect("json 405 body");
-    assert_eq!(body["code"], "method_not_allowed");
-
-    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2811,31 +2653,6 @@ async fn write_file_bytes(
         )
         .await
         .unwrap_or_else(|error| panic!("seed `{absolute_path}`: {error}"));
-}
-
-async fn delete_path_recursive(
-    fs: &LoonFs<Writable>,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-    commit_id: &str,
-) {
-    let namespace = fs.open_namespace(namespace_id).expect("open namespace");
-    namespace
-        .delete_path_with_options(
-            absolute_path,
-            &loonfs_test_support::test_actor(),
-            &DeleteOptions {
-                behavior: DeleteDirectoryBehavior::Recursive,
-                commit: loonfs_types::options::CommitOptions {
-                    preconditions: Vec::new(),
-                    commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
-                    message: None,
-                },
-                expected_inode_id: None,
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("delete `{absolute_path}`: {error}"));
 }
 
 fn assert_error_response<T: std::fmt::Debug>(

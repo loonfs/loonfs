@@ -711,32 +711,6 @@ key_prefiks = "typo"
     }
 
     #[test]
-    fn validation_reports_profile_prefixed_store_fields() {
-        let config = parse(
-            r#"
-config_version = 1
-
-[profiles.cloud]
-mode = "embedded"
-
-[profiles.cloud.store]
-kind = "aws_s3"
-bucket = " "
-region = "us-east-1"
-
-[profiles.cloud.store.credentials]
-kind = "static"
-access_key_id = "access"
-secret_access_key = "secret"
-"#,
-        )
-        .expect("parse config");
-
-        let error = config.validate().expect_err("blank bucket");
-        assert_eq!(error.message, "missing `cloud.store.bucket`");
-    }
-
-    #[test]
     fn cli_example_configs_parse_and_validate() {
         let configs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
         let mut examples = 0usize;

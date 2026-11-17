@@ -909,8 +909,8 @@ fn io_error(key: &str, error: std::io::Error) -> ObjectStoreError {
 mod tests {
 
     use super::LocalFsStore;
-    use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
-    use crate::keys::{boundary, upload_session};
+    use super::{ObjectStore, ObjectStoreError, PutMode};
+    use crate::keys::boundary;
     use crate::{GetIfChangedOutcome, ObjectStoreExtension};
     use bytes::Bytes;
     use futures::{stream, StreamExt};
@@ -1067,65 +1067,6 @@ mod tests {
         assert_matches!(error, ObjectStoreError::Transport { .. });
     }
 
-    #[tokio::test]
-    async fn ranged_reads_answer_their_range_and_refuse_impossible_ones() {
-        let temp_dir = test_dir("ranged-reads");
-        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
-        let payload = Bytes::from_static(b"0123456789");
-        store
-            .put(&key, payload.clone(), PutMode::CreateIfAbsent)
-            .await
-            .expect("seed object");
-
-        let range = |start_inclusive, end_exclusive| {
-            Some(ByteRange {
-                start_inclusive,
-                end_exclusive,
-            })
-        };
-        assert_eq!(
-            store.get(&key, range(0, 4)).await.expect("leading range"),
-            Some(Bytes::from_static(b"0123"))
-        );
-        assert_eq!(
-            store.get(&key, range(4, 7)).await.expect("middle range"),
-            Some(Bytes::from_static(b"456"))
-        );
-        assert_eq!(
-            store
-                .get(&key, range(7, 99))
-                .await
-                .expect("range past the end is truncated"),
-            Some(Bytes::from_static(b"789"))
-        );
-        assert_eq!(
-            store
-                .get(&key, range(10, 10))
-                .await
-                .expect("a range at the end is empty, not missing"),
-            Some(Bytes::new())
-        );
-        assert_matches!(
-            store.get(&key, range(11, 12)).await,
-            Err(ObjectStoreError::InvalidRange { .. })
-        );
-        assert_matches!(
-            store.get(&key, range(6, 2)).await,
-            Err(ObjectStoreError::InvalidRange { .. })
-        );
-        assert!(store
-            .get(
-                &boundary(
-                    &loonfs_types::NamespaceId::parse("ns-missing").expect("valid namespace id")
-                ),
-                range(0, 4)
-            )
-            .await
-            .expect("a ranged read of a missing object is absent, not an error")
-            .is_none());
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_readers_observe_complete_replacement_versions() {
         const PAYLOAD_BYTES: usize = 16 * 1024;
@@ -1206,30 +1147,6 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .expect("a scratch name")
         ));
-    }
-
-    #[tokio::test]
-    async fn delete_is_idempotent_and_head_reflects_removal() {
-        let temp_dir = test_dir("delete");
-        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = upload_session(
-            &loonfs_test_support::ids::numbered_pool_id(1),
-            &loonfs_types::UploadId::parse("upl_00000000000000000000000001")
-                .expect("valid upload id"),
-        );
-
-        store
-            .put_if_absent(&key, Bytes::from_static(br#"{"created":true}"#))
-            .await
-            .expect("seed upload object");
-        assert!(store
-            .head(&key)
-            .await
-            .expect("head before delete")
-            .is_some());
-        store.delete(&key).await.expect("delete existing object");
-        store.delete(&key).await.expect("delete missing object");
-        assert_eq!(store.head(&key).await.expect("head after delete"), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

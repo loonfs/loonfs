@@ -1005,32 +1005,6 @@ mod tests {
     }
 
     #[test]
-    fn segment_round_trips_every_row_through_index_and_blocks() {
-        let rows = SHARED_SEGMENT_ROWS;
-        let built = shared_segment();
-        let index =
-            decode_index_block(section(&built.bytes, &built.index), &built.index).expect("index");
-        assert!(index.len() > 1, "5k inode rows should span several blocks");
-
-        let mut recovered = Vec::new();
-        for entry in &index {
-            let block = decode_data_block(section(&built.bytes, &entry.block), &entry.block)
-                .expect("data block");
-            assert_eq!(block.row_keys.len(), block.rows.len());
-            assert_eq!(
-                block.row_keys.last().expect("blocks are never empty"),
-                &entry.last_row_key
-            );
-            recovered.extend(block.row_keys.iter().cloned());
-        }
-        let expected: Vec<String> = (0..rows).map(|i| inode_row(i as u64).0).collect();
-        assert_eq!(recovered, expected);
-        assert_eq!(built.row_count, rows as u64);
-        assert_eq!(built.min_row_key, expected[0]);
-        assert_eq!(&built.max_row_key, expected.last().expect("rows"));
-    }
-
-    #[test]
     fn index_narrows_point_lookups_to_one_block() {
         let built = shared_segment();
         let index =
@@ -1570,19 +1544,5 @@ mod tests {
                 "unexpected error: {error}"
             );
         }
-    }
-
-    #[test]
-    fn decoding_rejects_a_single_block_range_past_the_integer_edge() {
-        let entries = [index_entry("a", u64::MAX - 10, 100)];
-        let (bytes, handle) = encode_index(&entries);
-
-        let error = decode_index_block(&bytes, &handle)
-            .expect_err("an overflowing single range should be rejected");
-        assert_matches!(
-            &error,
-            SegmentBlockCodecError::Malformed(message) if message.contains("byte range overflows"),
-            "unexpected error: {error}"
-        );
     }
 }

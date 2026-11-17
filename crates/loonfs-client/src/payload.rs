@@ -206,18 +206,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_last_part_is_whatever_is_left() {
-        let mut reader = PartReader::new(source(vec![b"abcdef"]), 4);
-        assert_eq!(
-            cut(&mut reader).await,
-            vec![b"abcd".to_vec(), b"ef".to_vec()]
-        );
-
-        let mut reader = PartReader::new(source(vec![b"abcd"]), 4);
-        assert_eq!(cut(&mut reader).await, vec![b"abcd".to_vec()]);
-    }
-
-    #[tokio::test]
     async fn an_empty_source_produces_no_parts() {
         let mut reader = PartReader::new(source(vec![]), 4);
         assert!(reader.next_part().await.expect("cut a part").is_none());

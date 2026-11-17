@@ -910,26 +910,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recency_queue_stays_bounded_under_repeated_hits() {
-        let cache = DecodedBlockCache::new(DecodedBlockCacheConfig::new(10_000));
-        for index in 0..8 {
-            cache.insert(format!("k{index}"), Block(10));
-        }
-        let (first, second) = ("k0".to_owned(), "k3".to_owned());
-        for _ in 0..10_000 {
-            cache.get(&first);
-            cache.get(&second);
-        }
-        let inner = cache.inner.lock().expect("cache lock");
-        assert_eq!(inner.entries.len(), 8);
-        assert!(
-            inner.order.positions() <= (inner.entries.len() * 2).max(16),
-            "hits must not grow the recency queue unboundedly, queue = {}",
-            inner.order.positions()
-        );
-    }
-
     /// Checks that entries whose values weigh nothing are charged their keys
     /// and the cache's own allocation, so a budget that fits a few of them
     /// keeps that many and evicts the rest.

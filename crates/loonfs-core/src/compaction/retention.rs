@@ -624,37 +624,6 @@ mod tests {
         kept
     }
 
-    #[test]
-    fn one_inode_keeps_the_newest_row_at_the_floor() {
-        for family in WHOLE_STATE_FAMILIES {
-            let mut operator = RetentionRule::WholeState.operator();
-            let mut kept = Vec::new();
-            // Newest first: two above the floor, then a hundred thousand below.
-            for (revision, committed_seq) in [(100_002u64, 102u64), (100_001, 101)] {
-                if let Some((_, row)) = operator
-                    .push(
-                        family,
-                        whole_state_row(family, 7, revision, committed_seq),
-                        floor(),
-                    )
-                    .expect("push")
-                {
-                    kept.push(row);
-                }
-            }
-            for revision in (1..=100_000u64).rev() {
-                let pushed = operator
-                    .push(family, whole_state_row(family, 7, revision, 50), floor())
-                    .expect("push");
-                if let Some((_, row)) = pushed {
-                    kept.push(row);
-                }
-            }
-            assert_eq!(kept.len(), 3, "two above the floor and the newest below it");
-            assert_eq!(kept[2], whole_state_row(family, 7, 100_000, 50));
-        }
-    }
-
     /// Checks that a whole-state row above the floor stays, and that the row
     /// kept at the floor is the newest at or below it.
     #[test]

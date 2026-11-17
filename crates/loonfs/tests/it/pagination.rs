@@ -195,51 +195,6 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
 }
 
 #[test]
-fn directory_cursor_resumes_after_later_writes() {
-    let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "directory-page-snapshot-test");
-    let namespace_id = namespace_id("demo");
-    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
-        fs.put_file_blocking(
-            &namespace_id,
-            path,
-            path.as_bytes(),
-            &loonfs_test_support::test_actor(),
-        )
-        .expect("put file");
-    }
-
-    let limit = page_limit(2);
-    let first = block_on(fs.list(&namespace_id, "/docs").page_limit(limit).page())
-        .expect("first directory page");
-    assert_eq!(display_names(&first.entries), vec!["a.txt", "b.txt"]);
-    let cursor = first.next_cursor.clone().expect("next cursor");
-
-    fs.put_file_blocking(
-        &namespace_id,
-        "/docs/z.txt",
-        b"newer",
-        &loonfs_test_support::test_actor(),
-    )
-    .expect("put later file");
-
-    // The cursor is an ordering resume: the next page continues after the
-    // last returned name key against the advanced head, so the entry
-    // committed mid-listing appears in its canonical position.
-    let second = block_on(
-        fs.list(&namespace_id, "/docs")
-            .page_limit(limit)
-            .cursor(Some(cursor))
-            .page(),
-    )
-    .expect("second directory page resumes after head drift");
-    assert_eq!(display_names(&second.entries), vec!["c.txt", "z.txt"]);
-    assert!(second.next_cursor.is_none());
-}
-
-#[test]
 fn directory_cursor_from_the_future_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-future-test");

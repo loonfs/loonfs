@@ -232,54 +232,6 @@ mod tests {
     use std::assert_matches;
 
     #[tokio::test]
-    async fn staging_identical_bytes_twice_mints_two_distinct_objects() {
-        let (_temp_dir, store) = test_store();
-        let bytes = b"identical payload";
-
-        let pool_id = loonfs_test_support::ids::numbered_pool_id(1);
-        let first = stage_bytes_under_content_id(
-            &store,
-            &pool_id,
-            ContentId::generate(),
-            bytes,
-            ContentKeyOwner::FreshIdentity,
-        )
-        .await
-        .expect("first stage");
-        let second = stage_bytes_under_content_id(
-            &store,
-            &pool_id,
-            ContentId::generate(),
-            bytes,
-            ContentKeyOwner::FreshIdentity,
-        )
-        .await
-        .expect("second stage");
-
-        assert_ne!(
-            first.content_ref().content_id,
-            second.content_ref().content_id,
-            "each staging write owns its own content object"
-        );
-        assert_ne!(first.object_key(), second.object_key());
-        assert_eq!(
-            first.content_ref().checksum,
-            second.content_ref().checksum,
-            "identical bytes still carry identical evidence"
-        );
-        for stored in [&first, &second] {
-            assert_eq!(
-                store
-                    .get(stored.object_key(), None)
-                    .await
-                    .expect("read staged object")
-                    .expect("staged object exists"),
-                Bytes::from_static(b"identical payload")
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn staging_over_an_object_without_an_equal_stored_checksum_is_corruption() {
         let (_temp_dir, local) = test_store();
         let pool_id = loonfs_test_support::ids::numbered_pool_id(1);

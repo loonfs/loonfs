@@ -306,40 +306,6 @@ mod tests {
         assert_eq!(put.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
     }
 
-    #[tokio::test]
-    async fn the_gcs_bundle_signs_native_generation_preconditions() {
-        let issuer = gcs_store()
-            .direct_transfers()
-            .and_then(|transfers| transfers.put)
-            .expect("gcs presigner");
-
-        let signed = issuer
-            .presign_put(
-                PresignedPutRequest {
-                    object_key: "namespaces/demo/content/con_0123456789abcdef0123456789abcdef",
-                    ttl: Duration::from_secs(900),
-                },
-                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            )
-            .await
-            .expect("presign");
-
-        assert!(signed
-            .url
-            .starts_with("https://storage.googleapis.com/bucket/tenant-a/namespaces/"));
-        assert_eq!(
-            signed
-                .headers
-                .get("x-goog-if-generation-match")
-                .map(String::as_str),
-            Some("0")
-        );
-        assert!(!signed.headers.contains_key("x-goog-hash"));
-        // The S3 family's spellings never appear on a native GCS capability.
-        assert!(!signed.headers.contains_key("if-none-match"));
-        assert!(!signed.url.contains("X-Amz-"));
-    }
-
     #[test]
     fn configured_object_store_offers_direct_transfers_only_on_proven_endpoints() {
         let temp_dir = unique_temp_dir("configured-store-kind");

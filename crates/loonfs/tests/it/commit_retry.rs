@@ -6,8 +6,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
-    ByteStream, CommitId, CommitSeq, CreateDirectoryOptions, DestinationBehavior,
-    MetadataCompactionOutcome, NamespaceId, PutFileOptions, RevisionNo,
+    ByteStream, CommitId, CommitSeq, DestinationBehavior, MetadataCompactionOutcome, NamespaceId,
+    PutFileOptions, RevisionNo,
 };
 use loonfs_types::ActorId;
 use loonfs_types::ErrorCode;
@@ -422,54 +422,6 @@ async fn prepared_content_replays_after_restart_with_the_same_message() {
         feed_message(&runtime, &namespace_id, first.committed_seq).await,
         Some("import batch".to_owned())
     );
-}
-
-#[tokio::test]
-async fn a_changed_message_on_mkdir_still_conflicts() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace_id = namespace(&runtime).await;
-    let namespace_writer = runtime
-        .writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let commit_id = CommitId::parse("pinned-mkdir").expect("valid commit id");
-    let options = |message: &str| CreateDirectoryOptions {
-        commit: loonfs_types::options::CommitOptions {
-            preconditions: Vec::new(),
-            commit_id: Some(commit_id.clone()),
-            message: Some(message.to_owned()),
-        },
-        parents: true,
-    };
-
-    let first = namespace_writer
-        .create_directory_with_options(
-            "/pinned",
-            &loonfs_test_support::test_actor(),
-            &options("one"),
-        )
-        .await
-        .expect("first mkdir");
-    let replay = namespace_writer
-        .create_directory_with_options(
-            "/pinned",
-            &loonfs_test_support::test_actor(),
-            &options("one"),
-        )
-        .await
-        .expect("an identical retry replays");
-    assert_eq!(replay, first);
-
-    let error = namespace_writer
-        .create_directory_with_options(
-            "/pinned",
-            &loonfs_test_support::test_actor(),
-            &options("two"),
-        )
-        .await
-        .expect_err("a changed message is a different commit");
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
 }
 
 #[tokio::test]

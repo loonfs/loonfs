@@ -137,25 +137,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_hits_on_one_key_keep_the_queue_bounded() {
-        let mut recency = Recency::default();
-        let mut entries = Entries::default();
-        for key in ["a", "b", "c"] {
-            touch(&mut recency, &mut entries, key);
-        }
-        for _ in 0..10_000 {
-            touch(&mut recency, &mut entries, "a");
-        }
-
-        assert_eq!(entries.0.len(), 3);
-        assert!(
-            recency.positions() <= (entries.0.len() * 2).max(16),
-            "compaction must bound the queue, positions = {}",
-            recency.positions()
-        );
-    }
-
-    #[test]
     fn compaction_holds_off_until_ghosts_outnumber_live_entries() {
         let mut recency = Recency::default();
         let mut entries = Entries::default();

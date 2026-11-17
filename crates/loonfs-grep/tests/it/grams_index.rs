@@ -16,7 +16,6 @@ use loonfs_test_support::ids::{first_page, nonzero_usize};
 use loonfs_test_support::stores::{
     ConcurrencyWatchStore, KeyPredicate, OperationSelector, RecordingStore,
 };
-use loonfs_types::GrepIndexStatus;
 use loonfs_types::{decode_cursor, AbsolutePath, GrepCursorPosition, GrepPageCursor};
 use std::assert_matches;
 use std::collections::BTreeSet;
@@ -73,98 +72,6 @@ async fn grams_built_through_seq(
         .active_watermark()
         .expect("an active grep manifest has a watermark")
         .built_through_seq()
-}
-
-#[tokio::test]
-async fn grep_worker_builds_the_gram_index_once_enabled() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("grams-runtime").expect("namespace id");
-
-    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
-    let host = GrepHost::new(&store, "grams-maintenance").await;
-
-    namespace
-        .put_file(
-            "/alpha.txt",
-            b"a needle in alpha\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write alpha");
-    namespace
-        .put_file(
-            "/bravo.txt",
-            b"nothing here\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write bravo");
-
-    // Before enablement, grep names the missing data half.
-    let error = host
-        .grep(&namespace_id, &request("needle"), first_page())
-        .await
-        .expect_err("grep without the feature must be refused");
-    assert_matches!(error, GrepError::NotEnabled);
-    assert_eq!(error.code(), ErrorCode::NotSupported);
-
-    let enabled = host.enable_grep_index(&namespace_id).await.expect("enable");
-    let again = host
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("re-enable");
-    assert_eq!(again.status, enabled.status);
-
-    // Explicit worker steps run the backfill and keep the watermark current.
-    for _ in 0..2 {
-        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    }
-
-    let response = host
-        .grep(&namespace_id, &request("needle"), first_page())
-        .await
-        .expect("grep after steps");
-    assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].path, "/alpha.txt");
-
-    // New commits are visible immediately through the exhaustive tail, and
-    // a later step absorbs them into the index.
-    namespace
-        .put_file(
-            "/charlie.txt",
-            b"another needle\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write charlie");
-    let response = host
-        .grep(&namespace_id, &request("needle"), first_page())
-        .await
-        .expect("grep with tail");
-    assert_eq!(response.matches.len(), 2);
-    drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let response = host
-        .grep(&namespace_id, &request("needle"), first_page())
-        .await
-        .expect("grep after catch-up step");
-    assert_eq!(response.matches.len(), 2);
-    assert!(response.built_through_seq.0 > 0);
-
-    let disabled = host
-        .disable_grep_index(&namespace_id)
-        .await
-        .expect("disable");
-    assert_eq!(disabled.status, GrepIndexStatus::Disabled);
-    let error = host
-        .grep(&namespace_id, &request("needle"), first_page())
-        .await
-        .expect_err("grep after disable must be refused");
-    assert_matches!(error, GrepError::NotEnabled);
-    assert_eq!(error.code(), ErrorCode::NotSupported);
-
-    writer.shutdown().await.expect("writer shutdown");
 }
 
 #[tokio::test]

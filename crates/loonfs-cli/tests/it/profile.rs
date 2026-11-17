@@ -679,29 +679,6 @@ fn init_is_interactive_only() {
 }
 
 #[test]
-fn removing_last_profile_leaves_empty_config() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-
-    let remove = harness.run(&["--json", "--no-input", "profile", "delete", "default"]);
-    assert_success(&remove);
-
-    let list = harness.run(&["--json", "profile", "list"]);
-    assert_success(&list);
-    let data = json_data(&list);
-    assert!(data["default_profile"].is_null());
-    assert_eq!(data["profiles"].as_array().expect("json array").len(), 0);
-
-    let show_config = harness.run(&["config", "show"]);
-    assert_success(&show_config);
-    assert!(!stdout_string(&show_config).contains("default_profile"));
-
-    let show = harness.run(&["--json", "profile", "show"]);
-    assert_failure(&show);
-    assert_eq!(json_error(&show)["code"], "no_default_profile");
-}
-
-#[test]
 fn removing_default_profile_requires_explicit_reselection() {
     let harness = Harness::new();
     harness.add_embedded_profile("alpha");

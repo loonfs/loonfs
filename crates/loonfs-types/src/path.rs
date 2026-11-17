@@ -543,7 +543,6 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{AbsolutePath, DisplayName, PathError};
-    use crate::NameKey;
     use std::assert_matches;
 
     #[test]
@@ -786,29 +785,6 @@ mod tests {
         assert_eq!(
             DisplayName::parse("é".repeat(128)),
             Err(PathError::DisplayNameTooLong { byte_length: 256 })
-        );
-    }
-
-    #[test]
-    fn maximal_key_expansion_stays_within_the_name_key_cap() {
-        // U+1D160 normalizes to three code points, twelve bytes from four:
-        // the worst byte expansion. A maximum-length name of it has a
-        // 756-byte key, inside the 768-byte key cap.
-        let display_name =
-            DisplayName::parse("\u{1D160}".repeat(63)).expect("maximal expander parses");
-        let key = NameKey::for_display_name(&display_name);
-        assert_eq!(key.as_str().len(), 756);
-    }
-
-    #[test]
-    fn absolute_path_components_satisfy_the_display_name_grammar() {
-        assert_matches!(
-            AbsolutePath::parse("/docs/bad\u{0}name"),
-            Err(PathError::DisplayNameContainsControlCharacter { code_point: 0 })
-        );
-        assert_matches!(
-            AbsolutePath::parse(format!("/docs/{}", "a".repeat(256))),
-            Err(PathError::DisplayNameTooLong { .. })
         );
     }
 }

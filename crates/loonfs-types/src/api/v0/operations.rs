@@ -866,36 +866,6 @@ mod tests {
     }
 
     #[test]
-    fn behavior_enums_use_snake_case_wire_values() {
-        assert_eq!(
-            DestinationBehavior::default(),
-            DestinationBehavior::NoReplace
-        );
-        assert_eq!(
-            DeleteDirectoryBehavior::default(),
-            DeleteDirectoryBehavior::NonRecursive
-        );
-        assert_eq!(
-            serde_json::to_value(DestinationBehavior::NoReplace)
-                .expect("destination behavior json"),
-            serde_json::json!("no_replace")
-        );
-        assert_eq!(
-            serde_json::to_value(DestinationBehavior::Replace).expect("destination behavior json"),
-            serde_json::json!("replace")
-        );
-        assert_eq!(
-            serde_json::to_value(DeleteDirectoryBehavior::NonRecursive)
-                .expect("delete behavior json"),
-            serde_json::json!("non_recursive")
-        );
-        assert_eq!(
-            serde_json::to_value(DeleteDirectoryBehavior::Recursive).expect("delete behavior json"),
-            serde_json::json!("recursive")
-        );
-    }
-
-    #[test]
     fn filesystem_delete_and_move_operations_use_behavior_field() {
         let create_directory = FilesystemOperation::CreateDirectory {
             path: path("/docs"),

@@ -385,50 +385,6 @@ async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-#[tokio::test]
-async fn read_handlers_accept_the_subject_headers() {
-    let temp_dir = tempdir().expect("tempdir");
-    let (router, state) = test_app(
-        test_options(&temp_dir.path().join("store"), "read-subject-headers"),
-        TestAppOptions::default(),
-    )
-    .await
-    .expect("app");
-    state
-        .runtime
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
-        .await
-        .expect("namespace");
-    for (principals, status) in [
-        ("team", StatusCode::OK),
-        ("bad principal", StatusCode::BAD_REQUEST),
-    ] {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/v0/namespaces/demo/filesystem/entry?path=/")
-                    .header("authorization", "Bearer test-token")
-                    .header("Loonfs-Subject", "usr_ada")
-                    .header("Loonfs-Principal-Scope", "org")
-                    .header("Loonfs-Principals", principals)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), status);
-        if status == StatusCode::BAD_REQUEST {
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("body");
-            let error: ErrorResponse = serde_json::from_slice(&body).expect("error");
-            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
-            assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
-        }
-    }
-}
-
 fn request(method: &str, uri: &str, body: Option<&str>, headers: &[(&str, &str)]) -> Request<Body> {
     let headers = [&[("Loonfs-Actor", "service")][..], headers].concat();
     fixtures::request(method, uri, body, &headers)

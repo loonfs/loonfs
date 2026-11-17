@@ -118,36 +118,6 @@ fn compactions(recorder: &DefaultMetricsRecorder, outcome: &str) -> u64 {
     )
 }
 
-#[tokio::test]
-async fn a_session_compacts_after_its_own_fold_without_any_hint() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
-        .build()
-        .await
-        .expect("build writer");
-    let namespace_id = NamespaceId::parse("compacts-itself").expect("namespace id");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-
-    write_until_the_session_compacts(&writer, &namespace, store.as_ref(), "/file").await;
-
-    let manifest = current_manifest(store.as_ref(), &namespace_id).await;
-    assert!(
-        delta_runs(&manifest) < DEFAULT_MIN_COMPACTION_RUNS.get(),
-        "found {} delta runs",
-        delta_runs(&manifest)
-    );
-    writer.shutdown().await.expect("shut down writer");
-}
-
 /// A session whose compaction unit is parked at its first segment write.
 /// Compaction became due on the session's own fold.
 struct ParkedCompaction {

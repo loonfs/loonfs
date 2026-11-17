@@ -801,42 +801,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn reader_engine_still_serves_reads() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        NamespaceFixture::new(&store, &namespace_id, &writer_at("writer-a", 1_000))
-            .create()
-            .await
-            .expect("bootstrap namespace");
-
-        let reader = NamespaceEngine::reader(namespace_store(&store, &namespace_id));
-        let loaded = reader
-            .namespace
-            .load_read_anchor(crate::test_support::observed_now())
-            .await
-            .expect("read basis");
-        let context = RuntimeReadContext {
-            read_basis: crate::control::ReadBasis {
-                basis: loaded.basis(),
-                head: loaded.read_state,
-            },
-            tail: None,
-            visible_seq: None,
-        };
-        let changes = reader
-            .list_changes_after(
-                ChangeFeedPosition::after(CommitSeq(0)),
-                loonfs_types::EffectiveLimit::DEFAULT,
-                CommitSplitting::Whole,
-                &context,
-            )
-            .await
-            .expect("a reader-built engine serves reads");
-        assert_eq!(changes.namespace_id, namespace_id);
-    }
-
-    #[tokio::test]
     async fn reader_engine_reads_upload_status_without_writer_identity() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");

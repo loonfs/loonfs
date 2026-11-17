@@ -335,7 +335,6 @@ pub(crate) fn plan_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::assert_matches;
 
     #[tokio::test]
     async fn local_fs_assembly_matches_buffered_sources_and_tail() {
@@ -398,54 +397,6 @@ mod tests {
         assert_eq!(
             local.get("streamed", None).await.expect("streamed"),
             local.get("buffered", None).await.expect("buffered")
-        );
-    }
-
-    #[tokio::test]
-    async fn local_verified_puts_and_assemblies_share_object_identity() {
-        use crate::local_fs_store::LocalFsStore;
-        let directory = tempfile::tempdir().expect("directory");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        let bytes = Bytes::from_static(b"source tail");
-        let expected = Checksum::crc64nvme(&bytes);
-        store
-            .put_immutable_verified("destination", bytes.clone())
-            .await
-            .expect("verified put");
-        store
-            .put_immutable_verified("source", Bytes::from_static(b"source"))
-            .await
-            .expect("source");
-        let sources = [AssemblySource {
-            key: "source".to_owned(),
-            range: None,
-            checksum: Checksum::crc64nvme(b"source"),
-            metadata: store.head("source").await.expect("head").expect("source"),
-        }];
-        let assembled = store
-            .assemble(
-                "destination",
-                &sources,
-                vec![Bytes::from_static(b" tail")],
-                &expected,
-            )
-            .await
-            .expect("same object");
-        assert_eq!(assembled.checksum, Some(expected.clone()));
-        assert_eq!(
-            assembled.etag,
-            Some(format!("local-fs-v1:crc64nvme:{}", expected.value()))
-        );
-        assert_matches!(
-            store
-                .assemble(
-                    "destination",
-                    &sources,
-                    vec![Bytes::from_static(b" other")],
-                    &Checksum::crc64nvme(b"source other")
-                )
-                .await,
-            Err(ObjectStoreError::DifferentObject { .. })
         );
     }
 

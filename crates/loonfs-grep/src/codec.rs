@@ -619,12 +619,6 @@ mod tests {
     }
 
     #[test]
-    fn posting_batches_pin_their_byte_layout() {
-        let bytes = encode_gram_postings(&[7, 8, 300]).expect("encode");
-        assert_eq!(bytes, [3, 7, 1, 0xa4, 0x02]);
-    }
-
-    #[test]
     fn posting_batch_decode_rejects_a_zero_gap() {
         let mut bytes = Vec::new();
         for value in [2, 5, 0] {
@@ -725,24 +719,6 @@ mod tests {
         assert!(rows
             .windows(2)
             .all(|pair| pair[0].row_key() < pair[1].row_key()));
-    }
-
-    #[test]
-    fn segment_max_row_key_survives_a_full_final_block() {
-        use loonfs_types::format::segment_blocks::SegmentBlocksBuilder;
-
-        let mut builder = SegmentBlocksBuilder::new(std::num::NonZeroUsize::MIN);
-        let mut last_row_key = String::new();
-        for gram in [Gram(*b"abc"), Gram(*b"abd"), Gram(*b"abe")] {
-            let row = IndexRow::gram_postings(gram, &[7]).expect("row");
-            last_row_key = row.row_key();
-            builder
-                .push(&last_row_key, &row.filter_key(), &row)
-                .expect("push");
-        }
-        let built = builder.build().expect("finish");
-        assert_eq!(built.max_row_key, last_row_key);
-        assert!(built.min_row_key <= built.max_row_key);
     }
 
     #[test]

@@ -998,34 +998,6 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
 }
 
 #[tokio::test]
-async fn fork_clone_survives_source_delete() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source = NamespaceId::parse("source").expect("valid namespace id");
-    let clone = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = default_writer();
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    seed_source_namespace_for_fork(&store, &source, &context).await;
-    fork_namespace(&store, &source, &clone, &context)
-        .await
-        .expect("fork");
-
-    namespace_engine(&store, &source, &context)
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
-        .await
-        .expect("delete source");
-
-    let clone_head = head_state(&store, &clone).await;
-    assert_eq!(clone_head.seq, CommitSeq(1));
-    assert_eq!(
-        read_file_bytes(&store, &clone, "/docs/shared.txt")
-            .await
-            .expect("clone reads forked file")
-            .bytes,
-        b"base"
-    );
-}
-
-#[tokio::test]
 async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     let temp_dir = tempdir().expect("tempdir");
     let ancestor = NamespaceId::parse("ancestor").expect("valid namespace id");

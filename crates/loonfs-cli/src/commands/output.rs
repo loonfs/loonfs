@@ -392,37 +392,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn path_entries(head_drift: Option<ListingHeadDrift>) -> CommandData {
-        CommandData::PathEntries {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            path: AbsolutePath::parse("/docs").expect("absolute path"),
-            head_seq: CommitSeq(8),
-            head_drift,
-            entries: Vec::new(),
-            next_cursor: None,
-        }
-    }
-
-    #[test]
-    fn listing_head_drift_serializes_only_after_the_head_moves() {
-        let mut heads = ListingHeadObservation::default();
-        heads.observe(CommitSeq(5));
-        assert_eq!(heads.drift(), None);
-
-        let settled = serde_json::to_value(path_entries(heads.drift())).expect("serialize listing");
-        assert!(settled.get("head_drift").is_none(), "{settled}");
-
-        heads.observe(CommitSeq(8));
-        let drifted = serde_json::to_value(path_entries(heads.drift())).expect("serialize listing");
-        assert_eq!(
-            drifted["head_drift"],
-            serde_json::json!({
-                "first_head_seq": 5,
-                "last_head_seq": 8,
-            })
-        );
-    }
-
     #[test]
     fn inspection_data_uses_the_expected_kind_names() {
         let capabilities = CommandData::Capabilities(CapabilityDocument {

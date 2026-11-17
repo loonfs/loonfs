@@ -26,8 +26,7 @@ mod views_below_the_head;
 
 use super::error::ManifestLoadError;
 use super::load::{
-    append_rows_to_metadata, head_from_manifest,
-    load_manifest_metadata_state_for_inspection_from_manifest,
+    append_rows_to_metadata, load_manifest_metadata_state_for_inspection_from_manifest,
     load_manifest_segments_for_inspection, load_manifest_state_for_inspection,
 };
 use super::publish::{encode_manifest, ManifestPublicationOutcome};
@@ -720,20 +719,6 @@ fn group_containing(family: ApiMetadataRowFamily) -> &'static [ApiMetadataRowFam
         .find(|group| group.families().contains(&family))
         .expect("every family belongs to a compaction group")
         .families()
-}
-
-fn base_segment_object_keys_for_family(
-    manifest: &NamespaceManifestEnvelope,
-    family: ApiMetadataRowFamily,
-) -> Vec<String> {
-    base_tier(manifest)
-        .iter()
-        .find(|family_segments| family_segments.family == family)
-        .expect("the family's segments")
-        .segments
-        .iter()
-        .map(metadata_segment_object_key)
-        .collect()
 }
 
 pub(crate) fn test_context() -> WriterAt {
