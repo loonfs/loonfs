@@ -4,7 +4,7 @@ use crate::error::{CliError, Result};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_client::{DirectDownloadStream, PayloadStream, ReadAt};
-use loonfs_types::{ContentRef, RevisionNo, SnapshotId};
+use loonfs_types::{RevisionNo, SnapshotId};
 
 /// Which revision of a file a download reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,69 +28,27 @@ impl FileVersion {
             None => Self::At(ReadAt::from(snapshot_id)),
         }
     }
-
-    /// Returns the revision that the download names, or `None` when the head
-    /// or a snapshot selects it.
-    pub(crate) fn revision_no(&self) -> Option<RevisionNo> {
-        match self {
-            Self::Revision(revision_no) => Some(*revision_no),
-            Self::At(_) => None,
-        }
-    }
-}
-
-/// The content and revision that a direct download resolved, which a resumed
-/// download has to match.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ResumeIdentity<'a> {
-    pub(crate) content_ref: &'a ContentRef,
-    pub(crate) revision_no: RevisionNo,
 }
 
 pub(crate) enum FileDownload {
-    Direct {
-        stream: Box<DirectDownloadStream>,
-        revision_no: RevisionNo,
-        resumed_from: u64,
-    },
+    Direct(Box<DirectDownloadStream>),
     Proxied(PayloadStream),
 }
 
 impl FileDownload {
-    pub(crate) fn resume_identity(&self) -> Option<ResumeIdentity<'_>> {
+    /// Returns the size of the content a direct download fetches. A proxied
+    /// download doesn't know it before the stream ends.
+    pub(crate) fn content_size(&self) -> Option<u64> {
         match self {
-            Self::Direct {
-                stream,
-                revision_no,
-                ..
-            } => Some(ResumeIdentity {
-                content_ref: stream.content_ref(),
-                revision_no: *revision_no,
-            }),
+            Self::Direct(stream) => Some(stream.content_ref().size_bytes),
             Self::Proxied(_) => None,
         }
     }
 
     pub(crate) async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
         match self {
-            Self::Direct { stream, .. } => stream.next_chunk().await.map_err(CliError::from),
+            Self::Direct(stream) => stream.next_chunk().await.map_err(CliError::from),
             Self::Proxied(stream) => stream.next().await.transpose().map_err(CliError::io),
-        }
-    }
-
-    pub(crate) fn resumed_from(&self) -> u64 {
-        match self {
-            Self::Direct { resumed_from, .. } => *resumed_from,
-            Self::Proxied(_) => 0,
-        }
-    }
-
-    pub(crate) fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<()> {
-        match self {
-            Self::Direct { stream, .. } => {
-                stream.fold_resumed_prefix(bytes).map_err(CliError::from)
-            }
-            Self::Proxied(_) => Ok(()),
         }
     }
 }

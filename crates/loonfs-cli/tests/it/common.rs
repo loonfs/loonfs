@@ -69,42 +69,6 @@ pub(super) fn multi_chunk_payload() -> Vec<u8> {
         .collect()
 }
 
-/// Returns the partial-data and metadata paths for an interrupted download.
-pub(super) fn partial_paths(destination: &Path) -> (PathBuf, PathBuf) {
-    let name = destination
-        .file_name()
-        .expect("destination file name")
-        .to_str()
-        .expect("utf-8 name");
-    let parent = destination.parent().expect("destination parent");
-    (
-        parent.join(format!(".{name}.loonfs-partial")),
-        parent.join(format!(".{name}.loonfs-partial.meta")),
-    )
-}
-
-/// Creates the files left by a download interrupted after `held` bytes.
-pub(super) fn leave_a_partial_download(
-    harness: &Harness,
-    remote_path: &str,
-    destination: &Path,
-    payload: &[u8],
-    held: usize,
-) {
-    let stat = harness.run(&["--json", "stat", remote_path]);
-    assert_success(&stat);
-    let content_ref = json_data(&stat)["content_ref"].clone();
-    let (partial, meta) = partial_paths(destination);
-    fs::write(&partial, &payload[..held]).expect("write partial bytes");
-    let note = serde_json::json!({
-        "content_id": content_ref["content_id"],
-        "size_bytes": content_ref["size_bytes"],
-        "checksum": content_ref["checksum"],
-        "revision_no": null,
-    });
-    fs::write(&meta, serde_json::to_vec(&note).expect("encode note")).expect("write note");
-}
-
 /// Finds the only content object with `size_bytes` under a store root.
 ///
 /// Callers use a unique size so the match identifies one fixture object.

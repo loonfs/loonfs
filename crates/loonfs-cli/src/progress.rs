@@ -242,9 +242,8 @@ impl ProgressReporter {
         }
     }
 
-    /// A stretch where time passes and bytes do not — the commit a finished
-    /// upload waits on, or the head start a resumed download begins from.
-    /// Emitted at the transition, not on a timer.
+    /// A stretch where time passes and bytes do not, such as the commit a
+    /// finished upload waits on. Emitted at the transition, not on a timer.
     ///
     /// A transfer of several files reports none of these. Each file of a
     /// tree passes through the same stretches, several at a time, so one

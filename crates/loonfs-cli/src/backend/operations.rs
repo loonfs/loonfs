@@ -38,20 +38,12 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         version: &FileVersion,
-        start_offset: u64,
     ) -> Result<FileDownload> {
         if self.client.offers_direct_download().await? {
             let grant = match version {
                 FileVersion::Revision(revision_no) => {
                     self.client
-                        .create_revision_download_with_options(
-                            spec,
-                            *revision_no,
-                            &DownloadOptions {
-                                start_offset,
-                                ..DownloadOptions::default()
-                            },
-                        )
+                        .create_revision_download(spec, *revision_no)
                         .await?
                 }
                 FileVersion::At(at) => {
@@ -60,17 +52,15 @@ impl ResolvedTarget {
                             spec,
                             &DownloadOptions {
                                 at: at.clone(),
-                                start_offset,
+                                ..DownloadOptions::default()
                             },
                         )
                         .await?
                 }
             };
-            return Ok(FileDownload::Direct {
-                revision_no: grant.revision_no,
-                stream: Box::new(self.client.open_direct_download(&grant).await?),
-                resumed_from: start_offset,
-            });
+            return Ok(FileDownload::Direct(Box::new(
+                self.client.open_direct_download(&grant).await?,
+            )));
         }
         let stream = match version {
             FileVersion::Revision(revision_no) => {

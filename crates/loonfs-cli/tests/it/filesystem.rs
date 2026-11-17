@@ -781,7 +781,7 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
 }
 
 #[test]
-fn an_interrupted_embedded_download_restarts_and_verifies_the_whole_file() {
+fn a_stale_partial_file_beside_the_destination_is_overwritten_and_the_download_verifies() {
     let harness = Harness::with_demo_namespace();
 
     let payload = streaming_payload();
@@ -789,9 +789,12 @@ fn an_interrupted_embedded_download_restarts_and_verifies_the_whole_file() {
     fs::write(&source, &payload).expect("write payload");
     assert_success(&harness.run(&["put", source.to_str().expect("utf-8 path"), "/big.bin"]));
 
+    // An interrupted run leaves its partial file beside the destination.
+    // These bytes are not a prefix of the file, so a download that kept
+    // them would fail its verification.
     let destination = harness.temp_dir.path().join("big.bin");
-    let held = 3 * 1024 * 1024;
-    leave_a_partial_download(&harness, "/big.bin", &destination, &payload, held);
+    let partial = harness.temp_dir.path().join(".big.bin.loonfs-partial");
+    fs::write(&partial, vec![0xa5_u8; 3 * 1024 * 1024]).expect("write stale partial");
 
     let get = harness.run(&[
         "--json",
@@ -803,21 +806,9 @@ fn an_interrupted_embedded_download_restarts_and_verifies_the_whole_file() {
     assert_eq!(
         fs::read(&destination).expect("read destination"),
         payload,
-        "a restarted download writes the whole verified file"
+        "the download writes the whole verified file"
     );
-
-    let resuming: Vec<Value> = events_of_kind(&get, "phase")
-        .into_iter()
-        .filter(|event| event["phase"] == "resuming")
-        .collect();
-    assert!(
-        resuming.is_empty(),
-        "proxied downloads restart: {resuming:?}"
-    );
-
-    let (partial, meta) = partial_paths(&destination);
     assert!(!partial.exists(), "an installed download leaves no partial");
-    assert!(!meta.exists(), "and takes its note with it");
 }
 
 #[test]
@@ -2204,36 +2195,4 @@ fn a_remote_put_replays_its_exact_request_after_the_upload_session_is_gone() {
         "replay never creates or reads an upload session"
     );
     assert_eq!(download(&harness, "/file", "readback"), b"retained request");
-}
-
-#[test]
-fn an_interrupted_historical_download_restarts_at_the_requested_revision() {
-    let harness = Harness::with_demo_namespace();
-    let payload = streaming_payload();
-    let source = harness.temp_dir.path().join("source.bin");
-    fs::write(&source, &payload).expect("payload");
-    assert_success(&harness.run(&["put", source.to_str().expect("path"), "/big.bin"]));
-    let destination = harness.temp_dir.path().join("historical.bin");
-    let held = 3 * 1024 * 1024;
-    leave_a_partial_download(&harness, "/big.bin", &destination, &payload, held);
-    let (_, meta_path) = partial_paths(&destination);
-    let mut meta: Value =
-        serde_json::from_slice(&fs::read(&meta_path).expect("meta")).expect("json");
-    meta["revision_no"] = Value::from(1);
-    fs::write(&meta_path, serde_json::to_vec(&meta).expect("json")).expect("historical meta");
-    fs::write(&source, b"tiny current revision").expect("replacement");
-    assert_success(&harness.run(&["put", source.to_str().expect("path"), "/big.bin", "--force"]));
-    let get = harness.run(&[
-        "--json",
-        "get",
-        "/big.bin",
-        destination.to_str().expect("path"),
-        "--revision",
-        "1",
-    ]);
-    assert_success(&get);
-    assert_eq!(fs::read(&destination).expect("download"), payload);
-    assert!(events_of_kind(&get, "phase")
-        .into_iter()
-        .all(|event| event["phase"] != "resuming"));
 }
