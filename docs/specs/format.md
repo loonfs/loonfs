@@ -2691,7 +2691,7 @@ v1:sha256:fd69abed548f0d6929753492171d2e653d08541ea84dd11fefe202124437b5e5
 
 ## Appendix C. Timing and size reference
 
-Publication and garbage collection use the timing relationships below, and [C.4](#c4-reference-implementation-sizing-and-admission-defaults) lists the configurable sizing targets separately. The [limits module][limits-source] defines the reference values.
+Publication and garbage collection use the timing relationships below. [C.4](#c4-reference-implementation-sizing-and-admission-defaults) lists the configurable sizing targets, and the [limits module][limits-source] defines the reference values.
 
 ### C.1 Publication and collection timing
 
@@ -2711,7 +2711,7 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `POOL_ROOTS_READ_BUDGET_MS` | 43,200,000 | The monotonic time, from the start of a pool's collection, within which the collection reads the roots of every member of the pool, or skips the pool's content sweep. |
 | `MAX_TAIL_COMMIT_AGE_MS` | 42,300,000 | The greatest age of a commit in a namespace's WAL tail at which a merge, or a rebase's replay commit, still plans from the fork's tail, and a fork of the head still folds the source's tail into itself. When a commit is older, the merge folds the fork before planning, and the fork folds the source and reads the source's head again. It's the grace window less the other terms of the pool collection's inequality below (see [Cross-namespace copies and moves](#97-cross-namespace-copies-and-moves) and [Forking a namespace](#92-forking-a-namespace)). |
 
-A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, and then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (see [Required operations](#31-required-operations)), but a conditional WAL or manifest write can still be larger than the payload threshold in its one request. So the publication allowance reserves 120 + 15 + 120 seconds, rounded up to 300 seconds, not the 30-second timeout for small requests. The allowance covers the request phase, not reading the response body. It keeps the relative-clock and scheduling assumptions, and it doesn't prove that a timed-out remote change had no effect.
+The provider's request bound is the 120-second operation deadline, plus up to 15 seconds of backoff for a retry admitted just before that deadline, plus 120 seconds for a payload-sized request, which is 120 + 15 + 120 seconds, rounded up to 300 seconds. It reserves a payload-sized request instead of the 30-second attempt timeout because the object-store layer sends a conditional WAL or manifest write as one request (see [Required operations](#31-required-operations)), and that one request can be larger than the payload threshold. The bound covers the request phase, not reading the response body, and it doesn't show that a timed-out remote change had no effect (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 
 ```text
 PUBLICATION_COMPLETION_BOUND_MS
@@ -2720,7 +2720,7 @@ PUBLICATION_COMPLETION_BOUND_MS
       + GC_SAFETY_MARGIN_MS
 ```
 
-The grace window `T` can't be lower than the publication completion bound. A compaction's last publication attempt finishes before the compaction's earliest unreferenced output is old enough to delete when this inequality holds:
+The grace window `T` can't be lower than the publication completion bound. A compaction's last publication attempt finishes before its earliest unreferenced output is old enough to delete when this inequality holds (see [Streaming compaction](#104-streaming-compaction)):
 
 ```text
 METADATA_COMPACTION_BUDGET_MS + PUBLICATION_COMPLETION_BOUND_MS
@@ -2737,9 +2737,9 @@ POOL_ROOTS_READ_BUDGET_MS + GC_SAFETY_MARGIN_MS
 
 With the current constants, that's 12 hours plus 15 minutes, against 24 hours, so `MAX_TAIL_COMMIT_AGE_MS` is the remaining 11 hours and 45 minutes.
 
-A fork call has to verify its fork snapshot before the user snapshot that the fork is built from ends. A fork that folds the source's WAL tail also publishes its active manifest within `OPERATION_SNAPSHOT_TTL_MS` (5 minutes) of its temporary snapshot's creation, which is the term that the pool collection's inequality reserves for it, and which is shorter than the 15 minutes (`METADATA_PUBLICATION_BUDGET_MS`) that a manifest publication can take. A later call writes nothing and returns `snapshot_not_found`, and the fork stays initializing until a delete call or a collection publishes its tombstone (see [Forking a namespace](#92-forking-a-namespace)). A namespace's collection publishes that tombstone once manifest 1 is more than `T` old (see [Deleting a namespace](#94-deleting-a-namespace)).
+A fork that folds the source's WAL tail publishes its active manifest within `OPERATION_SNAPSHOT_TTL_MS` (5 minutes) of its temporary snapshot's creation, which is shorter than the 15 minutes (`METADATA_PUBLICATION_BUDGET_MS`) that a manifest publication can take. A fork call that's past those 5 minutes writes nothing and returns `snapshot_not_found` (see [Forking a namespace](#92-forking-a-namespace)), and a namespace's collection publishes the initializing fork's tombstone once manifest 1 is more than `T` old (see [Deleting a namespace](#94-deleting-a-namespace)).
 
-Retirement, the retention advance's cutoff, and segment age use `T`, and the completed-content grace uses its own constant. Changing a publication bound, or its safety relationship, changes the protocol, not just a scheduling preference.
+The completed-content grace has its own constant, not `T`. Changing a publication bound, or one of these inequalities, changes the protocol, not just a scheduling preference.
 
 ### C.2 Upload admission
 
@@ -2751,9 +2751,9 @@ Retirement, the retention advance's cutoff, and segment age use `T`, and the com
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | The receipt issuance window plus the final token's lifetime. |
 | `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 691,200,000 | The completed-content grace, at least the admission window plus the publication completion bound. |
 
-The completed-content interval is eight days, which is longer than the admission window plus the publication completion bound (seven days, one hour, and twenty-five minutes). Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
+[Upload-session cleanup](#116-upload-session-cleanup) compares the eight-day completed-content grace with the receipt issuance window, the final token's lifetime, and the publication completion bound. Reaching that age doesn't delete referenced content.
 
-A direct multipart upload is also subject to the provider's transfer limits. The current reference limits are 10,000 parts, a 5 MiB minimum configured part size, a 5 GiB maximum configured part size, and 1,000 presigned part URLs per signing request. These limits don't override a provider's lower maximum object size, or other constraints of supported providers.
+A direct multipart upload is also subject to the provider's transfer limits, which in the reference are 10,000 parts, a configured part size from 5 MiB to 5 GiB, and 1,000 presigned part URLs per signing request. A supported provider's lower maximum object size, and its other constraints, still apply.
 
 ### C.3 Fixed logical bounds
 
@@ -2771,11 +2771,11 @@ A direct multipart upload is also subject to the provider's transfer limits. The
 
 Attribute limits count the original UTF-8 strings, before JSON escaping or CBOR encoding. Path limits apply to canonical request paths.
 
-A [merge](glossary.md#merge) isn't held to the API's request limits on the number of operations, preconditions, content tokens, and content references, because LoonFS plans a merge itself instead of reading it from a request body. `MAX_WAL_OBJECT_BYTES` bounds a merge instead. LoonFS checks the merge's planned WAL record against it, as it does for every commit, and a merge that exceeds it fails with `merge_too_large`. The reference server's merge allowance (`max_merge_bytes`) bounds a merge too. The allowance limits the estimated peak memory of the merges that the server plans and publishes at the same time. The server estimates a merge's memory as three times the size of the merge's planned WAL record, or as the memory that planning the merge uses, whichever is larger, as the `merge_too_large` row in the API's [Standard error contract](api.md#3-standard-error-contract) describes.
+A [merge](glossary.md#merge) isn't held to the API's request limits on operations, preconditions, content tokens, and content references, because LoonFS plans a merge instead of reading it from a request body. LoonFS checks the merge's planned WAL record against `MAX_WAL_OBJECT_BYTES`, as for every commit, and a merge that exceeds it fails with `merge_too_large`. The reference server's merge allowance (`max_merge_bytes`) also bounds a merge (see the `merge_too_large` row in the API's [Standard error contract](api.md#3-standard-error-contract), which describes the allowance and how the server estimates a merge's memory).
 
 ### C.4 Reference-implementation sizing and admission defaults
 
-These are defaults for the reference producer and runtime. A target size can be exceeded by one large row, because rows are never split to meet a size target, and the stored encoding stays the same when a producer changes these values.
+These are defaults for the reference producer and runtime, and changing them doesn't change the stored encoding. One large row can exceed a target size, because rows are never split to meet a size target.
 
 | Setting | Value |
 | --- | ---: |
@@ -2793,9 +2793,9 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Maximum commit-message size | 4,096 bytes |
 | `MANIFEST_PROBE_WINDOW` (manifest numbers probed at once above a manifest whose successor exists) | 8 |
 
-`manifest_revalidation_interval_ms` is the minimum monotonic interval between checks for a successor to the manifest of a cached view. `max_staleness_ms` is the default maximum staleness of an `eventual` read: how old the confirmation of a cached view's tip, or the last successor check of a writer position, can be for the read to use it without a probe. Neither setting can exceed `READ_REVALIDATION_BOUND_MS`, and a runtime build with a longer one fails.
+`max_staleness_ms` is the default maximum staleness of an `eventual` read, and [Replaying the visible WAL](#42-replaying-the-visible-wal) describes how reads use `max_staleness_ms` and `manifest_revalidation_interval_ms`. Neither setting can exceed `READ_REVALIDATION_BOUND_MS`, and a runtime build with a longer one fails.
 
-A decoder can't use the target block or segment sizes as hard allocation limits. The reference block reader initially reserves at most the smaller of `decoded_bytes` and 64 KiB, and further allocation follows the bytes actually decompressed. Output stops at the declared length plus one byte (see [Block-segment encoding](#a7-block-segment-encoding)), and vector capacity can be larger than that output length. This doesn't impose a smaller maximum block size. The [API specification][api-spec] specifies request admission limits.
+A decoder can't use the target block or segment sizes as hard allocation limits. The reference block reader first reserves at most the smaller of `decoded_bytes` and 64 KiB, and allocates more only as it decompresses more bytes, so it doesn't impose a smaller maximum block size. Output stops at the declared length plus one byte (see [Block-segment encoding](#a7-block-segment-encoding)), and vector capacity can exceed that length. The [API specification][api-spec] specifies request admission limits.
 
 [Control and manifest payloads](#a4-control-and-manifest-payloads) and [WAL records](#a5-wal-records) specify the hard limits on the sizes of a manifest document and a WAL document.
 
