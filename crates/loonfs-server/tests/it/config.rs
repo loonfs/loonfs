@@ -1174,7 +1174,7 @@ fn server_example_configs_parse_and_validate() {
     );
 }
 
-fn write_config(contents: &str) -> std::path::PathBuf {
+fn write_config(contents: &str) -> ConfigFile {
     let contents = if contents.contains("content_token_secret") {
         contents.to_owned()
     } else {
@@ -1187,12 +1187,27 @@ fn write_config(contents: &str) -> std::path::PathBuf {
     write_config_verbatim(&contents)
 }
 
-fn write_config_verbatim(contents: &str) -> std::path::PathBuf {
-    let temp_dir = tempdir().expect("tempdir");
-    let path = temp_dir.path().join("server.toml");
+/// A config file in a temporary directory, which is removed when the file
+/// is dropped.
+struct ConfigFile {
+    _directory: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl AsRef<std::path::Path> for ConfigFile {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+fn write_config_verbatim(contents: &str) -> ConfigFile {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("server.toml");
     fs::write(&path, contents).expect("write config");
-    let _ = temp_dir.keep();
-    path
+    ConfigFile {
+        _directory: directory,
+        path,
+    }
 }
 
 fn assert_invalid_field(error: ServerError, field: &'static str) {
