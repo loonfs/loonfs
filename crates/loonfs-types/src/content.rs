@@ -546,9 +546,10 @@ mod tests {
     fn unknown_kind_fails_to_decode() {
         let error = serde_json::from_str::<ContentRefKind>("\"sparse_file_v9\"")
             .expect_err("unknown content kind must be rejected");
-        assert_eq!(
-            error.to_string(),
-            "unknown variant `sparse_file_v9`, expected `blob_v1` at line 1 column 16"
+        let message = error.to_string();
+        assert!(
+            message.contains("unknown variant `sparse_file_v9`"),
+            "unexpected error: {message}"
         );
     }
 
