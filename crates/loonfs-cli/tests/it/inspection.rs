@@ -101,6 +101,7 @@ fn doctor_reads_an_existing_embedded_store_without_writing_it() {
 
 #[test]
 #[cfg(unix)]
+#[allow(clippy::print_stderr, reason = "the test says why it skipped")]
 fn doctor_fails_when_the_embedded_store_cannot_be_read() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -113,6 +114,7 @@ fn doctor_fails_when_the_embedded_store_cannot_be_read() {
     fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).expect("make store unreadable");
     if fs::read_dir(&root).is_ok() {
         fs::set_permissions(&root, permissions).expect("restore store permissions");
+        eprintln!("skipped: mode 000 doesn't block access when the test runs as root");
         return;
     }
 

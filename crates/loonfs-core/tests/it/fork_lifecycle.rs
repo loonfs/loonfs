@@ -1118,13 +1118,24 @@ async fn a_fork_survives_a_concurrent_collection() {
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
     seed_source_namespace_for_fork(store.as_ref(), &source, &context).await;
 
-    let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
+    // The fork waits at its put of manifest 2, after manifest 1 records the
+    // fork snapshot and before the snapshot exists, while the source runs a
+    // collection. Manifest 1's record is what makes the collection keep it.
+    let gate = BlockingStore::new(
+        store.clone(),
+        KeyPredicate::exact(metadata_manifest_object(&clone, &ManifestNo(2))),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    gate.block_next();
     let source_store = namespace_store(store.as_ref(), &source);
     let clock = context.clock();
-    let collecting = source_store.gc(&clock);
-    let (forked, collected) = tokio::join!(forking, collecting);
-    // Manifest 1 records the fork snapshot before the snapshot exists, so the
-    // collection keeps it.
+    let (forked, collected) =
+        tokio::join!(fork_namespace(&gate, &source, &clone, &context), async {
+            gate.wait_until_blocked().await;
+            let collected = source_store.gc(&clock).await;
+            gate.release();
+            collected
+        });
     forked.expect("the fork succeeds");
     collected.expect("the collection finishes");
     assert_eq!(

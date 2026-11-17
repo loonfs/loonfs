@@ -121,8 +121,8 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '.cargo/config.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ steps.rust.outputs.version }}-
-      - run: cargo test -p loonfs-http --features openapi --locked openapi
-      - run: cargo test -p loonfs-types --features openapi --locked openapi
+      - run: cargo test -p loonfs-http --features openapi --locked
+      - run: cargo test -p loonfs-types --features openapi --locked
 
   # Builds the conformance server once; the three language legs download it.
   sdk-conformance-server:

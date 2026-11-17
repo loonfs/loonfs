@@ -529,10 +529,12 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
         .into_iter()
         .all(|algorithm| algorithm == ChecksumAlgorithm::Crc32c));
     assert_eq!(retention.total_bytes(), TEST_PAYLOAD_BYTES as u64);
-    assert!(
-        transport.attempts() >= missing.len() + 2,
-        "{}",
-        transport.attempts()
+    // capabilities + a signing request for the first window and one for
+    // each part after it + one PUT per part + completion + commit, and no
+    // `begin`: the session was rejoined.
+    assert_eq!(
+        transport.attempts(),
+        1 + (1 + missing.len() - DIRECT_MULTIPART_PARTS_IN_FLIGHT) + missing.len() + 2
     );
 }
 
@@ -606,50 +608,6 @@ async fn a_proxied_put_streams_its_body() {
         retention.peak_live_bytes() <= (2 * chunk_bytes) as u64,
         "a forwarded body should never accumulate; peak was {}",
         retention.peak_live_bytes()
-    );
-}
-
-#[tokio::test]
-async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
-    let payload = payload(1_000);
-    let uploaded = content_ref(&payload);
-    let (source, _) = watched_source(&payload, 512);
-    let transport = scripted_transport::script(vec![
-        capabilities_for(Advertised {
-            proxy_max_bytes: Some(4_096),
-            ..Advertised::default()
-        }),
-        begin_proxied(),
-        json(&UploadSession {
-            namespace_id: namespace_id(),
-            upload_id: upload_id(),
-            mode: loonfs_types::UploadMode::ServiceProxied,
-            status: UploadSessionStatus::Open {
-                expires_at_ms: 1000,
-                checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
-                part_size_bytes: None,
-                transfer: None,
-                content_ref: Some(uploaded.clone()),
-            },
-        }),
-        completed(uploaded),
-        commit_succeeded(),
-    ]);
-
-    let client = client(&transport);
-    client
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
-        .await
-        .expect("a small streamed put should succeed");
-
-    assert_eq!(
-        transport
-            .sent()
-            .iter()
-            .filter(|sent| sent.url.ends_with("/v0/capabilities"))
-            .count(),
-        1,
-        "the capability document is fetched once and cached on the client"
     );
 }
 

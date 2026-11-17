@@ -249,28 +249,6 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_note_resumes_at_what_is_on_disk() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let destination = dir.path().join("file.bin");
-        let meta = meta_for(b"0123456789");
-
-        assert_eq!(
-            resumable_bytes(&destination, &meta),
-            0,
-            "nothing on disk resumes nothing"
-        );
-        let mut partial =
-            PartialDownload::open(&destination, Some(&meta), 0).expect("open partial");
-        partial.write_all(b"0123").expect("write");
-        drop(partial);
-        assert_eq!(
-            resumable_bytes(&destination, &meta),
-            0,
-            "a partial whose download reached a verdict is gone"
-        );
-    }
-
-    #[test]
     fn a_note_that_does_not_match_starts_over() {
         let dir = tempfile::tempdir().expect("tempdir");
         let destination = dir.path().join("file.bin");

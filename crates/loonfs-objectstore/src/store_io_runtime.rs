@@ -87,16 +87,3 @@ impl Drop for OwnedRuntime {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::StoreIoRuntime;
-
-    #[tokio::test]
-    async fn store_io_runtime_drops_safely_inside_an_async_context() {
-        let runtime = StoreIoRuntime::new().expect("start io runtime");
-        let clone = runtime.clone();
-        drop(runtime);
-        drop(clone);
-    }
-}

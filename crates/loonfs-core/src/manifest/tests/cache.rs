@@ -515,61 +515,76 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
 async fn a_listing_skips_a_run_without_the_directorys_rows_by_its_parent_probe() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
-    // `/docs` is created before `/later`, so its inode ID, and its rows,
-    // sort between the root's and `/later`'s.
-    for path in ["/docs/a.txt", "/later/a.txt"] {
-        fixture
-            .write_file_bytes(path, b"first\n", None)
-            .await
-            .expect("write a file");
-    }
-    create_snapshot(&store, &namespace_id, &context)
-        .await
-        .expect("first snapshot");
-    for path in ["/root.txt", "/later/b.txt"] {
-        fixture
-            .write_file_bytes(path, b"second\n", None)
-            .await
-            .expect("write a file");
-    }
-    create_snapshot(&store, &namespace_id, &context)
-        .await
-        .expect("second snapshot");
-
-    let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
-    let segments = super::load_manifest_segments_for_inspection(
-        &store,
-        Some(&cache),
-        &namespace_id,
-        &manifest_number,
-    )
-    .await
-    .expect("load segments");
-    let young_binds = segments
-        .manifest()
-        .payload()
-        .runs
-        .iter()
-        .max_by_key(|run| run.run_seq)
-        .expect("the second snapshot's run")
-        .segments
-        .iter()
-        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
-        .expect("the second snapshot's bind segment")
-        .clone();
-    let young_filter =
-        load_segment_filter(&store, None, &SessionBlockMemo::default(), &young_binds)
+    // The probe contains `/docs`'s inode ID, whose low bits are random, so
+    // the young filter admits it by a false positive in a few namespaces.
+    // The test builds namespaces until the filter rejects the probe, so the
+    // skip is checked on every run.
+    let (segments, young_binds, young_filter, docs, later) = 'search: {
+        for attempt in 0..20 {
+            let namespace_id =
+                NamespaceId::parse(format!("demo-{attempt}")).expect("valid namespace id");
+            bootstrap_namespace(&store, &namespace_id, &context)
+                .await
+                .expect("bootstrap");
+            let fixture =
+                crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+            // `/docs` is created before `/later`, so its inode ID, and its
+            // rows, sort between the root's and `/later`'s.
+            for path in ["/docs/a.txt", "/later/a.txt"] {
+                fixture
+                    .write_file_bytes(path, b"first\n", None)
+                    .await
+                    .expect("write a file");
+            }
+            create_snapshot(&store, &namespace_id, &context)
+                .await
+                .expect("first snapshot");
+            for path in ["/root.txt", "/later/b.txt"] {
+                fixture
+                    .write_file_bytes(path, b"second\n", None)
+                    .await
+                    .expect("write a file");
+            }
+            create_snapshot(&store, &namespace_id, &context)
+                .await
+                .expect("second snapshot");
+
+            let manifest_number = current_manifest_number(&store, &namespace_id).await;
+            let segments = super::load_manifest_segments_for_inspection(
+                &store,
+                Some(&cache),
+                &namespace_id,
+                &manifest_number,
+            )
             .await
-            .expect("load the young filter");
-    let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
-    let later = crate::test_support::visible_inode_id(&store, &namespace_id, "/later").await;
+            .expect("load segments");
+            let young_binds = segments
+                .manifest()
+                .payload()
+                .runs
+                .iter()
+                .max_by_key(|run| run.run_seq)
+                .expect("the second snapshot's run")
+                .segments
+                .iter()
+                .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
+                .expect("the second snapshot's bind segment")
+                .clone();
+            let young_filter =
+                load_segment_filter(&store, None, &SessionBlockMemo::default(), &young_binds)
+                    .await
+                    .expect("load the young filter");
+            let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+            let later =
+                crate::test_support::visible_inode_id(&store, &namespace_id, "/later").await;
+            if !young_filter.may_contain(&lookup_keys::direntry_parent_probe(docs)) {
+                break 'search (segments, young_binds, young_filter, docs, later);
+            }
+        }
+        panic!("a namespace whose young filter rejects `/docs`'s probe");
+    };
     let docs_prefix = lookup_keys::direntry_parent_prefix(docs);
     assert!(
         young_binds.min_row_key < docs_prefix && docs_prefix < young_binds.max_row_key,
@@ -582,15 +597,7 @@ async fn a_listing_skips_a_run_without_the_directorys_rows_by_its_parent_probe()
             .await
             .expect("list `/docs`");
     assert_eq!(rows.len(), 2, "the file's bind and its summary row");
-    let after = cache.filter_stats();
-    // The probe contains `/docs`'s inode ID, whose low bits are random, so
-    // the young filter rejects it in most runs of the test and admits it by
-    // a false positive in the others.
-    if young_filter.may_contain(&lookup_keys::direntry_parent_probe(docs)) {
-        assert!(after.false_positives > before.false_positives);
-    } else {
-        assert_eq!(after.skips, before.skips + 1, "{after:?}");
-    }
+    assert_eq!(cache.filter_stats().skips, before.skips + 1);
 
     assert!(young_filter.may_contain(&lookup_keys::direntry_parent_probe(later)));
     let before = cache.filter_stats();

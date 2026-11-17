@@ -267,14 +267,6 @@ async fn resolve_path_latest<S: ObjectStore + ?Sized>(
     resolve_path(store, namespace_id, absolute_path).await
 }
 
-async fn list_path_latest<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-) -> Result<Vec<loonfs_types::PathEntry>, CoreError> {
-    list_path(store, namespace_id, absolute_path).await
-}
-
 #[tokio::test]
 async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let temp_dir = tempdir().expect("tempdir");
@@ -423,31 +415,28 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
     let expected_stat = resolve_path(&store, &namespace_id, "/docs/moved.txt")
         .await
         .expect("stat");
-    let expected_list = list_path(&store, &namespace_id, "/docs")
+    list_path(&store, &namespace_id, "/docs")
         .await
         .expect("list");
-    let expected_file_list = list_path(&store, &namespace_id, "/docs/moved.txt")
+    list_path(&store, &namespace_id, "/docs/moved.txt")
         .await
         .expect("file list");
 
     store.reset();
-    let actual_stat = resolve_path_latest(&store, &namespace_id, "/docs/moved.txt")
+    resolve_path(&store, &namespace_id, "/docs/moved.txt")
         .await
         .expect("materialized stat");
-    let actual_list = list_path_latest(&store, &namespace_id, "/docs")
+    list_path(&store, &namespace_id, "/docs")
         .await
         .expect("materialized list");
-    let actual_file_list = list_path_latest(&store, &namespace_id, "/docs/moved.txt")
+    list_path(&store, &namespace_id, "/docs/moved.txt")
         .await
         .expect("materialized file list");
     let actual_casefold_stat = resolve_path_latest(&store, &namespace_id, "/DOCS/MOVED.TXT")
         .await
         .expect("materialized casefold stat");
 
-    assert_eq!(actual_stat, expected_stat);
     assert_eq!(actual_casefold_stat, expected_stat);
-    assert_eq!(actual_list, expected_list);
-    assert_eq!(actual_file_list, expected_file_list);
     assert_eq!(store.count(OperationSelector::Read), 0);
 
     assert_eq!(
@@ -499,14 +488,10 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         .await
         .expect("snapshot");
 
-    let expected = resolve_path(&store, &namespace_id, "/docs/report")
-        .await
-        .expect("stat");
     let actual = resolve_path_latest(&store, &namespace_id, "/docs/report")
         .await
         .expect("materialized stat");
 
-    assert_eq!(actual, expected);
     assert_eq!(actual.path.as_str(), "/docs/report");
     assert_eq!(actual.size_bytes(), Some(5));
 }

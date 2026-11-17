@@ -609,9 +609,18 @@ fn rm_recursive_deletes_a_populated_directory_in_one_commit() {
     assert_failure(&refused);
     assert_eq!(json_error(&refused)["code"], "directory_not_empty");
 
+    let head_seq = || {
+        let shown = harness.run(&["--json", "namespace", "show"]);
+        assert_success(&shown);
+        json_data(&shown)["head_seq"]
+            .as_u64()
+            .expect("the namespace reports its head")
+    };
+    let before = head_seq();
     let removed = harness.run(&["--json", "rm", "-r", "/docs"]);
     assert_success(&removed);
     assert_eq!(json_data(&removed)["target"], "demo:/docs");
+    assert_eq!(head_seq(), before + 1, "the delete is one commit");
 
     for path in ["/docs", "/docs/a.txt", "/docs/nested/b.txt"] {
         let stat = harness.run(&["--json", "stat", path]);

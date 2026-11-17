@@ -284,19 +284,39 @@ mod tests {
 
     #[test]
     fn cli_error_code_values_are_pinned() {
+        // The wire strings are written out, so renaming a variant or changing
+        // its string fails this test.
+        let table = [
+            (CliErrorCode::IoError, "io_error"),
+            (CliErrorCode::InvalidConfig, "invalid_config"),
+            (CliErrorCode::ProfileNotFound, "profile_not_found"),
+            (CliErrorCode::NoDefaultProfile, "no_default_profile"),
+            (CliErrorCode::NoDefaultNamespace, "no_default_namespace"),
+            (CliErrorCode::ProfileAlreadyExists, "profile_already_exists"),
+            (CliErrorCode::ConfigAlreadyExists, "config_already_exists"),
+            (
+                CliErrorCode::NonInteractiveInputRequired,
+                "non_interactive_input_required",
+            ),
+            (CliErrorCode::DestinationExists, "destination_exists"),
+            (CliErrorCode::InvalidUsage, "invalid_usage"),
+            (
+                CliErrorCode::JsonNotSupportedForStreaming,
+                "json_not_supported_for_streaming",
+            ),
+            (CliErrorCode::Cancelled, "cancelled"),
+            (CliErrorCode::ClientError, "client_error"),
+            (CliErrorCode::MergeNotRecoverable, "merge_not_recoverable"),
+        ];
+        for (code, wire) in table {
+            assert_eq!(code.as_str(), wire);
+        }
+        assert_eq!(table.len(), CliErrorCode::ALL.len());
         for code in CliErrorCode::ALL {
-            assert_eq!(code.as_str(), snake_case(&format!("{code:?}")));
+            assert!(
+                table.iter().any(|(listed, _)| *listed == code),
+                "{code:?} has no wire string in the table"
+            );
         }
-    }
-
-    fn snake_case(value: &str) -> String {
-        let mut result = String::with_capacity(value.len());
-        for (index, character) in value.chars().enumerate() {
-            if index > 0 && character.is_ascii_uppercase() {
-                result.push('_');
-            }
-            result.push(character.to_ascii_lowercase());
-        }
-        result
     }
 }

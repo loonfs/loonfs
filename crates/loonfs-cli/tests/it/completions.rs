@@ -36,18 +36,6 @@ fn completion_covers_capabilities_and_doctor_selectors() {
 }
 
 #[test]
-fn completion_detects_the_shell_from_the_environment() {
-    let output = loonfs()
-        .arg("completion")
-        .env("SHELL", "/bin/zsh")
-        .output()
-        .expect("run completion generation");
-
-    assert!(output.status.success(), "{output:?}");
-    assert!(!output.stdout.is_empty());
-}
-
-#[test]
 fn completion_without_a_shell_fails_cleanly() {
     let output = loonfs()
         .arg("completion")

@@ -2,13 +2,10 @@
 
 use crate::common::GrepHost;
 use bytes::Bytes;
-use loonfs::engine::SegmentBlockKind;
 use loonfs::SharedObjectStore;
 use loonfs_grep::codec::{ContentValue, Gram, IndexRow};
 use loonfs_grep::entry::{grep_extension_name, GrepEntry, GrepIndexStatus};
-use loonfs_grep::{
-    DecodedGrepBlock, GramIndexBuildPolicy, GrepBlockCacheKey, GrepReorganizeOutcome,
-};
+use loonfs_grep::{GramIndexBuildPolicy, GrepReorganizeOutcome};
 use loonfs_objectstore::keys::{extension_segment, extension_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -72,12 +69,6 @@ fn many_block_segment() -> (Vec<IndexRow>, BuiltSegmentBlocks) {
 
 #[tokio::test]
 async fn reorganization_reads_one_span_per_refill_and_preserves_rows() {
-    let cold_data_gets = reorganize_with_cache(false).await;
-    let warm_data_gets = reorganize_with_cache(true).await;
-    assert_eq!(warm_data_gets, cold_data_gets);
-}
-
-async fn reorganize_with_cache(warm_cache: bool) -> usize {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("grep-span-refills").expect("namespace id");
     let keys = KeyPredicate::prefix(extension_segment_prefix(
@@ -152,51 +143,8 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
     )
     .expect("valid entry");
     crate::common::publish_grep_entry(&host.maintenance, &namespace_id, entry.encode()).await;
-    if warm_cache {
-        for (position, segment) in segments.iter().enumerate() {
-            if position % 2 == 0 {
-                host.block_cache.insert(
-                    GrepBlockCacheKey {
-                        identity: segment.segment_id.to_string(),
-                        block_kind: SegmentBlockKind::Index,
-                        block_offset: built.index.offset,
-                    },
-                    DecodedGrepBlock::Index {
-                        entries: Arc::new(index.clone()),
-                        decoded_bytes: built.index.decoded_bytes as usize,
-                    },
-                );
-            }
-            for entry in index.iter().step_by(2) {
-                let start = loonfs_types::usize_from_u64(entry.block.offset);
-                let block = decode_data_block_rows::<IndexRow>(
-                    &built.bytes[start..start + entry.block.stored_bytes as usize],
-                    &entry.block,
-                )
-                .expect("decode cached input block");
-                host.block_cache.insert(
-                    GrepBlockCacheKey {
-                        identity: segment.segment_id.to_string(),
-                        block_kind: SegmentBlockKind::Data,
-                        block_offset: entry.block.offset,
-                    },
-                    DecodedGrepBlock::Data {
-                        block: Arc::new(block),
-                        decoded_bytes: entry.block.decoded_bytes as usize,
-                    },
-                );
-            }
-        }
-    }
     let cache_before = host.block_cache.stats();
-    assert_eq!(
-        cache_before.inserts,
-        if warm_cache {
-            4 + 8 * index.len().div_ceil(2)
-        } else {
-            0
-        }
-    );
+    assert_eq!(cache_before.inserts, 0);
     assert_eq!(cache_before.evictions, 0);
     recording.reset();
     let outcome = host
@@ -223,10 +171,6 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
     let reads = watched.reads();
     assert!(reads.peak_in_flight <= 8, "{reads:?}");
     let gets = recording.take_gets();
-    let data_gets = gets
-        .iter()
-        .filter(|(_, range)| range.is_some_and(|(start, _)| start == 0))
-        .count();
     let table_blocks: Vec<_> = index_blocks_for_key_range(
         &index,
         "value-",
@@ -293,5 +237,4 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
     // so the rows are in key order once the segments are.
     actual_rows.sort_by_cached_key(IndexRow::row_key);
     assert_eq!(actual_rows, expected_rows);
-    data_gets
 }

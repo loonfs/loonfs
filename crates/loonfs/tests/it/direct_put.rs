@@ -680,7 +680,7 @@ fn begin_upload_rejects_a_missing_namespace() {
 }
 
 #[test]
-fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
+fn begin_upload_rejects_a_malformed_head_when_cache_disabled() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();

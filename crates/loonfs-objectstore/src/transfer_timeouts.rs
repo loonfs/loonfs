@@ -338,7 +338,7 @@ mod tests {
         use crate::provider_limits::{
             PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_PUBLICATION_REQUEST_BOUND,
         };
-        use crate::retry::provider_retry_config;
+        use crate::retry::{one_attempt_retry_config, provider_retry_config};
         use object_store::ObjectStore;
 
         assert_eq!(
@@ -353,10 +353,7 @@ mod tests {
             .with_endpoint("http://provider.invalid")
             .with_allow_http(true)
             .with_http_connector(RetriedPublicationConnector)
-            .with_retry(object_store::RetryConfig {
-                max_retries: 0,
-                ..provider_retry_config()
-            })
+            .with_retry(one_attempt_retry_config())
             .build()
             .expect("scripted store");
         let started = tokio::time::Instant::now();

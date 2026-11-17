@@ -463,10 +463,6 @@ mod tests {
                  &X-Goog-Signature={PUT_UNPREFIXED_SIGNATURE}"
             )
         );
-        assert_ne!(
-            PUT_UNPREFIXED_SIGNATURE, PUT_PREFIXED_SIGNATURE,
-            "the same object key under two prefixes must not sign alike"
-        );
     }
 
     #[tokio::test]

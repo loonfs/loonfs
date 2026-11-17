@@ -851,19 +851,11 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
     assert_eq!(duplicate, primary);
 }
 
-#[tokio::test]
-async fn new_candidate_with_4097_operations_is_rejected_after_identity_computation() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = default_writer();
-    NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect("bootstrap");
-    let candidate = CommitCandidate::new(CommitIntent {
+/// One more operation than a commit accepts, each a distinct directory create.
+fn over_operation_limit_intent(commit_id: &str) -> CommitIntent {
+    CommitIntent {
         preconditions: Vec::new(),
-        commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
+        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
         message: None,
@@ -873,17 +865,72 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
                 parents: false,
             })
             .collect(),
-    });
+    }
+}
 
-    // A later release may lower the operation limit below a durable request;
-    // identity must remain available so receipt resolution can win first.
-    candidate.semantic_identity(&namespace_id);
+#[tokio::test]
+async fn new_request_with_4097_operations_is_invalid() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = default_writer();
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
+        .await
+        .expect("bootstrap");
+
     let error = NamespaceFixture::new(&store, &namespace_id, &context)
-        .publish_candidates(vec![candidate])
+        .publish_candidates(vec![CommitCandidate::new(over_operation_limit_intent(
+            "over-operation-new",
+        ))])
         .await
         .remove(0)
         .expect_err("new over-operation request must be rejected");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
+}
+
+// No request over the operation limit can match a receipt's fingerprint,
+// because the fingerprint covers every operation, so the ordering shows as a
+// reuse conflict: the receipt answers before the limit is checked.
+#[tokio::test]
+async fn request_with_4097_operations_under_a_committed_id_returns_the_reuse_conflict() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = default_writer();
+    NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
+        .await
+        .expect("bootstrap");
+    let original = submit_commit(
+        &store,
+        &namespace_id,
+        commit_request(
+            "over-operation-reuse",
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/alpha").expect("path"),
+                parents: false,
+            },
+        ),
+        &context,
+    )
+    .await
+    .expect("original commit");
+
+    let error = NamespaceFixture::new(&store, &namespace_id, &context)
+        .publish_candidates(vec![CommitCandidate::new(over_operation_limit_intent(
+            "over-operation-reuse",
+        ))])
+        .await
+        .remove(0)
+        .expect_err("a different request cannot reuse the commit id");
+    assert_matches!(
+        error,
+        CoreError::CommitIdReuseConflict {
+            committed: Some(loonfs_types::CommittedReceipt { committed_seq, .. }),
+            ..
+        } if committed_seq == original.committed_seq
+    );
 }
 
 #[tokio::test]

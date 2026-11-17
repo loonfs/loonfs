@@ -741,7 +741,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 }
 
 #[tokio::test]
-async fn reorganization_does_not_warm_the_query_cache() {
+async fn a_query_during_an_incomplete_reorganization_returns_every_match() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
@@ -778,7 +778,6 @@ async fn reorganization_does_not_warm_the_query_cache() {
         ..GramIndexBuildPolicy::default()
     };
     let gets_before_reorganization = raw_store.count(OperationSelector::Read);
-    let stats_before_reorganization = host.block_cache.stats();
     let reorganization = host
         .worker
         .steps(&namespace_id, 0)
@@ -796,8 +795,7 @@ async fn reorganization_does_not_warm_the_query_cache() {
         raw_store.count(OperationSelector::Read) > gets_before_reorganization,
         "the worker must load its snapshot's segment blocks"
     );
-    let stats_after_reorganization = host.block_cache.stats();
-    assert_eq!(stats_after_reorganization, stats_before_reorganization);
+    let stats_before_query = host.block_cache.stats();
 
     let gets_before_query = raw_store.count(OperationSelector::Read);
     let result = host
@@ -810,7 +808,7 @@ async fn reorganization_does_not_warm_the_query_cache() {
         "the query must load its segment blocks"
     );
     assert!(
-        host.block_cache.stats().inserts > stats_after_reorganization.inserts,
+        host.block_cache.stats().inserts > stats_before_query.inserts,
         "the query must cache its segment blocks"
     );
 

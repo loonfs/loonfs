@@ -580,7 +580,9 @@ mod tests {
             ("out>", '>'),
             ("back\\slash.txt", '\\'),
         ] {
-            let error = DisplayName::parse(name).expect_err("`{name}` should be rejected");
+            let Err(error) = DisplayName::parse(name) else {
+                panic!("`{name}` should be rejected");
+            };
             assert_eq!(
                 error,
                 PathError::UnportableDisplayNameCharacter {

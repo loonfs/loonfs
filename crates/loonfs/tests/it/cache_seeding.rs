@@ -533,7 +533,7 @@ fn stat_and_list_use_materialized_segments_after_a_snapshot_without_content_read
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_materialized_stat_and_list_share_async_store() {
+async fn a_concurrent_stat_and_list_return_the_file_and_count_two_head_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
