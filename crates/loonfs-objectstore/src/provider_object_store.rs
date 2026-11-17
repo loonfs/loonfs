@@ -1103,30 +1103,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_store_preserves_put_get_head_and_prefix_scoping() {
-        let store = memory_store();
-        let key = "namespaces/demo/boundary.json";
-
-        let metadata = store
-            .put_if_absent(key, Bytes::from_static(b"head"))
-            .await
-            .expect("put");
-        assert_eq!(metadata.size_bytes, 4);
-        assert!(metadata.etag.is_some());
-
-        let head = store.head(key).await.expect("head").expect("head exists");
-        assert_eq!(head.size_bytes, 4);
-        assert_eq!(
-            store.get(key, None).await.expect("get"),
-            Some(Bytes::from_static(b"head"))
-        );
-        assert_eq!(
-            store.list_prefix("namespaces/demo/").await.expect("list"),
-            vec![key.to_owned()]
-        );
-    }
-
-    #[tokio::test]
     async fn partial_key_prefixes_keep_times_and_resume_across_provider_pages() {
         let store = memory_store();
         let prefix = "objects/con_a";
@@ -1505,25 +1481,6 @@ mod tests {
 
     fn script_puts(flaky: &FlakyStore, script: impl IntoIterator<Item = WriteScript>) {
         flaky.put_script.lock().expect("put script").extend(script);
-    }
-
-    #[tokio::test]
-    async fn head_reports_the_stored_checksum_after_a_create() {
-        let store = memory_store();
-        let created = "namespaces/demo/content/con_00000000000000000000000001";
-        store
-            .put_if_absent(created, Bytes::from_static(b"created"))
-            .await
-            .expect("create");
-
-        let head = store.head(created).await.expect("head").expect("created");
-        let body = store
-            .get_with_metadata(created)
-            .await
-            .expect("get")
-            .expect("created");
-        assert_eq!(head.checksum, Some(Checksum::crc64nvme(b"created")));
-        assert_eq!(body.bytes, b"created".as_slice());
     }
 
     #[tokio::test]

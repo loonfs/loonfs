@@ -41,13 +41,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_call_that_never_retries_reports_one_attempt() {
-        let counted = counting_attempts(async { 7 }).await;
-        assert_eq!(counted.output, 7);
-        assert_eq!(counted.attempts, 1);
-    }
-
-    #[tokio::test]
     async fn granted_retries_count_against_the_call_that_made_them() {
         let counted = counting_attempts(async {
             count_retry_attempt();

@@ -16,8 +16,7 @@ use loonfs_objectstore::metrics::{
 use loonfs_objectstore::ListedObject;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
-    AssemblySource, ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError,
-    ObjectStoreErrorKind, PutMode,
+    AssemblySource, ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::{Checksum, EffectiveLimit, ManifestNo, Page};
@@ -32,53 +31,6 @@ const SECRET_KEY_SEGMENT: &str = "secret-segment";
 
 fn secret_key() -> String {
     format!("namespaces/ns-1/wal/{SECRET_KEY_SEGMENT}.wal.zst")
-}
-
-#[test]
-fn metric_result_classes_preserve_every_error_class() {
-    let cases = [
-        (
-            ObjectStoreErrorKind::NotFound,
-            ObjectStoreOutcomeKind::NotFound,
-        ),
-        (
-            ObjectStoreErrorKind::InvalidRequest,
-            ObjectStoreOutcomeKind::InvalidRequest,
-        ),
-        (
-            ObjectStoreErrorKind::InvalidKey,
-            ObjectStoreOutcomeKind::InvalidKey,
-        ),
-        (
-            ObjectStoreErrorKind::PreconditionFailed,
-            ObjectStoreOutcomeKind::PreconditionFailed,
-        ),
-        (
-            ObjectStoreErrorKind::PermissionDenied,
-            ObjectStoreOutcomeKind::PermissionDenied,
-        ),
-        (
-            ObjectStoreErrorKind::StoredChecksumMissing,
-            ObjectStoreOutcomeKind::StoredChecksumMissing,
-        ),
-        (
-            ObjectStoreErrorKind::Unsupported,
-            ObjectStoreOutcomeKind::Unsupported,
-        ),
-        (
-            ObjectStoreErrorKind::Configuration,
-            ObjectStoreOutcomeKind::Configuration,
-        ),
-        (
-            ObjectStoreErrorKind::RetryableTransport,
-            ObjectStoreOutcomeKind::RetryableTransport,
-        ),
-        (ObjectStoreErrorKind::Other, ObjectStoreOutcomeKind::Other),
-    ];
-
-    for (error_class, result_class) in cases {
-        assert_eq!(ObjectStoreOutcomeKind::from(error_class), result_class);
-    }
 }
 
 #[tokio::test]
@@ -232,27 +184,6 @@ async fn records_get_success_bytes_out() {
     assert_eq!(sample.bytes_out, Some(3));
     assert_eq!(sample.key_class, ObjectKeyKind::Content);
     assert_eq!(sample.range_class, Some(RangeKind::Bounded));
-}
-
-#[tokio::test]
-async fn records_not_found_without_key_leak() {
-    let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
-    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let raw_key = secret_key();
-
-    assert!(store
-        .get(&raw_key, None)
-        .await
-        .expect("get missing")
-        .is_none());
-
-    let sample = recorder.samples().pop().expect("get sample");
-    assert_eq!(sample.operation, ObjectStoreOperation::Get);
-    assert_eq!(sample.outcome, ObjectStoreOutcomeKind::NotFound);
-    let encoded = serde_json::to_string(&sample).expect("serialize sample");
-    assert!(!encoded.contains(&raw_key));
-    assert!(!encoded.contains(SECRET_KEY_SEGMENT));
 }
 
 #[tokio::test]

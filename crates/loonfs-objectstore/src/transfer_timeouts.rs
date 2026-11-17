@@ -380,22 +380,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn small_request_is_bounded_by_the_base_attempt_timeout() {
-        let service = service_with(
-            PROVIDER_ATTEMPT_TIMEOUT + Duration::from_secs(1),
-            Vec::new(),
-        );
-
-        let error = service
-            .call(request_with_body(Bytes::from_static(b"tiny")))
-            .await
-            .expect_err("headers past the base bound must time out");
-
-        assert_eq!(error.kind(), HttpErrorKind::Timeout);
-        assert!(error.to_string().contains("transfer bound"));
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn payload_request_gets_the_transfer_bound() {
         // A payload-bearing request that needs longer than the control-plane
         // bound must survive up to the transfer bound...

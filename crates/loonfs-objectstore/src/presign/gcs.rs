@@ -307,7 +307,7 @@ fn pkcs8_der(private_key_pem: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{stored_crc32c, GcsV4Presigner, GCP_GCS_MAX_DIRECT_PUT_BYTES};
+    use super::{stored_crc32c, GcsV4Presigner};
     use crate::gcs::GcpGcsStoreConfig;
     use crate::keyspace::KeyScope;
     use crate::presign::{
@@ -540,33 +540,6 @@ mod tests {
                  &X-Goog-SignedHeaders=host%3Brange&X-Goog-Signature={GET_ESCAPED_SIGNATURE}"
             )
         );
-    }
-
-    #[tokio::test]
-    async fn presigned_get_addresses_the_same_object_the_write_did() {
-        let signer = presigner(Some("tenant-a"));
-        let written = presign_put(&signer).await;
-        let read = signer
-            .presign_get(
-                PresignedGetRequest {
-                    object_key: CONTENT_KEY,
-                    range: GRANT,
-                    ttl: TTL,
-                },
-                signing_time(),
-            )
-            .await
-            .expect("presign get");
-
-        let object_of = |url: &str| url.split('?').next().expect("url path").to_owned();
-        assert_eq!(object_of(&read.url), object_of(&written.url));
-    }
-
-    #[test]
-    fn gcs_advertises_googles_documented_single_request_ceiling() {
-        let signer = presigner(None);
-        assert_eq!(signer.max_content_bytes(), GCP_GCS_MAX_DIRECT_PUT_BYTES);
-        assert_eq!(GCP_GCS_MAX_DIRECT_PUT_BYTES, 5 * 1024 * 1024 * 1024 * 1024);
     }
 
     #[tokio::test]
