@@ -2,7 +2,7 @@
 
 This document describes how LoonFS stores a filesystem in object storage, and how reads, writes, forks, and maintenance fit together. The [format specification](format.md) defines the exact rules, and the [glossary](glossary.md) defines each term.
 
-LoonFS stores everything in object storage. File bytes are stored in content objects, and every change to the directory tree is recorded in a numbered write-ahead log (WAL). LoonFS uses five object-store operations: put-if-absent, compare-and-swap on small objects, reads, listings, and deletes. It doesn't use transactions across objects, so every change to a namespace becomes durable through a single object write.
+LoonFS stores everything in object storage. File bytes are stored in content objects, and every change to the directory tree is recorded in a numbered write-ahead log (WAL). LoonFS uses seven object-store operations (see [Required operations](format.md#31-required-operations)): put-if-absent, compare-and-swap on small objects, full and ranged reads, reads that are conditional on an object's version, deletes, prefix listings, and listings of the child prefixes under a prefix. It doesn't use transactions across objects, so every change to a namespace becomes durable through a single object write.
 
 Each "namespace" is one directory tree with its own history, stored under `namespaces/{namespace_id}/`. A namespace's content objects are stored under the prefix of its [pool](glossary.md#pool) (`pools/{pool_id}/`), which the namespace shares with its forks.
 

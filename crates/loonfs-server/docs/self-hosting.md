@@ -4,7 +4,7 @@ This guide describes how to run `loonfs-server` on your own infrastructure, with
 
 A LoonFS deployment is one server connected to an object store. All durable data is stored in the object store, and the server keeps only temporary state, in memory and in an optional cache on local disk.
 
-Run one active server per deployment, and don't run two active servers against the same LoonFS data. LoonFS doesn't support automatic failover or horizontal scaling. A restart or an upgrade makes the API unavailable until the server starts again.
+One server at a time can write to a namespace. If a second server writes to the namespace, the second server's writer session fences the first server's session. The first server's next write to that namespace then fails with `writer_fenced` (see [Writer ownership](../../../docs/specs/format.md#61-writer-ownership)). More than one server can run maintenance against one store. LoonFS doesn't support automatic failover or horizontal scaling. A restart or an upgrade makes the API unavailable until the server starts again.
 
 ## Deployment checklist
 
@@ -283,11 +283,11 @@ The script creates a temporary LoonFS namespace and deletes it before it exits.
 
 Before you run a server in production, check this list:
 
-- Run exactly one active LoonFS server per deployment.
+- Send each namespace's writes to one LoonFS server.
 - Require an auth token.
 - Use TLS in LoonFS or in a trusted proxy.
 - Keep secrets in a secret manager or a Kubernetes Secret.
-- Keep a `local_fs` store on durable storage that uid 10001 can write to.
+- Use a cloud object store. The local filesystem provider (`local_fs`) is a development and test provider (see [Local filesystem provider](../../../docs/specs/object-storage-providers.md#5-local-filesystem-provider)).
 - Configure S3 buckets to remove incomplete multipart uploads.
 - Allow at least 660 seconds for graceful shutdown.
 - Monitor health, readiness, metrics, and repeated error logs.
