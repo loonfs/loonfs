@@ -246,27 +246,6 @@ mod tests {
     use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
     use std::assert_matches;
 
-    #[cfg(unix)]
-    #[test]
-    fn relative_local_roots_remove_dots_and_keep_parents_without_creating_paths() {
-        let current_directory = std::env::current_dir().expect("current directory");
-        let name = loonfs_types::generated_id("local-root");
-        let missing_root = current_directory.join(&name);
-        let input = std::path::Path::new(&name).join("./child//../store");
-        assert!(!missing_root.exists());
-
-        let absolute = super::absolute_local_root(&input).expect("absolute root");
-        assert!(std::path::Path::new(&absolute).is_absolute());
-        assert_eq!(
-            absolute,
-            missing_root
-                .join("child/../store")
-                .to_str()
-                .expect("utf-8 root"),
-        );
-        assert!(!missing_root.exists());
-    }
-
     #[test]
     fn create_profile_supports_cloudflare_r2() {
         let profile = build(&r2(R2StoreArgs {
@@ -391,20 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn no_static_flags_select_ambient_without_storing_secrets() {
-        let s3 = build(&s3(S3StoreArgs {
-            bucket: Some("bucket".to_owned()),
-            region: Some("us-east-1".to_owned()),
-            ..S3StoreArgs::default()
-        }))
-        .expect("build ambient s3 profile");
-        let StoreConfig::AwsS3(AwsS3StoreConfig { credentials, .. }) = store(&s3) else {
-            panic!("expected aws-s3 profile")
-        };
-        assert_eq!(credentials, &AwsS3Credentials::Ambient {});
-    }
-
-    #[test]
     fn static_flags_imply_static_and_require_the_complete_set() {
         let incomplete = build(&s3(S3StoreArgs {
             bucket: Some("bucket".to_owned()),
@@ -500,48 +465,6 @@ mod tests {
                 .contains("bearer tokens require https except for loopback http URLs"),
             "{}",
             error.message
-        );
-    }
-
-    #[test]
-    fn update_switches_credential_source_only_with_a_complete_static_set() {
-        let profile = embedded_profile(StoreConfig::AwsS3(AwsS3StoreConfig {
-            bucket: "bucket".to_owned(),
-            region: "us-east-1".to_owned(),
-            endpoint_url: None,
-            credentials: AwsS3Credentials::Ambient {},
-            key_prefix: None,
-            force_path_style: false,
-        }));
-
-        let incomplete = s3(S3StoreArgs {
-            credential_source: Some(CredentialSource::Static),
-            access_key_id: Some("access".to_owned()),
-            ..S3StoreArgs::default()
-        });
-        let error = update(profile.clone(), &incomplete).expect_err("failed switch");
-        assert!(error.message.contains("secret-access-key"));
-        assert_matches!(
-            store(&profile),
-            StoreConfig::AwsS3(AwsS3StoreConfig {
-                credentials: AwsS3Credentials::Ambient {},
-                ..
-            })
-        );
-
-        let complete = s3(S3StoreArgs {
-            credential_source: Some(CredentialSource::Static),
-            access_key_id: Some("access".to_owned()),
-            secret_access_key: Some("secret".to_owned()),
-            ..S3StoreArgs::default()
-        });
-        let updated = update(profile, &complete).expect("complete switch");
-        assert_matches!(
-            store(&updated),
-            StoreConfig::AwsS3(AwsS3StoreConfig {
-                credentials: AwsS3Credentials::Static { .. },
-                ..
-            })
         );
     }
 

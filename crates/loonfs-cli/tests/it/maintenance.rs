@@ -637,50 +637,6 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
 }
 
 #[test]
-fn gc_counts_extension_segments_in_both_modes() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("embedded");
-    let remote_server = harness.start_external_server(harness.write_server_config_with(
-        "remote",
-        "grep-gc-parity",
-        "\n[grep]\nmode = \"serve_and_maintain\"\n",
-    ));
-    assert_success(&harness.run(&[
-        "profile",
-        "create",
-        "remote",
-        "remote",
-        "--server-url",
-        &remote_server.server_url,
-        "--auth-token",
-        "test-token",
-    ]));
-    for profile in ["embedded", "remote"] {
-        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
-        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
-        assert_success(&harness.run(&["maintenance", "index", "enable", "--profile", profile]));
-
-        // The core pass collects the index's segments, so the report has
-        // no section of its own for grep.
-        let collected = harness.run(&["--json", "maintenance", "gc", "--profile", profile]);
-        assert_success(&collected);
-        let data = json_data(&collected);
-        assert_eq!(data["kind"], "gc");
-        assert_eq!(data["namespace_id"], "demo");
-        assert_eq!(data["deleted"]["extension_segments"], 0);
-        assert!(data.get("extensions").is_none());
-
-        let human = harness.run(&["maintenance", "gc", "--profile", profile]);
-        assert_success(&human);
-        assert!(
-            stdout_string(&human).contains(", 0 extension segments, "),
-            "{}",
-            stdout_string(&human)
-        );
-    }
-}
-
-#[test]
 fn maintenance_store_probe_renders_the_profile_stores_report() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

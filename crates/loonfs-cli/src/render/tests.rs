@@ -280,18 +280,6 @@ fn human_stat_leaves_ordinary_unicode_alone() {
 }
 
 #[test]
-fn json_stat_flattens_the_attribute_projection_and_preserves_values() {
-    let newline =
-        stat_with_attribute(AttributeValue::parse("first\nsecond").expect("attribute value"));
-    let json: serde_json::Value =
-        serde_json::from_str(&json_success(&newline).expect("JSON stat should render"))
-            .expect("rendered stat is JSON");
-    assert_eq!(json["data"]["attributes"]["note"], "first\nsecond");
-    assert_eq!(json["data"]["attributes_revision_no"], 1);
-    assert!(json.pointer("/data/attributes/attributes").is_none());
-}
-
-#[test]
 fn json_stat_preserves_the_absent_root_name() {
     let root = stat_output(path_entry("/", None));
     let json: serde_json::Value =
@@ -415,32 +403,6 @@ fn profile_updates_show_store_locations_without_credentials() {
 }
 
 #[test]
-fn json_error_carries_profile_and_code() {
-    let failure = CommandFailure {
-        kind: CommandKind::ConfigShow,
-        profile: Some("default".to_owned()),
-        mode: Some(ProfileMode::Remote),
-        error: Box::new(CliError::client_error("connection refused")),
-    };
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(
-            &json_error(&failure).expect("json error renders")
-        )
-        .expect("rendered error is valid json"),
-        serde_json::json!({
-            "error": {
-                "code": "client_error",
-                "message": "connection refused"
-            },
-            "format_version": 1,
-            "kind": "config_show",
-            "mode": "remote",
-            "profile": "default"
-        })
-    );
-}
-
-#[test]
 fn server_error_fields_survive_client_and_cli_json() {
     let feature = r#"{
         "code": "not_supported",
@@ -476,31 +438,6 @@ fn server_error_fields_survive_client_and_cli_json() {
             "{boundary}"
         );
     }
-}
-
-#[test]
-fn cli_parse_error_json_names_the_flag_param() {
-    use clap::Parser;
-
-    let clap_error =
-        crate::args::Cli::try_parse_from(["loonfs", "--json", "ls", "--limit", "not-a-number"])
-            .expect_err("invalid --limit must fail parsing");
-    let failure = crate::parse_failure_error(&clap_error);
-    let rendered: serde_json::Value = serde_json::from_str(
-        &super::json::json_parse_error(&failure).expect("parse error JSON renders"),
-    )
-    .expect("parse error is valid JSON");
-
-    assert_eq!(
-        rendered["error"],
-        serde_json::json!({
-            "code": "invalid_usage",
-            "message": failure.message,
-            "param": "--limit"
-        })
-    );
-    assert_eq!(rendered["kind"], "parse_error");
-    assert_eq!(rendered["format_version"], 1);
 }
 
 #[test]

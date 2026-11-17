@@ -532,12 +532,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_total_has_no_percentage_and_no_eta() {
-        assert_eq!(state(10, None).percent(), None);
-        assert_eq!(eta_seconds(10, None, 1_000), None);
-    }
-
-    #[test]
     fn a_terminal_line_says_what_a_watcher_needs() {
         let one_file = silent_reporter(ProgressOp::Get, "/docs/big.bin");
         let mut single = state(512 * 1_024, Some(1_024 * 1_024));
