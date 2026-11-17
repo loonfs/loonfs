@@ -394,7 +394,7 @@ pub(super) mod tests {
     }
 
     /// Checks that a seek skips the rows before its bound in every state,
-    /// that the end key stops the merge, and that the filter drops rows.
+    /// and that the end key stops the merge.
     #[test]
     fn a_seek_skips_rows_in_every_state_and_the_end_key_stops_the_merge() {
         let first = state(&[inode(1, 1), inode(4, 1), inode(6, 3), inode(9, 1)]);

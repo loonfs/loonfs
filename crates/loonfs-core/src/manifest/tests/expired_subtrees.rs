@@ -139,7 +139,8 @@ fn compacted_bindings_state() -> MetadataState {
 }
 
 #[tokio::test]
-async fn a_read_by_inode_whose_ancestry_was_compacted_away_is_refused_for_every_principal() {
+async fn a_read_by_inode_whose_ancestry_was_compacted_away_is_refused_live_and_only_an_administrator_passes_the_snapshot_head_check(
+) {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("compacted-bindings").expect("namespace id");
