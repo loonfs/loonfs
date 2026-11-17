@@ -10,8 +10,7 @@ mod transfer;
 
 pub(crate) use self::content::{run_filesystem_annotate, run_filesystem_cat, run_filesystem_grep};
 pub(crate) use self::get::{
-    open_resumable_download, run_filesystem_get, stream_download_to_file, DestinationName,
-    LocalDestination, ResumableDownload,
+    run_filesystem_get, stream_download_to_file, DestinationName, LocalDestination,
 };
 pub(crate) use self::listing::{
     run_filesystem_ls, run_filesystem_revisions, run_filesystem_stat, run_filesystem_trash,

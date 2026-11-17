@@ -1,5 +1,5 @@
 //! The `get` command: one file to a local path or to standard output, or a
-//! directory tree, with downloads that resume from a partial file.
+//! directory tree, each file written through a partial file beside it.
 
 use super::mutate::destination_behavior;
 use crate::args::{FilesystemGetArgs, RuntimeBehavior};
@@ -8,7 +8,7 @@ use crate::commands::context::{
 };
 use crate::commands::download::{FileDownload, FileVersion};
 use crate::commands::output::{CommandData, CommandFailure, CommandOutput};
-use crate::commands::partial::{self, PartialDownload, PartialDownloadMetadata};
+use crate::commands::partial::{self, PartialDownload};
 use crate::commands::recursive;
 use crate::error::{CliError, Result};
 use crate::progress::{ProgressOp, ProgressReporter};
@@ -113,16 +113,14 @@ async fn get_to_stdout(
     spec: &NamespacePath,
     version: &FileVersion,
 ) -> Result<CommandOutput, CommandFailure> {
-    // No progress and no resume: standard output receives the file, and
-    // the CLI can't read back bytes that were already piped onward.
+    // Standard output receives the file, and no progress is reported.
     stream_file_to_stdout(context, spec, version)
         .await
         .map_err(|error| context.fail(error))?;
     Ok(context.output(CommandData::StreamedToStdout))
 }
 
-/// Downloads one file to a local path, resuming from a partial file that an
-/// earlier `get` left behind.
+/// Downloads one file to a local path.
 async fn get_to_file(
     context: &NamespaceContext,
     spec: &NamespacePath,
@@ -138,10 +136,10 @@ async fn get_to_file(
     let destination =
         destination_path_for_get(spec.absolute_path(), args.local_destination.as_deref())
             .map_err(|error| context.fail(error))?;
-    let ResumableDownload {
-        mut download,
-        partial,
-    } = open_resumable_download(context, spec, version, &destination)
+    let mut download = context
+        .profile
+        .target
+        .open_file_download(spec, version)
         .await
         .map_err(|error| context.fail(error))?;
 
@@ -150,9 +148,7 @@ async fn get_to_file(
         ProgressOp::Get,
         spec.absolute_path().as_str(),
     ));
-    let size_bytes = download
-        .resume_identity()
-        .map(|identity| identity.content_ref.size_bytes);
+    let size_bytes = download.content_size();
     progress.expect(size_bytes, Some(1));
     progress.file_started(spec.absolute_path().as_str(), size_bytes);
     // The local working copy is the one thing this CLI touches that has no
@@ -166,7 +162,6 @@ async fn get_to_file(
             behavior: destination_behavior(args.force),
             name,
         },
-        partial.as_ref(),
         &progress,
     )
     .await;
@@ -184,83 +179,21 @@ async fn get_to_file(
     Ok(context.output(data))
 }
 
-/// A download and the partial-file metadata that a resumed run has to match.
-pub(crate) struct ResumableDownload {
-    pub(crate) download: FileDownload,
-    pub(crate) partial: Option<PartialDownloadMetadata>,
-}
-
-/// Opens a download at the offset recorded in a matching partial file.
-pub(crate) async fn open_resumable_download(
-    context: &NamespaceContext,
-    spec: &NamespacePath,
-    version: &FileVersion,
-    destination: &Path,
-) -> Result<ResumableDownload> {
-    let mut download = context
-        .profile
-        .target
-        .open_file_download(spec, version, 0)
-        .await?;
-    let identity = download.resume_identity();
-    let resolved_revision = identity.map(|identity| identity.revision_no);
-    let meta = identity.map(|identity| {
-        PartialDownloadMetadata::describe(identity.content_ref, version.revision_no())
-    });
-    let start_offset = meta
-        .as_ref()
-        .map_or(0, |meta| partial::resumable_bytes(destination, meta));
-    if start_offset > 0 {
-        // Pin the content revision resolved by the first stream. A snapshot
-        // already pins its revision and cannot also take a revision selector.
-        let resumed = match (version, resolved_revision) {
-            (FileVersion::At(ReadAt::Snapshot(_)), _) | (_, None) => version.clone(),
-            (_, Some(revision_no)) => FileVersion::Revision(revision_no),
-        };
-        drop(download);
-        download = context
-            .profile
-            .target
-            .open_file_download(spec, &resumed, start_offset)
-            .await?;
-    }
-    Ok(ResumableDownload {
-        download,
-        partial: meta,
-    })
-}
-
 /// Writes a download into its destination through the partial file, and
 /// installs it only once the download has ended cleanly.
 ///
 /// The partial file is deleted on any failure, including a streamed download
 /// whose content failed verification at its last chunk. An integrity failure
 /// therefore leaves no file at the destination at all, never a
-/// complete-looking one, and nothing beside it for a rerun to build on.
-///
-/// A download that never reported anything — a killed process — is the one
-/// that leaves its partial and its note behind, and the one a rerun picks
-/// up. Whatever it picks up is folded into the same verification the whole
-/// file gets, so bytes that turn out not to be the file's fail the rerun
-/// rather than reaching the destination.
+/// complete-looking one.
 pub(crate) async fn stream_download_to_file(
     download: &mut FileDownload,
     destination: LocalDestination<'_>,
-    meta: Option<&PartialDownloadMetadata>,
     progress: &ProgressReporter,
 ) -> Result<u64> {
-    let resumed_from = download.resumed_from();
-    let mut partial = PartialDownload::open(destination.path, meta, resumed_from)
-        .map_err(|error| destination.open_error(error))?;
-    partial.fold_into(download, |error| destination.write_error(error))?;
-    progress.already_done(resumed_from);
-    if resumed_from > 0 {
-        // Folding a head start back into the verification takes time and
-        // moves nothing, and it is the one thing about this run a caller
-        // could not otherwise tell: it fetches less than the file.
-        progress.phase("resuming");
-    }
-    let mut bytes_written = resumed_from;
+    let mut partial =
+        PartialDownload::open(destination.path).map_err(|error| destination.open_error(error))?;
+    let mut bytes_written = 0;
     while let Some(chunk) = download.next_chunk().await? {
         partial
             .write_all(&chunk)
@@ -299,7 +232,7 @@ pub(crate) async fn stream_file_to_stdout(
     let mut download = context
         .profile
         .target
-        .open_file_download(spec, version, 0)
+        .open_file_download(spec, version)
         .await?;
     while let Some(chunk) = download.next_chunk().await? {
         // Locked per chunk rather than across the fetch: nothing else

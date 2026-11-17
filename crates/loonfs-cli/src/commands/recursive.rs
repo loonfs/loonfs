@@ -365,16 +365,11 @@ pub(crate) async fn run_get_tree(
                 Ok(spec) => spec,
                 Err(error) => return (remote, Err(error)),
             };
-            let super::fs::ResumableDownload {
-                mut download,
-                partial,
-            } = match super::fs::open_resumable_download(
-                context,
-                &spec,
-                &FileVersion::At(at.clone()),
-                &local,
-            )
-            .await
+            let mut download = match context
+                .profile
+                .target
+                .open_file_download(&spec, &FileVersion::At(at.clone()))
+                .await
             {
                 Ok(opened) => opened,
                 Err(error) => return (remote, Err(error)),
@@ -387,7 +382,6 @@ pub(crate) async fn run_get_tree(
                     behavior,
                     name: super::fs::DestinationName::Given,
                 },
-                partial.as_ref(),
                 &progress,
             )
             .await;
@@ -1019,7 +1013,7 @@ mod tests {
         let mut download = context
             .profile
             .target
-            .open_file_download(&spec, &FileVersion::At(ReadAt::default()), 0)
+            .open_file_download(&spec, &FileVersion::At(ReadAt::default()))
             .await
             .expect("open uploaded file");
         let mut read = Vec::new();

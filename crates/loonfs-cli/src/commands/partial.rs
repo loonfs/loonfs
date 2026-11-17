@@ -1,111 +1,28 @@
-//! Partial files and metadata used to resume interrupted downloads.
+//! The partial file a download writes before it is installed at its
+//! destination.
 
-use super::download::FileDownload;
-use crate::error::{CliError, Result};
-use loonfs_types::{Checksum, ContentId, ContentRef, DestinationBehavior, RevisionNo};
-use serde::{Deserialize, Deserializer, Serialize};
-use std::io::{Read, Seek, Write};
+use loonfs_types::DestinationBehavior;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Suffix for partial download files.
 const PARTIAL_SUFFIX: &str = ".loonfs-partial";
-/// Suffix for partial download metadata.
-const META_SUFFIX: &str = ".loonfs-partial.meta";
-/// Chunk size used to checksum an existing partial file.
-const FOLD_CHUNK_BYTES: usize = 1024 * 1024;
 
-/// Identifies the content stored in a partial download.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PartialDownloadMetadata {
-    content_id: ContentId,
-    size_bytes: u64,
-    checksum: Checksum,
-    #[serde(deserialize_with = "required_option")]
-    revision_no: Option<RevisionNo>,
-}
-
-fn required_option<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
-
-impl PartialDownloadMetadata {
-    /// Describes the content a download is about to fetch.
-    pub(super) fn describe(content_ref: &ContentRef, revision_no: Option<RevisionNo>) -> Self {
-        Self {
-            content_id: content_ref.content_id.clone(),
-            size_bytes: content_ref.size_bytes,
-            checksum: content_ref.checksum.clone(),
-            revision_no,
-        }
-    }
-}
-
-/// Returns the number of reusable bytes when the partial file matches `meta`.
-pub(super) fn resumable_bytes(destination: &Path, meta: &PartialDownloadMetadata) -> u64 {
-    let (Some(partial_path), Some(meta_path)) = (
-        sibling(destination, PARTIAL_SUFFIX),
-        sibling(destination, META_SUFFIX),
-    ) else {
-        return 0;
-    };
-    let Ok(recorded) = std::fs::read(&meta_path) else {
-        return 0;
-    };
-    if serde_json::from_slice::<PartialDownloadMetadata>(&recorded)
-        .ok()
-        .as_ref()
-        != Some(meta)
-    {
-        return 0;
-    }
-    let Ok(metadata) = std::fs::metadata(&partial_path) else {
-        return 0;
-    };
-    // A partial file cannot be reused if it is longer than the content, and
-    // one as long as the content starts over, because a grant names at
-    // least one byte.
-    if metadata.len() >= meta.size_bytes {
-        return 0;
-    }
-    metadata.len()
-}
-
-/// Stores a partial download and its metadata until completion.
+/// Stores a download until it completes.
 pub(super) struct PartialDownload {
     file: tempfile::NamedTempFile,
-    /// Metadata stored as a temporary path so it is removed with the partial
-    /// file.
-    _meta: tempfile::TempPath,
-    path: PathBuf,
-    resumed_from: u64,
 }
 
 impl PartialDownload {
-    /// Locks the partial file for this command, writes its metadata file, and
-    /// opens the partial file at `resume_from`.
+    /// Locks the partial file for this command and empties it.
     ///
-    /// Metadata is written before content so a later run can verify that the
-    /// existing bytes belong to the same download. Content without a stable
-    /// identity is not resumed. A partial file another command holds fails
-    /// the open before either file changes.
-    pub(super) fn open(
-        destination: &Path,
-        meta: Option<&PartialDownloadMetadata>,
-        resume_from: u64,
-    ) -> std::io::Result<Self> {
-        let (Some(path), Some(meta_path)) = (
-            sibling(destination, PARTIAL_SUFFIX),
-            sibling(destination, META_SUFFIX),
-        ) else {
+    /// A partial file another command holds fails the open before the file
+    /// changes. Bytes an earlier, interrupted run left are discarded.
+    pub(super) fn open(destination: &Path) -> std::io::Result<Self> {
+        let Some(path) = sibling(destination, PARTIAL_SUFFIX) else {
             return Err(std::io::Error::other("destination has no file name"));
         };
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
+        let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
@@ -115,53 +32,13 @@ impl PartialDownload {
                 "another command is downloading to this destination",
             ));
         }
-        match meta {
-            Some(meta) => {
-                let encoded = serde_json::to_vec(meta).map_err(std::io::Error::other)?;
-                std::fs::write(&meta_path, encoded)?;
-            }
-            None => drop(std::fs::remove_file(&meta_path)),
-        }
-        let meta = tempfile::TempPath::try_from_path(&meta_path)?;
-        // Remove stale trailing bytes, or clear the file when starting over.
-        file.set_len(resume_from)?;
-        file.seek(std::io::SeekFrom::Start(resume_from))?;
+        file.set_len(0)?;
         Ok(Self {
             file: tempfile::NamedTempFile::from_parts(
                 file,
                 tempfile::TempPath::try_from_path(&path)?,
             ),
-            _meta: meta,
-            path,
-            resumed_from: resume_from,
         })
-    }
-
-    /// Adds the existing bytes to the verifier so it checks the complete file.
-    ///
-    /// `local_error` maps failures while reading the partial file. Validation
-    /// errors from the download are returned unchanged.
-    pub(super) fn fold_into(
-        &self,
-        download: &mut FileDownload,
-        local_error: impl Fn(std::io::Error) -> CliError,
-    ) -> Result<()> {
-        if self.resumed_from == 0 {
-            return Ok(());
-        }
-        let mut reader = std::fs::File::open(&self.path).map_err(&local_error)?;
-        let mut buffer = vec![0u8; FOLD_CHUNK_BYTES];
-        let mut remaining = self.resumed_from;
-        while remaining > 0 {
-            let wanted = usize::try_from(remaining)
-                .map_or(buffer.len(), |remaining| buffer.len().min(remaining));
-            reader
-                .read_exact(&mut buffer[..wanted])
-                .map_err(&local_error)?;
-            download.fold_resumed_prefix(&buffer[..wanted])?;
-            remaining -= wanted as u64;
-        }
-        Ok(())
     }
 
     pub(super) fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -226,112 +103,17 @@ pub(super) fn parent_of(destination: &Path) -> &Path {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loonfs_types::{ContentId, ContentRef, ContentRefKind};
-
-    fn meta_for(bytes: &[u8]) -> PartialDownloadMetadata {
-        PartialDownloadMetadata::describe(
-            &ContentRef::blob_v1(
-                ContentId::generate(),
-                bytes,
-                loonfs_types::ChecksumAlgorithm::Crc64nvme,
-            ),
-            None,
-        )
-    }
-
-    fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
-        ContentRef {
-            kind: ContentRefKind::BlobV1,
-            content_id: ContentId::generate(),
-            size_bytes: bytes.len() as u64,
-            checksum: Checksum::crc32c(bytes),
-        }
-    }
-
-    #[test]
-    fn a_note_that_does_not_match_starts_over() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let destination = dir.path().join("file.bin");
-        let meta = meta_for(b"0123456789");
-        let partial_path = sibling(&destination, PARTIAL_SUFFIX).expect("partial path");
-        let meta_path = sibling(&destination, META_SUFFIX).expect("meta path");
-
-        std::fs::write(&partial_path, b"0123").expect("write partial");
-        std::fs::write(
-            &meta_path,
-            serde_json::to_vec(&meta).expect("encode the note"),
-        )
-        .expect("write note");
-        assert_eq!(resumable_bytes(&destination, &meta), 4);
-
-        // A different content id is a different file at the same path.
-        assert_eq!(resumable_bytes(&destination, &meta_for(b"9876543210")), 0);
-
-        // A partial longer than the content is not a prefix of it.
-        std::fs::write(&partial_path, vec![0u8; 11]).expect("overlong partial");
-        assert_eq!(resumable_bytes(&destination, &meta), 0);
-
-        // A note this build cannot read is no note at all.
-        std::fs::write(&partial_path, b"0123").expect("write partial");
-        std::fs::write(&meta_path, b"{\"content_id\":").expect("write torn note");
-        assert_eq!(resumable_bytes(&destination, &meta), 0);
-
-        // Bytes with no note beside them say nothing about themselves.
-        std::fs::remove_file(&meta_path).expect("remove note");
-        assert_eq!(resumable_bytes(&destination, &meta), 0);
-    }
-
-    #[test]
-    fn a_crc32c_note_describes_and_resumes_its_partial() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let destination = dir.path().join("file.bin");
-        let content_ref = crc32c_content_ref(b"0123456789");
-        let meta = PartialDownloadMetadata::describe(&content_ref, None);
-
-        let encoded = serde_json::to_vec(&meta).expect("encode the note");
-        let document: serde_json::Value =
-            serde_json::from_slice(&encoded).expect("decode the note as a document");
-        assert_eq!(document["checksum"]["algorithm"], "crc32c");
-        assert!(document.get("revision_no").is_some());
-
-        std::fs::write(
-            sibling(&destination, PARTIAL_SUFFIX).expect("partial path"),
-            b"0123",
-        )
-        .expect("write partial");
-        std::fs::write(
-            sibling(&destination, META_SUFFIX).expect("meta path"),
-            &encoded,
-        )
-        .expect("write note");
-        assert_eq!(resumable_bytes(&destination, &meta), 4);
-
-        // The checksum is part of the match: the same id and length under a
-        // different digest is not the content this run resolved.
-        let other = PartialDownloadMetadata::describe(
-            &ContentRef {
-                checksum: Checksum::crc32c(b"9876543210"),
-                ..content_ref
-            },
-            None,
-        );
-        assert_eq!(resumable_bytes(&destination, &other), 0);
-    }
 
     #[test]
     fn a_second_download_to_one_destination_fails_before_it_truncates() {
         let dir = tempfile::tempdir().expect("tempdir");
         let destination = dir.path().join("file.bin");
-        let meta = meta_for(b"0123456789");
         let partial_path = sibling(&destination, PARTIAL_SUFFIX).expect("partial path");
-        let meta_path = sibling(&destination, META_SUFFIX).expect("meta path");
 
-        let mut first =
-            PartialDownload::open(&destination, Some(&meta), 0).expect("open the first");
+        let mut first = PartialDownload::open(&destination).expect("open the first");
         first.write_all(b"0123").expect("write");
-        let note = std::fs::read(&meta_path).expect("read the note");
 
-        let error = PartialDownload::open(&destination, Some(&meta_for(b"other")), 0)
+        let error = PartialDownload::open(&destination)
             .err()
             .expect("the second download must fail");
         assert_eq!(
@@ -339,7 +121,6 @@ mod tests {
             "another command is downloading to this destination"
         );
         assert_eq!(std::fs::read(&partial_path).expect("read partial"), b"0123");
-        assert_eq!(std::fs::read(&meta_path).expect("read note"), note);
 
         first.write_all(b"456789").expect("write");
         first

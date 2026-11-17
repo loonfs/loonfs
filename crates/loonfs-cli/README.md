@@ -12,7 +12,7 @@ Requests through an embedded profile work as follows:
 - **Deadline.** The HTTP API cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content and maintenance jobs aren't subject to that deadline.
 - **Concurrency.** The HTTP API admits at most 8 concurrent uploads and 16 concurrent downloads, the same defaults as the server.
 - **Transfer size.** The upload and download size limits are `u64::MAX`, so embedded transfers aren't limited in size.
-- **Downloads.** An interrupted embedded download starts again from the beginning. Progress for a single-file `loonfs get` counts the bytes received, but doesn't show a total.
+- **Downloads.** An interrupted download starts again from the beginning, through any profile. Progress for a single-file `loonfs get` counts the bytes received, but doesn't show a total.
 - **Uploads.** A file upload records its prepared commit request. If you rerun the command after the process restarts, the rerun submits that request again and renews its content token through the upload session, so the file isn't uploaded again.
 
 If another writer [fences](../../docs/specs/glossary.md#fence) an embedded profile's [writer session](../../docs/specs/glossary.md#writer-session), that session can't be used again. The request fails with `writer_fenced`, the CLI doesn't resubmit it, and the embedded host drops its handle. A later request starts a new writer session, and that session's first publication takes the namespace back. If a request tries to open the namespace while the old session's work is still ending, it can fail with `writer_session_closed`. A request made after that work ends can open the namespace.
@@ -602,30 +602,13 @@ Update options
     --actor-id <stable-id>
 
 Interrupted transfers
-  To pick up a transfer that was killed partway through, rerun the same
-  command. The CLI doesn't ask for anything, and there's no flag to turn
-  this on. A rerun either finds something to continue from or starts
-  over, and it says which.
+  To recover from a transfer that was killed partway through, rerun the
+  same command. The CLI doesn't ask for anything, and there's no flag to
+  turn this on.
 
-  A download writes into `.<name>.loonfs-partial` next to its destination,
-  along with a `.meta` file that identifies the content those bytes belong
-  to. A rerun continues from those bytes if the `.meta` file still
-  describes the file that the command resolves now. Otherwise, the rerun
-  silently discards the bytes and starts over. That happens when there's a
-  different file at that path, a different revision, or a `.meta` file
-  that this build can't read.
-
-  Both files are removed when the download is installed at its
-  destination, and when the download fails and reports the failure, so
-  only a run that was killed leaves anything behind. Verification still
-  covers the whole file. The bytes already on disk are included in the
-  same digest as the bytes fetched, so if the partial bytes don't really
-  belong to this file, the rerun fails instead of installing them.
-
-  An embedded download, or a remote download that the server proxies,
-  arrives in one response, so there's no point partway through to resume
-  from, and the rerun starts over from the beginning. Only a direct
-  download from the object store resumes.
+  A rerun of an interrupted download starts over from the beginning. A
+  download writes into `.<name>.loonfs-partial` next to its destination,
+  and the rerun replaces whatever an interrupted run left in that file.
 
   An upload resumes only when the transfer had parts to lose, which means
   a remote profile's direct multipart upload of a file larger than 8 MiB.
@@ -656,11 +639,11 @@ Interrupted transfers
   `loonfs put -` keeps no record, because a pipe can't be read a second
   time.
 
-  A tree resumes file by file, under the same rules. Each file of a
-  `put -r` keeps its own record, identified by the profile, namespace,
-  remote path, and local file of that upload, so rerunning the command
-  resumes whichever files were interrupted and doesn't upload again any
-  file that already committed.
+  An uploaded tree resumes file by file, under the same rules. Each file
+  of a `put -r` keeps its own record, identified by the profile,
+  namespace, remote path, and local file of that upload, so rerunning the
+  command resumes whichever files were interrupted and doesn't upload
+  again any file that already committed.
 
 Transfer progress
   `loonfs get` and `loonfs put` report their progress while they run, for
@@ -705,10 +688,9 @@ Transfer progress
       A period when time passes but no bytes move, reported when it
       starts, with `bytes_done` as it was at that moment. `committing`
       means an upload's payload has been read and only the commit is left.
-      `resuming` means a download picked up bytes that an interrupted run
-      left behind, and `bytes_done` is how many. Only a transfer of one
-      file reports these events. A tree has several files in progress at
-      once, so no single file's phase describes the whole operation.
+      Only a transfer of one file reports these events. A tree has several
+      files in progress at once, so no single file's phase describes the
+      whole operation.
 
   `op` is `get` or `put`. --no-progress turns off both forms, and neither
   form is produced for `loonfs cat` or for `loonfs get ... -`, which write
