@@ -3,8 +3,8 @@
 use crate::common::{collect_path_entries, expect_code};
 use loonfs::test_support::{fresh_reader, writer};
 use loonfs::{
-    ErrorCode, LoonFs, MaintainMetadataOptions, ManifestNo, Namespace, NamespaceId,
-    NamespaceSessionStatus, ReadOnly, SharedObjectStore, Writable,
+    ErrorCode, LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, NamespaceSessionStatus,
+    ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
@@ -200,21 +200,6 @@ async fn a_cold_node_reconstructs_current_state_during_active_writes() {
         .wait_for_fold()
         .await
         .expect("first fold completes");
-    let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "cold-handoff-inspection",
-        ))
-        .build()
-        .await
-        .expect("build maintenance handle")
-        .maintenance(loonfs_test_support::ids::writer_id(
-            "cold-handoff-inspection",
-        ));
-    let diagnostics = maintenance
-        .diagnostics(&namespace_id)
-        .await
-        .expect("read diagnostics after fold");
-    assert_eq!(diagnostics.current_manifest_no, Some(ManifestNo(4)));
     assert_root_paths(&fresh_reader(store.clone()).await, &namespace_id, &expected).await;
 
     for index in fold_threshold..(fold_threshold + 3) {

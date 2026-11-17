@@ -386,7 +386,7 @@ fn put_file_and_prepare_then_put_commit_equivalent_state() {
 }
 
 #[test]
-fn manual_only_writer_folds_without_scheduling_maintenance() {
+fn an_ordinary_writer_folds_on_its_own_without_scheduled_maintenance() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
