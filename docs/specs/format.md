@@ -2544,9 +2544,7 @@ These patterns define the core object families. [Storage layout](#21-storage-lay
 
 ## Appendix B. Semantic commit fingerprints
 
-A commit fingerprint is stored as `v1:sha256:<64 lowercase hex>`. The scheme identifies the canonicalization rules below, not the API's general-purpose JSON serialization.
-
-The fingerprint is the SHA-256 of compact UTF-8 JSON with these top-level fields, in this exact order:
+A commit fingerprint is stored as `v1:sha256:<64 lowercase hex>`, where `v1` identifies the canonicalization rules below, not the API's general JSON serialization. It's the SHA-256 of compact UTF-8 JSON with these top-level fields, in this exact order:
 
 ```text
 {
@@ -2560,13 +2558,13 @@ The fingerprint is the SHA-256 of compact UTF-8 JSON with these top-level fields
 }
 ```
 
-The layout above illustrates the schema, and the actual preimage bytes contain no formatting whitespace. The `preconditions` member is always present (and `[]` for an empty list), and `message` and `subject_id` are always present (and `null` when absent). A merge's fingerprint uses a different preimage, which [Merge commits](#b5-merge-commits) specifies.
+The hashed bytes have no formatting whitespace. Every member is always present: `preconditions` is `[]` when empty, and `message` and `subject_id` are `null` when absent. A merge uses a different preimage (see [Merge commits](#b5-merge-commits)).
 
-The `namespace_id`, `actor_id`, `subject_id`, message, operation order, and caller preconditions are all significant. A changed `actor_id` is a changed logical request, even if a different process is retrying on behalf of the same application. The principal scope isn't included, because a namespace has one scope and refuses every other. The commit ID itself, the writer epoch, and the commit timestamp aren't included either.
+A changed `actor_id` is a different request, even from a process retrying for the same application. The preimage leaves out the principal scope, because a namespace accepts one scope and refuses the rest. It also leaves out the commit ID, writer epoch and commit timestamp.
 
 ### B.1 Operation fields
 
-Every operation starts with `kind`, followed by the fields in the order below. Every listed field is written, including unset optional fields (as `null`) and default booleans or behavior values.
+Every operation starts with `kind`, then the fields below in order. Every field is written, including unset optional fields (as `null`) and default booleans and behaviors.
 
 | Kind | Fields after `kind`, in order |
 | --- | --- |
@@ -2591,31 +2589,29 @@ Every operation starts with `kind`, followed by the fields in the order below. E
 | `update_access` | `path`, `boundary`, `grants`, `expected_inode_id`, `expected_access_revision_no` |
 | `update_access_by_inode` | `inode_id`, `boundary`, `grants`, `expected_access_revision_no` |
 
-Paths use their validated canonical absolute form, and display-name fields contain one validated component. Inode IDs in these operations are their 26-character spelling, without the public `ino_` prefix. Sequence and revision numbers are JSON integers, and binding versions keep their opaque string representation.
+Paths use their validated canonical absolute form, and display names are one validated component. Inode IDs use their 26-character spelling without the public `ino_` prefix. Sequence and revision numbers are JSON integers, and binding versions stay opaque strings.
 
-Attribute `set` keys are sorted in lexicographic UTF-8 byte order, and the `remove` list is sorted and deduplicated. The order of operations isn't sorted or otherwise changed.
+Attribute `set` keys are sorted in lexicographic UTF-8 byte order, and the `remove` list is sorted and deduplicated. Operations keep the request's order.
 
 ### B.2 Content in a fingerprint
 
-A content reference is represented by exactly these fields, in this order:
+A content reference has exactly these fields, in this order:
 
 ```json
 {"kind":"blob_v1","content_id":"con_014d2pf2dbsqqg28t5cy4tqkff","size_bytes":15}
 ```
 
-The checksum isn't included in the preimage, and neither is the delta's `layout`, which records physical placement, not request identity. The checksum is verification evidence, not a second identity. It's still present and validated on the actual reference (leaving it out of the fingerprint doesn't make it optional on a commit).
+The preimage leaves out the checksum (verification evidence, still required and validated on the reference) and the delta's `layout` (physical placement). Identical bytes uploaded twice have different IDs and fingerprints, so a retry reuses the original reference.
 
-Two uploads of identical bytes have different IDs, so they have different fingerprints. A retry reuses the original reference, instead of repeating the upload and using a new one.
-
-Content that a commit includes inline has no object to refer to, so it's identified by its bytes. Each operation whose reference is for inline content uses this form in its `content_ref` member instead:
+Inline content has no object to refer to, so its `content_ref` identifies it by its bytes:
 
 ```json
 {"kind":"inline_v1","sha256":"<64 lowercase hex>","size_bytes":15}
 ```
 
-`sha256` is the lowercase hexadecimal SHA-256 of the complete content, and the fields appear in the order shown. The fingerprint hashes the request bytes separately from the content reference's checksum, and the content ID isn't included. The form follows how the request provided the content, not where the bytes are stored. Content provided inline keeps this form even if the writer stages it, and staged or uploaded content always keeps the reference form. So the same bytes, sent once inline and once as an uploaded object, produce different fingerprints.
+`sha256` is the lowercase hexadecimal SHA-256 of the complete content, separate from the reference's checksum, and the fields appear in the order shown. The content ID isn't included. The form follows how the request sent the content, not where it's stored: inline content keeps this form even if the writer stages it, and staged or uploaded content keeps the reference form.
 
-The bytes an append adds don't have a reference until the writer plans the commit, so the `inline_content` member of `append_file` and `append_file_by_inode` uses a third form:
+Appended bytes have no reference until the writer plans the commit, so the `inline_content` member of `append_file` and `append_file_by_inode` uses a third form:
 
 ```json
 {"kind":"append_v1","sha256":"<64 lowercase hex>","size_bytes":6}
@@ -2625,7 +2621,7 @@ The bytes an append adds don't have a reference until the writer plans the commi
 
 ### B.3 Preconditions
 
-The precondition list comes after `message`, and it keeps the caller's order, without sorting or deduplication. Each precondition starts with `kind`, followed by:
+The precondition list comes after `message` and keeps the caller's order, unsorted and not deduplicated. Each precondition starts with `kind`, followed by:
 
 | Kind | Fields after `kind`, in order |
 | --- | --- |
@@ -2638,15 +2634,13 @@ The precondition list comes after `message`, and it keeps the caller's order, wi
 | `path_absence` | `path` |
 | `name_absence` | `parent_inode_id`, `display_name` |
 
-Precondition inode IDs use the same 26-character spelling as operations, without the public `ino_` prefix. Every listed field is written, and optional fields are `null` when absent.
-
-Precondition sequence and revision values are JSON integers. Paths use their validated absolute spelling, display names use one validated component, and binding versions stay opaque strings. Preconditions affect request identity and validation, but they add no separate WAL field or replay delta.
+Every field is written, with `null` for an absent optional field, and values follow [Operation fields](#b1-operation-fields). Preconditions affect request identity and validation but add no WAL field or replay delta.
 
 ### B.4 Strings, integers, and example bytes
 
-Non-ASCII characters are encoded directly as UTF-8. JSON quotes, backslashes, and control characters are escaped, and `/` isn't escaped. Integers use decimal digits without leading zeros. The field order above is kept as specified (it isn't a general instruction to sort every JSON object's fields alphabetically).
+Non-ASCII characters are written directly as UTF-8. JSON quotes, backslashes and control characters are escaped, and `/` isn't. Integers use decimal digits without leading zeros. The field orders above are kept as specified; they aren't a general instruction to sort every object's fields alphabetically.
 
-For example, this is the complete canonical preimage for one directory-creation request. The hashed bytes have no trailing newline:
+For example, the complete preimage of one directory-creation request, with no trailing newline, is:
 
 ```json
 {"domain":"loonfs.commit.semantic.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
@@ -2658,9 +2652,9 @@ Its fingerprint is:
 v1:sha256:2d44c045a1d4eaaf3e808abbe1088b581fa51292cd410bc34dfd8e63f67140d3
 ```
 
-A one-operation convenience call and a one-element commit request use the same canonical input. The wire request can leave out defaults that the canonical operation writes explicitly, so its raw request JSON isn't the fingerprint preimage.
+A one-operation convenience call and a one-element commit request use the same canonical input. The raw request JSON isn't the preimage, because it can leave out defaults that the canonical operation writes.
 
-The complete shared vectors are in [commit_fingerprints_v1.json][fingerprint-vectors]. They cover every operation, every precondition variant, path bindings with and without binding versions, path absence, an empty precondition list, and operations with and without inline preconditions. Encoders MUST preserve those exact bytes and digests.
+The shared vectors in [commit_fingerprints_v1.json][fingerprint-vectors] cover every operation and precondition variant, path bindings with and without binding versions, an empty precondition list, and operations with and without inline preconditions. Encoders MUST preserve those exact bytes and digests.
 
 ### B.5 Merge commits
 
@@ -2681,9 +2675,9 @@ A [merge's](glossary.md#merge) fingerprint covers its merge record in place of i
 }
 ```
 
-The preimage has no `operations` and no `preconditions` members. Every member is always present, `subject_id` and `message` are `null` when absent, and strings and integers follow [Strings, integers, and example bytes](#b4-strings-integers-and-example-bytes). The stored form is `v1:sha256:<64 lowercase hex>`, the same as an ordinary commit's.
+Every member is always present, with `null` for an absent `subject_id` or `message`. Strings and integers follow [Strings, integers, and example bytes](#b4-strings-integers-and-example-bytes), and the stored form is an ordinary commit's.
 
-For example, this is the complete canonical preimage of a merge into `demo` that applies the commits of the fork `demo-fork` above sequence 418, through sequence 425. The hashed bytes have no trailing newline:
+For example, the complete preimage of a merge into `demo` of the fork `demo-fork`'s commits above sequence 418, through sequence 425, with no trailing newline, is:
 
 ```json
 {"domain":"loonfs.commit.merge.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"merge":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}
