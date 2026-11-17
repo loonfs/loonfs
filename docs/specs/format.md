@@ -339,7 +339,7 @@ This section describes the objects LoonFS stores for a namespace, how their keys
 
 ### 2.1 Storage layout
 
-Each namespace's objects are stored under its own prefix, except its content objects and upload records, which are stored under the prefix of the namespace's [pool](glossary.md#pool). A pool's prefix also stores the pool's member entries, one for each namespace in the pool, which the namespace's create or fork call writes (see [Creating a namespace](#91-creating-a-namespace)), and the temporary objects of assemblies. Every assembly writes a content object, so every temporary object is stored under a pool's prefix ([Object keys](#a8-object-keys) lists the complete key patterns):
+Each namespace's objects are stored under its own prefix, except content objects and upload records, which every member of a [pool](glossary.md#pool) stores under the pool's prefix (see [File contents and ownership](#15-file-contents-and-ownership)). The pool's prefix also stores a member entry for each namespace in the pool, which the namespace's create or fork call writes (see [Creating a namespace](#91-creating-a-namespace)), and the temporary objects of assemblies, because every assembly writes a content object. [Object keys](#a8-object-keys) lists the complete key patterns:
 
 ```text
 namespaces/{namespace_id}/
@@ -358,11 +358,11 @@ pools/{pool_id}/
 └── temporary/{temporary_id}
 ```
 
-Every member of a pool stores its content objects and upload records under the pool's prefix (see [File contents and ownership](#15-file-contents-and-ownership)). Metadata segments stay with the namespace that wrote them. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key. Every newly written segment, including compaction output, is stored under the writing namespace's `segments/` prefix. An [extension's](#124-extensions) segments follow the same rule under the writing namespace's `extensions/{extension_name}/segments/` prefix.
+Every newly written metadata segment, including compaction output, is stored under the writing namespace's `segments/` prefix, and an [extension's](#124-extensions) segments are stored the same way under `extensions/{extension_name}/segments/`. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key.
 
-On providers that build a new object by composing whole objects (such as GCS), an assembly writes temporary objects for the parts it can't compose directly: a range of a source object, new bytes, or an intermediate result. The assembly deletes them when it finishes (see [Immutable writes and retries](#32-immutable-writes-and-retries)).
+On providers that build a new object by composing whole objects (such as GCS), an assembly writes temporary objects for the parts it can't compose directly (a range of a source object, new bytes, or an intermediate result), and it deletes them when it finishes (see [Immutable writes and retries](#32-immutable-writes-and-retries)).
 
-The key layout is part of the format. Other objects MUST NOT use keys in these families. Core readers don't read an extension's segments, and garbage collection keeps every key under an extension's prefix other than a segment key.
+The key layout is part of the format, and other objects MUST NOT use keys in these families. Core readers don't read an extension's segments, and garbage collection keeps every key under an extension's prefix other than a segment key.
 
 ### 2.2 Object roles and mutability
 
@@ -383,17 +383,15 @@ Manifests and WAL objects are immutable once they're written. A manifest publica
 
 ### 2.3 Numbered objects and generated IDs
 
-Manifest numbers and WAL numbers are separate counters for each namespace, and both start at 1. Object keys use twenty decimal digits, so lexicographic order matches numeric order. For example, WAL object 2 is stored at `wal/00000000000000000002.wal.zst`.
+Manifest numbers and WAL numbers are separate counters for each namespace, and both start at 1. Object keys spell them with twenty decimal digits, so lexicographic order matches numeric order. For example, WAL object 2 is stored at `wal/00000000000000000002.wal.zst`.
 
-Each number refers to exactly one immutable object. A publisher creates the next number with put-if-absent, so competing publishers can't write different objects at the same number. A publisher that loses loads the winning object before it plans another attempt. The namespace and number in an object's payload MUST match its key.
+Each number refers to exactly one immutable object. A publisher creates the next number with put-if-absent, so competing publishers can't write different objects at the same number, and a publisher that loses loads the winning object before it plans another attempt. The namespace and number in an object's payload MUST match its key.
 
-Other objects use generated IDs:
+Other objects use generated IDs, which all use one 26-character lowercase Crockford base 32 spelling of 128 bits. The spelling adds two zero bits in front of the 128 bits and writes each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`, so the first character is `0` through `7`:
 
-- A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. The number identifies the snapshot's manifest, and the random part, which has the 26-character spelling that every generated ID uses (see the content ID below), distinguishes separate user and fork snapshots on the same manifest.
-- A content ID is `con_` followed by the 26-character lowercase Crockford base 32 spelling of a random version 4 UUID. The spelling adds two zero bits in front of the UUID's 128 bits and writes each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`, so the first character is `0` through `7`.
-- An inode ID is `ino_` followed by the same 26-character spelling, but its 128 bits aren't a UUID. Its high 64 bits are the creating commit's sequence and the inode's create number, and its low 64 bits are random. The root directory's ID is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
-- A metadata segment ID is `seg_` followed by the same 26-character spelling of a random version 4 UUID. It's generated, instead of being derived from the segment's position in publication history.
-- An extension segment ID (`idx_`), a pool ID (`pool_`), an upload ID (`upl_`), a span object ID (`span_`), and a temporary object's ID (`tmp_`) are each the prefix followed by the same 26-character spelling of a random version 4 UUID. A span object's key spells its full ID, as every other object key spells its ID (see [File contents and ownership](#15-file-contents-and-ownership)).
+- A content ID (`con_`), a metadata segment ID (`seg_`), an extension segment ID (`idx_`), a pool ID (`pool_`), an upload ID (`upl_`), a span object ID (`span_`), and a temporary object's ID (`tmp_`) are each the prefix followed by that spelling of a random version 4 UUID. A metadata segment ID is generated, instead of being derived from the segment's position in publication history. A span object's key spells its full ID, as every object key does (see [File contents and ownership](#15-file-contents-and-ownership)).
+- An inode ID is `ino_` followed by the same spelling, but its 128 bits aren't a UUID. Its high 64 bits are the creating commit's sequence and the inode's create number, and its low 64 bits are random. The root directory's ID is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
+- A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. The number identifies the snapshot's manifest, and the random part, in the same 26-character spelling, distinguishes separate user and fork snapshots on the same manifest.
 
 A collision at a newly generated immutable key MUST NOT overwrite the existing bytes.
 
@@ -401,9 +399,9 @@ A collision at a newly generated immutable key MUST NOT overwrite the existing b
 
 The current manifest is the source of truth for the namespace's identity, status, writer epoch, and compactor epoch. Its runs describe the folded metadata through the folded head sequence (`head_seq`), and `folded_wal_no` is the last WAL number that those runs include. The WAL objects after `folded_wal_no` contain the later commits, and the highest-numbered one is the "WAL tip".
 
-Every WAL object records the head sequence after its commits. A fence moves the WAL number and the writer epoch forward without adding a commit, and it keeps the head sequence it started from. A [floor object](glossary.md#floor-object) is a WAL object with no commits that records a new [retention floor](glossary.md#retention-floor), and it also keeps the head sequence it started from (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
+Every WAL object records the head sequence after its commits. A fence moves the WAL number and the writer epoch forward without adding a commit. A [floor object](glossary.md#floor-object) is a WAL object with no commits that records a new [retention floor](glossary.md#retention-floor) (see [Advancing the retention floor](#101-advancing-the-retention-floor)). A fence and a floor object both keep the head sequence they started from.
 
-A process that has no manifest of the namespace in memory finds the newest manifest by reading the [manifest boundary](glossary.md#manifest-boundary) and listing the manifests numbered above it. If the boundary is retired, the namespace is retired and has no newest manifest. If the listing is empty and no boundary object exists, no namespace has the ID (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
+A process that has no manifest of the namespace in memory finds the newest manifest by reading the [manifest boundary](glossary.md#manifest-boundary) and listing the manifests numbered above it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
 
 The namespace's counters advance at different times:
 
@@ -427,9 +425,9 @@ A durable reference to a manifest contains:
 | `head_seq` | The head sequence that the manifest records. |
 | `payload_checksum` | A digest that MUST match the manifest's stored payload. |
 
-A snapshot refers to a manifest in its own namespace, and it stores these fields directly, with its `namespace_id` as the owner. A fork's basis includes a reference to a manifest in the source namespace, along with the IDs of the fork's two fork snapshots. The segment references inside a manifest keep their own owners, so a manifest can list segments that belong to other namespaces.
+A snapshot refers to a manifest in its own namespace and stores these fields directly, with its `namespace_id` as the owner. A fork's basis includes a reference to a manifest in the source namespace, along with the IDs of the fork's two fork snapshots. The segment references inside a manifest keep their own owners, so a manifest can list segments that belong to other namespaces.
 
-A segment descriptor and a layout extent also record a checksum of the object they refer to. A segment descriptor records the checksum that the store keeps for the segment object (see [Control and manifest payloads](#a4-control-and-manifest-payloads)), and a layout's extent records the checksum that the store keeps for the content object it lists (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)). So a manifest reference, a segment descriptor, and an extent each record a checksum of their object, and each one can be checked against the object without reading another object.
+A segment descriptor records the checksum that the store keeps for the segment object (see [Control and manifest payloads](#a4-control-and-manifest-payloads)), and a layout's extent records the store's checksum of the content object it lists (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)). So a manifest reference, a segment descriptor, and an extent can each be checked against its object without reading another object.
 
 Readers validate the referenced identity, sequence, and checksum. A missing or corrupt required object is an error, and never a reason to use another manifest instead.
 
@@ -437,7 +435,7 @@ Readers validate the referenced identity, sequence, and checksum. A missing or c
 
 This section summarizes how commits, writer takeover, folds, discovery, and garbage collection fit together. Sections 4, 6, 7, and 11 define the complete rules.
 
-Each namespace has two sequences of numbered objects, manifests and WAL objects. Each sequence starts at 1, and a publisher creates each object with put-if-absent at the previous number plus one.
+Each namespace has two sequences of numbered objects, manifests and WAL objects (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)).
 
 ```text
 manifests:  [4] | [5]  [6]   <- current manifest, folded_wal_no = 8
@@ -449,29 +447,20 @@ WAL:        [7]  [8]  [9]  [10]  [11]   <- WAL tip
                       visible WAL, replayed on top of manifest 6
 ```
 
-- A manifest records the namespace's lifecycle status, its writer and compactor epochs, `head_seq`, `folded_wal_no`, and the metadata segments that contain its rows through `head_seq`.
-- A WAL object is a data object, a fence, or a floor object. A data object contains the commits that follow the previous WAL object, stamped with the writer epoch of the session that wrote those commits. A fence contains no commits. A [floor object](glossary.md#floor-object) contains no commits either, and it records a new retention floor. Any process can create a floor object without the writer epoch (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
-- The [manifest boundary](glossary.md#manifest-boundary) is mutable. It records a manifest number that never decreases, and every manifest at or below that number has been replaced by a newer manifest. Retirement raises it to a retired state, which is above every manifest number. Garbage collection raises the boundary before it deletes manifests, and a publisher reads the boundary after each manifest put. A manifest put at or below the boundary counts as lost.
-- Content objects store immutable ranges of file bytes, and a layout lists those ranges in chain order.
-- Snapshots are retained manifests (see [Snapshots](#8-snapshots)).
+- A WAL object is a data object, a fence, or a [floor object](glossary.md#floor-object). A data object contains commits stamped with the writer epoch of the session that wrote them, and any process can create a floor object without the writer epoch (see [Advancing the retention floor](#101-advancing-the-retention-floor)).
+- Retirement and garbage collection raise the [manifest boundary](glossary.md#manifest-boundary), and a manifest put at or below the boundary counts as lost (see [Retirement](#95-retirement), [One complete collection](#111-one-complete-collection), and [Publishing a manifest](#72-publishing-a-manifest)).
 
-A commit creates WAL object `tip + 1` with put-if-absent. An acquired writer session plans its batch against the tip it discovered, and the put is the commit boundary. A put that collides creates nothing, so the writer discovers the new tip and plans again (see [Publication and group commit](#63-publication-and-group-commit)).
+A writer session commits a batch by creating WAL object `tip + 1` with put-if-absent, and it plans the batch again after a collision (see [Publication and group commit](#63-publication-and-group-commit)).
 
-A new writer session takes over by publishing the next manifest with `writer_epoch + 1`, and then creating a fence with that epoch at the next WAL number. Between the manifest and the fence, the previous writer can still commit at `tip + 1`. Those commits are valid, because their epoch is below the manifest's and the fence is written above them. Once the fence is written, the previous writer session can't commit. Its next put collides, the discovery that follows finds the higher epoch, and the session is fenced (it stops committing, and it doesn't reacquire authority on its own). Any earlier discovery that finds the higher epoch fences the session the same way (see [Writer ownership](#61-writer-ownership)).
+A new writer session takes over by publishing the next manifest with `writer_epoch + 1` and then a fence at the next WAL number, after which the previous session can't commit (see [Writer ownership](#61-writer-ownership)).
 
-A fold doesn't need a writer epoch, and any process can run one. A fold moves the WAL objects after the current manifest's `folded_wal_no` into new metadata segments, and it publishes the next manifest with `folded_wal_no` set to the tip it read. That manifest keeps the previous manifest's writer and compactor epochs. Before it publishes, the fold writes the pieces it covers to content objects as immutable extents (see [Publishing a manifest](#72-publishing-a-manifest)).
+Any process can run a fold, which writes the WAL objects after `folded_wal_no` to new metadata segments and the pieces it covers to content objects, and then publishes the next manifest (see [Publishing a manifest](#72-publishing-a-manifest)).
 
-To discover a namespace's current state, a reader:
+A reader discovers a namespace's current state by finding the newest manifest through the boundary, reading the WAL above its `folded_wal_no` until the first missing number, and then checking the manifest for a successor and reading the boundary again (see [Resolving the metadata basis](#41-resolving-the-metadata-basis) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 
-1. Reads the manifest boundary, lists the manifests numbered above it, loads the highest-numbered manifest in the listing, and reads the boundary again to check that the loaded manifest is still above it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)).
-2. Reads WAL objects from `folded_wal_no + 1` upward, in concurrent windows, until the first missing number.
-3. Checks that the manifest still has no successor, and then reads the boundary again.
+Garbage collection deletes the data WAL objects at or below the current manifest's `folded_wal_no`, the manifests that a newer manifest replaced and that no snapshot keeps, and the segments that neither the current manifest nor a manifest that a snapshot keeps lists, once each one is old enough under the age rules. It keeps every fence and floor object. A read that must outlive the current manifest takes a snapshot (see [Reference roots](#112-reference-roots), [Candidate and age rules](#113-candidate-and-age-rules), and [Snapshots](#8-snapshots)).
 
-If a successor appeared, or the manifest is at or below the boundary, the reader reloads the manifest and starts again. A missing or invalid WAL object also makes the reader reload the manifest, and if the manifest number hasn't changed, the store is corrupt (see [Resolving the metadata basis](#41-resolving-the-metadata-basis) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
-
-Garbage collection deletes the data WAL objects (the WAL objects with commits) at or below the current manifest's `folded_wal_no`, keeps every fence and floor object, and deletes manifests below the newest manifest that it found that no snapshot keeps. Before it deletes a manifest, it raises the manifest boundary to the highest manifest number that it deletes. It deletes each object only after the object's provider age reaches the grace window (see [Reference roots](#112-reference-roots) and [Candidate and age rules](#113-candidate-and-age-rules)). It deletes a metadata or extension segment once neither the current manifest nor a manifest that a snapshot keeps lists it, and the segment is more than 24 hours old. A read that must outlive the current manifest takes a snapshot (see [Snapshots](#8-snapshots)).
-
-A WAL put succeeds only at a number where no object was ever created, because no process deletes a fence or a floor object, the two kinds of WAL object that can take a number after a writer saw the tip (see [Publication and group commit](#63-publication-and-group-commit)). A fence put, and a floor object put by a process without the writer epoch, can still succeed at a number that a collection emptied, so after such a put succeeds the process checks the put's number against the newest manifest's `folded_wal_no` (see [Writer ownership](#61-writer-ownership) and [Advancing the retention floor](#101-advancing-the-retention-floor)). Manifests are covered by the boundary instead. A manifest publication reads the boundary after its put, and a process that already has a manifest reads the boundary after each check for a successor, so a manifest that garbage collection deleted is never mistaken for a missing one (see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
+A WAL put succeeds only at a number where no object was ever created, but a fence put, or a floor object put without the writer epoch, can succeed at a number that a collection emptied, so the process checks that number after the put (see [Publication and group commit](#63-publication-and-group-commit), [Writer ownership](#61-writer-ownership), and [Advancing the retention floor](#101-advancing-the-retention-floor)).
 
 The protocol guarantees the following:
 
