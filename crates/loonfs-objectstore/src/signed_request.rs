@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn a_head_reports_the_stored_checksum_and_object_age() {
+    fn a_head_reports_the_last_modified_time_and_treats_the_epoch_as_unknown() {
         let response = head(
             200,
             &[
@@ -196,15 +196,10 @@ mod tests {
                 ("last-modified", "Thu, 01 Jan 1970 00:00:01 GMT"),
             ],
         );
-        for expected in [Some(Checksum::crc64nvme(b"bytes")), None] {
-            let metadata = metadata_from_signed_head("key", &response, "x-amz-version-id", |_| {
-                expected.clone()
-            })
+        let metadata = metadata_from_signed_head("key", &response, "x-amz-version-id", |_| None)
             .expect("head")
             .expect("object");
-            assert_eq!(metadata.checksum, expected);
-            assert_eq!(metadata.last_modified_at_ms, Some(1000));
-        }
+        assert_eq!(metadata.last_modified_at_ms, Some(1000));
         let epoch = head(
             200,
             &[

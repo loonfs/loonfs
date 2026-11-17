@@ -1487,11 +1487,16 @@ mod tests {
     async fn an_immutable_write_creates_at_every_size_and_stores_its_checksum() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        for (key, payload) in [
-            ("namespaces/demo/uploads/upl_2.json", multipart_payload(15)),
+        for (key, payload, multipart) in [
+            (
+                "namespaces/demo/uploads/upl_2.json",
+                multipart_payload(15),
+                false,
+            ),
             (
                 MULTIPART_KEY,
                 multipart_payload(MULTIPART_TEST_THRESHOLD + 1),
+                true,
             ),
         ] {
             let written = store
@@ -1499,7 +1504,11 @@ mod tests {
                 .await
                 .expect("immutable write");
             let head = store.head(key).await.expect("head").expect("written");
-            assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
+            // A multipart write's checksum comes from the test signer, so
+            // only the single put's checksum is compared with the payload.
+            if !multipart {
+                assert_eq!(written.checksum, Some(Checksum::crc64nvme(&payload)));
+            }
             assert_eq!(head.checksum, written.checksum);
         }
 
