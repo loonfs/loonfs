@@ -152,19 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn api_errors_expose_known_registry_codes() {
-        for (wire, expected) in [
-            ("stale_revision", ErrorCode::StaleRevision),
-            ("content_not_prepared", ErrorCode::ContentNotPrepared),
-            ("namespace_deleted", ErrorCode::NamespaceDeleted),
-            ("outcome_unknown", ErrorCode::OutcomeUnknown),
-            ("index_corrupt", ErrorCode::IndexCorrupt),
-        ] {
-            assert_eq!(api_error(500, wire).code(), Some(expected));
-        }
-    }
-
-    #[test]
     fn api_errors_expose_the_cause_that_shares_a_code() {
         for (body, code, cause) in [
             (

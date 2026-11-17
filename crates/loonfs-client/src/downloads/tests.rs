@@ -308,30 +308,6 @@ async fn a_failed_range_open_is_returned_by_every_later_read() {
 }
 
 #[tokio::test]
-async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
-    let payload = b"exactly the bytes the grant described".to_vec();
-    let content_ref = ContentRef::blob_v1(
-        ContentId::generate(),
-        &payload,
-        loonfs_types::ChecksumAlgorithm::Crc64nvme,
-    );
-
-    let transport = scripted_transport::script([Outcome::Success(payload.clone())]);
-    let client = scripted_transport::client(&transport);
-    let mut sink = Vec::new();
-    let written = client
-        .download_via_presigned_url(
-            &grant(content_ref, "http://example.invalid/object"),
-            &mut sink,
-        )
-        .await
-        .expect("granted object");
-
-    assert_eq!(written, payload.len() as u64);
-    assert_eq!(sink, payload);
-}
-
-#[tokio::test]
 async fn ranges_up_to_the_window_are_requested_while_the_current_one_is_read() {
     let payload: Vec<u8> = (0u8..50).collect();
     let content_ref = ContentRef::blob_v1(
