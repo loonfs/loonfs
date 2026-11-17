@@ -2076,7 +2076,7 @@ This section describes designs that were considered for the format and why they 
 
 ## Appendix A. Durable records and byte encodings
 
-This appendix is the field and encoding reference for the protocols above. Field names are literal. A `?` after a field in a table means the object member is optional and is left out when absent (the question mark isn't part of its stored name).
+This appendix lists the fields and byte encodings of durable records. Field names are literal, and a `?` after a field in a table marks an optional member that's left out when absent (the `?` isn't part of the stored name).
 
 ### A.1 Family versions
 
@@ -2111,16 +2111,14 @@ To encode an object, a writer:
 
 1. Serializes the payload, to JSON for a JSON family or to CBOR for the WAL.
 2. Calculates `payload_checksum`, the SHA-256 of those payload bytes.
-3. Builds the envelope document around the payload bytes. A JSON document includes them as an inline fragment, and a CBOR document includes them as a byte string.
+3. Builds the envelope document around the payload bytes, as an inline fragment in a JSON document or a byte string in a CBOR document.
 4. Compresses the whole document with zstd, if the object is a manifest or a WAL object. A [control object](glossary.md#control-object) is stored as the document itself.
 
-The checksum covers the payload bytes exactly as they appear in the document, including a JSON fragment's internal whitespace and spelling. It doesn't cover the rest of the envelope (so a JSON envelope's own whitespace isn't part of it), the compressed representation, or a second encoding of the decoded payload. Neither a writer nor a reader parses and serializes the payload again to calculate its checksum.
+The checksum covers the payload bytes exactly as they appear in the document (see [Envelopes and checksums](#122-envelopes-and-checksums)), including a JSON fragment's internal whitespace and spelling, and not the rest of the envelope or the compressed bytes. Neither a writer nor a reader parses and serializes the payload again to calculate the checksum.
 
-Every manifest and every WAL object is compressed, so a reader doesn't check whether an object of those families is compressed. (The reference writer uses zstd level 3, and a reader accepts any level.) A reader decompresses the object first, and it refuses a document longer than the family's limit: `MAX_NAMESPACE_MANIFEST_BYTES` for a manifest (see [Control and manifest payloads](#a4-control-and-manifest-payloads)) or `MAX_WAL_OBJECT_BYTES` for a WAL object (see [WAL records](#a5-wal-records)).
+A reader decompresses every manifest and WAL object without checking whether it's compressed, and it refuses a document longer than the family's limit: `MAX_NAMESPACE_MANIFEST_BYTES` for a manifest (see [Control and manifest payloads](#a4-control-and-manifest-payloads)) or `MAX_WAL_OBJECT_BYTES` for a WAL object (see [WAL records](#a5-wal-records)). (The reference writer uses zstd level 3, and a reader accepts any level.) The reader then identifies the declared kind and version, validates the envelope and checksum, and interprets the payload under the supported schema. A matching checksum doesn't make an inconsistent record valid, so field and protocol validation still apply.
 
-A reader then identifies the declared kind and version, validates the envelope and checksum, and interprets the payload under the supported schema. Field and protocol validation still apply after the checksum matches, because a matching checksum doesn't make an inconsistent record valid.
-
-Why are manifests and WAL objects compressed, but control objects aren't? A manifest grows with the namespace and a WAL object grows with its commits, and a reader with an empty cache loads both. For example, a manifest of 193 KiB of JSON is 36 KiB compressed. A control object is under 1 KiB, so compressing it would save almost nothing.
+Why are manifests and WAL objects compressed, but control objects aren't? A manifest grows with the namespace and a WAL object with its commits, and a reader with an empty cache loads both (a manifest of 193 KiB of JSON is 36 KiB compressed). A control object is under 1 KiB, so compressing it would save almost nothing.
 
 ### A.3 Content references and checksums
 
@@ -2133,7 +2131,7 @@ A `blob_v1` reference contains all of these fields:
 | `size_bytes` | The length of the file, which is the prefix of the chain that the reference identifies. |
 | `checksum` | The algorithm and digest of those bytes. |
 
-For example, the 15 UTF-8 bytes `Hello, LoonFS!\n` (ending in a single LF) have this reference. The ID is illustrative, while the size and CRC-64/NVME checksum are calculated from those bytes:
+For example, this is a reference to the 15 UTF-8 bytes `Hello, LoonFS!\n` (ending in a single LF). The ID is illustrative, and the size and CRC-64/NVME checksum are calculated from those bytes:
 
 ```json
 {
@@ -2156,13 +2154,11 @@ A checksum is `{ "algorithm": <name>, "value": <lowercase hex> }`:
 | `crc64nvme` | 16 hexadecimal characters |
 | `crc32c` | 8 hexadecimal characters |
 
-The value is the CRC result written as a big-endian integer, so the hex is the checksum bytes in wire order.
+The value is the CRC result written as a big-endian integer, so the hex is the checksum bytes in wire order. Provider encodings are converted to this representation before the stored value is built, and an algorithm selector without a value isn't a checksum.
 
-What a checksum covers depends on the field that contains it. A content reference's checksum covers the prefix it identifies, and a multipart part checksum covers one part. An upload-content claim, an extent's object checksum, and a segment descriptor's checksum each cover the complete object. An algorithm selector without a value isn't a checksum. Provider encodings are converted to this representation before the stored value is built.
+A content reference's checksum covers the prefix it identifies, and a multipart part checksum covers one part. An upload-content claim, an extent's object checksum, and a segment descriptor's checksum each cover the complete object.
 
 ### A.4 Control and manifest payloads
-
-These tables list the durable payload fields. The protocol sections define how they change.
 
 | Payload | Fields |
 | --- | --- |
@@ -2176,9 +2172,9 @@ These tables list the durable payload fields. The protocol sections define how t
 | Member entry | `pool_id`, `namespace_id` |
 | Manifest boundary | `namespace_id`, `boundary` |
 
-Namespace status is `{"kind":"initializing"}`, `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. Every manifest 1 is initializing (see [Creating a namespace](#91-creating-a-namespace) and [Forking a namespace](#92-forking-a-namespace)). The genesis commit ID is `cmt_00000000000000000000000000`.
+Namespace status is `{"kind":"initializing"}`, `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms`. A missing status is invalid. Every manifest 1 is initializing (see [Creating a namespace](#91-creating-a-namespace) and [Forking a namespace](#92-forking-a-namespace)). The genesis commit ID is `cmt_00000000000000000000000000`.
 
-Snapshot owners have the fields in [Records and owners](#81-records-and-owners), and a snapshot has no status field. Upload records use these tagged variants, and both use `kind` tags:
+Snapshot owners have the fields in [Records and owners](#81-records-and-owners), and a snapshot has no status field. The upload records use these variants, each tagged with `kind`:
 
 - Mode, in the session record: `service_proxied` has no other fields, `direct_put` contains `checksum_algorithm`, and `direct_multipart` contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`.
 - Outcome, in the outcome record: `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`.
@@ -2187,12 +2183,12 @@ Both upload records are stored under the prefix of the pool of the namespace tha
 
 A manifest boundary is stored under the prefix of its namespace, and its `namespace_id` MUST match the key. Its `boundary` is one of two tagged variants:
 
-- `manifest`: a required `manifest_no` of at least 1, as in `{"kind":"manifest","manifest_no":44}`. Every manifest numbered `manifest_no` or lower is dead.
-- `retired`: no other fields, as in `{"kind":"retired"}`. The namespace is [retired](#95-retirement), and every manifest of the namespace is dead. A retired boundary never changes to another value.
+- `manifest`, with a required `manifest_no` of at least 1, as in `{"kind":"manifest","manifest_no":44}`. Every manifest numbered `manifest_no` or lower is dead.
+- `retired`, with no other fields, as in `{"kind":"retired"}`. The namespace is [retired](#95-retirement), so every manifest of it is dead, and the boundary never changes again.
 
 A missing boundary object means that no manifest of the namespace is at or below the boundary.
 
-A member entry records that one namespace is in one pool. It's stored under the prefix of its pool at `members/{namespace_id}.json`, and both its `pool_id` and its `namespace_id` MUST match the key. The namespace's create or fork call writes it after manifest 1 (see [Creating a namespace](#91-creating-a-namespace)), and the pool's collection uses its key and doesn't read its payload (see [Content roots](#119-content-roots)).
+A member entry records that one namespace is in one pool. It's stored under its pool's prefix at `members/{namespace_id}.json`, and both its `pool_id` and its `namespace_id` MUST match the key. [Creating a namespace](#91-creating-a-namespace) and [Content roots](#119-content-roots) describe when it's written and how the pool's collection uses it.
 
 A namespace manifest contains:
 
@@ -2233,7 +2229,7 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `del
 | `filter_inline?` | The exact stored filter bytes, as lowercase hexadecimal. |
 | `extent_filter_block?` | The extent filter handle, present exactly when `family` is `content_layouts` (see [Block-segment encoding](#a7-block-segment-encoding)). |
 
-An extension entry contains `version`, `runs`, and the members that the extension's specification defines, which core copies without interpreting them. The entry's `runs` lists the extension's runs in list order. A run contains `run_no` and `level`, which only the extension interprets, and `segments`, the run's segment descriptors in list order. An extension segment descriptor contains:
+An [extension's entry](#124-extensions) lists its runs in order in `runs`. Each run contains `run_no` and `level`, which only the extension interprets, and `segments`, its segment descriptors in list order. An extension segment descriptor contains:
 
 | Field | Meaning |
 | --- | --- |
@@ -2246,19 +2242,19 @@ An extension entry contains `version`, `runs`, and the members that the extensio
 
 `base_seq` is the oldest non-empty run's sequence, or `head_seq` when there's no such run, and it isn't stored. Extension runs don't count toward it. Segments follow their list order within each family. The owner and segment ID determine the object key, and the descriptor stores no separate path or compaction-job identity.
 
-`MAX_NAMESPACE_MANIFEST_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed manifest document, including its envelope. Readers refuse larger documents, and a publication whose manifest document would be larger fails before its put. A manifest lists every segment of its namespace, so this limit also caps how much metadata a namespace can have. (A namespace of one million files written in large commits has about 700 segments, and its manifest document is about 440 KiB, so the limit is reached at about 1.2 billion files.) This is a format constraint, because every published manifest MUST stay readable with bounded decompression.
+`MAX_NAMESPACE_MANIFEST_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed manifest document, including its envelope. Readers refuse larger documents, and a publication whose manifest document would be larger fails before its put. This is a format constraint, because every published manifest MUST stay readable with bounded decompression. Because a manifest lists every segment, the limit also caps a namespace's metadata. (A namespace of one million files written in large commits has about 700 segments and a manifest document of about 440 KiB, so the limit is reached at about 1.2 billion files.)
 
 ### A.5 WAL records
 
-`MAX_WAL_OBJECT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Writers keep every WAL object within this limit through request and batch admission, and readers refuse larger documents. A writer builds each batch so that the sum of its requests' bounds, plus the document overhead, stays within the limit. This is a format constraint, because every successful publication MUST stay readable with bounded decompression.
+`MAX_WAL_OBJECT_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed WAL document, including its envelope. Readers refuse larger documents, and writers keep every WAL object within the limit through request and batch admission. A writer builds each batch so that the sum of its requests' bounds, plus the document overhead, stays within it. This is a format constraint, because every successful publication MUST stay readable with bounded decompression.
 
 A WAL object's payload contains `namespace_id`, `wal_no`, `writer_epoch`, `head_seq`, `records`, and an optional `retention_floor_seq`.
 
 For a data WAL object, `prior_head_seq` is derived (with checked subtraction) from the first record's sequence, and `records` covers the sequences after it through `head_seq`, without gaps. A first sequence of 0 is invalid. The WAL number MUST match the key. A fence has an empty record list and an unchanged head, so its derived `prior_head_seq` equals `head_seq`. Fences take part in WAL numbering and epoch validation, but they produce no logical changes.
 
-A [floor object](glossary.md#floor-object) is a WAL object whose payload includes `retention_floor_seq`, the retention floor that the floor object records (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every other WAL object leaves the field out. Like a fence, a floor object has an unchanged head, and it takes part in WAL numbering and epoch validation. Encoding and decoding refuse a WAL object whose `retention_floor_seq` is present with a non-empty record list, or is above the object's `head_seq` (`InvalidWalFloorObject`). For example, WAL object 31 with `head_seq` 140, no records, and `retention_floor_seq` 20 is a valid floor object, and the same object with `retention_floor_seq` 150 is refused.
+A [floor object](glossary.md#floor-object) is a WAL object whose payload includes `retention_floor_seq`, the retention floor that it records (see [Advancing the retention floor](#101-advancing-the-retention-floor)), and every other WAL object leaves the field out. Like a fence, a floor object has an unchanged head and takes part in WAL numbering and epoch validation. Encoding and decoding refuse a WAL object whose `retention_floor_seq` is present with a non-empty record list, or is above the object's `head_seq` (`InvalidWalFloorObject`). For example, WAL object 31 with `head_seq` 140, no records, and `retention_floor_seq` 20 is a valid floor object, and the same object with `retention_floor_seq` 150 is refused.
 
-`MAX_FENCE_OR_FLOOR_OBJECT_BYTES` is 572 bytes. It's zstd's compression bound for the longest document of a WAL object with no records (508 bytes): the envelope fields and a payload with a `namespace_id` of 128 bytes, four integers of 9 bytes, an empty record list, and a `retention_floor_seq`. So every fence and every floor object is stored in at most 572 bytes. A writer stores every data WAL object in more than 572 bytes. When a data WAL object's stored size would be at most 572 bytes, the writer adds a `padding` field to the envelope document and compresses again, until the stored size is above 572 bytes. The padding is successive SHA-256 digests of the `payload_checksum` string followed by a 4-byte big-endian counter from 0, cut to the length that's needed, so it doesn't compress and the same payload encodes to the same bytes. The field is left out when the object is larger without it, and it's never added to a fence or a floor object. `payload_checksum` doesn't cover the padding, and a reader ignores its content. Garbage collection tells a fence or a floor object from a data WAL object by this bound alone (see [Candidate and age rules](#113-candidate-and-age-rules)).
+`MAX_FENCE_OR_FLOOR_OBJECT_BYTES` is 572 bytes, which is zstd's compression bound for the longest document of a WAL object with no records (508 bytes: the envelope fields and a payload with a `namespace_id` of 128 bytes, four integers of 9 bytes, an empty record list, and a `retention_floor_seq`). So every fence and floor object is stored in at most 572 bytes, and a writer stores every data WAL object in more than 572 bytes. When a data WAL object's stored size would be at most 572 bytes, the writer adds a `padding` field to the envelope document and compresses again until it's larger. The padding is successive SHA-256 digests of the `payload_checksum` string followed by a 4-byte big-endian counter from 0, cut to the length that's needed, so it doesn't compress and the same payload encodes to the same bytes. The field is left out when the object is larger without it, and never added to a fence or a floor object. `payload_checksum` doesn't cover the padding, and a reader ignores its content. Garbage collection tells a fence or a floor object from a data WAL object by this bound alone (see [Candidate and age rules](#113-candidate-and-age-rules)).
 
 Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, an optional `message`, an optional `merge`, `deltas`, and an optional `inline_content`. A delta wrapper contains `semantic_operation_index` and `delta`, which is a kind-tagged object with these fields:
 
@@ -2273,16 +2269,16 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 | `append_attributes_revision` | `delta_index`, `inode_id`, `attributes_revision_no`, `attributes` |
 | `append_access_revision` | `delta_index`, `inode_id`, `access_revision_no`, `boundary`, `grants` |
 
-A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes or revokes. A bind's `revision` is the child's revision summary, `{revision_no, size_bytes, revision_committed_by, revision_committed_at_ms}`. It's present exactly when `child_kind` is `file`, and encoding and decoding refuse a file bind without it and a directory bind with it (`InvalidWalBind`). A revision delta's `parent_inode_id`, `name_key`, `display_name`, `child_created_by`, `child_created_at_ms`, and `bind_position` describe the file's current binding, which replay copies into the revision's summary row (see [Directory bindings](#13-directory-bindings)). A tombstone delta's `root_kind` is the kind of the deleted root inode, and a deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear. A revision delta's `append_offset` is present only when an append produced the revision, and it's the base revision's `size_bytes`, so it's less than the delta's own `content_ref.size_bytes`.
+A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes or revokes. A bind's `revision` is the child's revision summary, `{revision_no, size_bytes, revision_committed_by, revision_committed_at_ms}`. It's present exactly when `child_kind` is `file`, and encoding and decoding refuse a file bind without it and a directory bind with it (`InvalidWalBind`). A revision delta's `parent_inode_id`, `name_key`, `display_name`, `child_created_by`, `child_created_at_ms`, and `bind_position` describe the file's current binding, which replay copies into the revision's summary row (see [Directory bindings](#13-directory-bindings)). A tombstone delta's `root_kind` is the kind of the deleted root inode, and a deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear. A revision delta's `append_offset` is present only when an append produced the revision, and it's the base revision's `size_bytes` (see [Operations and WAL deltas](#66-operations-and-wal-deltas)), so it's less than the delta's own `content_ref.size_bytes`.
 
-A revision delta's layout records the [creator](#15-file-contents-and-ownership) of the delta's chain. The layout of an upload or a new chain records the committing namespace. A copy or a restore includes the chain's layout from the planning view, so the layout's creator can be another member of the namespace's [pool](glossary.md#pool). Replay copies the delta's layout, creator included, into the layout row that it writes from the delta (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)).
+A revision delta's layout records the [creator](#15-file-contents-and-ownership) of its chain. That's the committing namespace for an upload or a new chain. A copy or a restore includes the chain's layout from the planning view, so its creator can be another member of the namespace's [pool](glossary.md#pool). Replay copies the delta's layout, creator included, into the layout row that it writes (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)).
 
 A revision delta's `layout` follows these rules:
 
-- It can be left out only when the commit includes a piece at offset 0 for its content ID, or a piece for a chain that already has a revision in the planning view. The same-chain case is safe, because the base stays the file's newest revision until the append is folded, so retention keeps a revision that refers to the chain, and layout compaction can't prune its row.
+- It can be left out only when the commit includes a piece at offset 0 for its content ID, or a piece for a chain that already has a revision in the planning view. The second case is safe, because the base stays the file's newest revision until the append is folded, so retention keeps a revision that refers to the chain and compaction can't prune its layout row.
 - A commit with a piece at offset 0 can't include a layout.
 - A present layout validates against its own `size_bytes()`, and its extents can refer to other content IDs. Its size equals the lowest offset of the commit's pieces for that content ID, or the reference's `size_bytes` if the commit includes no piece for it. A failed check is `InvalidWalRevisionLayout`.
-- Upload evidence provides one whole extent. Copies, restores, and new chains include the required prefix from the planning view. Before it admits the reference, validation writes any pending pieces that prefix needs to content objects, the same way a fold does. The resulting layout refers to those objects even if compaction later removes the source chain's row.
+- Upload evidence provides one whole extent. Copies, restores, and new chains include the required prefix from the planning view, and validation first writes any pending pieces that the prefix needs to content objects (see [Operations and WAL deltas](#66-operations-and-wal-deltas)), so the layout still refers to those objects if compaction later removes the source chain's row.
 
 A [merge's](glossary.md#merge) commit includes a merge record (`merge`), and every other commit leaves the field out. The merge record contains these fields:
 
@@ -2297,9 +2293,9 @@ A replay commit stores its conflict report in `conflicts`, so a retry with the r
 
 The range follows the change feed's cursor convention, so a consumer that reads the fork's change feed after `source_after_seq`, through `source_through_seq`, reads the commits that the merge applied. For example, a first merge of a fork made at sequence 100, which applies the fork's commits 101 through 120, records 100 and 120. Encoding and decoding refuse a merge record whose `source_after_seq` isn't below its `source_through_seq`, or whose `source_namespace_id` is the WAL object's own `namespace_id` (`InvalidWalMerge`).
 
-LoonFS publishes a merge as the only commit in its WAL object, so `MAX_WAL_OBJECT_BYTES` bounds the merge alone, and no other commit shares a WAL object that the merge's size could refuse. A merge's `create_inode` deltas record the IDs that the inodes have in the fork, so an inode that a fork created has one ID in both namespaces after the merge. A merge includes no inline content and appends no bytes, because it refers only to content that the fork already wrote.
+LoonFS publishes a merge as the only commit in its WAL object, so `MAX_WAL_OBJECT_BYTES` bounds the merge alone, and the merge's size can't cause another commit to be refused. A merge's `create_inode` deltas record the inodes' IDs in the fork (see [Merges](#merges)). A merge includes no inline content and appends no bytes, because it refers only to content that the fork already wrote.
 
-`inline_content` is a list of pieces, `{content_id, offset, bytes}`, where `bytes` is a CBOR byte string that the chain contains starting at `offset`. The field is left out when it's empty, and it defaults to an empty list when absent. The reference that a piece goes with is an ordinary `blob_v1` reference. A whole value is a piece at offset 0. A piece past offset 0 continues an existing chain, or starts a new chain whose delta includes the layout of the first `offset` bytes. An append to zero bytes starts a new content ID with a whole value. A chain of zero bytes is never appended to, so a download of the chain signs no range (see the [API specification][api-spec]).
+`inline_content` is a list of pieces, `{content_id, offset, bytes}`, where `bytes` is a CBOR byte string of the chain's bytes starting at `offset`. The field is left out when it's empty, and it defaults to an empty list when absent. A piece goes with an ordinary `blob_v1` reference, and a whole value is a piece at offset 0. An append to zero bytes starts a new content ID with a whole value (see [Operations and WAL deltas](#66-operations-and-wal-deltas)), so a chain of zero bytes is never appended to, and a download of the chain signs no range (see the [API specification][api-spec]).
 
 Encoding and decoding enforce these rules, using only the WAL object:
 
@@ -2309,7 +2305,7 @@ Encoding and decoding enforce these rules, using only the WAL object:
 4. A commit contains at most one entry per content ID and offset.
 5. Each entry contains at most `MAX_WAL_INLINE_CONTENT_BYTES` (256 KiB, or 262,144 bytes), and the sum of all entry lengths in one WAL object is at most `MAX_WAL_OBJECT_INLINE_CONTENT_BYTES` (4 MiB, or 4,194,304 bytes).
 
-These are reader limits, and writer thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta can refer to content that has no inline entry. Replay doesn't hash pieces against the reference's checksum, because the envelope's `payload_checksum` covers the stored payload bytes. The decoder can't check whether the objects a layout refers to exist, so a read or fold that finds their bytes missing reports corruption.
+These are reader limits, and a writer's thresholds are policy at or below them. `MAX_WAL_OBJECT_BYTES` still limits the complete decompressed document. A delta can refer to content that has no inline entry. Replay doesn't hash pieces against the reference's checksum, because the envelope's `payload_checksum` covers the stored payload bytes. The decoder can't check whether the objects that a layout refers to exist, so a read or fold that finds their bytes missing reports corruption.
 
 WAL replay applies these normalized records in sequence and delta order. It doesn't run the original request's preconditions again, or interpret the request again under a newer planner.
 
@@ -2331,23 +2327,26 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `attributes_revision` | `inode_id`, `attributes_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `attributes` |
 | `access_revision` | `inode_id`, `access_revision_no`, `committed_seq`, `commit_id`, `delta_index`, `committed_by`, `committed_at_ms`, `boundary`, `grants` |
 
-A `commit` row is the WAL commit record from [WAL records](#a5-wal-records), without its inline content. The `inline_content` field is left out, and a row that includes one is invalid.
+A `commit` row is the WAL commit record from [WAL records](#a5-wal-records) without its inline content, and a row that includes an `inline_content` field is invalid.
 
-A `merge` row indexes one merge by the fork that it applied. A fold, and a replay of the WAL tail, write one `merge` row for each commit record that includes a merge record, with the merge record's fork and range and the commit's own sequence, and they write none for any other commit. A scan of one fork's prefix in `merges` returns that fork's merges newest first, so the first row is the fork's newest merge.
+A `merge` row indexes one merge by the fork that it applied. A fold, and a replay of the WAL tail, write one `merge` row for each commit record that includes a merge record, with the merge record's fork and range and the commit's own sequence, and none for any other commit. A scan of one fork's prefix in `merges` returns that fork's merges newest first.
 
-For a directory binding, `state` is `{"kind":"bound","display_name":...,"revision"?:...}` or `{"kind":"unbound"}`. A bound file row's `revision` is the file's revision summary, `{revision_no, size_bytes, revision_committed_by, revision_committed_at_ms}`, and a directory row has none. `bind_position` is a `DeltaPosition` value, `{seq, delta_index}`. Both binding families store the complete row.
+For a directory binding, `state` is `{"kind":"bound","display_name":...,"revision"?:...}` or `{"kind":"unbound"}`. A bound file row's `revision` is the file's revision summary, in the shape of a bind delta's `revision` (see [WAL records](#a5-wal-records)), and a directory row has none. `bind_position` is a `DeltaPosition` value, `{seq, delta_index}`. Both binding families store the complete row.
 
-The two binding families store the same binding events, and the slot index also stores summary rows (see [Directory bindings](#13-directory-bindings)). A slot-index row is a summary row when it's bound and its position isn't its `bind_position`, and an unbound row is always a binding event. Index parity checks compare binding events alone, so they leave summary rows out.
+Index parity checks compare binding events alone, and leave out the summary rows that the slot index also stores (see [Directory bindings](#13-directory-bindings)). An unbound row is always a binding event.
 
 For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke target is a `DeltaPosition` value, `{seq, delta_index}`. A set action is `{"kind":"set","root_kind":...,"deleted_binding":...}`, and a revoke action is `{"kind":"revoke","target":...}`.
 
-A trash `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `removed_seq`, the sequence of the restore that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every trash row. The `inode_kind` is the `root_kind` of the deletion's `set` event, and a `listed` action without it fails decoding.
+A trash `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `removed_seq`, the sequence of the restore that removed the deletion from the listing. These fields are nested in the action, not top-level fields of the row. The `inode_kind` is the `root_kind` of the deletion's `set` event, and a `listed` action without it fails decoding.
 
-Each row key starts with its family's prefix, followed by hyphen-separated components, and every family's keys follow the same rules (see [Row families](#19-row-families)). A generated ID is its 26-character body, without its prefix (a placeholder that ends in `_body`), so an inode ID leaves out `ino_` and a content ID leaves out `con_` (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)). A client-chosen string is the lowercase hexadecimal encoding of its UTF-8 bytes (a placeholder that ends in `_hex`), because a client can put a hyphen in it. A name key is one, and so is a commit ID: a generated commit ID has the shape of a generated ID, but a client can supply any commit ID, such as `retry-1`. A counter is zero-padded decimal, 20 digits for an unsigned 64-bit value (`:020`) and 10 for an unsigned 32-bit value (`:010`), and a counter that sorts newest first is subtracted from its type's maximum value first (`u64::MAX - x`). A filter key is the family's prefix followed by the components that identify one entity, or one slot in `direntry_binds` and one child in `direntry_child_binds`, and `direntry_binds` also adds a parent probe.
+Each row key starts with its family's prefix, followed by hyphen-separated components, under the key rules in [Row families](#19-row-families). In the grammar below, these placeholders and expressions aren't literal text in a key:
 
-Every generated ID body has the same width, and the alphabet is in byte order, so the byte order of two keys follows the numeric order of their inode IDs. A `_hex` component is the only component whose width varies. It contains no hyphen, and a hyphen sorts before every hexadecimal digit, so a name's own punctuation is never read as a component separator, and a shorter name key sorts before every longer name key with the same leading bytes.
+- A placeholder that ends in `_body` is a generated ID's 26-character body, without its prefix, so an inode ID leaves out `ino_` and a content ID leaves out `con_` (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)).
+- A placeholder that ends in `_hex` is the lowercase hexadecimal encoding of a client-chosen string's UTF-8 bytes. A name key is one, and so is a commit ID, because a client can supply any commit ID, such as `retry-1`.
+- A counter is zero-padded decimal, 20 digits for an unsigned 64-bit value (`:020`) and 10 for an unsigned 32-bit value (`:010`).
+- `u64::MAX - x` and `u32::MAX - x` mean subtraction before the zero-padded encoding, so that larger values sort first.
 
-In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction before the zero-padded decimal encoding, a placeholder that ends in `_body` means a generated ID's 26-character body, and a placeholder that ends in `_hex` means the lowercase hexadecimal encoding of the value's UTF-8 bytes. They aren't literal text in a key.
+Every generated ID body has the same width, and its alphabet is in byte order, so the byte order of two keys follows the numeric order of their inode IDs. A `_hex` component is the only component whose width varies. It contains no hyphen, and a hyphen sorts before every hexadecimal digit, so a name's punctuation is never read as a separator, and a shorter name key sorts before every longer one with the same leading bytes.
 
 | Family | Row key |
 | --- | --- |
@@ -2364,16 +2363,11 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `attributes` | `attribute-{inode_id_body}-{u64::MAX - attributes_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `access` | `access-{inode_id_body}-{u64::MAX - access_revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 
-The two binding families store the binding events in two orders (an edge is a parent, a name key, and a child):
+The trash `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
 
-- The slot index sorts a slot's rows by child, and then by position, newest first.
-- The child index sorts a child's rows by parent, then by name key, and then by position, newest first.
+Key order sorts a slot's edges by child, and a child's edges by parent and name key, not by position. So a slot's or a child's value is the newest of its edges' values (see [Directory bindings](#13-directory-bindings)), and an edge's value is the first of its rows in key order at or below the read's sequence.
 
-An edge's value at sequence `N` is the first row in key order whose `committed_seq` is at or below `N`, and a tombstone series' value at `N` is found the same way, because the `tombstones` keys also sort one root's events newest first. A slot's or a child's value is the newest of its edges' values, because key order sorts a slot's edges by child and a child's edges by parent and name key, not by position.
-
-Compaction groups both families by edge, and it decides each row as it arrives, without keeping a row back. It also tracks the last edge bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index. Commit validation enforces one child per slot and one parent per child (see [Directory bindings](#13-directory-bindings)), so a second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
-
-Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. It scans an edge's binding rows and a root's tombstone events newest first too, because their keys subtract the sequence and the delta index from the maximum values, and a fork's merges newest first, because their keys subtract the sequence. The trash `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
+Compaction groups both binding families by edge, and decides each row as it arrives, without keeping a row back. It also tracks the last edge bound at the floor, across the edges of one slot in the slot index and of one child in the child index. Commit validation allows one child per slot and one parent per child, so compaction refuses as corruption a second child bound in one slot at the floor, or a second parent bound for one child at the floor.
 
 Bloom filters use these keys, which aren't always full row keys:
 
@@ -2392,9 +2386,9 @@ Bloom filters use these keys, which aren't always full row keys:
 | `attributes` | `attribute-{inode_id_body}` |
 | `access` | `access-{inode_id_body}` |
 
-A layout row records a chain's objects as of the commit or fold that wrote its bytes. The first row under a content ID's prefix is the longest layout (the newest, among layouts of equal length), and shorter rows are superseded. Compaction keeps the first row for each ID in its inputs, subject to the pruning rule in [Row retention during a base compaction](#103-row-retention-during-a-base-compaction). A layout row's `size_bytes` is the layout's size, which can be different from the reference's size. A layout row written from a revision delta copies the delta's layout (see [WAL records](#a5-wal-records)), and a row that a fold writes records the folding namespace as the layout's creator (see [Publishing a manifest](#72-publishing-a-manifest)).
+A layout row records a chain's objects as of the commit or fold that wrote its bytes. The first row under a content ID's prefix is the longest layout (the newest, among layouts of equal length), and shorter rows are superseded. Compaction keeps the first row for each ID in its inputs, subject to the pruning rule in [Row retention during a base compaction](#103-row-retention-during-a-base-compaction). A layout row's `size_bytes` is the layout's size, which can differ from the reference's size. A layout row written from a revision delta copies the delta's layout (see [WAL records](#a5-wal-records)), and a row that a fold writes records the folding namespace as the layout's creator (see [Publishing a manifest](#72-publishing-a-manifest)).
 
-A `layout` contains `creator_namespace_id` and `extents`. The creator is the namespace whose commit started the chain (see [Operations and WAL deltas](#66-operations-and-wal-deltas)), and every layout of one chain records the same creator. The extents are in chain order. Each extent contains `content_id`, `object`, `object_checksum`, `offset`, and `length`, and its object is `{"kind":"whole"}` or `{"kind":"span","object_id":...,"start":...,"end":...}`. A span's `object_id` is the span object's ID (`span_` and a 26-character body), which ends the object's key (see [Object keys](#a8-object-keys)), and `start` and `end` are the chain offsets of the bytes that the object stores. The `object_checksum` is the full-object checksum that the store keeps for the object, in the store's algorithm (see [Content references and checksums](#a3-content-references-and-checksums)), whatever part of the object the extent takes. A layout MUST follow these rules:
+A `layout` contains `creator_namespace_id` and `extents`. Every layout of one chain records the same [creator](#15-file-contents-and-ownership), and the extents are in chain order. Each extent contains `content_id`, `object`, `object_checksum`, `offset`, and `length`, and its object is `{"kind":"whole"}` or `{"kind":"span","object_id":...,"start":...,"end":...}`. A span's `object_id` is the span object's ID (`span_` and a 26-character body), which ends the object's key (see [Object keys](#a8-object-keys)), and `start` and `end` are the chain offsets of the bytes that the object stores. The `object_checksum` is the full-object checksum that the store keeps for the object, in the store's algorithm (see [Content references and checksums](#a3-content-references-and-checksums)), whatever part of the object the extent takes. A layout MUST follow these rules:
 
 - The lengths add up to `size_bytes`, and each length is positive.
 - Zero bytes require exactly one whole extent of length zero.
@@ -2404,7 +2398,7 @@ A `layout` contains `creator_namespace_id` and `extents`. The creator is the nam
 
 A shared prefix can shorten an extent without changing its span object, and readers honor nonzero object offsets.
 
-Why does a layout record the chain's creator, instead of the delta and the row each having a field of their own? The creator is a fact about the chain, like its extents, so the layout describes the whole chain. A revision delta and a layout row then include one record, and no rule has to tie the presence of one field to the presence of another.
+Why does a layout record the chain's creator, instead of the delta and the row each having a field? The creator is a fact about the chain, like its extents, so the delta and the row each include one record, and no rule has to tie one field's presence to another's.
 
 The family groups are:
 
@@ -2433,9 +2427,7 @@ A segment is a concatenation of independently readable sections:
 [zstd index block]
 ```
 
-There's no segment header or footer. The manifest descriptor provides the filter, extent filter, and index handles, and the index provides the data-block handles, so a segment can't be opened from its own bytes without the descriptor.
-
-A metadata segment descriptor's `encoding` is the version of this layout and of the rows its data blocks contain. Grep segments take their version from the grep entry that lists them.
+There's no segment header or footer. The manifest descriptor provides the filter, extent filter, and index handles, and the index provides the data-block handles, so a segment can't be opened without its descriptor.
 
 Each handle is an encoded object with these fields:
 
@@ -2446,9 +2438,9 @@ Each handle is an encoded object with these fields:
 | `decoded_bytes` | `u32` | The expected length after decompression (for a filter, the uncompressed length). |
 | `crc32c` | `u32` | The CRC32C of the exact stored section bytes. |
 
-The verified put checks the whole object when it's written. The descriptor's `checksum` is the stored checksum of the whole segment object, and a reader that fetches the whole segment checks the bytes against that checksum. A mismatch is corruption.
+The verified put checks the whole object when it's written, and a reader that fetches the whole segment checks it against the descriptor's `checksum`. A mismatch is corruption.
 
-Each section MUST pass three checks: the returned byte count matches `stored_bytes`, the CRC of the stored bytes matches `crc32c`, and the decoded length matches `decoded_bytes`. Both lengths fit in `u32`. Readers stop decompressing after at most `decoded_bytes + 1` bytes, so the extra byte reports a decoded-length mismatch without expanding the rest of an invalid section. This limits the decompressed output, but not vector capacity or the total memory of decoded rows and parser state. [Reference-implementation sizing and admission defaults](#c4-reference-implementation-sizing-and-admission-defaults) describes initial allocation sizing.
+Each section MUST pass three checks: the returned byte count matches `stored_bytes`, the CRC of the stored bytes matches `crc32c`, and the decoded length matches `decoded_bytes`. Both lengths fit in `u32`. Readers stop decompressing after at most `decoded_bytes + 1` bytes, so the extra byte reports a mismatch without expanding the rest of an invalid section. This limits the decompressed output, but not vector capacity or the memory of decoded rows and parser state. [Reference-implementation sizing and admission defaults](#c4-reference-implementation-sizing-and-admission-defaults) describes initial allocation sizing.
 
 #### Data blocks
 
@@ -2462,13 +2454,11 @@ row_len               unsigned LEB128
 row                    row_len CBOR bytes
 ```
 
-The key is the first `shared_prefix_len` bytes of the previous key, followed by `key_suffix`. The prefix MUST end on a valid UTF-8 boundary, and keys are in ascending order. The block grammar can represent adjacent equal keys, but the uniqueness rule for metadata runs still applies to metadata producers.
+The key is the first `shared_prefix_len` bytes of the previous key, followed by `key_suffix`. The prefix MUST end on a valid UTF-8 boundary, and keys are in ascending order. The block grammar can represent adjacent equal keys, but metadata producers still follow the uniqueness rule for metadata runs.
 
-The first entry, and every sixteenth entry after it, starts a restart and encodes the full key with a shared-prefix length of zero. The restart array contains their offsets relative to the start of the entry region, each as a little-endian `u32`. Readers verify each offset and reject missing or unused offsets. Restarts limit shared-prefix reconstruction to groups of sixteen rows. The array is followed by its count, also a little-endian `u32`, and the entries and restart data are compressed together as one zstd section.
+The first entry, and every sixteenth entry after it, starts a restart and encodes the full key with a shared-prefix length of zero. The restart array contains their offsets relative to the start of the entry region, each as a little-endian `u32`. Readers verify each offset and reject missing or unused offsets. The array is followed by its count, also a little-endian `u32`, and the entries and restart data are compressed together as one zstd section. Metadata and grep data blocks use the same entry and restart layout.
 
-Metadata and grep data blocks use the same entry and restart layout.
-
-Writers encode unsigned LEB128 values with seven payload bits per byte, and with the high bit set when another byte follows. The last byte has no continuation bit. Encoded values fit in `u64`, so in a ten-byte encoding, only one payload bit is available in the final byte. The writer uses the shortest representation of each value.
+Writers encode unsigned LEB128 values in their shortest form, with seven payload bits per byte and the high bit set when another byte follows. Values fit in `u64`, so a ten-byte encoding has one payload bit in its final byte.
 
 #### Filter block
 
@@ -2480,7 +2470,7 @@ bit_len               u64, little-endian
 bits                  ceil(bit_len / 8) bytes
 ```
 
-Version 1 requires `n_hashes` to be seven and `bit_len` to be at least 64, and readers reject other header values before probing. The reference producer sizes the filter as [Filter sizes](#filter-sizes) describes, and repeated filter keys count as separate insertions for sizing. The number of stored bit-array bytes MUST equal `ceil(bit_len / 8)`.
+Version 1 requires `n_hashes` to be seven and `bit_len` to be at least 64, and readers reject other header values before probing. The number of stored bit-array bytes MUST equal `ceil(bit_len / 8)`. The reference producer sizes the filter as [Filter sizes](#filter-sizes) describes, and repeated filter keys count as separate insertions for sizing.
 
 Hashing is XXH64 over the filter key's UTF-8 bytes, with two constant seeds:
 
@@ -2498,15 +2488,15 @@ x = (x ^ (x >> 27)) * 0x94d049bb133111eb
 b = (x ^ (x >> 31)) % bit_len
 ```
 
-Bit `b` is stored in byte `b / 8`, at the mask `1 << (b % 8)`. The mix makes each probe depend on all 64 bits of both hashes. Without it, a filter would read only `h1` and `h2` modulo `bit_len`, so a small filter would have few distinct probe sequences, and a key whose `h2` is a multiple of `bit_len` would test one bit seven times.
+Bit `b` is stored in byte `b / 8`, at the mask `1 << (b % 8)`. The mix makes each probe depend on all 64 bits of both hashes. Without it, a small filter would have few distinct probe sequences, and a key whose `h2` is a multiple of `bit_len` would test one bit seven times.
 
 A valid negative filter result means the lookup can skip the segment. A positive result doesn't replace the row-level visibility rules.
 
-When `filter_inline` is present in the descriptor, it's the lowercase hexadecimal encoding of these exact stored filter bytes, and it MUST have the filter handle's stored length and checksum. Its presence doesn't remove the filter block from the segment, and a reader without an inline copy fetches the section by its handle.
+When `filter_inline` is present in the descriptor, it's the lowercase hexadecimal encoding of the exact stored filter bytes, and it MUST have the filter handle's stored length and checksum. The segment still contains the filter block, and a reader without an inline copy fetches the block by its handle.
 
 #### Filter sizes
 
-The reference producer sizes each Bloom filter by what a false match costs. A filter has a number of bits for each key that it's built for, and at least a minimum number of bits. (These sizes aren't format requirements. A reader accepts any `bit_len` of at least 64.)
+The reference producer sizes each Bloom filter by what a false match costs, with a number of bits for each key and a minimum number of bits. (These sizes aren't format requirements, and a reader accepts any `bit_len` of at least 64.)
 
 | Filter | A false match | Bits per key | Fewest bits |
 | --- | --- | --- | --- |
@@ -2515,15 +2505,15 @@ The reference producer sizes each Bloom filter by what a false match costs. A fi
 | A compaction's layout filter and kept inode filter ([Row retention during a base compaction](#103-row-retention-during-a-base-compaction)) | Keeps a row until a compaction with another seed | 10 | 4,096 |
 | A reorganization's value and revision filters ([Pruning the index](#d5-pruning-the-index)) | Keeps an index row until a later reorganization | 10 | 4,096 |
 
-A filter with 10 bits for each key matches another key about once in 100 to 120 at any size (a 40-bit filter of four keys about once in 99, and a 4,100-bit filter of 410 keys about once in 122). That's too often for a filter whose false match keeps data, so such a filter has at least 4,096 bits, and with 30 keys it matches another key about once in 1.2 billion, with 100 keys about once in 426,000, and with 200 keys about once in 5,800. A segment's filter has the smaller minimum because its false match costs one read, and a 64-bit filter of three keys matches about once in 6,300.
+Why do filters whose false match keeps data have a 4,096-bit minimum? A filter with 10 bits for each key matches another key about once in 100 to 120 at any size, which is too often when a false match keeps data. With 4,096 bits, a filter of 30 keys matches about once in 1.2 billion, of 100 keys about once in 426,000, and of 200 keys about once in 5,800. A segment's filter has the smaller minimum because its false match costs one read, and a 64-bit filter of three keys matches about once in 6,300.
 
 #### Extent filter
 
-A `content_layouts` segment has an extent filter right before its filter, and a segment of another family has none. A descriptor of a `content_layouts` segment without `extent_filter_block`, or a descriptor of another family with one, is corruption. The extent filter has the filter block's byte layout, header rules, and hashing, and its handle follows the rules of every section, so its `decoded_bytes` equals its `stored_bytes`. The manifest has no inline copy.
+A `content_layouts` segment has an extent filter right before its filter, and a segment of another family has none. A descriptor of a `content_layouts` segment without `extent_filter_block`, or of another family with one, is corruption. The extent filter has the filter block's byte layout, header rules, and hashing, and its `decoded_bytes` equals its `stored_bytes`. The manifest has no inline copy.
 
-The keys of the extent filter are the names of the content objects that the segment's rows' extents reference. A name is the extent's object key with the pool's content prefix (`pools/{pool_id}/content/`) removed: `{content_id}` for a whole object and `{content_id}-{span_object_id}` for a span object (see [Object keys](#a8-object-keys)). A name doesn't depend on the pool, so a segment that any member wrote and the listing of the pool's content prefix agree on the names. The producer inserts the name of every extent of every row in the segment, including shared base extents. The reference producer sizes the extent filter as [Filter sizes](#filter-sizes) describes, and repeated names count as separate insertions for sizing.
+The extent filter's keys are the names of the content objects that the extents of the segment's rows reference, including shared base extents. A name is the object key without the pool's content prefix (`pools/{pool_id}/content/`), so it's `{content_id}` for a whole object and `{content_id}-{span_object_id}` for a span object (see [Object keys](#a8-object-keys)). A name doesn't depend on the pool, so a segment that any member wrote and the listing of the pool's content prefix agree on the names. The reference producer sizes the extent filter as [Filter sizes](#filter-sizes) describes, and repeated names count as separate insertions.
 
-Garbage collection reads the extent filter (see [Content roots](#119-content-roots)), and lookups don't. A lookup's fetch of the filter and the index after it doesn't include the extent filter.
+Garbage collection reads the extent filter (see [Content roots](#119-content-roots)), and a lookup's fetch of the filter and the index leaves it out.
 
 #### Index block
 
@@ -2535,7 +2525,7 @@ A range lookup uses the last keys to find candidate blocks. Readers verify each 
 
 ### A.8 Object keys
 
-These patterns define the core object families. A segment's owner can be different from the namespace that reads it. Content objects, upload records, and temporary objects are stored under the prefix of the namespace's pool, whichever member wrote them. The pool's member entries are stored under the same prefix.
+These patterns define the core object families. [Storage layout](#21-storage-layout) describes which prefix stores each one, and where an inherited segment is stored.
 
 | Family | Object key pattern |
 | --- | --- |
