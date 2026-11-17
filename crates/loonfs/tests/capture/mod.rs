@@ -1,6 +1,6 @@
 //! The tracing capture of the tracing test binaries. Each binary includes
 //! this file with `mod capture;` and stays its own process, for the reason
-//! `tracing_capture.rs` gives.
+//! `operation_spans.rs` gives.
 
 use loonfs::{LoonFs, StoreConfig, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -60,15 +60,4 @@ pub(crate) async fn writer(root: &Path, writer_id: &str) -> LoonFs<Writable> {
     .build()
     .await
     .expect("build writer")
-}
-
-/// Returns the first line of `log` that contains `needle`.
-#[allow(
-    dead_code,
-    reason = "`operation_spans.rs` parses its JSON lines instead"
-)]
-pub(crate) fn find_line<'log>(log: &'log str, needle: &str) -> &'log str {
-    log.lines()
-        .find(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("`{needle}` missing from captured tracing:\n{log}"))
 }

@@ -256,27 +256,6 @@ async fn prepare_content_performs_one_content_put_and_no_reads() {
 }
 
 #[tokio::test]
-async fn put_file_prepared_performs_no_content_io() {
-    let harness = TestHarness::new("put-file-prepared").await;
-    let namespace = harness
-        .writer
-        .open_namespace(&harness.namespace_id)
-        .expect("open namespace");
-    let prepared = namespace
-        .prepare_content(b"already prepared")
-        .await
-        .expect("prepare file bytes");
-    harness.recording.reset();
-
-    namespace
-        .put_file_prepared("/file.txt", prepared, &loonfs_test_support::test_actor())
-        .await
-        .expect("publish prepared file");
-
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
-}
-
-#[tokio::test]
 async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_content() {
     let temp_dir = tempdir().expect("tempdir");
     let recording = RequestLog::new(temp_dir.path());

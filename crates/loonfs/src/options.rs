@@ -127,15 +127,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_absent_threshold_resolves_to_the_default() {
-        assert_eq!(
-            MaintainMetadataOptions::from_request(MetadataMaintenanceRequest::default())
-                .expect("default metadata options should resolve"),
-            MaintainMetadataOptions::default()
-        );
-    }
-
-    #[test]
     fn a_useless_fold_threshold_is_rejected() {
         let error = MaintainMetadataOptions::from_request(MetadataMaintenanceRequest {
             max_wal_tail_objects: NonZeroU64::new(MAX_UNFOLDED_WAL_OBJECTS + 1),

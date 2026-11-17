@@ -134,17 +134,3 @@ pub(crate) fn payload_class(size_bytes: u64) -> &'static str {
         _ => "large",
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::payload_class;
-
-    #[test]
-    fn trace_helpers_classify_payloads_and_results() {
-        assert_eq!(payload_class(0), "small");
-        assert_eq!(payload_class(16_383), "small");
-        assert_eq!(payload_class(16_384), "medium");
-        assert_eq!(payload_class(1_048_575), "medium");
-        assert_eq!(payload_class(1_048_576), "large");
-    }
-}

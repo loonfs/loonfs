@@ -207,13 +207,6 @@ impl RuntimeCore {
         );
     }
 
-    /// Returns whether reads start from the positions of a writable
-    /// runtime's writer sessions.
-    #[cfg(test)]
-    pub(crate) fn has_head_positions(&self) -> bool {
-        self.inner.head_positions.get().is_some()
-    }
-
     /// Returns the position of the namespace's writer session in this
     /// runtime, or `None` when the runtime has no session for the namespace
     /// or the session has no position.

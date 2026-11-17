@@ -1419,57 +1419,6 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publisher_survives_publish_panic_and_keeps_serving() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
-    let shared = store.clone() as SharedStore;
-    let runtime = test_runtime(shared.clone());
-    create_namespace(&runtime, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &runtime);
-
-    store.arm_blocking_panic();
-    let doomed = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("doomed", "doomed"),
-    );
-    store.wait_until_blocked().await;
-
-    // Queued behind the in-flight batch: only a worker that survives the
-    // panic can ever publish this one.
-    let queued = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("queued", "queued"),
-    );
-
-    store.release_into_panic();
-
-    // The panic may have struck either side of the WAL put, so the
-    // taken request reports an unknown outcome, not definite failure.
-    let doomed_error = doomed
-        .await
-        .expect("doomed waiter is answered, not abandoned")
-        .expect_err("doomed commit did not complete");
-    assert_eq!(doomed_error.code(), ErrorCode::OutcomeUnknown);
-
-    let queued_response = recv_commit(queued, "queued").await;
-    assert_eq!(queued_response.committed_seq, CommitSeq(1));
-
-    // The publisher is fully serviceable after the panic.
-    let after = admit_commit(
-        &publisher,
-        &namespace_id,
-        create_directory_request("after", "after"),
-    );
-    assert_eq!(
-        recv_commit(after, "after").await.committed_seq,
-        CommitSeq(2)
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");

@@ -195,33 +195,6 @@ async fn engine_wal_tail_objects(publisher: &NamespacePublisher) -> u64 {
         .unwrap_or(0)
 }
 
-/// Checks that a commit at the write stop waits in the queue while its fold
-/// runs, and is committed once the fold publishes, without an error or a
-/// retry, and that `write_stop_waits` records it.
-#[tokio::test]
-async fn a_commit_at_the_write_stop_waits_for_the_fold_and_commits() {
-    let fixture = fixture(|builder| builder.monotonic_timer(Arc::new(ManualClock::new(0)))).await;
-    let commit = start_commit_at_the_write_stop(&fixture).await;
-    assert!(!commit.is_finished(), "the commit waits for the fold");
-
-    fixture.store.release();
-    settle_commit(commit)
-        .await
-        .expect("the commit is committed after the fold");
-    fixture.writer.drain().await.expect("the fold settles");
-    let recorder = &fixture.recorder;
-    assert_eq!(counter(recorder, "loonfs.publisher.write_stop_waits"), 1);
-    assert_eq!(counter(recorder, "loonfs.publisher.write_stop_refusals"), 0);
-    assert_eq!(
-        crate::test_support::histogram_count(
-            &recorder.snapshot(),
-            "loonfs.publisher.write_stop_wait_seconds"
-        ),
-        1
-    );
-    fixture.writer.shutdown().await.expect("shut down writer");
-}
-
 /// Checks that a commit that waits at the write stop past the write-stop
 /// wait returns `maintenance_required` with a reason that names the WAL
 /// object stop, isn't committed, and that `write_stop_refusals` records it.

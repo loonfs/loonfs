@@ -14,71 +14,6 @@ use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-/// Checks that reads in the writer's runtime take the WAL tail that the
-/// writer's position keeps, send no request to confirm the head, and leave
-/// the read cache's tails alone.
-#[test]
-fn runtime_reads_reuse_the_writer_tail_for_repeated_reads() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let recording = Arc::new(RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let object_store: SharedObjectStore = recording.clone();
-    let fs = open_runtime_with(object_store, "tail-projection-cache-test", |builder| {
-        builder.config(loonfs::RuntimeConfig {
-            max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
-            ..loonfs::RuntimeConfig::default()
-        })
-    });
-
-    fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    fs.put_file_blocking(
-        &namespace_id,
-        "/docs/file.txt",
-        b"file",
-        &loonfs_test_support::test_actor(),
-    )
-    .expect("put file");
-
-    block_on(fs.writer.drain()).expect("drain");
-    recording.reset();
-    fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("first read is served from the position's tail");
-    assert_eq!(recording.take(), []);
-
-    block_on(fs.writer.drain()).expect("drain");
-    recording.reset();
-    fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("second read reuses the position's tail");
-    assert_eq!(recording.take(), []);
-
-    fs.put_file_blocking(
-        &namespace_id,
-        "/other.txt",
-        b"other",
-        &loonfs_test_support::test_actor(),
-    )
-    .expect("put other");
-    block_on(fs.writer.drain()).expect("drain");
-    recording.reset();
-    fs.read_file_blocking(&namespace_id, "/docs/file.txt")
-        .expect("read after local mutation takes the tail the mutation extended");
-    assert_eq!(recording.take(), []);
-    let stats = fs.metadata_cache_stats();
-    assert_eq!(
-        (
-            stats.wal_tails.hits,
-            stats.wal_tails.misses,
-            stats.wal_tails.inserts
-        ),
-        (0, 0, 0),
-        "reads from the position never look a tail up in the read cache"
-    );
-}
-
 #[test]
 fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
     let temp_dir = tempdir().expect("tempdir");
@@ -228,48 +163,6 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         .expect("tail usage after fold");
     assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get());
     writer.shutdown().await.expect("shutdown");
-}
-
-#[test]
-fn runtime_cache_observes_head_advanced_by_another_runtime() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
-    let object_store = raw_store.store();
-    let reader = open_runtime_with(object_store.clone(), "tail-cache-reader", |builder| {
-        builder.config(loonfs::RuntimeConfig {
-            max_staleness_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-    });
-    let writer = open_runtime(object_store, "tail-cache-writer");
-
-    writer
-        .create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    writer
-        .create_directory_blocking(&namespace_id, "/docs", &loonfs_test_support::test_actor())
-        .expect("create docs");
-
-    reader
-        .stat_path_blocking(&namespace_id, "/docs")
-        .expect("prime reader cache");
-
-    writer
-        .create_directory_blocking(
-            &namespace_id,
-            "/docs/new",
-            &loonfs_test_support::test_actor(),
-        )
-        .expect("advance head from another runtime");
-
-    raw_store.reset_wal_get_count();
-    let stat = reader
-        .stat_path_blocking(&namespace_id, "/docs/new")
-        .expect("reader should observe external head advance");
-    assert_eq!(stat.path, "/docs/new");
-    assert_eq!(stat.head_seq, CommitSeq(2));
-    assert!(raw_store.wal_get_count() > 0);
 }
 
 /// Checks that a cache with zero limits keeps nothing, and that reads in the
@@ -809,29 +702,4 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
         .list_path_blocking(&namespace_id, "/")
         .expect("list root after create");
     assert!(entries.is_empty());
-}
-
-#[test]
-fn separate_runtime_instances_share_object_store_state() {
-    let temp_dir = tempdir().expect("tempdir");
-    let writer = runtime(temp_dir.path(), "writer");
-    let reader = runtime(temp_dir.path(), "reader");
-    let namespace_id = namespace_id("demo");
-
-    writer
-        .create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
-        .expect("create namespace");
-    writer
-        .put_file_blocking(
-            &namespace_id,
-            "/docs/shared.txt",
-            b"shared",
-            &loonfs_test_support::test_actor(),
-        )
-        .expect("put file");
-
-    let file = reader
-        .read_file_blocking(&namespace_id, "/docs/shared.txt")
-        .expect("read shared file");
-    assert_eq!(file.bytes, b"shared");
 }

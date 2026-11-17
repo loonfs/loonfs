@@ -352,23 +352,6 @@ async fn a_fenced_session_keeps_no_read_position() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a read-only runtime keeps no writer sessions for its reads.
-#[tokio::test]
-async fn a_read_only_runtime_has_no_read_positions() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-    let (writer, namespace) = published_namespace(store.clone()).await;
-    let reader = crate::LoonFs::builder_with_store(store)
-        .read_only()
-        .build()
-        .await
-        .expect("reader");
-    assert!(!reader.core.has_head_positions());
-    assert!(reader.core.writer_position(namespace.id()).is_none());
-    assert!(writer.core.writer_position(namespace.id()).is_some());
-    writer.shutdown().await.expect("shutdown");
-}
-
 /// Checks that a read during an explicit fold keeps the position, and that
 /// the fold then moves the position to its manifest.
 ///

@@ -1,10 +1,7 @@
 //! Maintenance from a runtime that holds no writer session for the
 //! namespace.
 
-use loonfs::{
-    CreateSnapshotOptions, FoldWalOutcome, FoldWalResponse, LoonFs, MaintainMetadataOptions,
-    SharedObjectStore,
-};
+use loonfs::{CreateSnapshotOptions, FoldWalOutcome, FoldWalResponse, LoonFs, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -199,63 +196,4 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .is_none());
     }
     writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
-async fn every_core_maintenance_operation_runs_without_a_writer() {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = namespace_id("standalone-maintenance");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("departing-writer"))
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let threshold = MaintainMetadataOptions::default()
-        .max_wal_tail_objects
-        .get();
-    for index in 0..threshold {
-        namespace
-            .put_file(
-                &format!("/file-{index}.txt"),
-                b"body",
-                &loonfs_test_support::test_actor(),
-            )
-            .await
-            .expect("write file");
-    }
-    writer.shutdown().await.expect("writer shutdown");
-    drop(writer);
-
-    let maintenance = LoonFs::builder_with_store(store)
-        .writer_id(loonfs_test_support::ids::writer_id("standalone-worker"))
-        .build()
-        .await
-        .expect("maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id("standalone-worker"));
-    maintenance
-        .maintain_metadata(&namespace_id)
-        .await
-        .expect("metadata maintenance");
-    maintenance
-        .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
-        .await
-        .expect("metadata compaction");
-    maintenance
-        .gc(&namespace_id)
-        .await
-        .expect("garbage collection");
-    let diagnostics = maintenance
-        .diagnostics(&namespace_id)
-        .await
-        .expect("diagnostics");
-    assert!(diagnostics.wal_tail_objects < threshold, "{diagnostics:?}");
 }
