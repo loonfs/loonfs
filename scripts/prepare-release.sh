@@ -85,9 +85,11 @@ sed "/^\[workspace\.package\]$/,/^\[/ s/^version = \"$current\"\$/version = \"$v
     Cargo.toml > Cargo.toml.tmp
 mv Cargo.toml.tmp Cargo.toml
 
+pinned=$(grep -c "^loonfs[a-z-]* = { path = \"crates/[a-z-]*\", version = \"$version\" }\$" Cargo.toml) || true
+expected=$((pinned + 1))
 bumped=$(grep -c "version = \"$version\"" Cargo.toml) || true
-if [ "$bumped" -ne 8 ]; then
-    die "expected 8 versions in Cargo.toml to read $version (workspace.package plus 7 pinned crates), found $bumped"
+if [ "$bumped" -ne "$expected" ]; then
+    die "expected $expected versions in Cargo.toml to read $version (workspace.package plus $pinned pinned crates), found $bumped"
 fi
 
 sed "s/^version: .*\$/version: $version/
