@@ -114,14 +114,14 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         Ok(None) => {}
         Err(error) => return CandidateAdmission::independent(Err(error)),
     }
+    if let Err(error) = candidate.validate_request_limits() {
+        return CandidateAdmission::independent(Err(error));
+    }
     if let Some(write_stop) = view.write_stop() {
         return CandidateAdmission::independent(Err(CoreError::MaintenanceRequired {
             namespace_id: namespace_id.clone(),
             reason: write_stop.reason(),
         }));
-    }
-    if let Err(error) = candidate.validate_request_limits() {
-        return CandidateAdmission::independent(Err(error));
     }
     if let Err(error) =
         validate_candidate_content_references(candidate, namespace_id, admission_now_ms)

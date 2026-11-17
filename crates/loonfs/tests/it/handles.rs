@@ -4,6 +4,7 @@
 //! the handles document.
 
 use crate::common::collect_path_entries;
+use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
     CommitId, CreateDirectoryOptions, Error, ErrorCode, FoldWalOutcome, FoldWalResponse, LoonFs,
     MaintainMetadataOptions, ManifestNo, NamespaceId, PutFileOptions, SharedObjectStore,
@@ -649,6 +650,59 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             1 | 2,
             "the fold in flight at recovery may have begun one commit early: {status:?}"
         );
+    });
+}
+
+/// Checks that a new commit over the operation limit at the write stop
+/// returns `invalid_request` at once: with the fold parked, a commit that
+/// waited at the write stop would wait for the whole write-stop wait.
+#[test]
+fn an_over_limit_commit_at_the_write_stop_is_refused_without_waiting_for_a_fold() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    block_on(async {
+        let blocking = Arc::new(BlockingStore::matching(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            crate::common::folded_manifest_put,
+        ));
+        let writer = LoonFs::builder_with_store(blocking.clone())
+            .writer_id(loonfs_test_support::ids::writer_id("handle-test-writer"))
+            .build()
+            .await
+            .expect("build writer");
+        writer
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("create namespace");
+        fill_wal_tail_to_write_stop(blocking.as_ref(), &namespace_id).await;
+        blocking.arm();
+        let namespace = writer
+            .open_namespace(&namespace_id)
+            .expect("open namespace");
+        let request = CommitIntent {
+            commit_id: CommitId::parse("over-limit").expect("commit id"),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            preconditions: Vec::new(),
+            operations: (0..=loonfs::publish::MAX_COMMIT_OPERATIONS)
+                .map(|index| FilesystemOperation::CreateDirectory {
+                    path: parse_mutation_path(&format!("/over-limit-{index}")).expect("path"),
+                    parents: false,
+                })
+                .collect(),
+        };
+        let error =
+            loonfs_test_support::clock::bounded(Duration::from_secs(5), namespace.commit(request))
+                .await
+                .expect("the commit returns before the write-stop wait of 30 s")
+                .expect_err("the commit is over the operation limit");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest, "{error}");
+        blocking.release();
+        writer
+            .shutdown()
+            .await
+            .expect("shut down writer background work");
     });
 }
 
