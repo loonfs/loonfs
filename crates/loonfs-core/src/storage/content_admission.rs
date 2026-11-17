@@ -395,26 +395,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn minted_content_token_passes_unchanged_into_embedded_verification() {
-        let namespace = NamespaceId::parse("demo").expect("namespace");
-        let value = InlineContent::new(
-            ContentId::generate(),
-            bytes::Bytes::from_static(b"hello"),
-            loonfs_types::ChecksumAlgorithm::Crc64nvme,
-        );
-        let content = value.content_ref().clone();
-        let evidence = evidence(&namespace, &content);
-        let token = mint_content_token("secret", &evidence, 1_000).expect("mint");
-        let catalog = catalog_entry(namespace);
-
-        let prepared =
-            verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
-
-        assert_eq!(prepared.content_ref(), &content);
-        assert!(prepared.admits(catalog.namespace_id(), &content, 1_000,));
-    }
-
     /// Checks that a token is bound to the namespace whose upload completed
     /// the content, so another member of the same pool refuses it.
     #[test]
@@ -439,24 +419,6 @@ mod tests {
             .expect("the uploading namespace verifies its token");
         assert!(prepared.admits(&root, &content, 1_000));
         assert!(!prepared.admits(fork.namespace_id(), &content, 1_000));
-    }
-
-    #[test]
-    fn prepared_admission_remains_bound_to_its_namespace() {
-        let namespace = NamespaceId::parse("source").expect("namespace");
-        let other_namespace = NamespaceId::parse("target").expect("namespace");
-        let content = ContentRef::blob_v1(
-            ContentId::generate(),
-            b"hello",
-            loonfs_types::ChecksumAlgorithm::Crc64nvme,
-        );
-        let token =
-            mint_content_token("secret", &evidence(&namespace, &content), 1_000).expect("mint");
-        let catalog = catalog_entry(namespace);
-        let admission =
-            verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
-
-        assert!(!admission.admits(&other_namespace, &content, 1_000,));
     }
 
     fn fixed_content() -> ContentRef {

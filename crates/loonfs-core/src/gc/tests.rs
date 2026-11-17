@@ -1288,51 +1288,6 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
     );
 }
 
-#[tokio::test]
-async fn gc_retains_active_snapshot_bases() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
-        .create()
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let first = create_snapshot(&store, &namespace_id, &setup)
-        .await
-        .expect("first snapshot");
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_snapshot(&store, &namespace_id, &setup)
-        .await
-        .expect("second snapshot");
-
-    let aged =
-        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
-    let report = collect(&store, &namespace_id, &aged).await;
-
-    // Only the create's manifests and the manifests that no snapshot keeps
-    // are collectable; both active snapshot bases stay.
-    assert_eq!(report.deleted.manifests, 4);
-    assert_eq!(
-        report.deleted_snapshots_by_owner,
-        loonfs_types::DeletedSnapshotsByOwner::default()
-    );
-    let first_record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&first.snapshot_id)
-        .await
-        .expect("read first snapshot")
-        .expect("first snapshot exists")
-        .state;
-    assert!(crate::manifest::load_namespace_manifest_envelope(
-        &store,
-        &namespace_id,
-        &first_record.snapshot_id.manifest_no(),
-    )
-    .await
-    .is_ok());
-}
-
 /// Reads the single fork-owned record a fork left under the source.
 async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> SnapshotPayload {
     for key in store

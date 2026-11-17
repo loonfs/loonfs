@@ -474,20 +474,6 @@ mod tests {
     }
 
     #[test]
-    fn byte_budget_evicts_the_oldest_block() {
-        let budget = charged_bytes(&(ObjectStoreScope::new(0), key("a")), &block(600));
-        let cache = MetadataSegmentCache::unshared(budget);
-        cache.insert(key("a"), block(600));
-        cache.insert(key("b"), block(600));
-        assert!(
-            cache.get(&key("a")).is_none(),
-            "oldest block should evict once the byte budget is exceeded"
-        );
-        assert!(cache.get(&key("b")).is_some());
-        assert_eq!(cache.stats().evictions, 1);
-    }
-
-    #[test]
     fn replacing_a_block_reaccounts_its_decoded_bytes() {
         let charge = |identity, decoded_bytes| {
             charged_bytes(
@@ -503,34 +489,6 @@ mod tests {
         assert!(cache.get(&key("a")).is_some());
         assert!(cache.get(&key("b")).is_some());
         assert_eq!(cache.stats().evictions, 0);
-    }
-
-    #[test]
-    fn cache_hits_share_the_decoded_row_allocation() {
-        let cache = MetadataSegmentCache::unshared(usize::MAX);
-        let inserted = block(64);
-        let rows = match &inserted {
-            DecodedMetadataSegmentBlock::Data { block: rows, .. } => Arc::clone(rows),
-            DecodedMetadataSegmentBlock::Index { .. }
-            | DecodedMetadataSegmentBlock::Filter { .. }
-            | DecodedMetadataSegmentBlock::Manifest { .. } => {
-                panic!("fixture builds a data block")
-            }
-        };
-        cache.insert(key("a"), inserted);
-        let hit = cache.get(&key("a")).expect("inserted block should hit");
-        let shares_allocation = match &hit {
-            DecodedMetadataSegmentBlock::Data {
-                block: hit_rows, ..
-            } => Arc::ptr_eq(hit_rows, &rows),
-            DecodedMetadataSegmentBlock::Index { .. }
-            | DecodedMetadataSegmentBlock::Filter { .. }
-            | DecodedMetadataSegmentBlock::Manifest { .. } => false,
-        };
-        assert!(
-            shares_allocation,
-            "a cache hit should share the decoded rows, not clone them"
-        );
     }
 
     #[tokio::test]

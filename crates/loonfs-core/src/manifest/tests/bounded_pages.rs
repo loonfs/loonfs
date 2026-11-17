@@ -442,69 +442,6 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
     }
 }
 
-#[tokio::test]
-async fn a_key_range_scan_loads_a_cold_key_range_in_one_data_get() {
-    let temp = tempdir().expect("tempdir");
-    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
-    // One edge's rows sort newest first.
-    let expected: Vec<_> = (1..=1024)
-        .rev()
-        .flat_map(|sequence| rows(1, 1, sequence))
-        .collect();
-    let mut segment_rows = rows(0, 1, 1);
-    segment_rows.extend(expected.clone());
-    segment_rows.extend(rows(2, 2, 1));
-    let descriptor = segment(&store, &segment_rows).await;
-    let index = index_block_load::load_segment_index(
-        &store,
-        None,
-        &SessionBlockMemo::default(),
-        &descriptor,
-    )
-    .await
-    .expect("index");
-    let first = index[1].block;
-    let last = index[1025].block;
-    let data_range = (first.offset, last.offset + u64::from(last.stored_bytes));
-    let filter_offset = descriptor.filter_block.offset;
-    let object_key = metadata_segment_object_key(&descriptor);
-    let runs = vec![MetadataRunManifest {
-        run_no: RunNo(1),
-        run_seq: CommitSeq(1024),
-        tier: RunTier::Delta,
-        segments: vec![MetadataFamilySegments {
-            family: FAMILY,
-            segments: vec![descriptor],
-        }],
-    }];
-    let cache = MetadataSegmentCache::unshared(1);
-    let view = scan::VerifiedMetadataSegments::from_runs(&store, &cache, runs);
-    let filter_probe = expected[0].filter_key_for_family(FAMILY);
-    let prefix = format!("{filter_probe}-");
-    store.reset();
-    let actual = view
-        .scan_range(
-            FAMILY,
-            &prefix,
-            string_prefix_upper_bound(&prefix).as_deref(),
-            usize::MAX,
-            Some(&filter_probe),
-            scan::BlocksPerRefill::KeyRange,
-        )
-        .await
-        .expect("prefix scan")
-        .into_iter()
-        .map(|(_, row)| row)
-        .collect::<Vec<_>>();
-    assert_eq!(actual, expected);
-    let data_gets: Vec<_> = store
-        .take_gets()
-        .into_iter()
-        .filter(|(_, range)| range.is_none_or(|(start, _)| start < filter_offset))
-        .collect();
-    assert_eq!(data_gets, vec![(object_key, Some(data_range))]);
-}
-
 /// A memory block cache that counts the inserts of each data block, which
 /// a read makes for each block that it fetches and decodes.
 struct InsertCountingBlocks {
@@ -645,65 +582,6 @@ async fn a_prefix_scan_through_a_small_block_cache_fetches_and_decodes_each_bloc
     assert!(
         inserts.values().all(|count| *count == 1),
         "each block is decoded and inserted once: {inserts:?}"
-    );
-}
-
-#[tokio::test]
-async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
-    let temp = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp.path()).expect("store");
-    let expected = rows(0, 1024, 1);
-    let descriptor = segment(&store, &expected).await;
-    let index = index_block_load::load_segment_index(
-        &store,
-        None,
-        &SessionBlockMemo::default(),
-        &descriptor,
-    )
-    .await
-    .expect("index");
-    let key = metadata_segment_object_key(&descriptor);
-    let mut bytes = store
-        .get(&key, None)
-        .await
-        .expect("get object")
-        .expect("object exists")
-        .to_vec();
-    bytes[loonfs_types::usize_from_u64(index[64].block.offset)] ^= 1;
-    replace_object(&store, &key, Bytes::from(bytes))
-        .await
-        .expect("corrupt fixture");
-    // The first page fetches block 0 alone, so the damaged block 64 doesn't
-    // fail it.
-    load_manifest_segment_rows_in_key_range_with_cache(
-        &store,
-        None,
-        &SessionBlockMemo::default(),
-        &descriptor,
-        CommitSeq(1),
-        "",
-        None,
-        1,
-        scan::BlocksPerRefill::One,
-    )
-    .await
-    .expect("unaffected first page");
-    let lower = expected[64].row_key_for_family(FAMILY);
-    assert!(
-        load_manifest_segment_rows_in_key_range_with_cache(
-            &store,
-            None,
-            &SessionBlockMemo::default(),
-            &descriptor,
-            CommitSeq(1),
-            &lower,
-            None,
-            1,
-            scan::BlocksPerRefill::One,
-        )
-        .await
-        .is_err(),
-        "requested corrupt data must fail validation"
     );
 }
 

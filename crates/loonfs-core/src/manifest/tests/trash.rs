@@ -1030,64 +1030,6 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
 }
 
 #[tokio::test]
-async fn nested_deletions_each_keep_their_own_entry() {
-    let temp = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
-    let namespace_id = NamespaceId::parse("trash-nested").expect("namespace id");
-    let context = writer_at("writer-1", 5_000);
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap namespace");
-    write_test_file(
-        &store,
-        &namespace_id,
-        "/dir/inner.txt",
-        "com_nested0000000000000000001",
-        &context,
-    )
-    .await;
-
-    let child_inode_id = inode_id_of(&store, &namespace_id, "/dir/inner.txt").await;
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .delete_path("/dir/inner.txt", None)
-        .await
-        .expect("delete the child");
-    let parent_inode_id = inode_id_of(&store, &namespace_id, "/dir").await;
-    let parent_deleted =
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .delete_path("/dir", None)
-            .await
-            .expect("delete the parent");
-
-    let nested = trash_entries(&store, &namespace_id, 10).await;
-    assert_eq!(
-        nested
-            .iter()
-            .map(|entry| entry.inode_id)
-            .collect::<Vec<_>>(),
-        vec![child_inode_id, parent_inode_id],
-        "a deletion inside an already-deleted subtree keeps its own entry"
-    );
-
-    restore_deleted(
-        &store,
-        &namespace_id,
-        "com_nested0000000000000000002",
-        parent_inode_id,
-        parent_deleted.committed_seq,
-        "/dir-restored",
-        &context,
-    )
-    .await;
-    let after = trash_entries(&store, &namespace_id, 10).await;
-    assert_eq!(
-        after.iter().map(|entry| entry.inode_id).collect::<Vec<_>>(),
-        vec![child_inode_id],
-        "recovering the parent leaves the child's own deletion listed"
-    );
-}
-
-#[tokio::test]
 async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");

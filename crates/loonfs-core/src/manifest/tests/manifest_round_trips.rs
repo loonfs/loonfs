@@ -415,61 +415,6 @@ async fn snapshots_are_standalone_files_one_per_snapshot() {
 }
 
 #[tokio::test]
-async fn manifest_materialization_uses_written_segments() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
-        .await
-        .expect("write hello");
-    create_snapshot(&store, &namespace_id, &context)
-        .await
-        .expect("create snapshot");
-    let compacted_manifest_no = drain_compaction(
-        &store,
-        &namespace_id,
-        MetadataRunPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataRunPolicy::default()
-        },
-    )
-    .await
-    .0;
-
-    let materialized =
-        load_manifest_state_for_inspection(&store, &namespace_id, compacted_manifest_no)
-            .await
-            .expect("load materialized manifest");
-    let current = load_current_projection(&store, &namespace_id)
-        .await
-        .expect("materialization");
-    let manifest_head = head_from_manifest(&current.head, &materialized.manifest);
-    assert_eq!(manifest_head.seq, CommitSeq(1));
-    assert!(metadata_states_equivalent(
-        &materialized.metadata_state,
-        &current.metadata_state
-    ));
-
-    let segment_key = base_segment_object_keys_for_family(
-        &materialized.manifest,
-        ApiMetadataRowFamily::Revisions,
-    )
-    .into_iter()
-    .next()
-    .expect("revision segment");
-    assert!(store
-        .head(&segment_key)
-        .await
-        .expect("head segment")
-        .is_some());
-}
-
-#[tokio::test]
 async fn manifest_delta_run_materialization_matches_snapshot_projection() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

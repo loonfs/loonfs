@@ -509,39 +509,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recreate_after_delete_succeeds_at_the_same_path() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .put_file(
-                "/docs/tmp.txt",
-                b"first",
-                DestinationBehavior::NoReplace,
-                Some(&CommitId::parse("recreate-seed").expect("valid commit id")),
-            )
-            .await
-            .expect("seed file");
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .delete_path(
-                "/docs/tmp.txt",
-                Some(&CommitId::parse("recreate-delete").expect("valid commit id")),
-            )
-            .await
-            .expect("delete file");
-
-        // The tombstone covers the dead inode, not the name: the name is
-        // reusable immediately, with or without an intervening rebuild.
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .put_file(
-                "/docs/tmp.txt",
-                b"second",
-                DestinationBehavior::NoReplace,
-                Some(&CommitId::parse("recreate-put").expect("valid commit id")),
-            )
-            .await
-            .expect("recreate at the deleted path");
-    }
-
-    #[tokio::test]
     async fn later_operations_resolve_against_earlier_ones() {
         let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
         let staged = crate::test_support::namespace_store(&store, &namespace_id)

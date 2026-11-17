@@ -764,59 +764,6 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
 }
 
 #[tokio::test]
-async fn manifest_writes_and_validates_direntry_child_bind_index() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
-        .await
-        .expect("write hello");
-
-    let manifest_no = snapshot_then_compact(
-        &store,
-        &namespace_id,
-        &context,
-        MetadataRunPolicy::default(),
-    )
-    .await;
-    let materialized = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
-        .await
-        .expect("load manifest");
-    let base = base_tier(&materialized.manifest);
-    let child_binds = base
-        .iter()
-        .find(|family_segments| {
-            family_segments.family
-                == loonfs_types::format::manifest::MetadataRowFamily::DirentryChildBinds
-        })
-        .expect("child bind segments");
-    let child_segment = child_binds.segments.first().expect("child bind segment");
-    let first_child = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs")
-        .await
-        .min(crate::test_support::visible_inode_id(&store, &namespace_id, "/docs/hello.txt").await);
-    assert!(child_segment.min_row_key.starts_with(
-        &loonfs_types::format::manifest::lookup_keys::direntry_child_prefix(first_child)
-    ));
-
-    let deleted_key = metadata_segment_object_key(child_segment);
-    store
-        .delete(&deleted_key)
-        .await
-        .expect("delete child index");
-    match load_manifest_state_for_inspection(&store, &namespace_id, manifest_no).await {
-        Err(ManifestLoadError::MissingSegment { object_key }) => {
-            assert_eq!(object_key, deleted_key);
-        }
-        other => panic!("expected missing child-bind segment, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

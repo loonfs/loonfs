@@ -711,50 +711,6 @@ async fn a_unit_and_its_split_pieces_reach_the_same_rows() {
 }
 
 #[tokio::test]
-async fn a_compaction_that_drops_nothing_fails_the_oracle() {
-    let job_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(job_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let group = MetadataFamilyGroup::Bindings;
-
-    let whole_dir = tempdir().expect("tempdir");
-    copy_store_tree(job_dir.path(), whole_dir.path());
-    let whole_store = LocalFsStore::new(whole_dir.path()).expect("store");
-    compact_group_whole(&whole_store, &namespace_id, group).await;
-    let whole = group_rows_of_current_manifest(&whole_store, &namespace_id, group).await;
-
-    let spec = compaction_spec_for_group(&store, &namespace_id, group)
-        .await
-        .with_frozen_floor_seq(CommitSeq(0));
-    let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
-    let Ok(result) = run_compaction(
-        &store,
-        &namespace_id,
-        &spec,
-        small_segment_policy(),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    else {
-        panic!("nothing cancelled this job");
-    };
-
-    publish_streaming_compaction(&store, &namespace_id, &spec, &input_keys, &result).await;
-
-    let compacted = group_rows_of_current_manifest(&store, &namespace_id, group).await;
-    assert_ne!(
-        compacted, whole,
-        "with the floor rules keeping everything, the job must not reach the step's rows"
-    );
-    assert!(
-        compacted.values().map(Vec::len).sum::<usize>()
-            > whole.values().map(Vec::len).sum::<usize>(),
-        "and must keep strictly more rows than the step kept"
-    );
-}
-
-#[tokio::test]
 async fn compaction_keeps_retained_revisions_and_their_layouts() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

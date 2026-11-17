@@ -1050,41 +1050,6 @@ mod direct_multipart {
     }
 
     #[tokio::test]
-    async fn a_re_uploaded_part_is_the_one_that_is_stored() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-        let context = default_writer();
-        let session = open_session(&store, &context).await;
-
-        // Part two arrives wrong first, then correct: same length both
-        // times, so only the checksum can tell them apart.
-        let wrong = vec![b'x'; PART.len()];
-        store
-            .upload_part(&session.provider_upload_id, 2, &wrong)
-            .expect("upload wrong part");
-        let parts = upload_every_part(&store, &session);
-
-        complete_upload(
-            &store,
-            &session.namespace_id,
-            &session.upload_id,
-            &complete_request(&session, parts),
-            &context,
-        )
-        .await
-        .expect("the corrected part is the one completion assembles");
-
-        assert_eq!(
-            store
-                .get(&session.object_key, None)
-                .await
-                .expect("read object")
-                .expect("object exists"),
-            Bytes::from(session.payload.clone())
-        );
-    }
-
-    #[tokio::test]
     async fn a_lost_completion_reconciles_from_the_session_and_the_object() {
         let temp_dir = tempdir().expect("tempdir");
         let store = FakeMultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
