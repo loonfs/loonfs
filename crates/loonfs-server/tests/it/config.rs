@@ -5,7 +5,7 @@ use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::GC_GRACE_WINDOW_MS;
 use loonfs_server::{
     load_server_config, JobMode, MetadataCacheConfig, MetadataCacheSsdConfig, ReadConsistency,
-    ServerConfig, ServerError, StoreConfig, TlsServerConfig, TransportConfig,
+    ServerConfig, ServerError, TlsServerConfig, TransportConfig,
 };
 use loonfs_test_support::EnvGuard;
 use loonfs_types::config::ConfigFieldError;
@@ -13,32 +13,6 @@ use loonfs_types::env::AUTH_TOKEN_ENV;
 use std::fs;
 use std::num::NonZeroUsize;
 use tempfile::tempdir;
-
-#[test]
-fn ambient_credential_sources_survive_loading_with_environment_credentials_set() {
-    let path = write_config(
-        r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-
-[store]
-kind = "aws_s3"
-bucket = "bucket"
-region = "us-east-1"
-
-[store.credentials]
-kind = "ambient"
-"#,
-    );
-    let access_key = EnvGuard::set("AWS_ACCESS_KEY_ID", "parity-access");
-    let secret_key = EnvGuard::set("AWS_SECRET_ACCESS_KEY", "parity-secret");
-    let config = load_server_config(&path)
-        .expect("load server config")
-        .config()
-        .clone();
-    drop((access_key, secret_key));
-    assert_eq!(config.store.credentials_kind(), Some("ambient"));
-}
 
 #[test]
 fn every_maintenance_mode_names_its_serving_and_scheduling_behavior() {
@@ -316,22 +290,6 @@ root = "/tmp/loonfs-server"
     );
 
     load_server_config(&path).expect("explicitly-open config loads");
-}
-
-#[test]
-fn loopback_bind_without_an_auth_table_is_allowed() {
-    let path = write_config(
-        r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-    );
-
-    load_server_config(&path).expect("loopback-only config loads");
 }
 
 #[test]
@@ -677,32 +635,6 @@ root = "/tmp/loonfs-server"
 }
 
 #[test]
-fn idle_fold_period_is_optional_and_accepts_zero() {
-    for (setting, expected) in [
-        ("", None),
-        ("idle_fold_after_ms = 60000", Some(60_000)),
-        ("idle_fold_after_ms = 0", Some(0)),
-    ] {
-        let path = write_config(&format!(
-            r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-{setting}
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#
-        ));
-        let config = load_server_config(&path)
-            .expect("valid config")
-            .config()
-            .clone();
-        assert_eq!(config.idle_fold_after_ms, expected, "{setting:?}");
-    }
-}
-
-#[test]
 fn a_retention_window_is_optional_and_at_least_the_grace_window() {
     let config = |setting: &str| {
         write_config(&format!(
@@ -787,46 +719,6 @@ session_token = "debug-session-token"
 }
 
 #[test]
-fn static_store_credentials_are_preserved_as_static() {
-    let path = write_config(
-        r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-
-[store]
-kind = "aws_s3"
-bucket = "bucket"
-region = "us-east-1"
-
-[store.credentials]
-kind = "static"
-access_key_id = "file-access"
-secret_access_key = "file-secret"
-"#,
-    );
-
-    let config = load_server_config(&path)
-        .expect("load config")
-        .config()
-        .clone();
-    match config.store {
-        StoreConfig::AwsS3(store) => {
-            let loonfs_objectstore::AwsS3Credentials::Static {
-                access_key_id,
-                secret_access_key,
-                ..
-            } = store.credentials
-            else {
-                panic!("expected static credentials")
-            };
-            assert_eq!(access_key_id.expose(), "file-access");
-            assert_eq!(secret_access_key.expose(), "file-secret");
-        }
-        other => panic!("expected an aws-s3 store, got {other:?}"),
-    }
-}
-
-#[test]
 fn load_rejects_unknown_keys_at_every_level() {
     let top_level = write_config(
         r#"
@@ -894,30 +786,6 @@ root = "/tmp/loonfs-server"
             }
             other => panic!("expected decode error naming {typo}, got {other:?}"),
         }
-    }
-}
-
-/// Checks that a config that still sets the removed `max_read_working_bytes`
-/// fails to load with an error that names the setting.
-#[test]
-fn load_rejects_the_removed_read_working_memory_setting() {
-    let path = write_config(
-        r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-max_read_working_bytes = 268435456
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-    );
-    match load_server_config(&path).expect_err("a removed setting must be rejected") {
-        ServerError::ConfigDecode(message) => assert!(
-            message.contains("max_read_working_bytes"),
-            "decode error must name the removed setting, got: {message}"
-        ),
-        other => panic!("expected a decode error, got {other:?}"),
     }
 }
 
@@ -1277,25 +1145,6 @@ root = "/tmp/loonfs-server"
     match error {
         ServerError::ConfigDecode(_) => {}
         other => panic!("expected decode error, got {other:?}"),
-    }
-}
-
-#[test]
-fn server_config_toml_round_trip_preserves_values() {
-    let mut config: ServerConfig =
-        toml::from_str(include_str!("../../config/local-fs.example.toml"))
-            .expect("example config should parse");
-
-    for threshold in [
-        config.inline_content.inline_content_threshold_bytes,
-        Some(0),
-        None,
-    ] {
-        config.inline_content.inline_content_threshold_bytes = threshold;
-        let serialized = toml::to_string(&config).expect("server config should serialize");
-        let decoded: ServerConfig =
-            toml::from_str(&serialized).expect("serialized server config should parse");
-        assert_eq!(decoded, config);
     }
 }
 

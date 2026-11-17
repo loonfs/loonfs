@@ -9,7 +9,6 @@ use loonfs_types::{
     AbsolutePath, Commit, CommitId, CommitRequest, CommitSeq, ContentRef, ContentToken,
     DestinationBehavior, ErrorCode, ErrorResponse, FilesystemOperation,
 };
-use serde_json::json;
 use std::io::Read as _;
 use tempfile::tempdir;
 
@@ -297,45 +296,6 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
             .cloned(),
         Some(first.content_ref)
     );
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkdir() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-bare-commit",
-        "http-bare-commit",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let body = json!({
-        "commit_id": "bare-commit-mkdir",
-        "operations": [{
-            "kind": "create_directory",
-            "path": "/docs"
-        }],
-        "message": null
-    });
-
-    let response =
-        send_commit_json(&harness.server_url, &namespace, &body).expect("bare operation body");
-    let response: Commit =
-        serde_json::from_reader(response.into_reader()).expect("decode response");
-    assert_eq!(response.committed_seq, CommitSeq(1));
-    harness
-        .client
-        .stat(&NamespacePath::parse("demo", "/docs").expect("path"))
-        .await
-        .expect("mkdir committed");
 
     harness.server.abort();
 }

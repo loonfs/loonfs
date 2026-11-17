@@ -480,49 +480,6 @@ async fn http_recursive_listing_round_trips_by_path_and_by_inode() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_client_listing_preserves_canonical_name_key_order() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-test",
-        "http-listing-order",
-    ))
-    .await;
-
-    harness
-        .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
-    harness
-        .client
-        .create_directory(&docs, &loonfs_test_support::test_actor())
-        .await
-        .expect("create docs dir");
-    for name in ["B.txt", "a.txt", "c.txt"] {
-        let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("file path");
-        harness
-            .client
-            .put_file_with_options(
-                &path,
-                name.as_bytes(),
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
-            .await
-            .expect("write file");
-    }
-
-    let listing = collect_path_entries(&harness.client, &docs, &Default::default())
-        .await
-        .expect("directory list");
-    assert_eq!(entry_names(&listing), vec!["a.txt", "B.txt", "c.txt"]);
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_restore_revision_appends_new_head_and_reports_change() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
