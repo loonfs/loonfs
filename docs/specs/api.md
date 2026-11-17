@@ -595,6 +595,8 @@ To retry a commit, a client resubmits the same request with the same `commit_id`
 - If the original request didn't commit, the request can commit on this attempt.
 - If the ID was used for a different request, the retry returns `commit_id_reuse_conflict`. Changing a write precondition counts as a different request, even if the operations are unchanged.
 
+LoonFS answers a retry from its receipt before it checks the commit limits, so a request that committed replays even when a later release lowers a limit below it, and an over-limit request under a used ID returns `commit_id_reuse_conflict` rather than `invalid_request`.
+
 A new `commit_id` means a new commit. After `outcome_unknown`, a transport failure, or a process restart, the client retries with the original ID and request. There's no separate commit-status lookup.
 
 A merge's identity is its fork and range, not its operations, because LoonFS plans a merge's operations itself. A retry of a merge with the same `commit_id`, fork, and range returns the original commit, and a request that reuses the `commit_id` for a different range returns `commit_id_reuse_conflict`. The merge route finds the range from the namespace's merge index, so before it reads the index, it looks up the receipt of the request's `commit_id` and returns the original merge if one was committed. Otherwise a retry after a successful merge would compute the next range, and its identity would differ from the original's. A merge with a new `commit_id` has to continue the previous merge from its fork, and a merge of a range that's already been merged returns `merge_range_conflict`, so each of a fork's commits is merged at most once.
