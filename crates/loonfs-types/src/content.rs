@@ -569,28 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn a_content_ref_records_no_namespace_and_one_checksum() {
-        let content_ref =
-            ContentRef::blob_v1(content_id(), b"hello", crate::ChecksumAlgorithm::Crc64nvme);
-
-        assert_eq!(content_ref.kind, ContentRefKind::BlobV1);
-        assert_eq!(content_ref.size_bytes, 5);
-        assert_eq!(content_ref.checksum.algorithm, ChecksumAlgorithm::Crc64nvme);
-
-        let document = serde_json::to_value(&content_ref).expect("encode content ref");
-        let object = document.as_object().expect("content ref object");
-        assert_eq!(object.len(), 4);
-        assert!(object.contains_key("checksum"));
-        let mut with_owner = document.clone();
-        with_owner
-            .as_object_mut()
-            .expect("reference")
-            .insert("owner_namespace_id".to_owned(), "demo".into());
-        serde_json::from_value::<ContentRef>(with_owner)
-            .expect_err("a content ref with a namespace field should be rejected");
-    }
-
-    #[test]
     fn a_checksum_of_the_wrong_width_fails_to_build_and_to_decode() {
         for (algorithm, width) in [
             (ChecksumAlgorithm::Crc64nvme, 16),

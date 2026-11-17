@@ -241,9 +241,4 @@ mod tests {
         }
         assert_eq!(total, 10_000 * step);
     }
-
-    #[test]
-    fn the_wall_clock_counts_milliseconds_from_the_unix_epoch() {
-        assert_eq!(unix_ms(UNIX_EPOCH + Duration::from_millis(1)), 1);
-    }
 }

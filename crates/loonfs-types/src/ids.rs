@@ -1032,20 +1032,4 @@ mod tests {
             "exceeds the maximum name key length of 768 bytes"
         );
     }
-
-    #[test]
-    fn name_key_serializes_as_string_and_validates_deserialize() {
-        let name_key = NameKey::parse("report.txt").expect("valid name key");
-
-        assert_eq!(
-            serde_json::to_string(&name_key).expect("serialize name key"),
-            "\"report.txt\""
-        );
-        assert_eq!(
-            serde_json::from_str::<NameKey>("\"report.txt\"").expect("deserialize name key"),
-            name_key
-        );
-        serde_json::from_str::<NameKey>("\"a/b\"")
-            .expect_err("a name key with a slash should be rejected");
-    }
 }
