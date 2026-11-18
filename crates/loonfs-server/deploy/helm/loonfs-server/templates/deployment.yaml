@@ -69,10 +69,12 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
+              scheme: {{ .Values.probeScheme }}
               port: http
           readinessProbe:
             httpGet:
               path: /readiness
+              scheme: {{ .Values.probeScheme }}
               port: http
           {{- with .Values.resources }}
           resources:

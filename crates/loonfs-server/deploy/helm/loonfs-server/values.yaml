@@ -40,6 +40,9 @@ service:
   # Annotations for the Service.
   annotations: {}
 
+# Set this to HTTPS when the server terminates TLS.
+probeScheme: HTTP
+
 # The kubelet's grace must outlast shutdown_deadline_ms (default 600s) plus settle time.
 terminationGracePeriodSeconds: 660
 
