@@ -30,7 +30,6 @@ class ProxyAuthorization:
     """
 
     actor_id: str | None = None
-    subject_id: str | None = None
     principals: list[str] | None = None
     service: bool = False
 
@@ -120,7 +119,6 @@ _REQUEST_EXCLUDED_HEADERS = frozenset(
         b"cookie",
         b"authorization",
         b"loonfs-actor",
-        b"loonfs-subject",
         b"loonfs-principals",
         b"loonfs-context",
     }
@@ -204,8 +202,6 @@ class LoonFSProxy:
         headers.append((b"authorization", self._authorization))
         if authorization.actor_id is not None:
             headers.append((b"loonfs-actor", authorization.actor_id.encode("ascii")))
-        if authorization.subject_id is not None:
-            headers.append((b"loonfs-subject", authorization.subject_id.encode("ascii")))
         if authorization.principals is not None:
             headers.append(
                 (b"loonfs-principals", ",".join(authorization.principals).encode("ascii"))

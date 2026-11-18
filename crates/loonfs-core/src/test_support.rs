@@ -151,7 +151,7 @@ pub(crate) fn proxied_upload_session(
         namespace_id: namespace_id.clone(),
         upload_id: loonfs_types::UploadId::generate(),
         content_id: loonfs_types::ContentId::generate(),
-        subject_id: None,
+        actor_id: loonfs_test_support::test_actor(),
         mode: loonfs_types::format::control::UploadSessionMode::ServiceProxied {},
         expires_at_ms,
     }

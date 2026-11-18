@@ -132,13 +132,16 @@ fn listed_name(entry: &PathEntry) -> String {
 }
 
 fn configured_client(server_url: &str, auth_token: Option<&str>) -> Client {
-    Client::new(ClientConfig {
-        server_url: server_url.to_owned(),
-        auth_token: auth_token.map(Into::into),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
+    Client::new(
+        ClientConfig {
+            server_url: server_url.to_owned(),
+            auth_token: auth_token.map(Into::into),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        loonfs_types::Context::Service,
+    )
     .expect("valid conformance client")
 }
 
@@ -238,7 +241,11 @@ async fn run_upload_modes(harness: &Harness, case: &Case) {
     ] {
         let begin = harness
             .client
-            .create_upload(&request.namespace_id, &body)
+            .create_upload(
+                &request.namespace_id,
+                &loonfs_test_support::test_actor(),
+                &body,
+            )
             .await;
         if !expected_modes.contains(&body.mode()) {
             assert_error_response(
@@ -267,7 +274,11 @@ async fn run_upload_modes(harness: &Harness, case: &Case) {
         }
         harness
             .client
-            .abort_upload(&request.namespace_id, &begin.upload_id)
+            .abort_upload(
+                &request.namespace_id,
+                &loonfs_test_support::test_actor(),
+                &begin.upload_id,
+            )
             .await
             .expect("abort mode check upload");
     }
@@ -457,7 +468,11 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     let payload = request.content_utf8.as_bytes();
     let begin = harness
         .client
-        .create_direct_put_upload_target(&namespace, Some(payload.len() as u64))
+        .create_direct_put_upload_target(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            Some(payload.len() as u64),
+        )
         .await
         .expect("begin direct PUT");
     assert_eq!(upload_mode_name(begin.mode), expected.mode);
@@ -485,6 +500,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
         .client
         .complete_upload(
             &namespace,
+            &loonfs_test_support::test_actor(),
             &upload_id,
             &CompleteUploadBody::DirectPut {
                 content: UploadContentClaim {
@@ -580,6 +596,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         .client
         .create_direct_multipart_upload_target_with_options(
             &namespace,
+            &loonfs_test_support::test_actor(),
             &DirectMultipartUploadOptions {
                 part_size_bytes: Some(request.part_size_bytes),
             },
@@ -617,7 +634,12 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         .collect::<Vec<_>>();
     let signed = harness
         .client
-        .sign_upload_parts(&namespace, &upload_id, claims.clone())
+        .sign_upload_parts(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &upload_id,
+            claims.clone(),
+        )
         .await
         .expect("sign multipart parts");
     assert_eq!(signed.parts.len(), expected.part_count);
@@ -648,14 +670,24 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     };
     let first = harness
         .client
-        .complete_upload(&namespace, &upload_id, &completion_request)
+        .complete_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &upload_id,
+            &completion_request,
+        )
         .await
         .expect("complete multipart upload");
     let first_content_ref = first.content_ref().expect("multipart content ref").clone();
     let first_completed_at_ms = completed_at_ms(&first.status);
     let replayed = harness
         .client
-        .complete_upload(&namespace, &upload_id, &completion_request)
+        .complete_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &upload_id,
+            &completion_request,
+        )
         .await
         .expect("replay multipart completion");
     assert_eq!(replayed.namespace_id, first.namespace_id);
@@ -723,7 +755,11 @@ async fn run_abort(harness: &Harness, case: &Case) {
         .expect("create abort namespace");
     let begin = harness
         .client
-        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
+        .create_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &CreateUploadBody::ServiceProxied {},
+        )
         .await
         .expect("begin abortable upload");
     assert_eq!(upload_mode_name(begin.mode), expected.mode);
@@ -733,12 +769,20 @@ async fn run_abort(harness: &Harness, case: &Case) {
     );
     let first = harness
         .client
-        .abort_upload(&namespace, &begin.upload_id)
+        .abort_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &begin.upload_id,
+        )
         .await
         .expect("abort upload");
     let replayed = harness
         .client
-        .abort_upload(&namespace, &begin.upload_id)
+        .abort_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &begin.upload_id,
+        )
         .await
         .expect("replay abort");
     assert_eq!(upload_status_name(&first.status), expected.status);
@@ -2553,7 +2597,11 @@ async fn stage_content(
 ) -> (ContentRef, Vec<ContentToken>) {
     let begin = harness
         .client
-        .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
+        .create_upload(
+            namespace_id,
+            &loonfs_test_support::test_actor(),
+            &CreateUploadBody::ServiceProxied {},
+        )
         .await
         .expect("begin service-proxied upload");
     assert_eq!(begin.mode, UploadMode::ServiceProxied);
@@ -2561,13 +2609,19 @@ async fn stage_content(
     let upload_id = begin.upload_id;
     harness
         .client
-        .put_upload_content(namespace_id, &upload_id, bytes)
+        .put_upload_content(
+            namespace_id,
+            &loonfs_test_support::test_actor(),
+            &upload_id,
+            bytes,
+        )
         .await
         .expect("stage upload content");
     let completed = harness
         .client
         .complete_upload(
             namespace_id,
+            &loonfs_test_support::test_actor(),
             &upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )

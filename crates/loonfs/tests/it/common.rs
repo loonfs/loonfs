@@ -243,7 +243,7 @@ async fn open_fixture(
     configure_maintenance: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> TestRuntime {
     let writer = configure(
-        LoonFs::builder_with_store(store.clone())
+        LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(writer_id)),
     )
     .build()
@@ -251,7 +251,7 @@ async fn open_fixture(
     .expect("build writer");
     let reader = writer.read_only();
     let maintenance = configure_maintenance(
-        LoonFs::builder_with_store(store.clone())
+        LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(writer_id)),
     )
     .build()
@@ -427,7 +427,9 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<loonfs::uploads::DirectPutUploadTarget> {
         let namespace = self.namespace_writer(namespace_id)?;
-        namespace.create_direct_put_upload_target().await
+        namespace
+            .create_direct_put_upload_target(&loonfs_test_support::test_actor())
+            .await
     }
 
     pub(crate) async fn complete_direct_put(
@@ -438,7 +440,11 @@ impl TestRuntime {
     ) -> loonfs::Result<UploadSession> {
         let namespace = self.namespace_writer(namespace_id)?;
         namespace
-            .complete_upload(upload_id, CompleteUploadBody::DirectPut { content })
+            .complete_upload(
+                upload_id,
+                CompleteUploadBody::DirectPut { content },
+                &loonfs_test_support::test_actor(),
+            )
             .await
             .map(|completed| completed.response)
     }
@@ -595,7 +601,7 @@ impl TestRuntime {
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<UploadSession> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.create_upload())
+        block_on(namespace.create_upload(&loonfs_test_support::test_actor()))
     }
 
     pub(crate) fn upload_content_blocking(
@@ -605,7 +611,7 @@ impl TestRuntime {
         bytes: &[u8],
     ) -> loonfs::Result<UploadSession> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.put_upload_content(upload_id, bytes))
+        block_on(namespace.put_upload_content(upload_id, bytes, &loonfs_test_support::test_actor()))
     }
 
     pub(crate) fn complete_upload_blocking(
@@ -614,8 +620,12 @@ impl TestRuntime {
         upload_id: &UploadId,
     ) -> loonfs::Result<UploadSession> {
         let namespace = self.namespace_writer(namespace_id)?;
-        block_on(namespace.complete_upload(upload_id, CompleteUploadBody::ServiceProxied {}))
-            .map(|completed| completed.response)
+        block_on(namespace.complete_upload(
+            upload_id,
+            CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
+        ))
+        .map(|completed| completed.response)
     }
 
     pub(crate) fn mutate_blocking(

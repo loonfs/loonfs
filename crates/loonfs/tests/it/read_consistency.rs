@@ -74,7 +74,7 @@ async fn fixture(name: &str) -> Fixture {
     writer.drain().await.expect("drain");
     let clock = Arc::new(ManualClock::new(1_000_000));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .monotonic_timer(clock.clone())
         .config(loonfs::RuntimeConfig {
@@ -421,7 +421,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
 async fn a_strong_default_confirms_reads_that_set_no_consistency() {
     let fixture = fixture("strong-default").await;
     let store: SharedObjectStore = fixture.recording.clone();
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .monotonic_timer(fixture.clock.clone())
         .config(loonfs::RuntimeConfig {
@@ -523,7 +523,7 @@ async fn budgeted_reader(
     recorder: Arc<DefaultMetricsRecorder>,
     max_head_bytes: usize,
 ) -> LoonFs<ReadOnly> {
-    LoonFs::builder_with_store(store.clone())
+    LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .monotonic_timer(clock)
         .metrics_recorder(recorder)

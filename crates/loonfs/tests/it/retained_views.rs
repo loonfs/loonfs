@@ -16,7 +16,7 @@ use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, RunTier};
 use loonfs_types::format::segment_blocks::{decode_data_block, decode_index_block};
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, AccessRight, Attributes, AttributesRevisionNo, CommitSeq,
-    ErrorCode, PathEntry, PrincipalId, PrincipalSet, RevisionNo, Subject, SubjectId,
+    ErrorCode, PathEntry, PrincipalId, PrincipalSet, RevisionNo, Subject,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,7 +42,6 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
     let fork = namespace_id("fork");
     let principal = PrincipalId::parse("prn_admin").expect("principal");
     let subject = Subject {
-        subject_id: SubjectId::parse("administrator").expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([principal.clone()])).expect("principals"),
     };
     runtime
@@ -57,7 +56,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             .expect("root grants"),
     )
     .await;
-    let writer = runtime.writer.with_subject(subject.clone());
+    let writer = runtime.writer.with_context(subject.clone().into());
     let source_namespace = writer.namespace(&source);
     let namespace_writer = writer.open_namespace(&source).expect("open namespace");
     namespace_writer
@@ -77,7 +76,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         ("/docs/recover.txt", b"recovered".as_slice()),
     ] {
         let prepared = namespace_writer
-            .prepare_content(bytes)
+            .prepare_content(bytes, &loonfs_test_support::test_actor())
             .await
             .expect("prepare inline content");
         assert!(prepared.upload_id().is_none());
@@ -88,7 +87,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
     }
     let uploaded_bytes = vec![b'u'; 128 * 1024];
     let prepared = namespace_writer
-        .prepare_content(&uploaded_bytes)
+        .prepare_content(&uploaded_bytes, &loonfs_test_support::test_actor())
         .await
         .expect("stage upload");
     assert!(prepared.upload_id().is_some());
@@ -300,12 +299,12 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             _ => {}
         }
 
-        let reader = LoonFs::builder_with_store(object_store.clone())
+        let reader = LoonFs::builder_with_store(object_store.clone(), loonfs::Context::Service)
             .read_only()
             .build()
             .await
             .expect("fresh reader")
-            .with_subject(subject.clone());
+            .with_context(subject.clone().into());
         let source_namespace = reader.namespace(&source);
         let fork_namespace = reader.namespace(&fork);
         for (path, mut expected_paths) in [

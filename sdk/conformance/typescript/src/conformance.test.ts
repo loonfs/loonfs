@@ -395,7 +395,7 @@ interface ProxyACL {
     namespace_id: string;
     administrator: string;
     member: string;
-    member_subject_id: string;
+    member_actor_id: string;
     browser_principals: string;
     commit_id: string;
     directory: string;
@@ -936,7 +936,7 @@ function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
             "namespace_id",
             "administrator",
             "member",
-            "member_subject_id",
+            "member_actor_id",
             "browser_principals",
             "commit_id",
             "directory",
@@ -2776,8 +2776,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             serverBaseUrl: activeHarness.serverBaseUrl,
             token: activeHarness.token,
             authorize: () => ({
-                actorId: request.actor_id,
-                subjectId: acl.member_subject_id,
+                actorId: acl.member_actor_id,
                 principals: [acl.member],
             }),
         }),

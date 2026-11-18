@@ -275,7 +275,7 @@ async fn a_page_after_the_floor_passes_its_cursor_returns_below_retention_floor(
     fixture.put("/three.txt", b"later\n").await;
     fixture.advance_retention_floor().await;
     // A new reader loads the manifest that records the new floor.
-    let reader = LoonFs::builder_with_store(fixture.store.clone())
+    let reader = LoonFs::builder_with_store(fixture.store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await

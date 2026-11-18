@@ -6,7 +6,7 @@ use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
 use crate::{CommitSeq, LoonFs, Mode, NamespaceId, ReadOnly, Result, Writable};
 use loonfs_core::NamespaceWriterEngine;
-use loonfs_types::Subject;
+use loonfs_types::Context;
 use std::fmt;
 use std::sync::Arc;
 
@@ -80,20 +80,20 @@ impl<M: Mode> Namespace<M> {
         &self.namespace_id
     }
 
-    /// Returns the subject this handle acts for, or `None` when it acts in
-    /// the service context, which checks no rights.
-    pub fn subject(&self) -> Option<&Subject> {
-        self.core.subject()
+    /// Returns the context this handle acts in: the service context, which
+    /// checks no rights, or a subject's principals.
+    pub fn context(&self) -> Context {
+        self.core.context()
     }
 
-    /// Clones this handle with the subject used for its reads and, on a
-    /// writable handle, its commits and uploads.
-    pub fn with_subject(&self, subject: Subject) -> Self
+    /// Clones this handle with the context that its reads and, on a writable
+    /// handle, its commits act in.
+    pub fn with_context(&self, context: Context) -> Self
     where
         M: Clone,
     {
         Self {
-            core: self.core.with_subject(subject),
+            core: self.core.with_context(&context),
             ..self.clone()
         }
     }

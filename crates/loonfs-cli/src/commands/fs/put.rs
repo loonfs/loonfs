@@ -231,12 +231,7 @@ fn resume_journal(
 ) -> Result<UploadJournal> {
     let source =
         SourceIdentity::of(local_path).map_err(|error| CliError::io_for_path(local_path, error))?;
-    let attempt = UploadAttempt::new(
-        source,
-        context.actor().clone(),
-        options,
-        context.profile.target.client.subject().cloned(),
-    );
+    let attempt = UploadAttempt::new(source, context.actor().clone(), options);
     UploadJournal::for_upload(
         &context.profile.profile_name,
         context.profile.target.target_identity(),
@@ -270,7 +265,7 @@ async fn commit_a_finished_upload(
         .profile
         .target
         .client
-        .get_upload(context.namespace(), &resume.upload_id)
+        .get_upload(context.namespace(), context.actor(), &resume.upload_id)
         .await?;
     let UploadSessionStatus::Completed {
         content_ref,

@@ -26,7 +26,7 @@ async fn test_writer_with_recorder(
     store: SharedStore,
     recorder: Arc<DefaultMetricsRecorder>,
 ) -> crate::LoonFs<crate::Writable> {
-    crate::LoonFs::builder_with_store(store)
+    crate::LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -132,7 +132,7 @@ async fn an_advance_moves_the_sessions_position_onto_its_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let clock = Arc::new(ManualClock::at_system_time());
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -312,7 +312,7 @@ async fn a_fenced_session_keeps_no_read_position() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let (writer, namespace) = published_namespace(store.clone()).await;
-    let rival = crate::LoonFs::builder_with_store(store)
+    let rival = crate::LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-b"))
         .build()
         .await

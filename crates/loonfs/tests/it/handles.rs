@@ -49,7 +49,7 @@ fn writes_past_wal_tail_threshold() -> u32 {
 }
 
 async fn writer(root: &Path) -> LoonFs<Writable> {
-    LoonFs::builder(store_config(root))
+    LoonFs::builder(store_config(root), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("handle-test-writer"))
         .build()
         .await
@@ -116,7 +116,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
 
         // A standalone reader opens its own store client from config and
         // still observes the write.
-        let standalone = LoonFs::builder(store_config(temp_dir.path()))
+        let standalone = LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .read_only()
             .build()
             .await
@@ -134,7 +134,7 @@ fn writer_reader_and_maintenance_share_a_namespace_through_store_config() {
         assert_eq!(entries.len(), 1);
 
         // Maintenance inspects the same namespace through its own handle.
-        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
             ))
@@ -177,7 +177,7 @@ fn standalone_reader_builds_without_writer_identity() {
             .await
             .expect("put file");
 
-        let reader = LoonFs::builder(store_config(temp_dir.path()))
+        let reader = LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .read_only()
             .build()
             .await
@@ -333,7 +333,7 @@ fn put_file_and_prepare_then_put_commit_equivalent_state() {
             .await
             .expect("put file bytes");
         let prepared = prepared_namespace_writer
-            .prepare_content(bytes)
+            .prepare_content(bytes, &loonfs_test_support::test_actor())
             .await
             .expect("prepare file bytes");
         let composed = prepared_namespace_writer
@@ -414,7 +414,7 @@ fn an_ordinary_writer_folds_on_its_own_without_scheduled_maintenance() {
             .await
             .expect("settle the writer's fold");
 
-        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
             ))
@@ -449,7 +449,7 @@ fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_is_commit
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
-        let stalled = LoonFs::builder(store_config(temp_dir.path()))
+        let stalled = LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-stalled-writer",
             ))
@@ -485,7 +485,7 @@ fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_is_commit
             tail_store,
             crate::common::folded_manifest_put,
         ));
-        let writer = LoonFs::builder_with_store(blocking.clone())
+        let writer = LoonFs::builder_with_store(blocking.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("handle-test-writer"))
             .build()
             .await
@@ -523,7 +523,7 @@ fn a_commit_at_a_preexisting_write_stopped_tail_waits_for_the_fold_and_is_commit
         put.await
             .expect("join the commit")
             .expect("the commit is committed after the fold, without a retry");
-        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
             ))
@@ -561,7 +561,7 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             InjectedError::PermissionDenied("manifest writes disabled".to_owned()),
         ));
         let store: SharedObjectStore = failing.clone();
-        let writer = LoonFs::builder_with_store(store)
+        let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("fold-failure-writer"))
             .config(loonfs::RuntimeConfig {
                 inline_content: loonfs::InlineContentPolicy {
@@ -631,16 +631,17 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
             )
             .await
             .expect("the commit at the write stop is committed after the recovered fold");
-        let maintenance = LoonFs::builder_with_store(failing as SharedObjectStore)
-            .writer_id(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ))
-            .build()
-            .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ));
+        let maintenance =
+            LoonFs::builder_with_store(failing as SharedObjectStore, loonfs::Context::Service)
+                .writer_id(loonfs_test_support::ids::writer_id(
+                    "handle-test-maintenance",
+                ))
+                .build()
+                .await
+                .expect("build maintenance")
+                .maintenance(loonfs_test_support::ids::writer_id(
+                    "handle-test-maintenance",
+                ));
         let status = maintenance
             .diagnostics(&namespace_id)
             .await
@@ -665,7 +666,7 @@ fn an_over_limit_commit_at_the_write_stop_is_refused_without_waiting_for_a_fold(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             crate::common::folded_manifest_put,
         ));
-        let writer = LoonFs::builder_with_store(blocking.clone())
+        let writer = LoonFs::builder_with_store(blocking.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("handle-test-writer"))
             .build()
             .await
@@ -715,7 +716,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             crate::common::folded_manifest_put,
         ));
-        let writer = LoonFs::builder_with_store(blocking.clone())
+        let writer = LoonFs::builder_with_store(blocking.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("parked-fold-writer"))
             .build()
             .await
@@ -804,20 +805,21 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             )
             .await
             .expect("put file before the shutdown");
-        let tail_at_shutdown = LoonFs::builder(store_config(temp_dir.path()))
-            .writer_id(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ))
-            .build()
-            .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ))
-            .diagnostics(&namespace_id)
-            .await
-            .expect("status before the shutdown")
-            .wal_tail_objects;
+        let tail_at_shutdown =
+            LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
+                .writer_id(loonfs_test_support::ids::writer_id(
+                    "handle-test-maintenance",
+                ))
+                .build()
+                .await
+                .expect("build maintenance")
+                .maintenance(loonfs_test_support::ids::writer_id(
+                    "handle-test-maintenance",
+                ))
+                .diagnostics(&namespace_id)
+                .await
+                .expect("status before the shutdown")
+                .wal_tail_objects;
 
         assert!(!writer.is_shutting_down());
         writer.shutdown().await.expect("shut down the writer");
@@ -838,7 +840,7 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
             .expect("reads survive the writer's shutdown");
         assert_eq!(read.bytes, b"hello");
 
-        let maintenance = LoonFs::builder(store_config(temp_dir.path()))
+        let maintenance = LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(
                 "handle-test-maintenance",
             ))
@@ -867,7 +869,8 @@ fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
 #[test]
 fn builders_require_identity_and_a_runtime() {
     let temp_dir = tempdir().expect("tempdir");
-    match block_on(LoonFs::builder(store_config(temp_dir.path())).build()) {
+    match block_on(LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service).build())
+    {
         Err(Error::Config(_)) => {}
         Err(other) => panic!("expected config error for missing writer_id, got {other:?}"),
         Ok(_) => panic!("writer_id must be required"),
@@ -877,7 +880,7 @@ fn builders_require_identity_and_a_runtime() {
 
     // Polling build() outside a Tokio runtime is a config error, not a panic.
     let outside_runtime = futures::executor::block_on(
-        LoonFs::builder(store_config(temp_dir.path()))
+        LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("handle-test-writer"))
             .build(),
     );
@@ -896,7 +899,7 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
     let temp_dir = tempdir().expect("tempdir");
     let bound = loonfs::engine::READ_REVALIDATION_BOUND_MS;
     let builder = || {
-        LoonFs::builder(store_config(temp_dir.path()))
+        LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("interval-test"))
     };
     let assert_rejected = |result: loonfs::Result<()>, setting: &str| match result {
@@ -1003,14 +1006,15 @@ fn maintenance_snapshot_and_retention_are_explicit_one_shot_calls() {
         // so this runtime's clock is that far ahead of the writer's.
         let clock = Arc::new(ManualClock::at_system_time());
         clock.advance_ms(loonfs::GC_GRACE_WINDOW_MS);
-        let maintenance_runtime = LoonFs::builder(store_config(temp_dir.path()))
-            .writer_id(loonfs_test_support::ids::writer_id(
-                "handle-test-maintenance",
-            ))
-            .wall_clock(clock)
-            .build()
-            .await
-            .expect("build maintenance");
+        let maintenance_runtime =
+            LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
+                .writer_id(loonfs_test_support::ids::writer_id(
+                    "handle-test-maintenance",
+                ))
+                .wall_clock(clock)
+                .build()
+                .await
+                .expect("build maintenance");
         let maintenance = maintenance_runtime.maintenance(loonfs_test_support::ids::writer_id(
             "handle-test-maintenance",
         ));
@@ -1046,7 +1050,7 @@ async fn namespace_deletion_drops_cached_reads_even_when_its_answer_is_lost() {
             )
             .apply_then_fail(),
         );
-        let writer = LoonFs::builder_with_store(store.clone())
+        let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("delete-lost-answer"))
             .config(loonfs::RuntimeConfig {
                 manifest_revalidation_interval_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,

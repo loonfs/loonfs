@@ -21,7 +21,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::manifest::MetadataRowFamily;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, PrincipalId,
-    PrincipalSet, Subject, SubjectId,
+    PrincipalSet, Subject,
 };
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -84,7 +84,7 @@ async fn create_compacted_directory(
     )
     .expect("grants");
     let writer = writer(store.clone(), "compacted-page-writer").await;
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let maintenance = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "compacted-page-maintenance",
         ))
@@ -119,7 +119,7 @@ async fn create_compacted_directory(
         .await;
     }
     let writer = match subject {
-        Some(subject) => writer.with_subject(subject.clone()),
+        Some(subject) => writer.with_context(subject.clone().into()),
         None => writer,
     };
     let namespace = writer.open_namespace(namespace_id).expect("open namespace");
@@ -204,7 +204,7 @@ async fn a_compacted_directory_page_reads_no_revision_segment() {
         family_keys(&store, &namespace_id, MetadataRowFamily::DirentryBinds).await;
     assert!(revision_keys.len() >= 8, "{} segments", revision_keys.len());
     let recording = Arc::new(RecordingStore::metadata_segments(store));
-    let reader = LoonFs::builder_with_store(recording.clone())
+    let reader = LoonFs::builder_with_store(recording.clone(), crate::Context::Service)
         .read_only()
         .build()
         .await
@@ -232,7 +232,6 @@ async fn a_compacted_directory_page_reads_no_revision_segment() {
 #[tokio::test]
 async fn compacted_directory_page_overlaps_access_segment_reads() {
     let subject = Subject {
-        subject_id: SubjectId::parse("viewer").expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse("viewer").expect("principal")
         ]))
@@ -263,13 +262,13 @@ async fn compacted_directory_page_overlaps_segment_reads(
     let keys = KeyPredicate::new(move |key| segment_keys.contains(key));
     let delayed = Arc::new(LatencyStore::new(store, keys.clone(), latency));
     let reads = Arc::new(ConcurrencyWatchStore::new(delayed.clone(), keys));
-    let reader = LoonFs::builder_with_store(reads.clone())
+    let reader = LoonFs::builder_with_store(reads.clone(), crate::Context::Service)
         .read_only()
         .build()
         .await
         .expect("reader");
     let reader = match subject {
-        Some(subject) => reader.with_subject(subject),
+        Some(subject) => reader.with_context(subject.into()),
         None => reader,
     };
     let namespace = reader.namespace(&namespace_id);

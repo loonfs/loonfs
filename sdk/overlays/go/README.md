@@ -150,8 +150,8 @@ route.
 
 Set `Authorize` to check each request and choose the identity that the proxy
 stamps on it. The proxy always removes the browser's `Loonfs-Actor`,
-`Loonfs-Subject`, `Loonfs-Principals`, and `Loonfs-Context` headers, so the
-browser can't choose its own authority. The hook returns one of two
+`Loonfs-Principals`, and `Loonfs-Context` headers, so the browser can't
+choose its own authority. The hook returns one of two
 choices:
 
 - `Principals`, to act for the signed-in user. LoonFS checks the request

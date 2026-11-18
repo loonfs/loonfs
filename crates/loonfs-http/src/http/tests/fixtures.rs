@@ -88,19 +88,21 @@ pub(super) async fn test_app_with_sessions(
     let options = config.http;
     let metrics = HttpMetrics::new();
     let defaults = loonfs::RuntimeConfig::default();
-    let builder = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store)).config(
-        loonfs::RuntimeConfig {
-            max_staleness_ms: inputs.max_staleness_ms.unwrap_or(defaults.max_staleness_ms),
-            consistency: inputs.consistency.unwrap_or(defaults.consistency),
-            min_publish_interval_ms: 0,
-            inline_content: config.inline_content,
-            max_read_content_bytes: options
-                .max_download_bytes
-                .expect("test HTTP APIs should cap proxied reads"),
-            trace_mode: TraceMode::Remote,
-            ..defaults
-        },
-    );
+    let builder = LoonFs::builder_with_store(
+        inputs.store.unwrap_or(config.store),
+        loonfs::Context::Service,
+    )
+    .config(loonfs::RuntimeConfig {
+        max_staleness_ms: inputs.max_staleness_ms.unwrap_or(defaults.max_staleness_ms),
+        consistency: inputs.consistency.unwrap_or(defaults.consistency),
+        min_publish_interval_ms: 0,
+        inline_content: config.inline_content,
+        max_read_content_bytes: options
+            .max_download_bytes
+            .expect("test HTTP APIs should cap proxied reads"),
+        trace_mode: TraceMode::Remote,
+        ..defaults
+    });
     let builder = match inputs.monotonic_timer {
         Some(timer) => builder.monotonic_timer(timer),
         None => builder,
@@ -213,13 +215,16 @@ pub(super) async fn serve(router: axum::Router) -> (Client, SocketAddr, JoinHand
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });
-    let client = Client::new(ClientConfig {
-        server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".into()),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
+    let client = Client::new(
+        ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".into()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        loonfs_types::Context::Service,
+    )
     .expect("valid client config");
     (client, addr, server)
 }

@@ -126,7 +126,11 @@ async fn store_contention_is_not_retried_by_the_client() {
         };
         client.timer = Arc::new(StdMonotonicTimer::default());
         let error = client
-            .abort_upload(&namespace_id, &upload_id)
+            .abort_upload(
+                &namespace_id,
+                &loonfs_test_support::test_actor(),
+                &upload_id,
+            )
             .await
             .expect_err("every attempt is refused");
         assert_eq!(error.code(), Some(code));
@@ -202,13 +206,14 @@ where
             ca_cert_path: None,
         },
         service,
+        loonfs_types::Context::Service,
     )
     .expect("valid config")
 }
 
 #[tokio::test]
 async fn services_receive_identical_body_and_identity_on_retries_but_not_provider_requests() {
-    use loonfs_types::{PrincipalId, PrincipalSet, Subject, SubjectId};
+    use loonfs_types::{Context, PrincipalId, PrincipalSet};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
@@ -232,13 +237,12 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
             }
         }
     });
-    let mut client = service_client(service, None).with_subject(Subject {
-        subject_id: SubjectId::parse("usr_demo").expect("subject"),
-        principals: PrincipalSet::new(BTreeSet::from([
+    let mut client = service_client(service, None).with_context(Context::Principals(
+        PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse("usr_demo").expect("principal")
         ]))
         .expect("principals"),
-    });
+    ));
     client.transport_retry_enabled = true;
     client.transport_retry.initial_backoff_ms = 0;
     client.transport_retry.max_backoff_ms = 0;
@@ -275,7 +279,6 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
         headers,
         vec![
             ("authorization", "Bearer test-token"),
-            ("loonfs-subject", "usr_demo"),
             ("loonfs-principals", "usr_demo"),
             ("loonfs-actor", "actor"),
             ("content-type", "application/json"),
@@ -287,6 +290,55 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
         requests[2].1.to_string(),
         "https://provider.invalid/object?signature=opaque"
     );
+}
+
+/// Checks that a client built in the service context sends
+/// `Loonfs-Context: service`, and that a client built with principals sends
+/// `Loonfs-Principals` and no context.
+#[tokio::test]
+async fn a_client_sends_the_header_of_the_context_it_was_built_with() {
+    use loonfs_types::{Context, PrincipalSet};
+    use std::sync::Mutex;
+
+    let principals: PrincipalSet = "usr_ada,grp_finance".parse().expect("principals");
+    for (context, expected) in [
+        (Context::Service, ("loonfs-context", "service")),
+        (
+            Context::Principals(principals),
+            ("loonfs-principals", "grp_finance,usr_ada"),
+        ),
+    ] {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let service = tower::service_fn(move |request: Request<Body>| {
+            recorded
+                .lock()
+                .expect("requests lock")
+                .push(request.headers().clone());
+            async { Ok(Response::new(Body::from(Bytes::from_static(b"{}")))) }
+        });
+        let client = Client::with_transport(
+            ClientConfig {
+                server_url: "http://127.0.0.1".to_owned(),
+                auth_token: None,
+                request_timeout_ms: None,
+                disable_transient_retry: true,
+                ca_cert_path: None,
+            },
+            service,
+            context,
+        )
+        .expect("valid config");
+        let request = client.request(Operation::retry(Method::GET), "http://127.0.0.1/entry");
+        let _: serde_json::Value = client.send_json(request).await.expect("response");
+        let requests = requests.lock().expect("requests lock");
+        let identity: Vec<_> = requests[0]
+            .iter()
+            .filter(|(name, _)| name.as_str().starts_with("loonfs-"))
+            .map(|(name, value)| (name.as_str(), value.to_str().expect("text")))
+            .collect();
+        assert_eq!(identity, vec![expected]);
+    }
 }
 
 fn timed_client<S>(service: S, timeout: Option<u64>) -> (Client, Arc<ManualClock>)
@@ -632,6 +684,7 @@ async fn transport_failures_resend_up_to_the_attempt_cap() {
             ca_cert_path: None,
         },
         transport.clone(),
+        loonfs_types::Context::Service,
     )
     .expect("valid client config");
     single_shot
@@ -719,7 +772,11 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
             "create_upload",
             attempts(async |client| {
                 client
-                    .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
+                    .create_upload(
+                        namespace_id,
+                        &loonfs_test_support::test_actor(),
+                        &CreateUploadBody::ServiceProxied {},
+                    )
                     .await
             })
             .await,
@@ -729,7 +786,11 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
             "create_direct_put_upload_target",
             attempts(async |client| {
                 client
-                    .create_direct_put_upload_target(namespace_id, Some(6))
+                    .create_direct_put_upload_target(
+                        namespace_id,
+                        &loonfs_test_support::test_actor(),
+                        Some(6),
+                    )
                     .await
             })
             .await,
@@ -745,7 +806,12 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
             "put_upload_content",
             attempts(async |client| {
                 client
-                    .put_upload_content(namespace_id, upload_id, b"content")
+                    .put_upload_content(
+                        namespace_id,
+                        &loonfs_test_support::test_actor(),
+                        upload_id,
+                        b"content",
+                    )
                     .await
             })
             .await,
@@ -757,6 +823,7 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
                 client
                     .complete_upload(
                         namespace_id,
+                        &loonfs_test_support::test_actor(),
                         upload_id,
                         &CompleteUploadBody::ServiceProxied {},
                     )

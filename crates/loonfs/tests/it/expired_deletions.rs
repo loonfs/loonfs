@@ -9,9 +9,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_types::options::AttributeInclusion;
-use loonfs_types::{
-    AccessGrants, AccessRight, NamespaceId, PrincipalId, PrincipalSet, Subject, SubjectId,
-};
+use loonfs_types::{AccessGrants, AccessRight, NamespaceId, PrincipalId, PrincipalSet, Subject};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -45,7 +43,7 @@ async fn advance_floor_through(
 /// A runtime that confirms the head on every read, so it sees a commit that
 /// another engine made.
 async fn reader(store: &SharedObjectStore) -> LoonFs<ReadOnly> {
-    LoonFs::builder_with_store(store.clone())
+    LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .config(loonfs::RuntimeConfig {
             max_staleness_ms: 0,
@@ -153,7 +151,7 @@ async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_one_in_the_tr
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = namespace_id("demo");
     let actor = test_actor();
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(writer_id("expired-reads"))
         .build()
         .await
@@ -213,9 +211,8 @@ async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_one_in_the_tr
     }
 }
 
-fn subject(subject_id: &str, principal: &str) -> Subject {
+fn subject(principal: &str) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(subject_id).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
         ]))
@@ -249,9 +246,11 @@ async fn history_reads(
     };
     let mut outcomes = Vec::new();
     for subject in subjects {
-        let namespace = reader.with_subject(subject.clone()).namespace(namespace_id);
+        let namespace = reader
+            .with_context(subject.clone().into())
+            .namespace(namespace_id);
         outcomes.push((
-            subject.subject_id.to_string(),
+            subject.principals.to_string(),
             [
                 code(
                     namespace
@@ -292,8 +291,8 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = namespace_id("acl-expiry");
     let actor = test_actor();
-    let admin = subject("root", "prn_root");
-    let service = LoonFs::builder_with_store(store.clone())
+    let admin = subject("prn_root");
+    let service = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(writer_id("acl-expiry"))
         .build()
         .await
@@ -308,7 +307,7 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
         access(false, "prn_root", &[AccessRight::Admin]).grants,
     )
     .await;
-    let writer = service.with_subject(admin.clone());
+    let writer = service.with_context(admin.clone().into());
     let namespace: Namespace<Writable> = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -347,7 +346,7 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
         .await
         .expect("delete directory");
 
-    let subjects = [subject("bob", "team"), subject("ada", "ada"), admin];
+    let subjects = [subject("team"), subject("ada"), admin];
     let ok = [Ok(()); 4];
     let not_found = [Err(ErrorCode::InodeNotFound); 4];
     // A view compares each deletion with the floor of its own manifest, so
@@ -359,9 +358,9 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
     assert_eq!(
         reads().await,
         vec![
-            ("bob".to_owned(), not_found),
+            ("team".to_owned(), not_found),
             ("ada".to_owned(), ok),
-            ("root".to_owned(), ok),
+            ("prn_root".to_owned(), ok),
         ],
         "while the deletion is in the trash, the boundary keeps the team out"
     );
@@ -371,9 +370,9 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
     assert_eq!(
         reads().await,
         vec![
-            ("bob".to_owned(), not_found),
+            ("team".to_owned(), not_found),
             ("ada".to_owned(), not_found),
-            ("root".to_owned(), snapshot_only),
+            ("prn_root".to_owned(), snapshot_only),
         ],
         "an expired subtree is unknown to every principal, apart from an \
          administrator's snapshot read"
@@ -389,7 +388,7 @@ fn deletion_seqs(page: loonfs_types::ListTrashResponse) -> Vec<CommitSeq> {
 
 #[tokio::test]
 async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() {
-    let admin = subject("root", "prn_root");
+    let admin = subject("prn_root");
     // Each namespace is read and written in the service context, and then
     // as an administrator of a namespace with a root access row.
     for administered in [false, true] {
@@ -397,7 +396,7 @@ async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() 
         let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let (source_id, fork_id) = (namespace_id("source"), namespace_id("fork"));
         let actor = test_actor();
-        let service = LoonFs::builder_with_store(store.clone())
+        let service = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(writer_id("fork-trash"))
             .build()
             .await
@@ -413,7 +412,7 @@ async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() 
                 access(false, "prn_root", &[AccessRight::Admin]).grants,
             )
             .await;
-            service.with_subject(admin.clone())
+            service.with_context(admin.clone().into())
         } else {
             service
         };
@@ -435,7 +434,7 @@ async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() 
         // fork yet.
         let reader = reader(&store).await;
         let reader = if administered {
-            reader.with_subject(admin.clone())
+            reader.with_context(admin.clone().into())
         } else {
             reader
         };

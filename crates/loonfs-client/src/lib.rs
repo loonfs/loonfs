@@ -5,6 +5,11 @@
 //! use the `loonfs` crate. Both crates share operation options from
 //! `loonfs-types`.
 //!
+//! A client is built with the [`Context`](loonfs_types::Context) that its
+//! requests act in: the service context, or the principals of the user that
+//! the requests act for. There's no default context, so each application
+//! chooses one when it builds the client.
+//!
 //! Namespace logic doesn't belong here: the client sends HTTP API requests
 //! and decodes their responses, and the server does the work.
 
@@ -82,7 +87,7 @@ pub use uploads::staging::{
 /// cache.
 #[derive(Debug, Clone)]
 pub struct Client {
-    subject: Option<loonfs_types::Subject>,
+    context: loonfs_types::Context,
     base_url: String,
     auth_token: Option<SecretString>,
     transport: transport::Transport,
@@ -103,16 +108,17 @@ pub struct Client {
 }
 
 impl Client {
-    /// Returns the subject sent with every request, or `None` when requests
-    /// act in the service context and send `Loonfs-Context: service`.
-    pub fn subject(&self) -> Option<&loonfs_types::Subject> {
-        self.subject.as_ref()
+    /// Returns the context that every request acts in: the service context,
+    /// sent as `Loonfs-Context: service`, or a subject's principals, sent as
+    /// `Loonfs-Principals`.
+    pub fn context(&self) -> &loonfs_types::Context {
+        &self.context
     }
 
-    /// Clones this client with the subject sent with every request.
-    pub fn with_subject(&self, subject: loonfs_types::Subject) -> Self {
+    /// Clones this client with the context that every request acts in.
+    pub fn with_context(&self, context: loonfs_types::Context) -> Self {
         Self {
-            subject: Some(subject),
+            context,
             ..self.clone()
         }
     }
@@ -125,16 +131,24 @@ impl Client {
     /// Creates a client, validating the config exactly as
     /// [`ClientConfig::load`] does — direct Rust construction cannot bypass
     /// validation.
-    pub fn new(config: ClientConfig) -> Result<Self> {
+    ///
+    /// `context` is the context that every request acts in. There's no
+    /// default, so a client that acts for a user can't send requests in the
+    /// service context by mistake.
+    pub fn new(config: ClientConfig, context: loonfs_types::Context) -> Result<Self> {
         config.validate()?;
         let service = reqwest_transport::service(&config)?;
-        Self::with_transport(config, service)
+        Self::with_transport(config, service, context)
     }
 
     /// Creates a client for in-process hosts and tests using an HTTP service.
     /// Retries, timeouts, and identity headers apply the same way as with
     /// [`Client::new`].
-    pub fn with_transport<S>(config: ClientConfig, service: S) -> Result<Self>
+    pub fn with_transport<S>(
+        config: ClientConfig,
+        service: S,
+        context: loonfs_types::Context,
+    ) -> Result<Self>
     where
         S: Service<http::Request<Body>, Response = http::Response<Body>, Error = TransportError>
             + Clone
@@ -148,7 +162,7 @@ impl Client {
             .request_timeout_ms
             .map(|timeout_ms| Duration::from_millis(timeout_ms.get()));
         Ok(Self {
-            subject: None,
+            context,
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
             transport: BoxCloneSyncService::new(service),

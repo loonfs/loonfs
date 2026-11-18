@@ -22,7 +22,6 @@ type RouteContext struct {
 // or with both, fails with invalid_request.
 type Authorization struct {
 	ActorID    string // Sent upstream in Loonfs-Actor when non-empty.
-	SubjectID  string
 	Principals []string
 	Service    bool // Sent upstream as Loonfs-Context: service when true.
 }
@@ -180,15 +179,10 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 		outgoing.Header.Set("User-Agent", "")
 	}
 	outgoing.Header.Del("Loonfs-Actor")
-	outgoing.Header.Del("Loonfs-Subject")
 	outgoing.Header.Del("Loonfs-Principals")
 	outgoing.Header.Del("Loonfs-Context")
 	if authorization.ActorID != "" {
 		outgoing.Header.Set("Loonfs-Actor", authorization.ActorID)
-	}
-
-	if authorization.SubjectID != "" {
-		outgoing.Header.Set("Loonfs-Subject", authorization.SubjectID)
 	}
 	if authorization.Principals != nil {
 		outgoing.Header.Set("Loonfs-Principals", strings.Join(authorization.Principals, ","))

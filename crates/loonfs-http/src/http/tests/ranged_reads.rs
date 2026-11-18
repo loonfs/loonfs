@@ -60,7 +60,7 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
         .cycle()
         .take(FOLDED_BYTES + APPENDED_BYTES)
         .collect();
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(writer_id("ranged-seed"))
         .config(loonfs::RuntimeConfig {
             idle_fold_after_ms: None,

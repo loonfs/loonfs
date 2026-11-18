@@ -70,7 +70,7 @@ async fn runtime_publish_reuses_wal_tail_projection_while_a_fold_runs() {
         folded_manifest_put,
     );
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
-    let writer = loonfs::LoonFs::builder_with_store(recording.clone())
+    let writer = loonfs::LoonFs::builder_with_store(recording.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("fold-projection"))
         .build()
         .await
@@ -334,7 +334,7 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
     // The second pass takes each head as it is, however long the first pass
     // took. Under the default bound of one second, a slow run refreshes the
     // oldest heads with a boundary read each.
-    let reader = loonfs::LoonFs::builder_with_store(object_store)
+    let reader = loonfs::LoonFs::builder_with_store(object_store, loonfs::Context::Service)
         .read_only()
         .config(loonfs::RuntimeConfig {
             max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
@@ -389,7 +389,7 @@ fn runtime_wal_tail_cache_skips_oversized_projection() {
     .expect("put file");
     block_on(fs.writer.drain()).expect("drain");
     let reader = block_on(
-        loonfs::LoonFs::builder_with_store(object_store)
+        loonfs::LoonFs::builder_with_store(object_store, loonfs::Context::Service)
             .read_only()
             .config(loonfs::RuntimeConfig {
                 max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,

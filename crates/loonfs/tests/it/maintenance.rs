@@ -85,14 +85,15 @@ async fn namespace_diagnostics_count_unexpired_snapshots_only() {
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(
         1_750_000_000_000,
     ));
-    let writer = loonfs::LoonFs::builder_with_store(store(temp_dir.path()))
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "diagnostic-snapshot-count",
-        ))
-        .wall_clock(clock.clone())
-        .build()
-        .await
-        .expect("build writer");
+    let writer =
+        loonfs::LoonFs::builder_with_store(store(temp_dir.path()), loonfs::Context::Service)
+            .writer_id(loonfs_test_support::ids::writer_id(
+                "diagnostic-snapshot-count",
+            ))
+            .wall_clock(clock.clone())
+            .build()
+            .await
+            .expect("build writer");
     let source = namespace_id("source");
     writer
         .create_namespace(&source, &loonfs_test_support::test_actor())
@@ -732,7 +733,7 @@ async fn a_second_collection_reads_no_completed_session_record() {
     let namespace = fs.namespace_writer(&namespace_id).expect("open namespace");
     for body in [&b"one"[..], b"two", b"three"] {
         namespace
-            .prepare_content(body)
+            .prepare_content(body, &loonfs_test_support::test_actor())
             .await
             .expect("prepare content");
     }

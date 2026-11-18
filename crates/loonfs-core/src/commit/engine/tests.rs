@@ -28,7 +28,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::wal::{
     MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
 };
-use loonfs_types::{CommitSeq, ContentRef, PrincipalId, PrincipalSet, Subject, SubjectId};
+use loonfs_types::{CommitSeq, ContentRef, PrincipalId, PrincipalSet, Subject};
 use loonfs_types::{ContentId, WriterEpoch};
 use std::assert_matches;
 use std::collections::BTreeSet;
@@ -83,7 +83,6 @@ fn principals_add_to_candidate_admission_weight() {
         })
         .collect::<BTreeSet<_>>();
     let candidate = candidate.with_subject(Subject {
-        subject_id: SubjectId::parse("subject").expect("subject"),
         principals: PrincipalSet::new(principals).expect("principals"),
     });
     let after = candidate.estimated_retained_bytes();

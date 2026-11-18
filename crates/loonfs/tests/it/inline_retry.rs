@@ -13,7 +13,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
-    DestinationBehavior, ErrorCode, NamespaceId, PrincipalId, PrincipalSet, Subject, SubjectId,
+    DestinationBehavior, ErrorCode, NamespaceId, PrincipalId, PrincipalSet, Subject,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,7 +26,6 @@ fn namespace() -> NamespaceId {
 
 fn subject(name: &str) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(name).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(name).expect("principal")
         ]))
@@ -55,7 +54,7 @@ fn access(grants: AccessGrants) -> FilesystemOperation {
 fn request(id: &str, who: &str, operation: FilesystemOperation) -> CommitIntent {
     CommitIntent::single(
         CommitId::parse(id).expect("commit id"),
-        loonfs_test_support::test_actor(),
+        loonfs_types::ActorId::parse(who).expect("actor id"),
         None,
         operation,
     )
@@ -86,7 +85,7 @@ fn inline(id: &str, who: &str, bytes: &'static [u8]) -> CommitCandidate {
 }
 
 async fn open(store: SharedObjectStore, wal_object_budget: usize) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("inline-retry"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -200,7 +199,7 @@ async fn retained_receipt_skips_fallback(state: ReceiptState) {
         namespace_writer
             .commit_candidate(inline("retained", "bob", b"recorded"))
             .await
-            .expect_err("another subject conflicts")
+            .expect_err("another actor conflicts")
             .code(),
         ErrorCode::CommitIdReuseConflict
     );

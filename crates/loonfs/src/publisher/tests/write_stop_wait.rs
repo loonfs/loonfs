@@ -33,7 +33,7 @@ async fn fixture(
         metadata_manifest_prefix(&namespace_id),
     ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let builder = crate::LoonFs::builder_with_store(store.clone())
+    let builder = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -473,7 +473,7 @@ async fn an_unknown_outcome_before_the_write_stop_keeps_outcome_unknown() {
         .apply_then_fail(),
     );
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = crate::LoonFs::builder_with_store(failing.clone())
+    let writer = crate::LoonFs::builder_with_store(failing.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .metrics_recorder(recorder.clone())
         .build()
@@ -660,7 +660,12 @@ async fn a_commit_at_the_byte_write_stop_waits_for_the_fold_and_commits() {
                 seed,
                 MAX_WAL_INLINE_CONTENT_BYTES,
             );
-            prepared.push(namespace.prepare_content(&bytes).await.expect("prepare"));
+            prepared.push(
+                namespace
+                    .prepare_content(&bytes, &loonfs_test_support::test_actor())
+                    .await
+                    .expect("prepare"),
+            );
         }
         let request = CommitIntent {
             commit_id: CommitId::generate(),

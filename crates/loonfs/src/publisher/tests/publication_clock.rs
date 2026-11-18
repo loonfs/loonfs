@@ -44,9 +44,13 @@ async fn publish_after_retry_delay(
     let engine = runtime
         .core
         .writer_engine(&runtime.writer.writer_id, &namespace_id);
-    let upload = engine.begin_upload(&catalog).await.expect("begin upload");
+    let actor = loonfs_test_support::test_actor();
+    let upload = engine
+        .begin_upload(&catalog, &actor)
+        .await
+        .expect("begin upload");
     engine
-        .upload_content(&catalog, &upload.upload_id, b"content")
+        .upload_content(&catalog, &upload.upload_id, b"content", &actor)
         .await
         .expect("upload bytes");
     let completed = engine
@@ -54,6 +58,7 @@ async fn publish_after_retry_delay(
             &catalog,
             &upload.upload_id,
             loonfs_types::CompleteUploadBody::ServiceProxied {},
+            &actor,
         )
         .await
         .expect("complete upload");

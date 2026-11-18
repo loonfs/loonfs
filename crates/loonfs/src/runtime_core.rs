@@ -17,7 +17,7 @@ use loonfs_core::{
 };
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{
-    u64_from_usize, CapabilityDocument, MonotonicTimer, PoolId, Subject, WriterId,
+    u64_from_usize, CapabilityDocument, Context, MonotonicTimer, PoolId, Subject, WriterId,
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS,
     FEATURE_MERGES, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
@@ -119,10 +119,10 @@ impl RuntimeCore {
         }
     }
 
-    pub(crate) fn with_subject(&self, subject: Subject) -> Self {
+    pub(crate) fn with_context(&self, context: &Context) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            subject: Some(subject),
+            subject: context.subject(),
         }
     }
 
@@ -130,6 +130,13 @@ impl RuntimeCore {
     /// context.
     pub(crate) fn subject(&self) -> Option<&Subject> {
         self.subject.as_ref()
+    }
+
+    /// Returns the context this core acts in.
+    pub(crate) fn context(&self) -> Context {
+        self.subject.clone().map_or(Context::Service, |subject| {
+            Context::Principals(subject.principals)
+        })
     }
 
     /// Returns the settings this core was built with.

@@ -156,7 +156,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     ));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-thousand-atomic").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("grams-thousand-writer"))
         .config(loonfs::RuntimeConfig {
             inline_content: loonfs::InlineContentPolicy {
@@ -201,7 +201,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         let bytes = format!("bounded needle file {index:04}\n");
         assert_eq!(bytes.len(), content_bytes);
         let content = namespace
-            .prepare_content(bytes.as_bytes())
+            .prepare_content(bytes.as_bytes(), &loonfs_test_support::test_actor())
             .await
             .expect("prepare atomic-commit content");
         operations.push(FilesystemOperation::PutFile {
@@ -519,7 +519,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grams-read-fault").expect("namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("grams-fault-writer"))
         .config(loonfs::RuntimeConfig {
             inline_content: loonfs::InlineContentPolicy {

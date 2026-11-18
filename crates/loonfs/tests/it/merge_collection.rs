@@ -60,7 +60,7 @@ async fn family() -> Family {
     let directory = tempfile::tempdir().expect("tempdir");
     let store = store(directory.path());
     let clock = Arc::new(ManualClock::at_system_time());
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(writer_id("merge-collection"))
         .wall_clock(clock.clone())
         .config(loonfs::RuntimeConfig {

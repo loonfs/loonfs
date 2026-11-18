@@ -41,6 +41,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
         ))
         .set("authorization", "Bearer test-token")
         .set("Loonfs-Context", "service")
+        .set("Loonfs-Actor", "test-actor")
         .set("content-type", "application/octet-stream")
         .send_bytes(b"hello");
     let ureq::Error::Status(status, response) = result.expect_err("invalid upload id should fail")
@@ -86,6 +87,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
             ))
             .set("authorization", "Bearer test-token")
             .set("Loonfs-Context", "service")
+            .set("Loonfs-Actor", "test-actor")
             .set("content-type", "application/json")
             .send_string(body);
         let ureq::Error::Status(status, response) =
@@ -119,7 +121,11 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         .expect("create namespace");
     let begin = harness
         .client
-        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
+        .create_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &CreateUploadBody::ServiceProxied {},
+        )
         .await
         .expect("begin upload");
 
@@ -133,6 +139,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         .post(&completion_url)
         .set("authorization", "Bearer test-token")
         .set("Loonfs-Context", "service")
+        .set("Loonfs-Actor", "test-actor")
         .set("content-type", "application/json")
         .send_string(
             r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}},"parts":[]}"#,
@@ -154,7 +161,12 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
 
     let staged = harness
         .client
-        .put_upload_content(&namespace, &begin.upload_id, b"hello")
+        .put_upload_content(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &begin.upload_id,
+            b"hello",
+        )
         .await
         .expect("stage content");
     assert_eq!(staged.namespace_id, namespace);
@@ -174,7 +186,11 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
     );
     let read = harness
         .client
-        .get_upload(&namespace, &begin.upload_id)
+        .get_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &begin.upload_id,
+        )
         .await
         .expect("read staged session");
     assert_eq!(read, staged);
@@ -182,6 +198,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         .client
         .complete_upload(
             &namespace,
+            &loonfs_test_support::test_actor(),
             &begin.upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )
@@ -207,7 +224,11 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         .expect("create namespace");
     let begin = harness
         .client
-        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
+        .create_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &CreateUploadBody::ServiceProxied {},
+        )
         .await
         .expect("begin upload");
     let limit = harness
@@ -232,6 +253,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         .post(&completion_url)
         .set("authorization", "Bearer test-token")
         .set("Loonfs-Context", "service")
+        .set("Loonfs-Actor", "test-actor")
         .set("content-type", "application/json")
         .send_bytes(&just_under);
     let ureq::Error::Status(status, response) =
@@ -255,6 +277,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
         .post(&completion_url)
         .set("authorization", "Bearer test-token")
         .set("Loonfs-Context", "service")
+        .set("Loonfs-Actor", "test-actor")
         .set("content-type", "application/json")
         .send_bytes(&one_over);
     let ureq::Error::Status(status, response) =
@@ -296,23 +319,42 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let begin = harness
         .client
-        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
+        .create_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &CreateUploadBody::ServiceProxied {},
+        )
         .await
         .expect("begin upload");
     let first_content = harness
         .client
-        .put_upload_content(&namespace, &begin.upload_id, file_bytes)
+        .put_upload_content(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &begin.upload_id,
+            file_bytes,
+        )
         .await
         .expect("upload content");
     let repeated_content = harness
         .client
-        .put_upload_content(&namespace, &begin.upload_id, file_bytes)
+        .put_upload_content(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &begin.upload_id,
+            file_bytes,
+        )
         .await
         .expect("repeat upload content");
     assert_eq!(first_content, repeated_content);
     match harness
         .client
-        .put_upload_content(&namespace, &begin.upload_id, b"different bytes")
+        .put_upload_content(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &begin.upload_id,
+            b"different bytes",
+        )
         .await
     {
         Err(ClientError::Api { response, .. }) => {
@@ -435,7 +477,11 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
 
     let open = harness
         .client
-        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
+        .create_upload(
+            &namespace,
+            &loonfs_test_support::test_actor(),
+            &CreateUploadBody::ServiceProxied {},
+        )
         .await
         .expect("begin upload");
     let status = get_upload(&harness.server_url, &open.upload_id);
@@ -469,6 +515,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .client
         .complete_upload(
             &namespace,
+            &loonfs_test_support::test_actor(),
             &open.upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )
@@ -483,6 +530,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .client
         .complete_upload(
             &namespace,
+            &loonfs_test_support::test_actor(),
             &upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )
@@ -556,18 +604,28 @@ async fn complete_upload_session(
 ) -> (loonfs_types::UploadId, ContentRef, u64) {
     let begin = harness
         .client
-        .create_upload(namespace, &CreateUploadBody::ServiceProxied {})
+        .create_upload(
+            namespace,
+            &loonfs_test_support::test_actor(),
+            &CreateUploadBody::ServiceProxied {},
+        )
         .await
         .expect("begin upload");
     harness
         .client
-        .put_upload_content(namespace, &begin.upload_id, bytes)
+        .put_upload_content(
+            namespace,
+            &loonfs_test_support::test_actor(),
+            &begin.upload_id,
+            bytes,
+        )
         .await
         .expect("upload content");
     let completed = harness
         .client
         .complete_upload(
             namespace,
+            &loonfs_test_support::test_actor(),
             &begin.upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )
@@ -593,6 +651,7 @@ fn get_upload(server_url: &str, upload_id: &loonfs_types::UploadId) -> UploadSes
             ))
             .set("authorization", "Bearer test-token")
             .set("Loonfs-Context", "service")
+            .set("Loonfs-Actor", "test-actor")
             .call()
             .expect("get upload status");
         serde_json::from_reader(response.into_reader()).expect("decode upload status")
@@ -610,6 +669,7 @@ fn abort_upload(
             ))
             .set("authorization", "Bearer test-token")
             .set("Loonfs-Context", "service")
+            .set("Loonfs-Actor", "test-actor")
             .call()
             .map_err(Box::new)?;
         Ok(serde_json::from_reader(response.into_reader()).expect("decode abort response"))

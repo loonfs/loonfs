@@ -156,7 +156,7 @@ async fn fold_twice(seed: &LoonFs<Writable>, namespace: &NamespaceId) {
 /// Opens a runtime on `store` under `name`, so that it holds no segment of
 /// the namespace it reads.
 async fn cold_runtime(store: Arc<AgedBlockingStore>, name: &str) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(writer_id(name))
         .build()
         .await
@@ -166,7 +166,7 @@ async fn cold_runtime(store: Arc<AgedBlockingStore>, name: &str) -> LoonFs<Writa
 /// Opens a cold runtime whose maintenance compacts every family group that
 /// has a delta run.
 async fn maintainer_runtime(store: Arc<AgedBlockingStore>) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(writer_id("maintainer"))
         .run_policy(loonfs_core::test_support::one_delta_run_policy())
         .build()
@@ -206,7 +206,7 @@ async fn assert_shared_file(
     content: &[u8],
     attributes: &[(&str, &str)],
 ) {
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -372,7 +372,7 @@ async fn a_merge_plan_that_finds_a_segment_missing_under_the_current_manifest_re
     let namespace = NamespaceId::parse("merge-corrupt-probe").expect("namespace");
     let fork = NamespaceId::parse("merge-corrupt-probe-fork").expect("fork");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let seed = LoonFs::builder_with_store(store.clone())
+    let seed = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(writer_id("seed"))
         .build()
         .await
@@ -393,7 +393,7 @@ async fn a_merge_plan_that_finds_a_segment_missing_under_the_current_manifest_re
         store.delete(key).await.expect("remove the segment");
     }
 
-    let writer = LoonFs::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(writer_id("cold-writer"))
         .build()
         .await

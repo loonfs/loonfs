@@ -12,13 +12,12 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ErrorCode, PrincipalId,
-    PrincipalSet, Subject, SubjectId,
+    PrincipalSet, Subject,
 };
 use std::sync::Arc;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(std::collections::BTreeSet::from([PrincipalId::parse(
             principal,
         )
@@ -63,7 +62,7 @@ async fn check_buffered_read_access(content_size: usize) {
     // Keep the reader's cache independent so a write cannot invalidate it.
     // A maximum staleness of 0 confirms the head on every read, as a
     // `strong` read does, so the next read after a change sees it.
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .config(loonfs::RuntimeConfig {
             max_staleness_ms: 0,
@@ -72,7 +71,7 @@ async fn check_buffered_read_access(content_size: usize) {
         .build()
         .await
         .expect("reader")
-        .with_subject(subject("viewer"));
+        .with_context(subject("viewer").into());
     let namespace = reader.namespace(&namespace_id);
     for operation in [
         FilesystemOperation::CreateDirectory {
@@ -104,7 +103,7 @@ async fn check_buffered_read_access(content_size: usize) {
     for byte in *b"ab" {
         let bytes = vec![byte; content_size];
         let prepared = namespace_writer
-            .prepare_content(&bytes)
+            .prepare_content(&bytes, &loonfs_test_support::test_actor())
             .await
             .expect("prepare file");
         namespace_writer
@@ -135,7 +134,7 @@ async fn check_buffered_read_access(content_size: usize) {
         }
         assert_eq!(
             namespace
-                .with_subject(subject("stranger"))
+                .with_context(subject("stranger").into())
                 .read_file("/team/file")
                 .await
                 .expect_err("a shared cache does not grant another subject access")
@@ -223,7 +222,7 @@ async fn check_eventual_read_access(content_size: usize) {
         .expect("open namespace");
     let bytes = vec![b'a'; content_size];
     namespace_writer
-        .with_subject(subject("prn_root"))
+        .with_context(subject("prn_root").into())
         .put_file_with_options(
             "/team/file",
             &bytes,
@@ -253,13 +252,13 @@ async fn check_eventual_read_access(content_size: usize) {
         .expect("grant read access");
     // A separate runtime, so the reader confirms the head from the store.
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000_000));
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .monotonic_timer(clock.clone())
         .build()
         .await
         .expect("reader")
-        .with_subject(subject("viewer"));
+        .with_context(subject("viewer").into());
     let namespace = reader.namespace(&namespace_id);
     let eventual = ReadFileOptions {
         at: ReadAt::Live(Some(Consistency::Eventual {
@@ -327,7 +326,7 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(1_000_000));
-    let old_writer = LoonFs::builder_with_store(store.clone())
+    let old_writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("old-writer"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -353,7 +352,7 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
         .expect("open namespace");
     let options = loonfs::PutFileOptions::default();
     old_namespace_writer
-        .with_subject(subject("prn_root"))
+        .with_context(subject("prn_root").into())
         .put_file_with_options(
             "/team/file",
             b"private payload",
@@ -381,7 +380,9 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
         )
         .await
         .expect("grant read access");
-    let reader = old_writer.read_only().with_subject(subject("viewer"));
+    let reader = old_writer
+        .read_only()
+        .with_context(subject("viewer").into());
     let namespace = reader.namespace(&namespace_id);
     if warm_before_handoff {
         assert_eq!(
@@ -434,7 +435,7 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
 async fn a_stat_batch_returns_readable_unknown_and_unreadable_inodes_in_request_order() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = LoonFs::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("stat-batch-access"))
         .build()
         .await
@@ -446,11 +447,11 @@ async fn a_stat_batch_returns_readable_unknown_and_unreadable_inodes_in_request_
     publish_team_and_private_files(&writer, &namespace_id, files).await;
     let administrator = writer
         .read_only()
-        .with_subject(subject("prn_root"))
+        .with_context(subject("prn_root").into())
         .namespace(&namespace_id);
     let viewer = writer
         .read_only()
-        .with_subject(subject("viewer"))
+        .with_context(subject("viewer").into())
         .namespace(&namespace_id);
     let visible = |inode_id, path: String| CurrentFileState {
         inode_id,
@@ -503,7 +504,7 @@ async fn a_stat_batch_returns_readable_unknown_and_unreadable_inodes_in_request_
 async fn listing_a_snapshots_files_requires_an_administrator() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = LoonFs::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("snapshot-files-access"))
         .build()
         .await
@@ -513,7 +514,7 @@ async fn listing_a_snapshots_files_requires_an_administrator() {
     let snapshot = writer
         .open_namespace(&namespace_id)
         .expect("open namespace")
-        .with_subject(subject("prn_root"))
+        .with_context(subject("prn_root").into())
         .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
             name: Some("snapshot".to_owned()),
             ..loonfs::CreateSnapshotOptions::default()
@@ -523,7 +524,7 @@ async fn listing_a_snapshots_files_requires_an_administrator() {
     let list = |principal: &str| {
         writer
             .read_only()
-            .with_subject(subject(principal))
+            .with_context(subject(principal).into())
             .namespace(&namespace_id)
             .list_snapshot_files(&snapshot.snapshot_id)
             .page()
@@ -566,9 +567,9 @@ async fn publish_team_and_private_files(
     let namespace_writer = writer
         .open_namespace(namespace_id)
         .expect("open namespace")
-        .with_subject(subject("prn_root"));
+        .with_context(subject("prn_root").into());
     let prepared = namespace_writer
-        .prepare_content(b"body")
+        .prepare_content(b"body", &loonfs_test_support::test_actor())
         .await
         .expect("prepare content");
     let put = |path: String| FilesystemOperation::PutFile {

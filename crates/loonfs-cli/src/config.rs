@@ -7,7 +7,7 @@ use loonfs_client::ClientConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_types::config::{validate_non_empty, ConfigFieldError};
 use loonfs_types::env::AUTH_TOKEN_ENV;
-use loonfs_types::{ActorId, NamespaceId, PrincipalId, SecretString, SubjectId, REDACTED};
+use loonfs_types::{ActorId, NamespaceId, PrincipalId, SecretString, REDACTED};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,6 @@ pub(crate) const CONFIG_PATH_ENV: &str = "LOONFS_CONFIG";
 pub(crate) const PROFILE_ENV: &str = "LOONFS_PROFILE";
 pub(crate) const NAMESPACE_ENV: &str = "LOONFS_NAMESPACE";
 pub(crate) const ACTOR_ID_ENV: &str = "LOONFS_ACTOR_ID";
-pub(crate) const SUBJECT_ID_ENV: &str = "LOONFS_SUBJECT_ID";
 pub(crate) const PRINCIPALS_ENV: &str = "LOONFS_PRINCIPALS";
 
 /// A blank environment value has no usable setting, so treat it as unset
@@ -60,11 +59,10 @@ pub(crate) struct ProfileConfig {
     pub connection: ProfileConnection,
 }
 
-/// The actor and the subject a profile acts as.
+/// The actor a profile acts as, and the principals of its subject.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ProfileIdentity {
     pub actor_id: Option<ActorId>,
-    pub subject_id: Option<SubjectId>,
     pub principals: Option<Vec<PrincipalId>>,
 }
 
@@ -119,8 +117,6 @@ enum ProfileConfigFile {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actor_id: Option<ActorId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        subject_id: Option<SubjectId>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         principals: Option<Vec<PrincipalId>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
@@ -131,8 +127,6 @@ enum ProfileConfigFile {
         server_url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actor_id: Option<ActorId>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        subject_id: Option<SubjectId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         principals: Option<Vec<PrincipalId>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,14 +144,12 @@ impl From<ProfileConfigFile> for ProfileConfig {
             ProfileConfigFile::Embedded {
                 store,
                 actor_id,
-                subject_id,
                 principals,
                 default_namespace,
                 writer_id,
             } => Self {
                 identity: ProfileIdentity {
                     actor_id,
-                    subject_id,
                     principals,
                 },
                 default_namespace,
@@ -166,7 +158,6 @@ impl From<ProfileConfigFile> for ProfileConfig {
             ProfileConfigFile::Remote {
                 server_url,
                 actor_id,
-                subject_id,
                 principals,
                 default_namespace,
                 auth_token,
@@ -174,7 +165,6 @@ impl From<ProfileConfigFile> for ProfileConfig {
             } => Self {
                 identity: ProfileIdentity {
                     actor_id,
-                    subject_id,
                     principals,
                 },
                 default_namespace,
@@ -192,7 +182,6 @@ impl From<ProfileConfig> for ProfileConfigFile {
     fn from(profile: ProfileConfig) -> Self {
         let ProfileIdentity {
             actor_id,
-            subject_id,
             principals,
         } = profile.identity;
         let default_namespace = profile.default_namespace;
@@ -200,7 +189,6 @@ impl From<ProfileConfig> for ProfileConfigFile {
             ProfileConnection::Embedded { store, writer_id } => Self::Embedded {
                 store,
                 actor_id,
-                subject_id,
                 principals,
                 default_namespace,
                 writer_id,
@@ -212,7 +200,6 @@ impl From<ProfileConfig> for ProfileConfigFile {
             } => Self::Remote {
                 server_url,
                 actor_id,
-                subject_id,
                 principals,
                 default_namespace,
                 auth_token,

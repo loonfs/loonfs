@@ -179,13 +179,16 @@ mod tests {
 
     #[test]
     fn construction_validates_config_like_load_does() {
-        let error = Client::new(ClientConfig {
-            server_url: "ftp://example.com".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        })
+        let error = Client::new(
+            ClientConfig {
+                server_url: "ftp://example.com".to_owned(),
+                auth_token: None,
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: None,
+            },
+            loonfs_types::Context::Service,
+        )
         .expect_err("ftp scheme must be rejected");
         assert_matches!(
             &error,
@@ -212,7 +215,8 @@ mod tests {
         assert!(!config_debug.contains(raw_token), "{config_debug}");
         assert!(config_debug.contains("<redacted>"), "{config_debug}");
 
-        let client = Client::new(config).expect("valid client config");
+        let client =
+            Client::new(config, loonfs_types::Context::Service).expect("valid client config");
         let client_debug = format!("{client:?}");
         assert!(!client_debug.contains(raw_token), "{client_debug}");
         assert!(client_debug.contains("<redacted>"), "{client_debug}");
@@ -227,13 +231,16 @@ mod tests {
 
         for path in [missing, garbage] {
             let display = path.display().to_string();
-            let error = Client::new(ClientConfig {
-                server_url: "https://example.com".to_owned(),
-                auth_token: None,
-                request_timeout_ms: None,
-                disable_transient_retry: false,
-                ca_cert_path: Some(display.clone()),
-            })
+            let error = Client::new(
+                ClientConfig {
+                    server_url: "https://example.com".to_owned(),
+                    auth_token: None,
+                    request_timeout_ms: None,
+                    disable_transient_retry: false,
+                    ca_cert_path: Some(display.clone()),
+                },
+                loonfs_types::Context::Service,
+            )
             .expect_err("unusable ca bundle");
             match &error {
                 ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {

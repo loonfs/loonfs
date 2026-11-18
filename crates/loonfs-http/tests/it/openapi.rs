@@ -1571,20 +1571,14 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
 }
 
 #[test]
-fn access_id_schemas_exclude_commas() {
+fn principal_id_schema_excludes_commas() {
     use utoipa::PartialSchema as _;
 
-    for (name, schema) in [
-        ("SubjectId", loonfs_types::SubjectId::schema()),
-        ("PrincipalId", loonfs_types::PrincipalId::schema()),
-    ] {
-        let schema = serde_json::to_value(schema).expect("id schema");
-        assert_eq!(
-            schema.get("pattern").and_then(Value::as_str),
-            Some(r"^[\x21-\x2B\x2D-\x7E]{1,256}$"),
-            "{name} pattern"
-        );
-    }
+    let schema = serde_json::to_value(loonfs_types::PrincipalId::schema()).expect("id schema");
+    assert_eq!(
+        schema.get("pattern").and_then(Value::as_str),
+        Some(r"^[\x21-\x2B\x2D-\x7E]{1,256}$")
+    );
 }
 
 #[test]
@@ -2034,7 +2028,7 @@ fn path_parameter<'a>(
 }
 
 #[test]
-fn actor_headers_are_global_and_only_attributed_operations_require_them() {
+fn actor_headers_are_global_and_only_attributed_and_upload_operations_require_them() {
     let full = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
         .expect("generate document");
     let full: Value = serde_json::from_str(&full).expect("full document");
@@ -2042,7 +2036,6 @@ fn actor_headers_are_global_and_only_attributed_operations_require_them() {
         full["x-fern-global-headers"],
         json!([
         {"header": "Loonfs-Actor", "name": "actorId", "optional": true},
-        {"header": "Loonfs-Subject", "name": "subjectId", "optional": true},
         {"header": "Loonfs-Principals", "name": "principals", "optional": true},
         {"header": "Loonfs-Context", "name": "loonfsContext", "optional": true}
         ])
@@ -2070,12 +2063,18 @@ fn actor_headers_are_global_and_only_attributed_operations_require_them() {
     assert_eq!(
         required,
         BTreeSet::from([
+            "abort_upload",
+            "complete_upload",
             "create_commit",
             "create_namespace",
+            "create_upload",
             "fork_namespace",
             "fork_namespace_for_rebase",
+            "get_upload",
             "merge_fork",
-            "replay_fork"
+            "put_upload_content",
+            "replay_fork",
+            "sign_upload_parts"
         ])
     );
 }

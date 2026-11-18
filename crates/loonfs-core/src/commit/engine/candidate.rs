@@ -112,9 +112,9 @@ impl CommitCandidate {
         self
     }
 
-    /// Supplies the subject used to own content staged for this candidate.
-    pub fn subject(&self) -> Option<&loonfs_types::Subject> {
-        self.intent.subject.as_ref()
+    /// Returns the actor of this candidate, which owns content staged for it.
+    pub fn actor_id(&self) -> &loonfs_types::ActorId {
+        &self.intent.actor_id
     }
 
     /// Returns the authorizer for the candidate's subject, or the service

@@ -71,7 +71,7 @@ async fn manifest_no(store: &SharedObjectStore, namespace_id: &NamespaceId) -> M
 /// Sets the namespace's retention window through another runtime, which
 /// publishes the next manifest.
 async fn publish_rival(store: &SharedObjectStore, namespace_id: &NamespaceId, window_ms: u64) {
-    let rival = LoonFs::builder_with_store(store.clone())
+    let rival = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("rival"))
         .build()
         .await

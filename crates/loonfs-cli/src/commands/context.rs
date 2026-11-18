@@ -6,7 +6,7 @@ use crate::config::{ProfileConfig, ProfileMode};
 use crate::config_file::{load_config, ConfigLocation, ConfigSource};
 use crate::error::{CliError, Result};
 use crate::profiles::{resolve_profile, NamedProfile};
-use crate::resolve::{resolve_actor, resolve_namespace, resolve_subject, ResolvedTarget};
+use crate::resolve::{resolve_actor, resolve_context, resolve_namespace, ResolvedTarget};
 use loonfs_client::{CreateDirectoryOptions, NamespacePath};
 use loonfs_types::{
     AbsolutePath, ActorId, Commit, CommitSeq, EntryInodeKind, ErrorCode, InodeId, NamespaceId,
@@ -83,13 +83,13 @@ impl ProfileContext {
     }
 
     /// Resolves the selected profile with a client that acts as the selected
-    /// subject, whose ID defaults to the profile's actor.
+    /// subject.
     pub(crate) async fn resolve_as_subject(
         invocation: &Invocation,
     ) -> Result<Self, CommandFailure> {
-        let context = Self::resolve(invocation).await?;
-        let actor_id = context.actor(None)?;
-        context.act_as_subject(&invocation.selectors, &actor_id)
+        Self::resolve(invocation)
+            .await?
+            .act_as_subject(&invocation.selectors)
     }
 
     pub(crate) fn mode(&self) -> ProfileMode {
@@ -103,17 +103,11 @@ impl ProfileContext {
     }
 
     /// Scopes the client to the subject that the selectors, the environment,
-    /// and the profile select, whose ID defaults to `actor_id`.
-    pub(crate) fn act_as_subject(
-        mut self,
-        selectors: &Selectors,
-        actor_id: &ActorId,
-    ) -> Result<Self, CommandFailure> {
-        let subject = resolve_subject(&self.profile, actor_id, &selectors.subject)
-            .map_err(|error| self.fail(error))?;
-        if let Some(subject) = &subject {
-            self.target.scope_to_subject(subject);
-        }
+    /// and the profile select.
+    pub(crate) fn act_as_subject(mut self, selectors: &Selectors) -> Result<Self, CommandFailure> {
+        let context =
+            resolve_context(&self.profile, &selectors.subject).map_err(|error| self.fail(error))?;
+        self.target.scope_to_context(context);
         Ok(self)
     }
 
@@ -177,7 +171,7 @@ impl NamespaceContext {
     ) -> Result<Self, CommandFailure> {
         let profile = ProfileContext::resolve(invocation).await?;
         let actor_id = profile.actor(explicit_actor)?;
-        let profile = profile.act_as_subject(&invocation.selectors, &actor_id)?;
+        let profile = profile.act_as_subject(&invocation.selectors)?;
         let namespace = profile.namespace(invocation.selectors.namespace.as_ref())?;
         Ok(profile.for_namespace(namespace, actor_id))
     }

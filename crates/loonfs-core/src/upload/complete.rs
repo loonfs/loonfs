@@ -4,7 +4,7 @@
 use super::direct::validate_upload_checksum;
 use super::proxied::find_proxied_content_ref;
 use super::records::{create_upload_outcome, OutcomeCreation};
-use super::session::{ensure_session_open, ensure_session_subject, upload_mode};
+use super::session::{ensure_session_actor, ensure_session_open, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, COMPLETED_UPLOAD_RECEIPT_WINDOW_MS};
@@ -17,7 +17,7 @@ use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{MultipartPart, ObjectStore};
 use loonfs_types::format::control::{UploadOutcome, UploadSessionMode, UploadSessionPayload};
 use loonfs_types::{
-    ChecksumAlgorithm, CompleteUploadBody, CompletedUploadPart, ContentId, ContentRef,
+    ActorId, ChecksumAlgorithm, CompleteUploadBody, CompletedUploadPart, ContentId, ContentRef,
     ContentRefKind, NamespaceId, PoolId, UploadContentClaim, UploadId, UploadMode, UploadSession,
     UploadSessionStatus,
 };
@@ -36,6 +36,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         completion: CompleteUploadBody,
+        actor_id: &ActorId,
     ) -> Result<CompletedUpload> {
         let clock = self.namespace.start_clock();
         let catalog = self.own_catalog(catalog);
@@ -44,7 +45,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .namespace
             .load_upload_session_state(catalog, upload_id)
             .await?;
-        ensure_session_subject(&loaded.session, self.subject.as_ref())?;
+        ensure_session_actor(&loaded.session, actor_id)?;
         if !matches!(loaded.outcome, Some(UploadOutcome::Completed { .. })) {
             ensure_session_open(&loaded, now_ms)?;
         }

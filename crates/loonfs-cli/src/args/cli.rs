@@ -14,7 +14,7 @@ use super::profile::ProfileCommand;
 use crate::progress::ProgressMode;
 use crate::render::OutputFormat;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueHint};
-use loonfs_types::{NamespaceId, SubjectId};
+use loonfs_types::NamespaceId;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -80,10 +80,6 @@ pub(crate) struct Cli {
     /// `LOONFS_NAMESPACE`, then the profile default.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
     pub(crate) namespace: Option<NamespaceId>,
-    /// Subject ID to act as. Precedence is `--subject-id`,
-    /// `LOONFS_SUBJECT_ID`, the profile, then the actor ID.
-    #[arg(long, global = true, value_hint = ValueHint::Other)]
-    pub(crate) subject_id: Option<SubjectId>,
     /// Comma-separated principal IDs whose grants apply. Precedence is
     /// `--principals`, `LOONFS_PRINCIPALS`, then the profile. Without
     /// principals the CLI acts in the service context, which checks no
@@ -397,7 +393,6 @@ pub(crate) struct Selectors {
 /// The flags that select the subject a command acts as.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SubjectSelectors {
-    pub subject_id: Option<SubjectId>,
     pub principals: Option<String>,
 }
 
@@ -407,7 +402,6 @@ impl Cli {
             profile: self.profile.clone(),
             namespace: self.namespace.clone(),
             subject: SubjectSelectors {
-                subject_id: self.subject_id.clone(),
                 principals: self.principals.clone(),
             },
         }

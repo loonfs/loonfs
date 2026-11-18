@@ -13,7 +13,7 @@ use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::MetadataRunPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
-use loonfs_types::WriterId;
+use loonfs_types::{Context, WriterId};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -36,6 +36,8 @@ use std::sync::Arc;
 #[must_use]
 pub struct LoonFsBuilder<M> {
     core: CoreConfig,
+    /// The context that the built runtime's handles act in.
+    context: Context,
     writer_id: Option<WriterId>,
     mode: PhantomData<M>,
 }
@@ -65,15 +67,15 @@ struct CoreConfig {
 }
 
 impl<M> LoonFsBuilder<M> {
-    pub(super) fn from_config(store_config: StoreConfig) -> Self {
-        Self::new(StoreSource::Config(store_config))
+    pub(super) fn from_config(store_config: StoreConfig, context: Context) -> Self {
+        Self::new(StoreSource::Config(store_config), context)
     }
 
-    pub(super) fn from_store(store: SharedObjectStore) -> Self {
-        Self::new(StoreSource::Shared(store))
+    pub(super) fn from_store(store: SharedObjectStore, context: Context) -> Self {
+        Self::new(StoreSource::Shared(store), context)
     }
 
-    fn new(source: StoreSource) -> Self {
+    fn new(source: StoreSource, context: Context) -> Self {
         Self {
             core: CoreConfig {
                 source,
@@ -88,6 +90,7 @@ impl<M> LoonFsBuilder<M> {
                 object_store_metrics_recorder: None,
                 metrics_recorder: None,
             },
+            context,
             writer_id: None,
             mode: PhantomData,
         }
@@ -225,7 +228,7 @@ impl LoonFsBuilder<ReadOnly> {
     /// no background work, so it needs no ambient Tokio runtime of its own.
     pub async fn build(self) -> Result<LoonFs<ReadOnly>> {
         Ok(LoonFs {
-            core: self.core.open()?,
+            core: self.core.open()?.with_context(&self.context),
             mode: ReadOnly,
         })
     }
@@ -247,6 +250,7 @@ impl LoonFsBuilder<Writable> {
     pub fn read_only(self) -> LoonFsBuilder<ReadOnly> {
         LoonFsBuilder {
             core: self.core,
+            context: self.context,
             writer_id: None,
             mode: PhantomData,
         }
@@ -271,8 +275,10 @@ impl LoonFsBuilder<Writable> {
         });
         let publisher = PublisherRegistry::new(core.clone(), Arc::downgrade(&writer), runtime);
         core.set_head_positions(publisher.head_positions());
+        // The publisher keeps the core without a subject, and only the
+        // handles act in the builder's context.
         Ok(LoonFs {
-            core,
+            core: core.with_context(&self.context),
             mode: Writable { writer, publisher },
         })
     }

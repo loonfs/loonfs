@@ -64,7 +64,7 @@ impl Namespace<Writable> {
                 payload_class = trace::payload_class(u64_from_usize(bytes.len()))
             ),
             async {
-                let prepared_content = self.prepare_content_inner(bytes).await?;
+                let prepared_content = self.prepare_content_inner(bytes, actor).await?;
                 self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
                     .await
             },
@@ -107,7 +107,7 @@ impl Namespace<Writable> {
                 payload_class = "streamed"
             ),
             async {
-                let prepared_content = self.prepare_content_stream_inner(body).await?;
+                let prepared_content = self.prepare_content_stream_inner(body, actor).await?;
                 self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
                     .await
             },

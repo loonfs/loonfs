@@ -31,7 +31,7 @@ use loonfs_test_support::ids::{
 };
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, PrincipalId,
-    PrincipalSet, Subject, SubjectId, MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTE_ENTRIES,
+    PrincipalSet, Subject, MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTE_ENTRIES,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, BTreeSet};
@@ -150,7 +150,7 @@ impl Shape {
     /// comes from the grants, so every read walks the access rows.
     fn reader(&self, reader: LoonFs<ReadOnly>) -> LoonFs<ReadOnly> {
         match self.rows {
-            Rows::Dense => reader.with_subject(subject(1)),
+            Rows::Dense => reader.with_context(subject(1).into()),
             Rows::Directories | Rows::Large => reader,
         }
     }
@@ -249,7 +249,6 @@ fn principal(index: usize) -> PrincipalId {
 
 fn subject(index: usize) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(principal(index).as_str()).expect("subject id"),
         principals: PrincipalSet::new(BTreeSet::from([principal(index)])).expect("principals"),
     }
 }
@@ -285,7 +284,7 @@ fn full_attributes() -> BTreeMap<AttributeKey, AttributeValue> {
 
 async fn seed(store: &SharedObjectStore, shape: &Shape) {
     let writer = writer(store.clone(), "seed-writer").await;
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let maintenance = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
         .build()
         .await
@@ -348,7 +347,7 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(root).expect("local store"));
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .metadata_cache(cache)
         .build()

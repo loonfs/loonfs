@@ -129,7 +129,7 @@ impl Fixture {
             .max_concurrent_reads(NonZeroUsize::MIN)
             .metrics_recorder(recorder.clone())
             .build();
-        let runtime = LoonFs::builder_with_store(store.clone())
+        let runtime = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("read-budget"))
             .metadata_cache(metadata_cache)
             .execution_budget(budget)
@@ -218,7 +218,7 @@ fn one_entry() -> EffectiveLimit {
 #[tokio::test]
 async fn lists_share_one_slot_across_writable_and_read_only_runtimes() {
     let fixture = Fixture::without_heads_or_wal_tails().await;
-    let reader = LoonFs::builder_with_store(fixture.store.clone())
+    let reader = LoonFs::builder_with_store(fixture.store.clone(), crate::Context::Service)
         .read_only()
         .execution_budget(fixture.runtime.execution_budget().clone())
         .build()

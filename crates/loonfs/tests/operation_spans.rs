@@ -54,16 +54,17 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
         namespace.stat("/").await.expect("stat namespace root");
         namespace.metadata().await.expect("read namespace state");
 
-        let maintenance = LoonFs::builder_with_store(writer.object_store())
-            .writer_id(loonfs_test_support::ids::writer_id(
-                "operation-span-maintenance",
-            ))
-            .build()
-            .await
-            .expect("build maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id(
-                "operation-span-maintenance",
-            ));
+        let maintenance =
+            LoonFs::builder_with_store(writer.object_store(), loonfs::Context::Service)
+                .writer_id(loonfs_test_support::ids::writer_id(
+                    "operation-span-maintenance",
+                ))
+                .build()
+                .await
+                .expect("build maintenance")
+                .maintenance(loonfs_test_support::ids::writer_id(
+                    "operation-span-maintenance",
+                ));
         maintenance
             .diagnostics(&namespace_id)
             .await

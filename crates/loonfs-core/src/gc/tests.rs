@@ -199,7 +199,7 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     let catalog = crate::test_support::load_catalog(store, namespace_id).await;
     let begin = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .begin_upload(&catalog)
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     let staged = crate::test_support::NamespaceFixture::new(
@@ -208,7 +208,12 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
         &crate::test_support::writer_at("test-writer", context.now_ms),
     )
     .engine()
-    .upload_content(&catalog, &begin.upload_id, b"racing upload\n")
+    .upload_content(
+        &catalog,
+        &begin.upload_id,
+        b"racing upload\n",
+        &loonfs_test_support::test_actor(),
+    )
     .await
     .expect("stage upload");
     (
@@ -572,6 +577,7 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
             &catalog,
             upload_id,
             loonfs_types::CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("complete upload");
@@ -587,7 +593,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     let catalog = crate::test_support::load_catalog(store, namespace_id).await;
     let begin = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .begin_upload(&catalog)
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     let staged = crate::test_support::NamespaceFixture::new(
@@ -596,7 +602,12 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
         &crate::test_support::writer_at("test-writer", context.now_ms),
     )
     .engine()
-    .upload_content(&catalog, &begin.upload_id, bytes)
+    .upload_content(
+        &catalog,
+        &begin.upload_id,
+        bytes,
+        &loonfs_test_support::test_actor(),
+    )
     .await
     .expect("stage upload");
     complete_staged_upload(store, namespace_id, &begin.upload_id, context).await;

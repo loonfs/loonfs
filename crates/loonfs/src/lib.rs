@@ -25,12 +25,12 @@
 //!
 //! ```no_run
 //! # async fn run(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
-//! use loonfs::{ActorId, CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions, WriterId};
+//! use loonfs::{ActorId, Context, CreateNamespaceOptions, LoonFs, NamespaceId, PutFileOptions, WriterId};
 //!
 //! let actor_id = ActorId::parse("usr_8f3c").expect("valid actor id");
 //! let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
 //!
-//! let runtime = LoonFs::builder(store_config)
+//! let runtime = LoonFs::builder(store_config, Context::Service)
 //!     .writer_id(WriterId::parse("server-a").expect("valid writer id"))
 //!     .build()
 //!     .await?;
@@ -103,7 +103,7 @@ pub use loonfs_types::{
     AbsolutePath, AccessRevisionNo, ActorId, AdvanceRetentionResponse, AttributeKey,
     AttributeValue, Attributes, AttributesProjection, AttributesRevisionNo, BindingVersion,
     CapabilityDocument, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitSeq, ContentId,
-    ContentRef, ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    ContentRef, ContentRefKind, Context, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DeleteSnapshotResponse, DeletedObjectCounts, DeletedSnapshotsByOwner, DestinationBehavior,
     DirectoryPageCursor, DisplayName, EffectiveLimit, EntryInodeKind, FileRevision,
     FileRevisionsPageCursor, GcResponse, GcSkippedWork, InodeId, InodeKind,
@@ -114,7 +114,7 @@ pub use loonfs_types::{
     PathEntryKind, PoolDeletedObjectCounts, PoolGcResponse, PoolId, PoolRetainedCandidates,
     PoolRetainedReason, PrincipalId, PrincipalSet, RetainedCandidates, RetainedReason, RevisionNo,
     SetRetentionWindowResponse, Snapshot, SnapshotId, SnapshotRecord, SnapshotRecordOwner, Subject,
-    SubjectId, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };

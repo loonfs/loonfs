@@ -62,7 +62,6 @@ impl ProfileProviderCommand {
     /// profile at prompts.
     pub(super) fn has_update_flags(&self, subject: &SubjectSelectors) -> bool {
         self.actor().actor_id.is_some()
-            || subject.subject_id.is_some()
             || subject.principals.is_some()
             || match self {
                 Self::S3(args) => args.store.has_update_flags(),
@@ -86,7 +85,6 @@ impl ProfileIdentity {
             parse_profile_principals(subject.principals.as_deref())?.or(self.principals);
         Ok(Self {
             actor_id: actor.actor_id.clone().or(self.actor_id),
-            subject_id: subject.subject_id.clone().or(self.subject_id),
             principals,
         })
     }
@@ -472,7 +470,6 @@ mod tests {
             }),
             &SubjectSelectors {
                 principals: Some(principals),
-                ..SubjectSelectors::default()
             },
             non_interactive_runtime(),
         )

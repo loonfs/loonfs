@@ -670,11 +670,15 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
                 .client
                 .prepare_content_stream(
                     &namespace,
+                    &loonfs_test_support::test_actor(),
                     loonfs_client::PayloadSource::reader(&bytes[..]),
                 )
                 .await
         } else {
-            harness.client.prepare_content(&namespace, bytes).await
+            harness
+                .client
+                .prepare_content(&namespace, &loonfs_test_support::test_actor(), bytes)
+                .await
         }
         .expect("prepare content");
         let mut options = PutFileOptions::default();

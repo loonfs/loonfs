@@ -463,7 +463,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("claim compactor");
-    let other = loonfs::LoonFs::builder_with_store(store.clone())
+    let other = loonfs::LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
@@ -702,7 +702,7 @@ async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_names
             .await
             .expect("create");
     }
-    let other = loonfs::LoonFs::builder_with_store(store.clone())
+    let other = loonfs::LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(writer_id("other"))
         .build()
         .await
@@ -779,7 +779,7 @@ async fn a_session_closes_when_its_index_step_finds_the_namespace_deleted() {
         .put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
-    let other = loonfs::LoonFs::builder_with_store(store)
+    let other = loonfs::LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(writer_id("other"))
         .build()
         .await
@@ -824,8 +824,14 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
             .expect("create");
     }
     let handle = namespaces.open(&aborted).await.expect("open");
-    let upload = handle.create_upload().await.expect("upload");
-    handle.abort_upload(&upload.upload_id).await.expect("abort");
+    let upload = handle
+        .create_upload(&loonfs_test_support::test_actor())
+        .await
+        .expect("upload");
+    handle
+        .abort_upload(&upload.upload_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("abort");
     assert_eq!(handle.last_published_seq(), None);
     drop(handle);
     store.reset();
@@ -881,7 +887,7 @@ async fn a_session_that_maintained_itself_leaves_the_session_steps_nothing_to_do
         KeyPredicate::any(),
     ));
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let runtime = loonfs::LoonFs::builder_with_store(store.clone())
+    let runtime = loonfs::LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("self-maintenance"))
         .wall_clock(clock.clone())
         .monotonic_timer(clock.clone())

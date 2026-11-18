@@ -11,9 +11,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
 use loonfs_types::crypto::constant_time_eq;
-use loonfs_types::{
-    headers, AbsolutePath, ActorId, NamespaceId, Subject, SubjectPart, SubjectPartsError,
-};
+use loonfs_types::{headers, AbsolutePath, ActorId, Context, NamespaceId, PrincipalSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -100,14 +98,14 @@ pub(super) fn missing_actor() -> ApiResponseError {
     .with_param(headers::ACTOR)
 }
 
-/// The subject a request acts as, or `None` in the service context.
+/// The context a request acts in.
 ///
 /// The request sends exactly one of `Loonfs-Principals`, with the subject's
 /// principals, or `Loonfs-Context: service`, so a client that leaves out its
 /// principals by mistake gets `invalid_request` instead of every right.
-pub(super) struct SubjectHeaders(pub(super) Option<Subject>);
+pub(super) struct ContextHeaders(pub(super) Context);
 
-impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
+impl<S: Send + Sync> FromRequestParts<S> for ContextHeaders {
     type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
@@ -117,27 +115,18 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
                 .get(name)
                 .map(|value| String::from_utf8_lossy(value.as_bytes()))
         };
-        let subject = Subject::from_parts(
-            header(headers::SUBJECT).as_deref(),
-            header(headers::ACTOR).as_deref(),
-            header(headers::PRINCIPALS).as_deref(),
-        )
-        .map_err(|error| {
-            let (part, message) = match error {
-                SubjectPartsError::Missing { part, .. } => (
-                    part,
-                    format!("missing required header {}", part.header_name()),
-                ),
-                SubjectPartsError::Invalid { part, message } => (part, message),
-                other => (SubjectPart::Principals, other.to_string()),
-            };
-            ApiResponseError::new(ErrorCode::InvalidRequest, &message)
-                .with_param(part.header_name())
-        })?;
+        let principals = header(headers::PRINCIPALS)
+            .map(|principals| {
+                principals.parse::<PrincipalSet>().map_err(|error| {
+                    ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string())
+                        .with_param(headers::PRINCIPALS)
+                })
+            })
+            .transpose()?;
         let context = header(headers::CONTEXT);
-        match (subject, context.as_deref()) {
-            (Some(subject), None) => Ok(Self(Some(subject))),
-            (None, Some(headers::SERVICE_CONTEXT)) => Ok(Self(None)),
+        match (principals, context.as_deref()) {
+            (Some(principals), None) => Ok(Self(Context::Principals(principals))),
+            (None, Some(headers::SERVICE_CONTEXT)) => Ok(Self(Context::Service)),
             (None, None) => Err(ApiResponseError::new(
                 ErrorCode::InvalidRequest,
                 &format!(

@@ -238,7 +238,7 @@ async fn seed_with_a_departed_writer(
     })
     .expect("construct store")
     .into_shared();
-    let writer = loonfs::LoonFs::builder_with_store(store)
+    let writer = loonfs::LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
         .wall_clock(std::sync::Arc::new(
             loonfs_test_support::clock::ManualClock::new(1_750_000_000_000),

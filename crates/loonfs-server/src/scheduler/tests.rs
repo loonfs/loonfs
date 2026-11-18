@@ -79,7 +79,7 @@ impl SchedulerServer {
     async fn start(store: SharedObjectStore, config: &ServerConfig, now_ms: u64) -> Self {
         let clock = Arc::new(ManualClock::new(now_ms));
         let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let runtime = LoonFs::builder_with_store(store)
+        let runtime = LoonFs::builder_with_store(store, loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("sweep-server"))
             .config(loonfs::RuntimeConfig {
                 min_publish_interval_ms: 0,
@@ -262,7 +262,7 @@ root = "unused"
 
 /// A writer that ran before the server started, on the real clock.
 async fn seed_writer(store: &SharedObjectStore) -> (LoonFs<Writable>, u64) {
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("before-the-server"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,

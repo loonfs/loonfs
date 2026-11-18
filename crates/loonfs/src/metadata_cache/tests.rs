@@ -35,7 +35,7 @@ async fn snapshot_fold_reads(creation: SnapshotCreation, max_segment_bytes: usiz
             OperationSelector::Put,
         ),
     ));
-    let runtime = LoonFs::builder_with_store(store.clone())
+    let runtime = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("snapshot-writer"))
         .metadata_cache(
             MetadataCache::builder()
@@ -156,7 +156,7 @@ async fn same_shape_store(
     cache: &MetadataCache,
     bytes: &'static [u8],
 ) -> LoonFs<Writable> {
-    let writer = LoonFs::builder_with_store(Arc::clone(store))
+    let writer = LoonFs::builder_with_store(Arc::clone(store), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("same-shape-writer"))
         .metadata_cache(cache.clone())
         .build()
@@ -184,7 +184,7 @@ async fn same_shape_store(
 }
 
 async fn reader(store: &SharedObjectStore, cache: &MetadataCache) -> LoonFs<ReadOnly> {
-    LoonFs::builder_with_store(Arc::clone(store))
+    LoonFs::builder_with_store(Arc::clone(store), crate::Context::Service)
         .read_only()
         .metadata_cache(cache.clone())
         .build()
@@ -516,12 +516,13 @@ async fn closing_one_runtime_leaves_the_cache_and_the_other_usable() {
         "the other runtime still reads its warm entries"
     );
 
-    let reopened = LoonFs::builder_with_store(local_store(first_root.path()))
-        .writer_id(loonfs_test_support::ids::writer_id("reopened-writer"))
-        .metadata_cache(cache.clone())
-        .build()
-        .await
-        .expect("build a new runtime over the first store");
+    let reopened =
+        LoonFs::builder_with_store(local_store(first_root.path()), crate::Context::Service)
+            .writer_id(loonfs_test_support::ids::writer_id("reopened-writer"))
+            .metadata_cache(cache.clone())
+            .build()
+            .await
+            .expect("build a new runtime over the first store");
     assert_reads(&reopened.read_only(), b"first").await;
     reopened
         .open_namespace(&demo())
@@ -555,9 +556,11 @@ async fn read_policy_stays_with_each_binding() {
                 LocalFsStore::new(root.path()).expect("create local-fs store"),
                 KeyPredicate::any(),
             ));
-            let runtime = configure(LoonFs::builder_with_store(recording.clone()).read_only())
-                .metadata_cache(cache.clone())
-                .build();
+            let runtime = configure(
+                LoonFs::builder_with_store(recording.clone(), crate::Context::Service).read_only(),
+            )
+            .metadata_cache(cache.clone())
+            .build();
             async move { (runtime.await.expect("build reader"), recording) }
         };
 
@@ -622,7 +625,7 @@ async fn runtimes_report_no_cache_metrics_to_their_recorder() {
     .await;
     for shared in [Some(MetadataCache::default()), None] {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let builder = LoonFs::builder_with_store(local_store(root.path()))
+        let builder = LoonFs::builder_with_store(local_store(root.path()), crate::Context::Service)
             .read_only()
             .metrics_recorder(recorder.clone());
         let runtime = match shared {
@@ -663,7 +666,7 @@ async fn recorded_writer(
         LocalFsStore::new(root.path()).expect("create local-fs store"),
         KeyPredicate::any(),
     ));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(writer_id("object-cache-writer"))
         .metadata_cache(cache)
         .build()
@@ -820,7 +823,7 @@ async fn write_long_named_entries(root: &Path) {
     use crate::publish::{CommitIntent, FilesystemOperation};
     use crate::{AbsolutePath, CommitId};
 
-    let writer = LoonFs::builder_with_store(local_store(root))
+    let writer = LoonFs::builder_with_store(local_store(root), crate::Context::Service)
         .writer_id(writer_id("long-names-writer"))
         .build()
         .await

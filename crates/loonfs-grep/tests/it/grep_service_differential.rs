@@ -30,7 +30,7 @@ impl ServiceHarness {
     async fn new(store: SharedObjectStore, namespace_id: NamespaceId) -> Self {
         // The reader checks for a newer manifest on every read, so a query
         // reads the grep entry that a step just published.
-        let reader = LoonFs::builder_with_store(store.clone())
+        let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .read_only()
             .config(loonfs::RuntimeConfig {
                 manifest_revalidation_interval_ms: 0,
@@ -115,7 +115,7 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse(namespace).expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "planless-boundary-writer",
         ))
@@ -126,7 +126,7 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         .build()
         .await
         .expect("build writer");
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let maintenance = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "planless-boundary-maintenance",
         ))

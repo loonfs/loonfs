@@ -110,7 +110,7 @@ async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
         .expect("published put");
 
     let prepared = namespace_writer
-        .prepare_content(b"never published")
+        .prepare_content(b"never published", &loonfs_test_support::test_actor())
         .await
         .expect("prepare content");
     let orphan_key = content_key(&store, &namespace_id, prepared.content_ref()).await;

@@ -1,5 +1,5 @@
 //! The checks and records that every step of an upload session uses: the
-//! namespace, subject, and lease checks, the session record, and the session's
+//! namespace, actor, and lease checks, the session record, and the session's
 //! response.
 
 use super::complete::completed_status;
@@ -17,8 +17,8 @@ use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, UploadOutcome, UploadSessionMode, UploadSessionPayload,
 };
 use loonfs_types::{
-    ChecksumAlgorithm, ContentId, ContentRef, Subject, SubjectId, UploadId, UploadMode,
-    UploadSession, UploadSessionStatus,
+    ActorId, ChecksumAlgorithm, ContentId, ContentRef, UploadId, UploadMode, UploadSession,
+    UploadSessionStatus,
 };
 use std::num::NonZeroU64;
 
@@ -67,11 +67,11 @@ impl NewUploadSession {
 pub(crate) async fn create_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
-    subject_id: Option<SubjectId>,
+    actor_id: ActorId,
     session: NewUploadSession,
     clock: &OperationClock,
 ) -> Result<UploadSession> {
-    let session = create_upload_session_record(store, catalog, subject_id, session, clock).await?;
+    let session = create_upload_session_record(store, catalog, actor_id, session, clock).await?;
     let state = UploadSessionState {
         session,
         outcome: None,
@@ -83,7 +83,7 @@ pub(crate) async fn create_upload_session<S: ObjectStore + ?Sized>(
 pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
-    subject_id: Option<SubjectId>,
+    actor_id: ActorId,
     session: NewUploadSession,
     clock: &OperationClock,
 ) -> Result<UploadSessionPayload> {
@@ -92,7 +92,7 @@ pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
         namespace_id: catalog.namespace_id().clone(),
         upload_id: upload_id.clone(),
         content_id: session.content_id,
-        subject_id,
+        actor_id,
         mode: session.mode,
         expires_at_ms: clock
             .request_at_ms()
@@ -105,13 +105,13 @@ pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
     Ok(record)
 }
 
-/// Returns `upload_not_found` unless the caller is the session's owner: both
-/// in the service context, or acting as the same subject.
-pub(crate) fn ensure_session_subject(
+/// Returns `upload_not_found` unless `actor_id` is the actor that opened the
+/// session.
+pub(crate) fn ensure_session_actor(
     session: &UploadSessionPayload,
-    subject: Option<&Subject>,
+    actor_id: &ActorId,
 ) -> Result<()> {
-    if session.subject_id.as_ref() == subject.map(|subject| &subject.subject_id) {
+    if &session.actor_id == actor_id {
         Ok(())
     } else {
         Err(CoreError::UploadNotFound {

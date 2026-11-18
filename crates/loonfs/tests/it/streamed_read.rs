@@ -73,7 +73,7 @@ async fn written_file(
         LocalFsStore::new(root).expect("create local-fs store"),
     ));
     let store: SharedObjectStore = watched.clone();
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -195,7 +195,7 @@ async fn a_content_read_the_store_refuses_answers_storage_permission_denied() {
     ));
     refusing.fail_all();
     let store: SharedObjectStore = refusing.clone();
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .build()
         .await

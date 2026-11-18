@@ -2,7 +2,7 @@
 
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
-use super::extractors::SubjectHeaders;
+use super::extractors::ContextHeaders;
 use super::handlers_filesystem::LivePageQuery;
 use super::query_params::{effective_page_limit, live_consistency, read_at};
 use super::{acquire_download_permit, AppPath, AppQuery, HttpState, NamespaceIdPath};
@@ -124,12 +124,12 @@ pub(super) struct StatInodeQuery {
 )]
 pub(super) async fn get_inode(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<StatInodeQuery>,
 ) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
     let mut options = StatOptions {
         at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
@@ -215,12 +215,12 @@ pub(super) struct ListInodeChildrenQuery {
 )]
 pub(super) async fn list_inode_children(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<ListInodeChildrenQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
     let mut options = ListOptions::default();
     if let Some(include) = query.include_attributes {
@@ -275,12 +275,12 @@ pub(super) async fn list_inode_children(
 )]
 pub(super) async fn list_file_revisions_by_inode(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<LivePageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = path.inode_id;
     let options = ListFileRevisionsOptions {
@@ -333,13 +333,13 @@ pub(super) async fn list_file_revisions_by_inode(
 )]
 pub(super) async fn get_file_content_by_inode(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(query): AppQuery<InodeContentQuery>,
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),
@@ -393,13 +393,13 @@ pub(super) async fn get_file_content_by_inode(
 )]
 pub(super) async fn get_file_revision_content_by_inode(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(query): AppQuery<InodeRevisionContentQuery>,
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = path.inode_id;
     let revision_no = path.revision_no;

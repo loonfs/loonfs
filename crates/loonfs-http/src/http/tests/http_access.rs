@@ -1,4 +1,4 @@
-//! Subject headers and their invalid-request parameter names.
+//! Identity headers and their invalid-request parameter names.
 
 use super::fixtures::{self, test_app, test_options, TestAppOptions};
 use axum::body::Body;
@@ -9,7 +9,7 @@ use tempfile::tempdir;
 use tower::ServiceExt as _;
 
 #[tokio::test]
-async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
+async fn principal_headers_are_parsed_and_rejected_with_the_header_named() {
     let temp_dir = tempdir().expect("tempdir");
     let (router, state) = test_app(
         test_options(&temp_dir.path().join("store"), "subject-headers"),
@@ -26,20 +26,14 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
         .map(|index| format!("principal_{index}"))
         .collect::<Vec<_>>()
         .join(",");
-    for (principals, subject, expected_param) in [
-        ("bad principal", Some("usr_ada"), "Loonfs-Principals"),
-        (too_many.as_str(), Some("usr_ada"), "Loonfs-Principals"),
-        ("team", Some("bad subject"), "Loonfs-Subject"),
-    ] {
-        let mut request = Request::builder()
+    for principals in ["bad principal", too_many.as_str()] {
+        let request = Request::builder()
             .method("POST")
             .uri("/v0/namespaces/demo/uploads")
             .header("authorization", "Bearer test-token")
             .header("content-type", "application/json")
+            .header("Loonfs-Actor", "usr_ada")
             .header("Loonfs-Principals", principals);
-        if let Some(subject) = subject {
-            request = request.header("Loonfs-Subject", subject);
-        }
         let response = router
             .clone()
             .oneshot(
@@ -53,14 +47,14 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
         let error: ErrorResponse =
             serde_json::from_value(json_body(response).await).expect("error");
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
-        assert_eq!(error.param.as_deref(), Some(expected_param));
+        assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
     }
     let response = router
         .oneshot(request(
             "POST",
             "/v0/namespaces/demo/commits",
             Some(
-                r#"{"commit_id":"subject-commit","operations":[{"kind":"create_directory","path":"/docs"}]}"#,
+                r#"{"commit_id":"service-commit","operations":[{"kind":"create_directory","path":"/docs"}]}"#,
             ),
             &[("Loonfs-Context", "service")],
         ))
@@ -156,70 +150,102 @@ async fn a_request_sends_exactly_one_of_principals_and_the_service_context() {
     }
 }
 
+/// Checks that every upload route requires `Loonfs-Actor`, and that a
+/// session opened by one actor returns `upload_not_found` to another actor,
+/// in the service context and with principals.
 #[tokio::test]
-async fn every_upload_route_acts_as_the_request_subject() {
+async fn every_upload_route_belongs_to_the_actor_that_opened_the_session() {
     let temp_dir = tempdir().expect("tempdir");
     let (router, _state) = test_app(
-        test_options(&temp_dir.path().join("store"), "upload-subject"),
+        test_options(&temp_dir.path().join("store"), "upload-actor"),
         TestAppOptions::default(),
     )
     .await
     .expect("app");
     create_namespace(&router, "demo", r#"{"team":["admin"]}"#).await;
-    let subject = |id| [("Loonfs-Subject", id), ("Loonfs-Principals", "team")];
-    let response = router
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces/demo/uploads",
-            Some(r#"{"mode":"service_proxied"}"#),
-            &subject("usr_ada"),
-        ))
-        .await
-        .expect("create upload response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let uri = format!(
-        "/v0/namespaces/demo/uploads/{}",
-        json_body(response).await["upload_id"]
-            .as_str()
-            .expect("upload id")
-    );
-
-    for (method, path, body) in [
-        ("GET", uri.clone(), None),
-        ("PUT", format!("{uri}/content"), Some("bytes")),
-        (
-            "POST",
-            format!("{uri}/complete"),
-            Some(r#"{"mode":"service_proxied"}"#),
-        ),
-        ("POST", format!("{uri}/abort"), None),
-    ] {
+    for context in [("Loonfs-Context", "service"), ("Loonfs-Principals", "team")] {
         let response = router
             .clone()
-            .oneshot(request(method, &path, body, &subject("usr_bob")))
+            .oneshot(fixtures::request(
+                "POST",
+                "/v0/namespaces/demo/uploads",
+                Some(r#"{"mode":"service_proxied"}"#),
+                &[("Loonfs-Actor", "usr_ada"), context],
+            ))
             .await
-            .expect("other subject response");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
-        let error: ErrorResponse =
-            serde_json::from_value(json_body(response).await).expect("error");
-        assert_eq!(error.code, ErrorCode::UploadNotFound.as_str());
+            .expect("create upload response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let uri = format!(
+            "/v0/namespaces/demo/uploads/{}",
+            json_body(response).await["upload_id"]
+                .as_str()
+                .expect("upload id")
+        );
+        let routes = [
+            ("GET", uri.clone(), None),
+            ("PUT", format!("{uri}/content"), Some("bytes")),
+            ("POST", format!("{uri}/parts"), Some(r#"{"parts":[]}"#)),
+            (
+                "POST",
+                format!("{uri}/complete"),
+                Some(r#"{"mode":"service_proxied"}"#),
+            ),
+            ("POST", format!("{uri}/abort"), None),
+        ];
+        for (method, path, body) in &routes {
+            let response = router
+                .clone()
+                .oneshot(fixtures::request(method, path, *body, &[context]))
+                .await
+                .expect("response without an actor");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{method} {path}"
+            );
+            let error: ErrorResponse =
+                serde_json::from_value(json_body(response).await).expect("error");
+            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(error.param.as_deref(), Some("Loonfs-Actor"));
+            assert_eq!(error.message, "missing required header Loonfs-Actor");
+        }
+        for (method, path, body) in &routes {
+            if path.ends_with("/parts") {
+                // Signing parts needs a direct multipart session and a
+                // deployment that can presign them.
+                continue;
+            }
+            let response = router
+                .clone()
+                .oneshot(fixtures::request(
+                    method,
+                    path,
+                    *body,
+                    &[("Loonfs-Actor", "usr_bob"), context],
+                ))
+                .await
+                .expect("other actor response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            let error: ErrorResponse =
+                serde_json::from_value(json_body(response).await).expect("error");
+            assert_eq!(error.code, ErrorCode::UploadNotFound.as_str());
+        }
+        let response = router
+            .clone()
+            .oneshot(fixtures::request(
+                "POST",
+                &format!("{uri}/abort"),
+                None,
+                &[("Loonfs-Actor", "usr_ada"), context],
+            ))
+            .await
+            .expect("owner abort response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
-    let response = router
-        .clone()
-        .oneshot(request(
-            "POST",
-            &format!("{uri}/abort"),
-            None,
-            &subject("usr_ada"),
-        ))
-        .await
-        .expect("owner abort response");
-    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn subject_headers_distinguish_service_and_subject_authority() {
+async fn principal_headers_distinguish_service_and_subject_authority() {
     let temp_dir = tempdir().expect("tempdir");
     let (router, _state) = test_app(
         test_options(&temp_dir.path().join("store"), "subject-authority"),
@@ -235,21 +261,13 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
             "POST",
             "/v0/namespaces/demo-acl/snapshots",
             Some(r#"{"name":"snapshot","ttl_ms":60000}"#),
-            &[("Loonfs-Subject", "usr_ada")],
+            &[("Loonfs-Principals", "nobody")],
         ))
         .await
-        .expect("partial subject response");
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ErrorResponse = serde_json::from_value(json_body(response).await).expect("error");
-    assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
-    assert_eq!(error.message, "missing required header Loonfs-Principals");
-    assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
+        .expect("response without rights");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-    for headers in [
-        vec![],
-        vec![("Loonfs-Subject", "usr_ada"), ("Loonfs-Principals", "team")],
-        vec![("Loonfs-Principals", "team")],
-    ] {
+    for headers in [vec![], vec![("Loonfs-Principals", "team")]] {
         let response = router
             .clone()
             .oneshot(request(
@@ -297,10 +315,7 @@ async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_sub
         (None, StatusCode::OK),
     ] {
         let headers = principals.map_or_else(Vec::new, |principals| {
-            vec![
-                ("Loonfs-Subject", "usr_ada"),
-                ("Loonfs-Principals", principals),
-            ]
+            vec![("Loonfs-Principals", principals)]
         });
         let response = router
             .clone()
@@ -386,17 +401,8 @@ async fn the_service_context_sets_administrators_over_the_wire() {
 
     let snapshot = Some(r#"{"name":"snapshot","ttl_ms":60000}"#);
     for (headers, status) in [
-        (
-            vec![("Loonfs-Subject", "usr_x"), ("Loonfs-Principals", "nobody")],
-            StatusCode::FORBIDDEN,
-        ),
-        (
-            vec![
-                ("Loonfs-Subject", "usr_x"),
-                ("Loonfs-Principals", "prn_root"),
-            ],
-            StatusCode::OK,
-        ),
+        (vec![("Loonfs-Principals", "nobody")], StatusCode::FORBIDDEN),
+        (vec![("Loonfs-Principals", "prn_root")], StatusCode::OK),
         (vec![("Loonfs-Context", "service")], StatusCode::OK),
     ] {
         let response = router
@@ -433,7 +439,6 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
                 r#"{"commit_id":"repeated-grant-principal","operations":[{"kind":"update_access","path":"/","boundary":false,"grants":{"viewer":["read"],"viewer":["manage"]}}]}"#,
             ),
             &[
-                ("Loonfs-Subject", "administrator"),
                 ("Loonfs-Principals", "administrator"),
             ],
         ))
@@ -464,10 +469,7 @@ async fn a_former_server_observes_revocation_on_its_first_strong_read() {
         .await
         .expect("old server");
     create_namespace(&old_router, "demo", r#"{"prn_root":["admin"]}"#).await;
-    let administrator = [
-        ("Loonfs-Subject", "root"),
-        ("Loonfs-Principals", "prn_root"),
-    ];
+    let administrator = [("Loonfs-Principals", "prn_root")];
     let publication = serde_json::json!({
         "commit_id": loonfs_types::CommitId::generate(),
         "operations": [
@@ -514,10 +516,7 @@ async fn a_former_server_observes_revocation_on_its_first_strong_read() {
             "GET",
             "/v0/namespaces/demo/filesystem/content?path=/team/file&consistency=strong",
             None,
-            &[
-                ("Loonfs-Subject", "viewer"),
-                ("Loonfs-Principals", "viewer"),
-            ],
+            &[("Loonfs-Principals", "viewer")],
         ))
         .await
         .expect("first read response");

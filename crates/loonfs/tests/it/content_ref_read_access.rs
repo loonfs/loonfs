@@ -7,14 +7,13 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::{
     AccessGrants, AccessRight, ContentRef, ErrorCode, NamespaceId, PrincipalId, PrincipalSet,
-    Subject, SubjectId,
+    Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
         ]))
@@ -69,12 +68,12 @@ async fn create_namespace(
 async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -> ContentRef {
     let namespace = writer
         .read_only()
-        .with_subject(subject("administrator"))
+        .with_context(subject("administrator").into())
         .namespace(namespace_id);
     let namespace_writer = writer.open_namespace(namespace_id).expect("open namespace");
     let options = PutFileOptions::default();
     namespace_writer
-        .with_subject(subject("administrator"))
+        .with_context(subject("administrator").into())
         .put_file_with_options(
             "/source",
             b"private inline bytes",
@@ -100,7 +99,7 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
     create_namespace(&writer, &source, Some("administrator")).await;
     create_namespace(&writer, &destination, Some("administrator")).await;
     let private_ref = publish_inline(&writer, &source).await;
-    loonfs::LoonFs::builder_with_store(recording.clone())
+    loonfs::LoonFs::builder_with_store(recording.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             loonfs_test_support::test_actor().as_str(),
         ))
@@ -113,7 +112,7 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
         .fold_wal(&source)
         .await
         .expect("materialize private content");
-    let reader = writer.read_only().with_subject(subject("stranger"));
+    let reader = writer.read_only().with_context(subject("stranger").into());
     let destination_namespace = writer.read_only().namespace(&destination);
     let source_namespace = reader.namespace(&source);
     assert_eq!(

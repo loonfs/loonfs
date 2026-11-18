@@ -119,7 +119,7 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
     // read that segment. A one-entry page of the directory reads the same
     // segments for the directory's lookup.
     let one_entry = Arc::new(RecordingStore::metadata_segments(store.clone()));
-    LoonFs::builder_with_store(one_entry.clone())
+    LoonFs::builder_with_store(one_entry.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -132,7 +132,7 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
         .expect("one-entry page");
     let directory_reads: BTreeSet<String> = one_entry.take_get_keys().into_iter().collect();
     let recording = Arc::new(RecordingStore::metadata_segments(store));
-    let reader = LoonFs::builder_with_store(recording.clone())
+    let reader = LoonFs::builder_with_store(recording.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -230,7 +230,7 @@ async fn a_cold_recursive_page_sends_at_most_one_data_get_to_each_segment() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let prepared = namespace_writer
-        .prepare_content(b"x")
+        .prepare_content(b"x", &loonfs_test_support::test_actor())
         .await
         .expect("prepare file content");
     let (directories, files) = spread_tree("/deps", 5_000, 16, 3);
@@ -305,7 +305,7 @@ async fn a_cold_recursive_page_sends_at_most_one_data_get_to_each_segment() {
     );
 
     let recording = Arc::new(RecordingStore::metadata_segments(store));
-    let reader = LoonFs::builder_with_store(recording.clone())
+    let reader = LoonFs::builder_with_store(recording.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await

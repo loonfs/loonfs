@@ -45,7 +45,7 @@ async fn a_query_at_a_collected_cached_head_reads_the_newest_manifest() {
     // The first query's pattern matches no file, so the query reads none of
     // the segments that the collection removes, and the reader caches none
     // of those segments.
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()

@@ -168,10 +168,13 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
 
     // The same batch, submitted embedded against the same store.
     let embedded_ns = namespace_id("embedded");
-    let writer = LoonFs::builder(StoreConfig::LocalFs(LocalFsStoreConfig {
-        root: store_root.display().to_string(),
-        key_prefix: Some("http-commits".to_owned()),
-    }))
+    let writer = LoonFs::builder(
+        StoreConfig::LocalFs(LocalFsStoreConfig {
+            root: store_root.display().to_string(),
+            key_prefix: Some("http-commits".to_owned()),
+        }),
+        loonfs::Context::Service,
+    )
     .writer_id(loonfs_test_support::ids::writer_id("loonfs-embedded-batch"))
     .build()
     .await
@@ -183,11 +186,11 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .expect("create embedded namespace");
     let namespace_writer = writer.open_namespace(&embedded_ns).expect("open namespace");
     let first_prepared = namespace_writer
-        .prepare_content(FIRST_BYTES)
+        .prepare_content(FIRST_BYTES, &loonfs_test_support::test_actor())
         .await
         .expect("prepare first");
     let second_prepared = namespace_writer
-        .prepare_content(SECOND_BYTES)
+        .prepare_content(SECOND_BYTES, &loonfs_test_support::test_actor())
         .await
         .expect("prepare second");
     let embedded_committed = namespace_writer
@@ -872,10 +875,13 @@ async fn a_commit_id_used_embedded_replays_over_http() {
     // Committed embedded first, then the writer goes away: the served
     // writer acquires its own epoch afterward and finds the receipt.
     let embedded_receipt = {
-        let writer = LoonFs::builder(StoreConfig::LocalFs(LocalFsStoreConfig {
-            root: store_root.display().to_string(),
-            key_prefix: Some("http-cross-transport".to_owned()),
-        }))
+        let writer = LoonFs::builder(
+            StoreConfig::LocalFs(LocalFsStoreConfig {
+                root: store_root.display().to_string(),
+                key_prefix: Some("http-cross-transport".to_owned()),
+            }),
+            loonfs::Context::Service,
+        )
         .writer_id(loonfs_test_support::ids::writer_id("loonfs-embedded-cross"))
         .build()
         .await

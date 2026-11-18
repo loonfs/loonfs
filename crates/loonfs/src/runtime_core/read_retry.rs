@@ -253,9 +253,10 @@ mod tests {
     #[tokio::test]
     async fn reads_through_views_run_again_after_a_replaced_manifest() {
         let temp_dir = tempdir().expect("tempdir");
-        let runtime = LoonFs::builder_with_store(Arc::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        ))
+        let runtime = LoonFs::builder_with_store(
+            Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store")),
+            crate::Context::Service,
+        )
         .writer_id(loonfs_test_support::ids::writer_id("replaced-reads"))
         .build()
         .await

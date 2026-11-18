@@ -59,9 +59,12 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     // Stage the second put's content while the store is unblocked: once
     // callers start being cancelled, the only work still in flight is
     // publication, the thing under test.
-    let upload = namespace.create_upload().await.expect("begin upload");
+    let upload = namespace
+        .create_upload(&loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     let staged = namespace
-        .put_upload_content(&upload.upload_id, b"b")
+        .put_upload_content(&upload.upload_id, b"b", &loonfs_test_support::test_actor())
         .await
         .expect("stage second put content");
     let catalog = loonfs_core::test_support::namespace_store(&store, &namespace_id)

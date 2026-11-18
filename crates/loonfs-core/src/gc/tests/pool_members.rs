@@ -568,7 +568,7 @@ async fn a_forks_content_is_stored_in_its_sources_pool_and_only_the_pools_collec
     let catalog = crate::test_support::load_catalog(&store, fork).await;
     crate::test_support::NamespaceFixture::new(&store, fork, &context(1_000))
         .engine()
-        .begin_upload(&catalog)
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
         .await
         .expect("open an upload in the fork");
     assert_eq!(

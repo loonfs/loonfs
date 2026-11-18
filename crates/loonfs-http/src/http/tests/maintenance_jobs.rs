@@ -38,7 +38,7 @@ async fn send(
 /// app starts, so no writer session compacts the namespaces on its own.
 async fn write_delta_runs(store: SharedObjectStore, namespaces: &[&NamespaceId]) {
     let actor = loonfs_test_support::test_actor();
-    let writer = LoonFs::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(writer_id("history-writer"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,

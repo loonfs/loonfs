@@ -2,7 +2,7 @@
 
 use super::complete::evidence_within_window;
 use super::proxied::find_proxied_content_ref;
-use super::session::{ensure_session_subject, session_response};
+use super::session::{ensure_session_actor, session_response};
 use crate::engine::NamespaceEngine;
 use crate::error::Result;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -10,7 +10,7 @@ use crate::storage::content_admission::CompletedUploadEvidence;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{UploadOutcome, UploadSessionMode};
-use loonfs_types::{UploadId, UploadSession};
+use loonfs_types::{ActorId, UploadId, UploadSession};
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns an upload session. Completed uploads include new evidence so
@@ -19,6 +19,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
+        actor_id: &ActorId,
     ) -> Result<UploadSessionView> {
         let now_ms = self.now_ms();
         let catalog = self.own_catalog(catalog);
@@ -26,7 +27,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .namespace
             .load_upload_session_state(catalog, upload_id)
             .await?;
-        ensure_session_subject(&loaded.session, self.subject.as_ref())?;
+        ensure_session_actor(&loaded.session, actor_id)?;
         let evidence = match &loaded.outcome {
             Some(UploadOutcome::Completed {
                 completed_at_ms,

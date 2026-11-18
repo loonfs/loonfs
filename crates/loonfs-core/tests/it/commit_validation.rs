@@ -127,9 +127,17 @@ async fn valid_content_admission_skips_durable_content_validation() {
     // so the token this test admits has to come from a real upload.
     let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload(&catalog).await.expect("begin upload");
+    let upload = engine
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     engine
-        .upload_content(&catalog, &upload.upload_id, b"admitted")
+        .upload_content(
+            &catalog,
+            &upload.upload_id,
+            b"admitted",
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("stage content");
     let catalog = namespace_store(&store, &namespace_id)
@@ -141,6 +149,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
             &catalog,
             &upload.upload_id,
             CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("complete upload");
@@ -254,9 +263,17 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
         .expect("bootstrap");
     let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload(&catalog).await.expect("begin upload");
+    let upload = engine
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     engine
-        .upload_content(&catalog, &upload.upload_id, b"deadline")
+        .upload_content(
+            &catalog,
+            &upload.upload_id,
+            b"deadline",
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("stage content");
     let completed = engine
@@ -264,6 +281,7 @@ async fn completed_upload_proof_is_rejected_after_its_admission_deadline() {
             &catalog,
             &upload.upload_id,
             CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("complete upload");
@@ -1053,9 +1071,17 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .expect("bootstrap");
     let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let engine = namespace_engine(&store, &namespace_id, &context);
-    let upload = engine.begin_upload(&catalog).await.expect("begin upload");
+    let upload = engine
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     let staged = engine
-        .upload_content(&catalog, &upload.upload_id, b"re-minted")
+        .upload_content(
+            &catalog,
+            &upload.upload_id,
+            b"re-minted",
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("stage content");
     let catalog = namespace_store(&store, &namespace_id)
@@ -1067,6 +1093,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
             &catalog,
             &upload.upload_id,
             CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("complete upload");
@@ -1092,7 +1119,11 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         evidence,
         ..
     } = engine
-        .get_upload(&catalog, &upload.upload_id)
+        .get_upload(
+            &catalog,
+            &upload.upload_id,
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("get upload status");
     match status.status {

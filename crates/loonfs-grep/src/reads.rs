@@ -52,7 +52,7 @@ impl NamespaceReads {
     /// Verifies candidates and reads their content as `subject`. The index
     /// and the change feed still read as the service.
     pub fn with_subject(mut self, subject: Subject) -> Self {
-        self.subject_namespace = Some(self.namespace.with_subject(subject));
+        self.subject_namespace = Some(self.namespace.with_context(subject.into()));
         self
     }
 

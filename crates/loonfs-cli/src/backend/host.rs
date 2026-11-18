@@ -108,6 +108,9 @@ pub(crate) fn client(
             ca_cert_path: None,
         },
         service,
+        // A profile-level command acts in the service context, and a
+        // command that acts for a subject switches with `with_context`.
+        loonfs_types::Context::Service,
     )?)
 }
 

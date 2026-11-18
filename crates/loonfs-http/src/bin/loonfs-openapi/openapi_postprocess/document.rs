@@ -12,7 +12,6 @@ pub(crate) fn openapi_json_pretty(
     let mut document = serde_json::to_value(document)?;
     document["x-fern-global-headers"] = serde_json::json!([
         {"header": headers::ACTOR, "name": "actorId", "optional": true},
-        {"header": headers::SUBJECT, "name": "subjectId", "optional": true},
         {"header": headers::PRINCIPALS, "name": "principals", "optional": true},
         {"header": headers::CONTEXT, "name": "loonfsContext", "optional": true}
     ]);

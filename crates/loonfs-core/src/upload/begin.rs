@@ -10,7 +10,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ObjectStore, PROVIDER_MULTIPART_PART_BYTES};
 use loonfs_types::options::DirectMultipartUploadOptions;
-use loonfs_types::{ChecksumAlgorithm, ContentId, UploadSession};
+use loonfs_types::{ActorId, ChecksumAlgorithm, ContentId, UploadSession};
 use std::num::NonZeroU64;
 
 /// Internal target for a new direct_put session, used by the server before
@@ -39,17 +39,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn begin_upload(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
+        actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let clock = self.namespace.start_clock();
         let catalog = self.own_catalog(catalog);
-        let recorded = self
-            .subject
-            .as_ref()
-            .map(|subject| subject.subject_id.clone());
         create_upload_session(
             &self.namespace.store,
             catalog,
-            recorded,
+            actor_id.clone(),
             NewUploadSession::service_proxied(),
             &clock,
         )
@@ -60,19 +57,16 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn begin_direct_put_upload_target(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
+        actor_id: &ActorId,
     ) -> Result<DirectPutUploadTarget> {
         let clock = self.namespace.start_clock();
         let catalog = self.own_catalog(catalog);
-        let recorded = self
-            .subject
-            .as_ref()
-            .map(|subject| subject.subject_id.clone());
         let content_id = ContentId::generate();
         let object_key = content_blob(catalog.pool_id(), &content_id);
         let session = create_upload_session(
             &self.namespace.store,
             catalog,
-            recorded,
+            actor_id.clone(),
             NewUploadSession::direct_put(content_id, self.namespace.store.checksum_algorithm()),
             &clock,
         )
@@ -93,15 +87,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn begin_direct_multipart_upload_target(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
+        actor_id: &ActorId,
         options: DirectMultipartUploadOptions,
     ) -> Result<DirectMultipartUploadTarget> {
         let clock = self.namespace.start_clock();
         let catalog = self.own_catalog(catalog);
         let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
-        let recorded = self
-            .subject
-            .as_ref()
-            .map(|subject| subject.subject_id.clone());
         let content_id = ContentId::generate();
         let object_key = content_blob(catalog.pool_id(), &content_id);
         let provider_upload_id = self
@@ -116,22 +107,27 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             part_size_bytes,
             self.namespace.store.checksum_algorithm(),
         );
-        let session =
-            match create_upload_session(&self.namespace.store, catalog, recorded, session, &clock)
-                .await
-            {
-                Ok(session) => session,
-                Err(error) => {
-                    let _ = abort_unpublished_multipart_upload(
-                        &self.namespace.store,
-                        catalog.pool_id(),
-                        &content_id,
-                        &provider_upload_id,
-                    )
-                    .await;
-                    return Err(error);
-                }
-            };
+        let session = match create_upload_session(
+            &self.namespace.store,
+            catalog,
+            actor_id.clone(),
+            session,
+            &clock,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = abort_unpublished_multipart_upload(
+                    &self.namespace.store,
+                    catalog.pool_id(),
+                    &content_id,
+                    &provider_upload_id,
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         Ok(DirectMultipartUploadTarget {
             session,

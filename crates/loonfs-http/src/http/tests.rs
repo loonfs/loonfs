@@ -1420,13 +1420,16 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
     let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     for auth_token in [None, Some("wrong-token".to_owned())] {
-        let client = Client::new(ClientConfig {
-            server_url: format!("http://{addr}"),
-            auth_token: auth_token.map(Into::into),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        })
+        let client = Client::new(
+            ClientConfig {
+                server_url: format!("http://{addr}"),
+                auth_token: auth_token.map(Into::into),
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: None,
+            },
+            loonfs_types::Context::Service,
+        )
         .expect("valid client config");
         assert_error_response(
             client.get_namespace(&namespace_id("demo")).await,
@@ -1827,13 +1830,16 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     config.http.max_upload_bytes = Some(1024);
     let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
-    let client = Client::new(ClientConfig {
-        server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".into()),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
+    let client = Client::new(
+        ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".into()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        loonfs_types::Context::Service,
+    )
     .expect("valid client config");
     let target = NamespacePath::parse("demo", "/big.bin").expect("target");
     let namespace = namespace_id("demo");
@@ -1844,13 +1850,19 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let session = client
         .create_upload(
             &namespace,
+            &loonfs_test_support::test_actor(),
             &loonfs_types::CreateUploadBody::ServiceProxied {},
         )
         .await
         .expect("begin a proxied upload session");
     assert_error_response(
         client
-            .put_upload_content(&namespace, &session.upload_id, &[0u8; 4096])
+            .put_upload_content(
+                &namespace,
+                &loonfs_test_support::test_actor(),
+                &session.upload_id,
+                &[0u8; 4096],
+            )
             .await,
         413,
         "content_too_large",
@@ -2090,7 +2102,8 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         ca_cert_path: None,
     };
     let config_for_busy = client_config.clone();
-    let client = Client::new(config_for_busy).expect("valid client config");
+    let client =
+        Client::new(config_for_busy, loonfs_types::Context::Service).expect("valid client config");
     let target = NamespacePath::parse("demo", "/one.bin").expect("target");
     assert_error_response(
         client
@@ -2115,7 +2128,8 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
             && entry.value == loonfs::metrics::MetricValue::Counter(1)));
 
     drop(held);
-    let client = Client::new(client_config).expect("valid client config");
+    let client =
+        Client::new(client_config, loonfs_types::Context::Service).expect("valid client config");
     let target = NamespacePath::parse("demo", "/one.bin").expect("target");
     client
         .put_file_with_options(
@@ -2174,7 +2188,8 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         ca_cert_path: None,
     };
     let config_for_busy = client_config.clone();
-    let client = Client::new(config_for_busy).expect("valid client config");
+    let client =
+        Client::new(config_for_busy, loonfs_types::Context::Service).expect("valid client config");
     let target = NamespacePath::parse("demo", "/note.txt").expect("target");
     assert_error_response(
         client.read_file(&target).await,
@@ -2230,7 +2245,8 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
             && entry.value == loonfs::metrics::MetricValue::Counter(2)));
 
     drop(held);
-    let client = Client::new(client_config).expect("valid client config");
+    let client =
+        Client::new(client_config, loonfs_types::Context::Service).expect("valid client config");
     let target = NamespacePath::parse("demo", "/note.txt").expect("target");
     let bytes = client
         .read_file(&target)
@@ -2349,13 +2365,16 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
     config.http.max_download_bytes = Some(16);
     let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
-    let client = Client::new(ClientConfig {
-        server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".into()),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
+    let client = Client::new(
+        ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".into()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        loonfs_types::Context::Service,
+    )
     .expect("valid client config");
     assert_error_response(
         client
@@ -2432,12 +2451,12 @@ async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObject
 /// on the given store, its filesystem reads and snapshots on handles over
 /// the same store.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
         .expect("build reader");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(actor))
         .build()
         .await
@@ -2615,7 +2634,7 @@ async fn start_server_with_config(store: SharedObjectStore, config: TestOptions)
 }
 
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .config(loonfs::RuntimeConfig {
             trace_mode: TraceMode::Remote,
@@ -3574,6 +3593,7 @@ mod direct_download {
                 ca_cert_path: None,
             },
             service,
+            loonfs_types::Context::Service,
         )
         .expect("client");
         let namespace = namespace_id("grant-ranges");
@@ -3848,13 +3868,21 @@ mod direct_download {
             .await
             .expect("create namespace");
         let begin = client
-            .create_direct_put_upload_target(&namespace_id, Some(5))
+            .create_direct_put_upload_target(
+                &namespace_id,
+                &loonfs_test_support::test_actor(),
+                Some(5),
+            )
             .await
             .expect("begin direct put");
 
         for _ in 0..2 {
             let session = client
-                .get_upload(&namespace_id, &begin.upload_id)
+                .get_upload(
+                    &namespace_id,
+                    &loonfs_test_support::test_actor(),
+                    &begin.upload_id,
+                )
                 .await
                 .expect("read open direct_put session");
             assert_eq!(session.mode, loonfs_types::UploadMode::DirectPut);
@@ -3871,6 +3899,7 @@ mod direct_download {
         let error = client
             .complete_upload(
                 &namespace_id,
+                &loonfs_test_support::test_actor(),
                 &begin.upload_id,
                 &loonfs_types::CompleteUploadBody::DirectMultipart {
                     content: UploadContentClaim {
@@ -4128,11 +4157,12 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
         assert!(first.len() as u64 <= loonfs::CONTENT_READ_CHUNK_BYTES.get());
         drop(first);
         if corrupt {
-            let reader = loonfs::LoonFs::builder_with_store(plain.clone())
-                .read_only()
-                .build()
-                .await
-                .expect("reader");
+            let reader =
+                loonfs::LoonFs::builder_with_store(plain.clone(), loonfs::Context::Service)
+                    .read_only()
+                    .build()
+                    .await
+                    .expect("reader");
             let namespace = reader.namespace(&ns);
             let entry = namespace.stat("/large.bin").await.expect("entry");
 

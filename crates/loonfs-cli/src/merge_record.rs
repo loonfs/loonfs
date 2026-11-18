@@ -4,21 +4,18 @@
 use crate::error::{CliError, Result};
 use crate::state_file::{keyed_path, OwnedStateFile};
 use loonfs_merge::MergeSessionState;
-use loonfs_types::{ActorId, CommitSeq, NamespaceId, Subject};
+use loonfs_types::{ActorId, CommitSeq, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 const MERGES_SUBDIR: &str = "merges";
 
 /// The inputs of a merge session that a resumed run has to repeat, beside
-/// the actor that the session's state records. The subject is part of every
-/// merge's identity, and `--through` sets the range that the session merges.
+/// the actor that the session's state records. `--through` sets the range
+/// that the session merges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MergeAttempt {
-    /// The subject that the session's requests act as, or `None` in the
-    /// service context.
-    pub subject: Option<Subject>,
     /// The fork sequence that the command asked to merge the fork through.
     pub through_seq: Option<CommitSeq>,
 }
@@ -98,8 +95,8 @@ impl MergeRecordFile {
         if let Some((actor_id, attempt)) = resumed_as {
             if session.actor_id != *actor_id || record.attempt != *attempt {
                 return Err(self.error(
-                    "merge options changed; resume with the original actor, subject, and \
-                     `--through`, or abandon the session with `--abandon`",
+                    "merge options changed; resume with the original actor and `--through`, \
+                     or abandon the session with `--abandon`",
                 ));
             }
         }

@@ -19,7 +19,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         Arc::new(LocalFsStore::new(directory.path()).expect("local store"));
     let clock = Arc::new(ManualClock::new(COMMITTED_AT_MS));
     let namespace_id = namespace_id("idle-tail");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("departed-writer"))
         .wall_clock(clock.clone())
         .build()
@@ -39,7 +39,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
     writer.shutdown().await.expect("writer shutdown");
     drop(writer);
 
-    let disabled = LoonFs::builder_with_store(store.clone())
+    let disabled = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("idle-off-worker"))
         .wall_clock(clock.clone())
         .config(loonfs::RuntimeConfig {
@@ -50,7 +50,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
         .await
         .expect("maintenance without idle folds")
         .maintenance(loonfs_test_support::ids::writer_id("idle-off-worker"));
-    let maintenance = LoonFs::builder_with_store(store)
+    let maintenance = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("fresh-worker"))
         .wall_clock(clock.clone())
         .build()
@@ -114,7 +114,7 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
     ));
     let clock = Arc::new(ManualClock::new(u64::MAX / 2));
     let namespace_id = namespace_id("wall-clock");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .wall_clock(clock.clone())
         .build()
@@ -135,13 +135,13 @@ async fn injected_wall_time_collects_objects_the_system_clock_keeps() {
             .committed_at_ms,
         clock.now_ms()
     );
-    let system = LoonFs::builder_with_store(store.clone())
+    let system = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("system"))
         .build()
         .await
         .expect("system maintenance")
         .maintenance(loonfs_test_support::ids::writer_id("system"));
-    let future_runtime = LoonFs::builder_with_store(store.clone())
+    let future_runtime = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("future"))
         .wall_clock(clock.clone())
         .build()

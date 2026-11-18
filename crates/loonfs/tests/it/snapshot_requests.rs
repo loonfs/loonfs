@@ -40,7 +40,7 @@ async fn fixture(fold: Fold) -> Fixture {
         KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let builder = LoonFs::builder_with_store(store)
+    let builder = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(writer_id(&name))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,

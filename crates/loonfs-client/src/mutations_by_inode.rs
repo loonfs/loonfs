@@ -47,7 +47,7 @@ impl Client {
         actor: &ActorId,
         options: &CommitOptions,
     ) -> Result<Commit> {
-        let prepared_content = self.prepare_content(namespace_id, bytes).await?;
+        let prepared_content = self.prepare_content(namespace_id, actor, bytes).await?;
         self.commit_prepared_operation(
             namespace_id,
             prepared_content,
@@ -101,7 +101,7 @@ impl Client {
         actor: &ActorId,
         options: &CommitOptions,
     ) -> Result<Commit> {
-        let prepared_content = self.prepare_content(namespace_id, bytes).await?;
+        let prepared_content = self.prepare_content(namespace_id, actor, bytes).await?;
         self.commit_prepared_operation(
             namespace_id,
             prepared_content,

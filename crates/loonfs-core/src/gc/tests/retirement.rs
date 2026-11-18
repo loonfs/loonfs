@@ -87,7 +87,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let catalog = crate::test_support::load_catalog(&inner, &target).await;
     let upload = crate::test_support::NamespaceFixture::new(&inner, &target, &setup)
         .engine()
-        .begin_upload(&catalog)
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
         .await
         .expect("open upload");
     crate::test_support::NamespaceFixture::new(&inner, &target, &setup)
@@ -185,7 +185,11 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     let catalog = crate::test_support::load_catalog(&inner, &namespace_id).await;
     let upload = crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &setup)
         .engine()
-        .begin_direct_multipart_upload_target(&catalog, Default::default())
+        .begin_direct_multipart_upload_target(
+            &catalog,
+            &loonfs_test_support::test_actor(),
+            Default::default(),
+        )
         .await
         .expect("open multipart upload");
     let targets = crate::test_support::NamespaceFixture::new(
@@ -201,6 +205,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
             part_number: 1,
             checksum: loonfs_types::Checksum::crc64nvme(b"part"),
         }],
+        &loonfs_test_support::test_actor(),
     )
     .await
     .expect("prepare capability");

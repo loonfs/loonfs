@@ -89,13 +89,16 @@ async fn a_client_without_the_certificate_authority_is_refused_at_the_handshake(
     ))
     .await;
 
-    let untrusting = Client::new(ClientConfig {
-        server_url: harness.server_url.clone(),
-        auth_token: harness.auth_token.clone().map(Into::into),
-        request_timeout_ms: None,
-        disable_transient_retry: true,
-        ca_cert_path: None,
-    })
+    let untrusting = Client::new(
+        ClientConfig {
+            server_url: harness.server_url.clone(),
+            auth_token: harness.auth_token.clone().map(Into::into),
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+            ca_cert_path: None,
+        },
+        loonfs_types::Context::Service,
+    )
     .expect("valid client config");
 
     // A self-signed certificate the platform roots do not vouch for is a

@@ -99,9 +99,17 @@ async fn reads_commits_and_change_feed_list_only_the_manifests() {
         .expect("write junk");
 
     let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
-    let staged = engine.begin_upload(&catalog).await.expect("begin upload");
+    let staged = engine
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     engine
-        .upload_content(&catalog, &staged.upload_id, b"uploaded\n")
+        .upload_content(
+            &catalog,
+            &staged.upload_id,
+            b"uploaded\n",
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("upload content");
     engine
@@ -109,6 +117,7 @@ async fn reads_commits_and_change_feed_list_only_the_manifests() {
             &catalog,
             &staged.upload_id,
             CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("complete upload");
@@ -224,9 +233,17 @@ async fn maintenance_preserves_the_logical_head() {
         .await
         .expect("collection");
     let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
-    let staged = engine.begin_upload(&catalog).await.expect("second upload");
+    let staged = engine
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
+        .await
+        .expect("second upload");
     engine
-        .upload_content(&catalog, &staged.upload_id, b"more\n")
+        .upload_content(
+            &catalog,
+            &staged.upload_id,
+            b"more\n",
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("second upload content");
     engine
@@ -234,6 +251,7 @@ async fn maintenance_preserves_the_logical_head() {
             &catalog,
             &staged.upload_id,
             CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("second upload complete");

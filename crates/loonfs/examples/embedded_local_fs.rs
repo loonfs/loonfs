@@ -15,10 +15,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // This short-lived example runs no maintenance of its own. A
     // long-running host would sweep its namespaces on a cadence.
-    let runtime = LoonFs::builder(StoreConfig::LocalFs(LocalFsStoreConfig {
-        root: root.to_string_lossy().into_owned(),
-        key_prefix: None,
-    }))
+    let runtime = LoonFs::builder(
+        StoreConfig::LocalFs(LocalFsStoreConfig {
+            root: root.to_string_lossy().into_owned(),
+            key_prefix: None,
+        }),
+        loonfs::Context::Service,
+    )
     .writer_id(WriterId::parse("embedded-example")?)
     .build()
     .await?;

@@ -27,7 +27,7 @@
       "namespace_id": "conf-proxy-acl",
       "administrator": "prn_admin",
       "member": "prn_member",
-      "member_subject_id": "usr_member",
+      "member_actor_id": "usr_member",
       "browser_principals": "prn_admin",
       "commit_id": "conf-proxy-acl-stamped",
       "directory": "/stamped-by-subject"

@@ -273,7 +273,7 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
         .snapshot_id
         .clone();
 
-    let deleter = LoonFs::builder_with_store(store.clone())
+    let deleter = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "snapshot-tombstone-deleter",
         ))
@@ -283,7 +283,7 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
     let namespace = deleter.open_namespace(&source).expect("open namespace");
     namespace.delete().await.expect("delete source namespace");
 
-    let observer = LoonFs::builder_with_store(store)
+    let observer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "snapshot-tombstone-observer",
         ))
@@ -340,7 +340,7 @@ async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() 
 async fn snapshot_lookups_refuse_a_deleted_namespace_and_a_missing_one() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let deleter = LoonFs::builder_with_store(store.clone())
+    let deleter = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "snapshot-lookup-deleter",
         ))
@@ -359,7 +359,7 @@ async fn snapshot_lookups_refuse_a_deleted_namespace_and_a_missing_one() {
         .expect("create a snapshot");
     namespace.delete().await.expect("delete namespace");
 
-    let observer = LoonFs::builder_with_store(store)
+    let observer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "snapshot-lookup-observer",
         ))
@@ -402,7 +402,7 @@ async fn an_expired_snapshot_is_not_found_and_not_listed_but_stays_in_the_invent
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(
         1_750_000_000_000,
     ));
-    let writer = LoonFs::builder_with_store(store(temp_dir.path()))
+    let writer = LoonFs::builder_with_store(store(temp_dir.path()), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("snapshot-expiry"))
         .wall_clock(clock.clone())
         .build()
@@ -488,9 +488,10 @@ async fn an_expired_snapshot_is_not_found_and_not_listed_but_stays_in_the_invent
 #[tokio::test]
 async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
     let directory = tempdir().expect("directory");
-    let writer = LoonFs::builder_with_store(Arc::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-    ))
+    let writer = LoonFs::builder_with_store(
+        Arc::new(LocalFsStore::new(directory.path()).expect("store")),
+        loonfs::Context::Service,
+    )
     .writer_id(loonfs_test_support::ids::writer_id("snapshot-options"))
     .build()
     .await
@@ -595,9 +596,10 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
 #[tokio::test]
 async fn shared_file_and_download_options_select_the_snapshot() {
     let directory = tempdir().expect("directory");
-    let writer = LoonFs::builder_with_store(Arc::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-    ))
+    let writer = LoonFs::builder_with_store(
+        Arc::new(LocalFsStore::new(directory.path()).expect("store")),
+        loonfs::Context::Service,
+    )
     .writer_id(loonfs_test_support::ids::writer_id("snapshot-file-options"))
     .build()
     .await

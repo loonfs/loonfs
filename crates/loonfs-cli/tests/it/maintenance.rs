@@ -29,12 +29,13 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/visible.txt"]));
     assert_success(&harness.run(&["maintenance", "index", "enable"]));
     // One commit puts more files past the index than a query scans.
-    let writer = loonfs::LoonFs::builder(loonfs_objectstore::StoreConfig::LocalFs(
-        LocalFsStoreConfig {
+    let writer = loonfs::LoonFs::builder(
+        loonfs_objectstore::StoreConfig::LocalFs(LocalFsStoreConfig {
             root: harness.store_root("default").display().to_string(),
             key_prefix: None,
-        },
-    ))
+        }),
+        loonfs::Context::Service,
+    )
     .writer_id(loonfs_test_support::ids::writer_id("stale-grep-fixture"))
     .build()
     .await
@@ -44,7 +45,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let prepared = namespace
-        .prepare_content(b"needle\n")
+        .prepare_content(b"needle\n", &loonfs_test_support::test_actor())
         .await
         .expect("prepare content");
     let operations = (0..=loonfs_grep::MAX_GREP_TAIL_FILES)

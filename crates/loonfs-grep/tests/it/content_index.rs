@@ -50,7 +50,7 @@ impl ContentFixture {
         ));
         let store: SharedObjectStore = content_gets.clone();
         let clock = Arc::new(ManualClock::at_system_time());
-        let writer = LoonFs::builder_with_store(store.clone())
+        let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(name))
             .wall_clock(clock.clone())
             .config(loonfs::RuntimeConfig {
@@ -111,7 +111,7 @@ impl ContentFixture {
     pub(crate) async fn put_prepared(&self, path: &str, bytes: &[u8]) -> (PreparedContent, Commit) {
         let prepared = self
             .namespace
-            .prepare_content(bytes)
+            .prepare_content(bytes, &loonfs_test_support::test_actor())
             .await
             .expect("prepare the content");
         let commit = self

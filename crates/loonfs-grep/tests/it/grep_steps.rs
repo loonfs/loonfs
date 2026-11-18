@@ -67,7 +67,10 @@ impl StepsFixture {
             let path = format!("/dir-{directory:03}/file-{index:03}.txt");
             let content = self
                 .namespace
-                .prepare_content(words(directory * count + index).as_bytes())
+                .prepare_content(
+                    words(directory * count + index).as_bytes(),
+                    &loonfs_test_support::test_actor(),
+                )
                 .await
                 .expect("prepare the content");
             operations.push(FilesystemOperation::PutFile {

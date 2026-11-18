@@ -12,8 +12,8 @@ use crate::{Namespace, Writable};
 use loonfs_core::control::VerifiedNamespaceCatalogEntry;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::u64_from_usize;
-use loonfs_types::UploadId;
 use loonfs_types::UploadPartChecksumClaim;
+use loonfs_types::{ActorId, UploadId};
 
 impl Namespace<Writable> {
     /// Loads the namespace's catalog from the head that this runtime holds,
@@ -24,13 +24,14 @@ impl Namespace<Writable> {
             .await
     }
 
-    /// Starts a durable upload session for a namespace.
-    pub async fn create_upload(&self) -> Result<UploadSession> {
+    /// Starts a durable upload session for a namespace. The session belongs
+    /// to `actor`, and every later step of the upload takes the same actor.
+    pub async fn create_upload(&self, actor: &ActorId) -> Result<UploadSession> {
         trace::in_operation(
             operation_span!(self.core, "create_upload", self.namespace_id),
             async {
                 let catalog = self.live_catalog().await?;
-                Ok(self.engine().begin_upload(&catalog).await?)
+                Ok(self.engine().begin_upload(&catalog, actor).await?)
             },
         )
         .await
@@ -38,7 +39,10 @@ impl Namespace<Writable> {
 
     /// Mints the content object a direct upload will write to and returns
     /// the internal target for server-side signing.
-    pub async fn create_direct_put_upload_target(&self) -> Result<DirectPutUploadTarget> {
+    pub async fn create_direct_put_upload_target(
+        &self,
+        actor: &ActorId,
+    ) -> Result<DirectPutUploadTarget> {
         trace::in_operation(
             operation_span!(
                 self.core,
@@ -49,7 +53,7 @@ impl Namespace<Writable> {
                 let catalog = self.live_catalog().await?;
                 Ok(self
                     .engine()
-                    .begin_direct_put_upload_target(&catalog)
+                    .begin_direct_put_upload_target(&catalog, actor)
                     .await?)
             },
         )
@@ -60,8 +64,10 @@ impl Namespace<Writable> {
     /// with the default part size.
     pub async fn create_direct_multipart_upload_target(
         &self,
+        actor: &ActorId,
     ) -> Result<DirectMultipartUploadTarget> {
         self.create_direct_multipart_upload_target_with_options(
+            actor,
             &DirectMultipartUploadOptions::default(),
         )
         .await
@@ -72,6 +78,7 @@ impl Namespace<Writable> {
     /// for server-side signing.
     pub async fn create_direct_multipart_upload_target_with_options(
         &self,
+        actor: &ActorId,
         options: &DirectMultipartUploadOptions,
     ) -> Result<DirectMultipartUploadTarget> {
         trace::in_operation(
@@ -84,7 +91,7 @@ impl Namespace<Writable> {
                 let catalog = self.live_catalog().await?;
                 Ok(self
                     .engine()
-                    .begin_direct_multipart_upload_target(&catalog, *options)
+                    .begin_direct_multipart_upload_target(&catalog, actor, *options)
                     .await?)
             },
         )
@@ -96,6 +103,7 @@ impl Namespace<Writable> {
         &self,
         upload_id: &UploadId,
         requested: &[UploadPartChecksumClaim],
+        actor: &ActorId,
     ) -> Result<MultipartPartTargets> {
         trace::in_operation(
             operation_span!(self.core, "sign_upload_parts", self.namespace_id),
@@ -103,7 +111,7 @@ impl Namespace<Writable> {
                 let catalog = self.live_catalog().await?;
                 Ok(self
                     .engine()
-                    .direct_multipart_part_targets(&catalog, upload_id, requested)
+                    .direct_multipart_part_targets(&catalog, upload_id, requested, actor)
                     .await?)
             },
         )
@@ -115,6 +123,7 @@ impl Namespace<Writable> {
         &self,
         upload_id: &UploadId,
         bytes: &[u8],
+        actor: &ActorId,
     ) -> Result<UploadSession> {
         trace::in_operation(
             operation_span!(
@@ -127,7 +136,7 @@ impl Namespace<Writable> {
                 let catalog = self.live_catalog().await?;
                 Ok(self
                     .engine()
-                    .upload_content(&catalog, upload_id, bytes)
+                    .upload_content(&catalog, upload_id, bytes, actor)
                     .await?)
             },
         )
@@ -146,6 +155,7 @@ impl Namespace<Writable> {
         &self,
         upload_id: &UploadId,
         body: ByteStream,
+        actor: &ActorId,
     ) -> Result<UploadSession> {
         trace::in_operation(
             operation_span!(
@@ -158,7 +168,7 @@ impl Namespace<Writable> {
                 let catalog = self.live_catalog().await?;
                 Ok(self
                     .engine()
-                    .upload_content_stream(&catalog, upload_id, body)
+                    .upload_content_stream(&catalog, upload_id, body, actor)
                     .await?)
             },
         )
@@ -170,6 +180,7 @@ impl Namespace<Writable> {
         &self,
         upload_id: &UploadId,
         completion: CompleteUploadBody,
+        actor: &ActorId,
     ) -> Result<CompletedUpload> {
         trace::in_operation(
             operation_span!(self.core, "complete_upload", self.namespace_id),
@@ -177,7 +188,7 @@ impl Namespace<Writable> {
                 let catalog = self.live_catalog().await?;
                 Ok(self
                     .engine()
-                    .complete_upload(&catalog, upload_id, completion)
+                    .complete_upload(&catalog, upload_id, completion, actor)
                     .await?)
             },
         )
@@ -185,7 +196,11 @@ impl Namespace<Writable> {
     }
 
     /// Aborts an upload session and deletes the content object it owned.
-    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<UploadSession> {
+    pub async fn abort_upload(
+        &self,
+        upload_id: &UploadId,
+        actor: &ActorId,
+    ) -> Result<UploadSession> {
         trace::in_operation(
             operation_span!(self.core, "abort_upload", self.namespace_id),
             async {
@@ -195,20 +210,27 @@ impl Namespace<Writable> {
                     .core
                     .load_namespace_catalog_cached(&self.namespace_id)
                     .await?;
-                Ok(self.engine().abort_upload(&catalog, upload_id).await?)
+                Ok(self
+                    .engine()
+                    .abort_upload(&catalog, upload_id, actor)
+                    .await?)
             },
         )
         .await
     }
 
     /// Returns an upload session and new evidence when the upload is complete.
-    pub async fn get_upload(&self, upload_id: &UploadId) -> Result<UploadSessionView> {
+    pub async fn get_upload(
+        &self,
+        upload_id: &UploadId,
+        actor: &ActorId,
+    ) -> Result<UploadSessionView> {
         trace::in_operation(
             operation_span!(self.core, "get_upload", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 let catalog = self.live_catalog().await?;
-                Ok(self.engine().get_upload(&catalog, upload_id).await?)
+                Ok(self.engine().get_upload(&catalog, upload_id, actor).await?)
             },
         )
         .await

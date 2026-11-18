@@ -223,13 +223,16 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     ));
 
     // The server accepts work while running.
-    let client = Client::new(ClientConfig {
-        server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".into()),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
+    let client = Client::new(
+        ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".into()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        },
+        loonfs_types::Context::Service,
+    )
     .expect("valid client config");
     client
         .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
@@ -714,7 +717,7 @@ root = "unused"
 }
 
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .config(loonfs::RuntimeConfig {
             trace_mode: TraceMode::Remote,

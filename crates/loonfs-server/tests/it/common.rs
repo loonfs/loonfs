@@ -314,13 +314,16 @@ impl GracefulTestServer {
 
 /// Builds a client of the server at `server_url`.
 fn client(server_url: &str, auth_token: Option<String>, ca_cert_path: Option<String>) -> Client {
-    Client::new(ClientConfig {
-        server_url: server_url.to_owned(),
-        auth_token: auth_token.map(Into::into),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path,
-    })
+    Client::new(
+        ClientConfig {
+            server_url: server_url.to_owned(),
+            auth_token: auth_token.map(Into::into),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path,
+        },
+        loonfs_types::Context::Service,
+    )
     .expect("valid client config")
 }
 
@@ -425,16 +428,26 @@ pub(crate) mod http_split_support {
         file_bytes: &[u8],
     ) -> StagedUpload {
         let begin = client
-            .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
+            .create_upload(
+                namespace_id,
+                &loonfs_test_support::test_actor(),
+                &CreateUploadBody::ServiceProxied {},
+            )
             .await
             .expect("begin upload");
         client
-            .put_upload_content(namespace_id, &begin.upload_id, file_bytes)
+            .put_upload_content(
+                namespace_id,
+                &loonfs_test_support::test_actor(),
+                &begin.upload_id,
+                file_bytes,
+            )
             .await
             .expect("upload content");
         let complete = client
             .complete_upload(
                 namespace_id,
+                &loonfs_test_support::test_actor(),
                 &begin.upload_id,
                 &CompleteUploadBody::ServiceProxied {},
             )
