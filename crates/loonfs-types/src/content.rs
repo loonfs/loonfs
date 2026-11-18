@@ -491,17 +491,16 @@ fn crc32_from_u64(value: u64) -> u32 {
 pub struct ContentRef {
     /// The kind of content reference. The format defines one kind, `blob_v1`.
     pub kind: ContentRefKind,
-    /// The immutable identity of the content. The content ID and the reading namespace's pool
-    /// together determine the object key.
+    /// The ID of the content chain in the reading namespace's pool.
     pub content_id: ContentId,
-    /// The length of the referenced bytes, which are a prefix of the content object.
+    /// The length of the referenced prefix of the chain, in bytes.
     pub size_bytes: u64,
     /// The required checksum of the referenced bytes.
     pub checksum: Checksum,
 }
 
 impl ContentRef {
-    /// Builds a reference to a freshly minted content object that contains these bytes.
+    /// Builds a reference to the first bytes of a new content chain.
     ///
     /// Every caller of this constructor moves the bytes through the LoonFS
     /// write path, so the checksum is trusted by construction.

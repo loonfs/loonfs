@@ -647,7 +647,7 @@
         "type": "object"
       },
       "ContentId": {
-        "description": "The random identity of one immutable content object.",
+        "description": "The random ID of a content chain. An append can extend the chain without changing its ID.",
         "example": "con_4z59p0wjvx9a8b2frdhhf6mat1",
         "pattern": "^con_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
@@ -662,14 +662,14 @@
           },
           "content_id": {
             "$ref": "#/components/schemas/ContentId",
-            "description": "The immutable identity of the content. The content ID and the reading namespace's pool\ntogether determine the object key."
+            "description": "The ID of the content chain in the reading namespace's pool."
           },
           "kind": {
             "$ref": "#/components/schemas/ContentRefKind",
             "description": "The kind of content reference. The format defines one kind, `blob_v1`."
           },
           "size_bytes": {
-            "description": "The length of the referenced bytes, which are a prefix of the content object.",
+            "description": "The length of the referenced prefix of the chain, in bytes.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"

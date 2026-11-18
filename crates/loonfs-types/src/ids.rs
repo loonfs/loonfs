@@ -425,7 +425,7 @@ string_id! {
 }
 
 string_id! {
-    /// The random identity of one immutable content object.
+    /// The random ID of a content chain. An append can extend the chain without changing its ID.
     ContentId,
     prefix = "con",
     schema(
