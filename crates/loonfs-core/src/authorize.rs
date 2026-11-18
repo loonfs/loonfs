@@ -105,6 +105,18 @@ where
         return Ok(());
     };
     let effective = effective_rights(reads, principals, inode_id).await?;
+    check_rights(effective, rights, inode_id, absence)
+}
+
+/// Requires `rights` within `effective`, the subject's rights on
+/// `inode_id`. A subject with no right on the inode gets the not-found error,
+/// and a subject with some right gets `forbidden`.
+pub(crate) fn check_rights(
+    effective: AccessRights,
+    rights: AccessRights,
+    inode_id: InodeId,
+    absence: Absence<'_>,
+) -> Result<()> {
     if rights.is_subset_of(effective) {
         Ok(())
     } else if effective.is_empty() {

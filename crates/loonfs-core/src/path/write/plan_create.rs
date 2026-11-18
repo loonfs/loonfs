@@ -167,7 +167,12 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         let destination = self.view.resolve_destination(destination).await?;
         self.view.ensure_vacant_destination(&destination).await?;
         self.view
-            .authorize_relocation(inode_id, saved_parent, destination.parent_inode_id)
+            .authorize_relocation(
+                inode_id,
+                saved_parent,
+                destination.parent_inode_id,
+                Some(Absence::Inode),
+            )
             .await?;
         Ok((destination.parent_inode_id, destination.name))
     }

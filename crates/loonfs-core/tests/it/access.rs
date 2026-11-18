@@ -651,7 +651,11 @@ async fn moves_are_authorized_as_the_equivalent_grant() {
             move_path("/secret/entry", "/team/entry"),
             Some(ErrorCode::Forbidden),
         ),
-        ("editor", move_path("/secret/folder", "/team/folder"), None),
+        (
+            "editor",
+            move_path("/secret/folder", "/team/folder"),
+            Some(ErrorCode::PathNotFound),
+        ),
         (
             "editor",
             move_path("/admin-source/file", "/admin-target/file"),
@@ -664,6 +668,137 @@ async fn moves_are_authorized_as_the_equivalent_grant() {
         ),
         ("prn_root", restore_deleted, None),
         ("editor", move_path("/team/loss", "/secret/loss"), None),
+    ] {
+        let result = commit_as(
+            &store,
+            &namespace_id,
+            &context,
+            subject(principal, &[principal]),
+            operation,
+        )
+        .await;
+        assert_eq!(
+            result.map(|_| ()).map_err(|error| error.code()),
+            expected.map_or(Ok(()), Err),
+            "{principal}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn moves_require_read_on_the_moved_item() {
+    use AccessRight::{Admin, Create, Read, Remove, Write};
+    let (_temp_dir, store, namespace_id, context) = setup().await;
+    let content = namespace_store(&store, &namespace_id)
+        .store_bytes_as_content(b"body")
+        .await
+        .expect("content")
+        .into_content_ref();
+    // `/work` and `/other` grant the same rights, so no move between them
+    // confers anything, and only the `read` requirement can refuse one.
+    let entry_rights = access_grants(&[
+        ("mover", &[Create, Remove]),
+        ("writer", &[Write, Create, Remove]),
+        ("reader", &[Read, Create, Remove]),
+    ]);
+    seed(
+        &store,
+        &namespace_id,
+        &context,
+        vec![
+            update_access(
+                "/",
+                false,
+                access_grants(&[("prn_root", &[Admin]), ("ops", &[Admin])]),
+            ),
+            create_directory("/work"),
+            create_directory("/other"),
+            update_access("/work", false, entry_rights.clone()),
+            update_access("/other", false, entry_rights),
+            put("/work/file", &content),
+            create_directory("/work/sealed"),
+            update_access("/work/sealed", true, AccessGrants::default()),
+            create_directory("/work/limited"),
+            update_access(
+                "/work/limited",
+                true,
+                access_grants(&[("writer", &[Write]), ("reader", &[Read])]),
+            ),
+            create_directory("/work/trashed"),
+            update_access("/work/trashed", true, AccessGrants::default()),
+        ],
+    )
+    .await;
+    let sealed = resolve_path(&store, &namespace_id, "/work/sealed")
+        .await
+        .expect("sealed directory");
+    let other = resolve_path(&store, &namespace_id, "/other")
+        .await
+        .expect("other directory");
+    let trashed = resolve_path(&store, &namespace_id, "/work/trashed")
+        .await
+        .expect("trashed directory");
+    let deletion = commit_as(
+        &store,
+        &namespace_id,
+        &context,
+        subject("root", &["prn_root"]),
+        delete("/work/trashed"),
+    )
+    .await
+    .expect("delete");
+    let restore_to = |destination| FilesystemOperation::RestoreDeleted {
+        inode_id: trashed.inode_id,
+        deletion_seq: deletion.committed_seq,
+        destination,
+    };
+    for (principal, operation, expected) in [
+        (
+            "mover",
+            move_path("/work/sealed", "/work/renamed"),
+            Some(ErrorCode::PathNotFound),
+        ),
+        (
+            "writer",
+            move_path("/work/file", "/work/renamed"),
+            Some(ErrorCode::Forbidden),
+        ),
+        (
+            "mover",
+            move_path("/work/sealed", "/other/sealed"),
+            Some(ErrorCode::PathNotFound),
+        ),
+        (
+            "mover",
+            FilesystemOperation::MoveByInode {
+                inode_id: sealed.inode_id,
+                expected_binding_version: sealed.binding_version.clone().expect("binding"),
+                destination_parent_inode_id: other.inode_id,
+                destination_display_name: DisplayName::parse("sealed").expect("display name"),
+                precondition: loonfs_types::DestinationPrecondition::default(),
+            },
+            Some(ErrorCode::InodeNotFound),
+        ),
+        (
+            "writer",
+            move_path("/work/limited", "/other/limited"),
+            Some(ErrorCode::Forbidden),
+        ),
+        ("reader", move_path("/work/limited", "/other/limited"), None),
+        ("reader", move_path("/work/file", "/other/file"), None),
+        ("ops", move_path("/work/sealed", "/other/sealed"), None),
+        (
+            "mover",
+            restore_to(loonfs_types::options::RestoreDeletedDestination::Path(
+                AbsolutePath::parse("/other/trashed").expect("path"),
+            )),
+            Some(ErrorCode::InodeNotFound),
+        ),
+        (
+            "mover",
+            restore_to(loonfs_types::options::RestoreDeletedDestination::Recorded),
+            None,
+        ),
     ] {
         let result = commit_as(
             &store,

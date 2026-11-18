@@ -8,7 +8,7 @@ use super::publish_path_planning::{
     classify_replace_destination, CompiledFilesystemOperation, Destination, ReplaceDestination,
     ResolvedDestination, Target,
 };
-use crate::authorize::Replacement;
+use crate::authorize::{Absence, Replacement};
 use crate::commit::engine::TemporaryMove;
 use crate::commit::{CommitOperation, CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
@@ -73,6 +73,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         }
         self.plan_rename(
             &source.resolved,
+            source.absence(),
             destination,
             precondition,
             expected_destination,
@@ -83,6 +84,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     async fn plan_rename(
         &self,
         source: &ResolvedVisiblePath,
+        source_absence: Absence<'_>,
         destination: ResolvedDestination<'_>,
         precondition: &DestinationPrecondition,
         expected_destination: Option<ExpectedFileState>,
@@ -98,18 +100,32 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             classify_replace_destination(occupant, precondition.behavior, source.inode_id, &path)?;
         let mut ops = Vec::new();
         let current_source_binding = self.view.source_binding(source).await?;
-        // A merge's move through a temporary name changes the inode's rights
-        // once, from the directory that it leaves in the first leg to the
-        // directory that it enters in the second.
-        let relocated_from = match self.temporary_move {
-            None => Some(current_source_binding.parent_inode_id),
-            Some(TemporaryMove::Away) => None,
-            Some(TemporaryMove::Back { from_parent }) => Some(from_parent),
-        };
-        if let Some(from_parent) = relocated_from {
-            self.view
-                .authorize_relocation(source.inode_id, from_parent, parent_inode_id)
-                .await?;
+        // A merge's move through a temporary name is authorized as one move.
+        // The first leg checks `read` on the inode where the move starts, and
+        // the second checks the change of the inode's rights from the
+        // directory that it left in the first leg to the directory that it
+        // enters.
+        match self.temporary_move {
+            None => {
+                self.view
+                    .authorize_relocation(
+                        source.inode_id,
+                        current_source_binding.parent_inode_id,
+                        parent_inode_id,
+                        Some(source_absence),
+                    )
+                    .await?;
+            }
+            Some(TemporaryMove::Away) => {
+                self.view
+                    .authorize(source.inode_id, AccessRight::Read.into(), source_absence)
+                    .await?;
+            }
+            Some(TemporaryMove::Back { from_parent }) => {
+                self.view
+                    .authorize_relocation(source.inode_id, from_parent, parent_inode_id, None)
+                    .await?;
+            }
         }
         match &replaced {
             ReplaceDestination::Replaced(existing) => {
