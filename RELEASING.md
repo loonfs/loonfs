@@ -36,7 +36,7 @@ The table below lists, for each release, the versions of each durable family and
 
 | Release | Writes | Reads |
 | --- | --- | --- |
-| v0.5.0 and earlier prereleases | Version 1 of every family in [Family versions](docs/specs/format.md#a1-family-versions): the WAL object, the namespace manifest, the five control records (snapshot, upload session, upload outcome, member entry, and manifest boundary), metadata segment encoding 1, and grep segment version 1 | Version 1, written by the same release |
+| v0.6.0 and earlier prereleases | Version 1 of every family in [Family versions](docs/specs/format.md#a1-family-versions): the WAL object, the namespace manifest, the five control records (snapshot, upload session, upload outcome, member entry, and manifest boundary), metadata segment encoding 1, and grep segment version 1 | Version 1, written by the same release |
 
 ## Retry a failed step
 
