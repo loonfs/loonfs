@@ -62,8 +62,9 @@ pub(crate) struct MergeIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TemporaryMove {
     /// The move to the temporary name. The writer checks the remove right on
-    /// the inode's directory, and not the temporary directory's create right
-    /// or the change of the inode's rights.
+    /// the inode's directory and the read right on the inode, and not the
+    /// temporary directory's create right or the change of the inode's
+    /// rights.
     Away,
     /// The move from the temporary name to the inode's place. The writer
     /// checks the create right on the inode's new directory, and the change

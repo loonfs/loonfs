@@ -2092,14 +2092,14 @@ Before an operation's conflict checks, LoonFS checks the subject's effective rig
 | Replacing put_file, put_file_revision_by_inode, append_file, append_file_by_inode | `write` on the existing file. |
 | put_file with no_replace at an occupied name | `create` on the parent, before the conflict is reported. |
 | delete_path, delete_by_inode | `remove` on the source parent. |
-| move_path, move_by_inode | `remove` on the source parent and `create` on the destination parent. Replacing an occupant also requires `remove` on the destination parent. |
+| move_path, move_by_inode | `remove` on the source parent, `create` on the destination parent, and `read` on the moved inode. Replacing an occupant also requires `remove` on the destination parent. |
 | copy_path, copy_by_inode | `read` on the source file, plus either `create` on the destination parent (for a vacant name or a name conflict) or `write` on the occupied file being replaced. |
 | restore_revision, restore_revision_by_inode | `write` and `history` on the file. |
 | update_attributes, update_attributes_by_inode | `write` on the target inode. |
-| restore_deleted | `remove` on the saved parent and `create` on the destination parent, including when restoring in place. |
+| restore_deleted | `remove` on the saved parent and `create` on the destination parent, including when restoring in place. A restore to a destination other than the saved parent also requires `read` on the restored inode. |
 | update_access, update_access_by_inode | Authority for the changes, as described below. |
 
-A move that changes any principal's effective rights on the moved inode is authorized as if the mover had granted the rights that are gained. The mover MUST have `share` and every gained right, or have `manage`, or be an administrator. Only gains count, so removing access needs no extra authority. Entry rights are enough when the move confers nothing. A boundary directory can move anywhere with entry rights, because its inherited rights don't change. Root administrator principals don't contribute gains. A restore that relocates the entry follows the same rule.
+A move that changes any principal's effective rights on the moved inode is authorized as if the mover had granted the rights that are gained. The mover MUST have `share` and every gained right, or have `manage`, or be an administrator. Only gains count, so removing access needs no extra authority. A move that confers nothing, such as a rename within one directory, needs only the rights in the table. A boundary directory confers nothing wherever it moves, because its inherited rights don't change, so it also needs only the rights in the table. Root administrator principals don't contribute gains. A restore that relocates the entry follows the same rule.
 
 For `update_access`, changing the root's set of administrator principals requires an administrator. Otherwise, `manage` permits any update. A subject without `manage` MUST have `share`, leave the boundary unchanged, and have every right that it adds to or removes from any principal's direct grant.
 

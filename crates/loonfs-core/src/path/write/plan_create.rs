@@ -5,7 +5,7 @@ use super::preconditions::{ensure_expected_inode, ExpectedFileState};
 use super::publish_path_planning::{
     is_missing_visible_path, CompiledFilesystemOperation, Destination, Target,
 };
-use crate::authorize::Absence;
+use crate::authorize::{check_rights, Absence};
 use crate::commit::{CommitOperation, CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
 use crate::metadata::VisiblePathError;
@@ -165,9 +165,15 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     ) -> Result<(InodeId, DisplayName)> {
         destination.ensure_mutation()?;
         let destination = self.view.resolve_destination(destination).await?;
+        // A destination in the saved parent is a restore in place, which
+        // needs no read right on the inode.
+        let mover = self.view.mover_rights(inode_id).await?;
+        if destination.parent_inode_id != saved_parent {
+            check_rights(mover, AccessRight::Read.into(), inode_id, Absence::Inode)?;
+        }
         self.view.ensure_vacant_destination(&destination).await?;
         self.view
-            .authorize_relocation(inode_id, saved_parent, destination.parent_inode_id)
+            .authorize_relocation(inode_id, saved_parent, destination.parent_inode_id, mover)
             .await?;
         Ok((destination.parent_inode_id, destination.name))
     }

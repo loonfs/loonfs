@@ -8,7 +8,7 @@ use super::publish_path_planning::{
     classify_replace_destination, CompiledFilesystemOperation, Destination, ReplaceDestination,
     ResolvedDestination, Target,
 };
-use crate::authorize::Replacement;
+use crate::authorize::{check_rights, Replacement};
 use crate::commit::engine::TemporaryMove;
 use crate::commit::{CommitOperation, CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
@@ -41,11 +41,22 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         // the temporary directory, which the subject needs no right on,
         // because the temporary binding doesn't survive the commit. The first
         // leg checked the remove right on the inode's directory.
+        // The second leg also skips the read check on the inode, which the
+        // first leg made where the move starts. Both checks come before any
+        // conflict check, so a subject with no right on the inode gets the
+        // not-found error.
         let parent_inode_id = source.parent_inode_id()?;
+        let mover = self.view.mover_rights(source.inode_id()).await?;
         if !matches!(self.temporary_move, Some(TemporaryMove::Back { .. })) {
             self.view
                 .authorize(parent_inode_id, remove, source.absence())
                 .await?;
+            check_rights(
+                mover,
+                AccessRight::Read.into(),
+                source.inode_id(),
+                source.absence(),
+            )?;
         }
         // Replace compiles to an atomic delete-plus-rename: the destination
         // file's delete and the source's rebind are written in one commit, and the
@@ -73,6 +84,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         }
         self.plan_rename(
             &source.resolved,
+            mover,
             destination,
             precondition,
             expected_destination,
@@ -83,6 +95,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     async fn plan_rename(
         &self,
         source: &ResolvedVisiblePath,
+        mover: AccessRights,
         destination: ResolvedDestination<'_>,
         precondition: &DestinationPrecondition,
         expected_destination: Option<ExpectedFileState>,
@@ -108,7 +121,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         };
         if let Some(from_parent) = relocated_from {
             self.view
-                .authorize_relocation(source.inode_id, from_parent, parent_inode_id)
+                .authorize_relocation(source.inode_id, from_parent, parent_inode_id, mover)
                 .await?;
         }
         match &replaced {

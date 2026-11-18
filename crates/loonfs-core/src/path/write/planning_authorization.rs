@@ -68,17 +68,28 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         self.authorize(inode_id, rights, destination.absence).await
     }
 
+    /// Returns the rights that a mover has on `moved`, which are every right
+    /// in an unrestricted namespace.
+    pub(super) async fn mover_rights(&self, moved: InodeId) -> Result<AccessRights> {
+        let Authorizer::Subject { principals } = self.authorizer else {
+            return Ok(AccessRights::ALL);
+        };
+        effective_rights(&mut self.metadata.reads(), principals, moved).await
+    }
+
     /// Authorizes moving `moved` from `source_parent` to `destination_parent`
-    /// as if the mover had granted every right the move confers.
+    /// as if the mover, whose rights on `moved` are `mover`, had granted
+    /// every right the move confers.
     pub(super) async fn authorize_relocation(
         &self,
         moved: InodeId,
         source_parent: InodeId,
         destination_parent: InodeId,
+        mover: AccessRights,
     ) -> Result<()> {
-        let Authorizer::Subject { principals } = self.authorizer else {
+        if matches!(self.authorizer, Authorizer::Unrestricted) {
             return Ok(());
-        };
+        }
         if source_parent == destination_parent {
             return Ok(());
         }
@@ -117,11 +128,10 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
                 .difference(AccessRights::ADMIN);
             gain = gain.union(after.difference(before));
         }
-        if gain.is_empty() || is_administrator(&mut reads, principals).await? {
-            return Ok(());
-        }
-        let mover = effective_rights(&mut reads, principals, moved).await?;
-        if mover.contains(AccessRight::Manage)
+        // An administrator's effective rights are every right, so `manage`
+        // covers the administrator case.
+        if gain.is_empty()
+            || mover.contains(AccessRight::Manage)
             || (mover.contains(AccessRight::Share) && gain.is_subset_of(mover))
         {
             return Ok(());

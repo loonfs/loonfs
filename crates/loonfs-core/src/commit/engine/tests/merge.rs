@@ -965,7 +965,10 @@ async fn a_swap_through_a_temporary_name_needs_no_right_on_the_temporary_directo
         .await
         .expect("create");
     let path = |path: &str| AbsolutePath::parse(path).expect("path");
-    let team = acl_grants("prn_team", &[AccessRight::Create, AccessRight::Remove]);
+    let team = acl_grants(
+        "prn_team",
+        &[AccessRight::Read, AccessRight::Create, AccessRight::Remove],
+    );
     let mut operations: Vec<_> = ["/x", "/y", "/t"]
         .map(|directory| FilesystemOperation::CreateDirectory {
             path: path(directory),
