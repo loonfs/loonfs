@@ -23,9 +23,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Distinct files changed in the unindexed tail that one query will scan before
-/// failing with `index_lagging` (or skipping the tail under `allow_stale`).
-/// Advertised as the `query.grep.tail_budget_files` capability limit.
+/// Maximum distinct files one query scans from the unindexed tail.
+///
+/// Above this limit, grep returns `index_lagging` or skips the tail under
+/// `allow_stale`. The capability key is `query.grep.tail_budget_files`.
 pub const MAX_GREP_TAIL_FILES: usize = 512;
 /// Files a plan-less `allow_scan` query will scan before refusing.
 /// Advertised as the `query.grep.scan_budget_files` capability limit.
