@@ -20,9 +20,8 @@ use loonfs_types::{
     u64_from_usize, CapabilityDocument, Context, MonotonicTimer, PoolId, Subject, WriterId,
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS,
     FEATURE_MERGES, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
-    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
-    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, MAX_SUBJECT_PRINCIPALS,
-    PROTOCOL_VERSION,
+    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
+    MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -318,10 +317,6 @@ impl RuntimeCore {
                     (
                         LIMIT_COMMIT_MAX_CONTENT_TOKENS,
                         loonfs_core::limits::MAX_COMMIT_CONTENT_TOKENS,
-                    ),
-                    (
-                        LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
-                        loonfs_core::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS,
                     ),
                     (
                         LIMIT_COMMIT_MAX_MESSAGE_BYTES,

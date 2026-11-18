@@ -151,8 +151,8 @@ pub mod engine {
 /// Most embedded applications do not need this module.
 pub mod publish {
     pub use loonfs_core::limits::{
-        MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_MESSAGE_BYTES,
-        MAX_COMMIT_OPERATIONS, MAX_COMMIT_PRECONDITIONS,
+        MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS,
+        MAX_COMMIT_PRECONDITIONS,
     };
     pub use loonfs_core::path::parse_mutation_path;
     pub use loonfs_core::publish::{
