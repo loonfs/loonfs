@@ -242,7 +242,7 @@ Wait for the pod:
 kubectl --namespace loonfs rollout status deployment/loonfs-server
 ```
 
-The chart creates one Deployment and one ClusterIP Service, but no ingress or load balancer. Add your own route and terminate TLS there, or configure TLS in the server.
+The chart creates one Deployment and one ClusterIP Service, but no ingress or load balancer. Add your own route and terminate TLS there, or configure TLS in the server and set the chart's `probeScheme` to `HTTPS`.
 
 The chart's [README](../deploy/helm/loonfs-server/README.md) lists all the values, including resources, scheduling, private registries, and the optional cache.
 

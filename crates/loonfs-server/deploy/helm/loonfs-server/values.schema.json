@@ -9,6 +9,7 @@
     "image",
     "config",
     "service",
+    "probeScheme",
     "terminationGracePeriodSeconds"
   ],
   "properties": {
@@ -87,6 +88,10 @@
           }
         }
       }
+    },
+    "probeScheme": {
+      "type": "string",
+      "enum": ["HTTP", "HTTPS"]
     },
     "terminationGracePeriodSeconds": {
       "type": "integer",

@@ -83,6 +83,7 @@ Use the same two lists for provider credentials, `RUST_LOG`, and any other envir
 | `imagePullSecrets` | `[]` | Pull secrets for a private registry. Each entry is `{name: ...}`. |
 | `config.existingSecret` | `""` | The name of an existing Secret that contains the config. Required. |
 | `config.key` | `config.toml` | The entry in that Secret that contains the TOML config. |
+| `probeScheme` | `HTTP` | Set to `HTTPS` when the server terminates TLS. |
 | `service.port` | `9400` | The port the Service publishes and the probes call. |
 | `service.annotations` | `{}` | Annotations for the Service. |
 | `terminationGracePeriodSeconds` | `660` | How long the kubelet waits after SIGTERM before it sends SIGKILL. |
