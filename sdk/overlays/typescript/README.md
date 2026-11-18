@@ -9,6 +9,7 @@ import { LoonFSClient } from "@loonfs/sdk/server";
 const client = new LoonFSClient({
     baseUrl: process.env.LOONFS_URL!,
     token: process.env.LOONFS_AUTH_TOKEN!,
+    actorId: "example-user",
     headers: { "Loonfs-Context": "service" },
 });
 await client.files.upload({
@@ -27,7 +28,7 @@ sends neither or both fails with `invalid_request`. A new namespace has no
 access rows and no administrators, so grant the first ones with a commit whose
 one operation is `update_access` on `/`, sent in the service context.
 
-Server clients accept an optional `actorId`. In a browser, set `baseUrl` to the
+Set `actorId` when uploading files or creating commits. In a browser, set `baseUrl` to the
 application's proxy (see [Proxy](#proxy)) and `token` to the credential that the
 proxy's `authorize` hook checks. The proxy replaces that credential with the
 server token, so the server token stays in the backend.
