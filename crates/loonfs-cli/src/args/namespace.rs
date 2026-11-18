@@ -2,8 +2,8 @@
 
 use super::flags::{ActorSelectorArgs, PaginationArgs};
 use super::parse::parse_change_seq;
-use clap::{Args, Subcommand, ValueEnum, ValueHint};
-use loonfs_types::{CommitSeq, NamespaceId, PrincipalId, SnapshotId};
+use clap::{Args, Subcommand, ValueHint};
+use loonfs_types::{CommitSeq, NamespaceId, SnapshotId};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -36,12 +36,6 @@ pub(crate) struct NamespaceShowArgs {
     pub namespace_id: Option<NamespaceId>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum NamespaceAccessArg {
-    Unrestricted,
-    Acl,
-}
-
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
@@ -49,13 +43,6 @@ pub(crate) struct NamespaceCreateArgs {
     /// ID of the new namespace. When omitted, the CLI generates an ID.
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: Option<NamespaceId>,
-    /// Access mode. It can't be changed after the namespace is created.
-    #[arg(long, value_enum, default_value_t = NamespaceAccessArg::Unrestricted)]
-    pub access: NamespaceAccessArg,
-    /// A principal to grant `admin` on the root at creation. Repeat the flag
-    /// for more principals.
-    #[arg(long = "administrator", required_if_eq("access", "acl"), value_hint = ValueHint::Other)]
-    pub administrators: Vec<PrincipalId>,
     /// The namespace's retention window, in milliseconds, at least 86400000
     /// (24 hours). The server's maintenance sweep keeps this many
     /// milliseconds of the namespace's history. Without this option, the

@@ -157,45 +157,6 @@ async fn fork_snapshots<S: ObjectStore>(store: &S, source: &NamespaceId) -> Vec<
         .collect()
 }
 
-#[test]
-fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
-    use super::bootstrap::bootstrap_metadata_state;
-    use crate::metadata::AccessRevisionRecord;
-    use loonfs_types::{
-        AccessGrants, AccessRevisionNo, AccessRights, ActorId, CommitSeq, NamespaceAccess,
-        PrincipalId, PrincipalScope, ROOT_INODE_ID,
-    };
-
-    let root_grants = AccessGrants::new(std::collections::BTreeMap::from([(
-        PrincipalId::parse("prn_root").expect("principal id"),
-        AccessRights::ADMIN,
-    )]))
-    .expect("root grants");
-    let state = bootstrap_metadata_state(
-        1_000,
-        &NamespaceAccess::Acl {
-            principal_scope: PrincipalScope::parse("org_test").expect("principal scope"),
-            root_grants: root_grants.clone(),
-        },
-    );
-    assert_eq!(
-        state.access_revisions(),
-        &[AccessRevisionRecord {
-            inode_id: ROOT_INODE_ID,
-            access_revision_no: AccessRevisionNo(0),
-            committed_seq: CommitSeq(0),
-            commit_id: loonfs_types::format::control::genesis_commit_id(),
-            delta_index: 0,
-            committed_by: ActorId::loonfs(),
-            committed_at_ms: 1_000,
-            boundary: false,
-            grants: root_grants,
-        }]
-    );
-    let state = bootstrap_metadata_state(1_000, &NamespaceAccess::Unrestricted {});
-    assert!(state.access_revisions().is_empty());
-}
-
 /// Checks that a create with the same request as a create that's waiting on
 /// its member entry finishes the namespace, that both creates return the
 /// same pool ID, and that a create with another retention window returns
@@ -694,8 +655,8 @@ async fn a_create_never_finishes_a_fork_and_a_fork_never_finishes_a_create() {
     assert!(fork_snapshots(&store, &source).await.is_empty());
 }
 
-/// Checks that a create with `allow_existing` and another access mode or
-/// retention window returns `namespace_exists` for an initializing create,
+/// Checks that a create with `allow_existing` and another retention window
+/// returns `namespace_exists` for an initializing create,
 /// because an initializing namespace isn't an existing one, and writes
 /// nothing to it.
 #[tokio::test]
@@ -705,29 +666,14 @@ async fn a_create_with_allow_existing_returns_namespace_exists_for_an_initializi
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("created").expect("namespace");
     let manifest_1 = half_done_create(directory.path(), &namespace_id, &Default::default()).await;
-    let other_access = loonfs_types::options::CreateNamespaceOptions {
-        allow_existing: true,
-        access: loonfs_types::NamespaceAccess::Acl {
-            principal_scope: loonfs_types::PrincipalScope::parse("org_test").expect("scope"),
-            root_grants: loonfs_types::AccessGrants::new(std::collections::BTreeMap::from([(
-                loonfs_types::PrincipalId::parse("prn_root").expect("principal id"),
-                loonfs_types::AccessRights::ADMIN,
-            )]))
-            .expect("root grants"),
-        },
-        ..Default::default()
-    };
     let other_window = loonfs_types::options::CreateNamespaceOptions {
         allow_existing: true,
         retention_window_ms: std::num::NonZeroU64::new(7 * 24 * 60 * 60 * 1_000),
-        ..Default::default()
     };
-    for options in [other_access, other_window] {
-        let created = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
-            .create_with_options(&options)
-            .await;
-        assert_matches!(created, Err(CoreError::NamespaceExists { .. }));
-    }
+    let created = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+        .create_with_options(&other_window)
+        .await;
+    assert_matches!(created, Err(CoreError::NamespaceExists { .. }));
     assert_eq!(manifest_payloads(&store, &namespace_id).await, [manifest_1]);
     assert!(member_entry_keys(&store).await.is_empty());
 }
@@ -840,7 +786,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         view.resolve_path(
             path,
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("inherited path");

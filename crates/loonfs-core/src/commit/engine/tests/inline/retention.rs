@@ -279,7 +279,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         old_record.inline_content.is_empty(),
         "folded records do not carry inline payloads"
     );
-    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let access = ReadAccess::live(Authorizer::Service);
     assert_eq!(
         old.read_file_bytes("/file", None, &access)
             .await

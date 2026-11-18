@@ -351,7 +351,7 @@ async fn trash_page<S: ObjectStore + ?Sized>(
             cursor,
             limit: EffectiveLimit::new(NonZeroU32::new(limit).expect("non-zero limit")),
         },
-        &mut crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        &mut crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
     )
     .await
     .expect("list trash page")
@@ -370,7 +370,7 @@ pub(super) async fn inode_id_of<S: ObjectStore + ?Sized>(
         .resolve_path(
             absolute_path,
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("resolve path")
@@ -1455,7 +1455,7 @@ async fn an_expired_deletion_leaves_the_trash_refuses_a_restore_and_stays_hidden
             .load_current_metadata_view()
             .await
             .expect("load read view");
-        let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
+        let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service);
         for path in ["/docs", "/docs/notes.txt"] {
             let error = view
                 .resolve_path(path, AttributeInclusion::Omit, &access)

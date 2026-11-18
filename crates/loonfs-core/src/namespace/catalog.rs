@@ -1,26 +1,20 @@
-//! Verified namespace identity, access mode, and pool.
+//! Verified namespace identity and pool.
 
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{NamespaceAccess, NamespaceId, PoolId};
+use loonfs_types::{NamespaceId, PoolId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedNamespaceCatalogEntry {
     namespace_id: NamespaceId,
-    access: NamespaceAccess,
     pool_id: PoolId,
 }
 
 impl VerifiedNamespaceCatalogEntry {
-    pub fn access(&self) -> &NamespaceAccess {
-        &self.access
-    }
-
     pub fn from_head(head: &NamespaceReadState) -> Self {
         Self {
             namespace_id: head.namespace_id.clone(),
-            access: head.access.clone(),
             pool_id: head.pool_id.clone(),
         }
     }

@@ -104,7 +104,7 @@ pub struct Client {
 
 impl Client {
     /// Returns the subject sent with every request, or `None` when requests
-    /// include no subject headers.
+    /// act in the service context and send `Loonfs-Context: service`.
     pub fn subject(&self) -> Option<&loonfs_types::Subject> {
         self.subject.as_ref()
     }

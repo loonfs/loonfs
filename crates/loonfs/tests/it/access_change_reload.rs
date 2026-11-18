@@ -5,9 +5,9 @@ use crate::common::wait_for_operation;
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::counter;
 use loonfs::{
-    AccessState, AttributeChanges, Consistency, CreateNamespaceOptions, CreateSnapshotOptions,
-    LoonFs, Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadAt,
-    ReadOnly, SharedObjectStore, StatOptions, Writable,
+    AccessState, AttributeChanges, Consistency, CreateSnapshotOptions, LoonFs, Maintenance,
+    MaintenanceCancellation, MetadataCompactionOutcome, Namespace, ReadAt, ReadOnly,
+    SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -16,8 +16,8 @@ use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
-    AccessGrants, AccessRight, AccessRights, ActorId, ChecksumAlgorithm, NamespaceAccess,
-    NamespaceId, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, AccessRights, ActorId, ChecksumAlgorithm, NamespaceId, PrincipalId,
+    PrincipalSet, Subject, SubjectId,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
@@ -114,17 +113,16 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
         .await
         .expect("writer");
     let actor = loonfs_test_support::test_actor();
-    let options = CreateNamespaceOptions {
-        access: NamespaceAccess::Acl {
-            principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-            root_grants: grants(&["prn_admin"], AccessRight::Admin),
-        },
-        ..Default::default()
-    };
     writer
-        .create_namespace_with_options(&namespace_id, &actor, &options)
+        .create_namespace(&namespace_id, &actor)
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(
+        &writer,
+        &namespace_id,
+        grants(&["prn_admin"], AccessRight::Admin),
+    )
+    .await;
     let fixture = Fixture {
         recording,
         recorder,

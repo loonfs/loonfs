@@ -36,7 +36,7 @@ pub struct CommitIntent {
     pub commit_id: CommitId,
     /// Actor responsible for the commit, as supplied by the application.
     pub actor_id: ActorId,
-    /// The subject the request acts as; absent on unrestricted namespaces.
+    /// The subject the request acts as, or `None` in the service context.
     pub subject: Option<Subject>,
     /// Caller annotation recorded on the commit. Part of the request's
     /// identity: reusing a commit id with a different message conflicts.

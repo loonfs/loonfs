@@ -185,7 +185,7 @@ async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
         .resolve_path(
             "/",
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("resolve root");
@@ -529,7 +529,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .read_file_bytes(
             "/docs/shared.txt",
             None,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("clone reads after source collection");
@@ -945,7 +945,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
     view.resolve_path(
         "/docs/two.txt",
         AttributeInclusion::Omit,
-        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
     )
     .await
     .expect("tail commit stays readable");
@@ -1180,7 +1180,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         view.resolve_path(
             &format!("/docs/file-{round}.txt"),
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("file readable after sweep");
@@ -1485,7 +1485,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .resolve_path(
             "/docs/one.txt",
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("forked file readable");

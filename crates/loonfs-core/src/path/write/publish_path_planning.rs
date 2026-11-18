@@ -15,7 +15,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::{
     AbsolutePath, BindingVersion as BindingVersionToken, DestinationBehavior, DisplayName, InodeId,
-    InodeKind, NameKey, NamespaceAccess, NamespaceId, ROOT_INODE_ID,
+    InodeKind, NameKey, NamespaceId, ROOT_INODE_ID,
 };
 use loonfs_types::{AccessRight, AccessRights};
 
@@ -41,12 +41,11 @@ impl CompiledFilesystemOperation {
     }
 }
 
-/// What one operation plans against: the namespace, its access mode, the
-/// request's authorizer, and the metadata that the operation resolves
+/// What one operation plans against: the namespace, the request's
+/// authorizer, and the metadata that the operation resolves
 /// against, which includes the commit's earlier operations.
 pub(super) struct PlanningView<'a, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: &'a NamespaceId,
-    pub(super) access: &'a NamespaceAccess,
     pub(super) authorizer: Authorizer<'a>,
     pub(super) metadata: MetadataView<'a, 'a, S>,
 }

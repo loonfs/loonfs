@@ -112,11 +112,11 @@ pub use loonfs_types::{
     MetadataMaintenanceResponse, MetadataSkippedWork, MonotonicTimer, NameKey,
     NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
     PathEntryKind, PoolDeletedObjectCounts, PoolGcResponse, PoolId, PoolRetainedCandidates,
-    PoolRetainedReason, PrincipalId, PrincipalScope, PrincipalSet, RecoverAdministratorResponse,
-    RetainedCandidates, RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot,
-    SnapshotId, SnapshotRecord, SnapshotRecordOwner, Subject, SubjectId, TrashEntry, UploadId,
-    WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    PoolRetainedReason, PrincipalId, PrincipalSet, RetainedCandidates, RetainedReason, RevisionNo,
+    SetRetentionWindowResponse, Snapshot, SnapshotId, SnapshotRecord, SnapshotRecordOwner, Subject,
+    SubjectId, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
@@ -348,10 +348,6 @@ impl Error {
             Self::Core(CoreError::InvalidEventIndex(_)) => Some("event_index".to_owned()),
             Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
             Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("name".to_owned()),
-            Self::Core(CoreError::RootGrantsWithoutAdministrator) => Some("root_grants".to_owned()),
-            Self::Core(CoreError::SubjectRequired { .. }) => {
-                Some(loonfs_types::headers::PRINCIPALS.to_owned())
-            }
             Self::Core(
                 CoreError::FailedOperation { error, .. }
                 | CoreError::FailedPrecondition { error, .. },

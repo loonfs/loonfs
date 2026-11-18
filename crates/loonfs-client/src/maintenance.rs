@@ -5,12 +5,12 @@ use crate::operations;
 use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, Result};
 use loonfs_types::{
-    headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, GcRequest, GcResponse,
+    AdvanceRetentionRequest, AdvanceRetentionResponse, GcRequest, GcResponse,
     ListSnapshotRecordsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PoolGcResponse, PoolId, PrincipalId,
-    RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceJobRequest,
-    RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest, RunPoolMaintenanceJobResponse,
-    SetRetentionWindowRequest, SetRetentionWindowResponse, SnapshotId, SnapshotRecord,
+    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PoolGcResponse, PoolId,
+    RunMaintenanceJobRequest, RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest,
+    RunPoolMaintenanceJobResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
+    SnapshotId, SnapshotRecord,
 };
 use loonfs_types::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
 use std::num::NonZeroU64;
@@ -90,32 +90,21 @@ impl Client {
 
     /// Runs one maintenance job against a namespace (maintenance API group).
     ///
-    /// An administrator recovery needs an actor, so recover an administrator
-    /// with [`Self::recover_administrator`] instead. Retrying this request
-    /// starts a distinct attempt.
+    /// Retrying this request starts a distinct attempt.
     pub async fn run_maintenance_job(
         &self,
         namespace_id: &NamespaceId,
         request: &RunMaintenanceJobRequest,
     ) -> Result<RunMaintenanceJobResponse> {
-        self.run_maintenance_as(namespace_id, request, None).await
-    }
-
-    async fn run_maintenance_as(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &RunMaintenanceJobRequest,
-        actor: Option<&ActorId>,
-    ) -> Result<RunMaintenanceJobResponse> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/jobs",
             self.base_url
         );
-        let mut wire_request = self.request(operations::RUN_MAINTENANCE_JOB, &url);
-        if let Some(actor) = actor {
-            wire_request = wire_request.header(headers::ACTOR, actor.as_str());
-        }
-        self.send_json(wire_request.json(request)?).await
+        self.send_json(
+            self.request(operations::RUN_MAINTENANCE_JOB, &url)
+                .json(request)?,
+        )
+        .await
     }
 
     /// Folds the WAL tail when it's due, and compacts metadata until nothing
@@ -246,28 +235,6 @@ impl Client {
             )
             .await?;
         job_response!(response, RunMaintenanceJobResponse::RetentionWindow)
-    }
-
-    /// Grants `admin` on the root to `principal_id`, through a commit that
-    /// `actor` makes and that doesn't check any subject's rights.
-    ///
-    /// Retrying this request starts a distinct attempt.
-    pub async fn recover_administrator(
-        &self,
-        namespace_id: &NamespaceId,
-        principal_id: &PrincipalId,
-        actor: &ActorId,
-    ) -> Result<RecoverAdministratorResponse> {
-        let response = self
-            .run_maintenance_as(
-                namespace_id,
-                &RunMaintenanceJobRequest::RecoverAdministrator(RecoverAdministratorRequest {
-                    principal_id: principal_id.clone(),
-                }),
-                Some(actor),
-            )
-            .await?;
-        job_response!(response, RunMaintenanceJobResponse::RecoverAdministrator)
     }
 
     /// Proves the server's backing store honours the object-store contract

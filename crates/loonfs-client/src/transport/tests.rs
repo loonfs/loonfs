@@ -208,7 +208,7 @@ where
 
 #[tokio::test]
 async fn services_receive_identical_body_and_identity_on_retries_but_not_provider_requests() {
-    use loonfs_types::{PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId};
+    use loonfs_types::{PrincipalId, PrincipalSet, Subject, SubjectId};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
@@ -233,7 +233,6 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
         }
     });
     let mut client = service_client(service, None).with_subject(Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse("usr_demo").expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse("usr_demo").expect("principal")
@@ -276,7 +275,6 @@ async fn services_receive_identical_body_and_identity_on_retries_but_not_provide
         headers,
         vec![
             ("authorization", "Bearer test-token"),
-            ("loonfs-principal-scope", "org_demo"),
             ("loonfs-subject", "usr_demo"),
             ("loonfs-principals", "usr_demo"),
             ("loonfs-actor", "actor"),

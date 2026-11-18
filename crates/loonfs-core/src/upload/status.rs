@@ -2,7 +2,7 @@
 
 use super::complete::evidence_within_window;
 use super::proxied::find_proxied_content_ref;
-use super::session::{authorize_upload_subject, ensure_session_subject, session_response};
+use super::session::{ensure_session_subject, session_response};
 use crate::engine::NamespaceEngine;
 use crate::error::Result;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -22,11 +22,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<UploadSessionView> {
         let now_ms = self.now_ms();
         let catalog = self.own_catalog(catalog);
-        authorize_upload_subject(
-            &self.namespace.namespace_id,
-            catalog.access(),
-            self.subject.as_ref(),
-        )?;
         let loaded = self
             .namespace
             .load_upload_session_state(catalog, upload_id)

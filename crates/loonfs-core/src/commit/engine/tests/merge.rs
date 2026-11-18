@@ -623,7 +623,7 @@ async fn stat<S: ObjectStore>(
         .stat_inode(
             inode_id,
             loonfs_types::options::AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("stat by inode ID")
@@ -645,7 +645,7 @@ async fn a_merge_of_a_forks_file_reads_none_of_its_bytes() {
         .read_file_bytes_by_inode(
             merged.inode_id,
             None,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("read the merged file");
@@ -916,10 +916,9 @@ async fn a_merge_whose_inode_ids_dont_match_its_creates_is_refused() {
     assert_eq!(feed(&store, &namespace_id).await, [directory]);
 }
 
-/// A subject of the tests' ACL namespace with `principals`.
+/// A subject with `principals`.
 fn acl_subject(principals: &[&str]) -> loonfs_types::Subject {
     loonfs_types::Subject {
-        principal_scope: loonfs_types::PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: loonfs_types::SubjectId::parse("subject").expect("subject id"),
         principals: loonfs_types::PrincipalSet::new(
             principals
@@ -954,16 +953,11 @@ async fn a_swap_through_a_temporary_name_needs_no_right_on_the_temporary_directo
     let namespace_id = NamespaceId::parse("main").expect("namespace");
     let writer = context("writer");
     let fixture = NamespaceFixture::new(&store, &namespace_id, &writer);
+    fixture.create().await.expect("create");
     fixture
-        .create_with_options(&loonfs_types::options::CreateNamespaceOptions {
-            access: loonfs_types::NamespaceAccess::Acl {
-                principal_scope: loonfs_types::PrincipalScope::parse("org_demo").expect("scope"),
-                root_grants: acl_grants("prn_root", &[AccessRight::Admin]),
-            },
-            ..Default::default()
-        })
+        .set_root_access(acl_grants("prn_root", &[AccessRight::Admin]))
         .await
-        .expect("create");
+        .expect("the root access row");
     let path = |path: &str| AbsolutePath::parse(path).expect("path");
     let team = acl_grants(
         "prn_team",
@@ -1024,7 +1018,7 @@ async fn a_swap_through_a_temporary_name_needs_no_right_on_the_temporary_directo
             view.resolve_path(
                 path,
                 loonfs_types::options::AttributeInclusion::Omit,
-                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
             )
             .await
             .expect("entry")
@@ -1095,7 +1089,7 @@ async fn a_swap_through_a_temporary_name_needs_no_right_on_the_temporary_directo
             .resolve_path(
                 path,
                 loonfs_types::options::AttributeInclusion::Omit,
-                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
             )
             .await
             .expect("entry");

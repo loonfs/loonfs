@@ -26,21 +26,10 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
         .map(|index| format!("principal_{index}"))
         .collect::<Vec<_>>()
         .join(",");
-    for (principals, scope, subject, expected_param) in [
-        ("team", Some("org"), None, "Loonfs-Subject"),
-        (
-            "bad principal",
-            Some("org"),
-            Some("usr_ada"),
-            "Loonfs-Principals",
-        ),
-        (
-            too_many.as_str(),
-            Some("org"),
-            Some("usr_ada"),
-            "Loonfs-Principals",
-        ),
-        ("team", None, Some("usr_ada"), "Loonfs-Principal-Scope"),
+    for (principals, subject, expected_param) in [
+        ("bad principal", Some("usr_ada"), "Loonfs-Principals"),
+        (too_many.as_str(), Some("usr_ada"), "Loonfs-Principals"),
+        ("team", Some("bad subject"), "Loonfs-Subject"),
     ] {
         let mut request = Request::builder()
             .method("POST")
@@ -48,9 +37,6 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
             .header("authorization", "Bearer test-token")
             .header("content-type", "application/json")
             .header("Loonfs-Principals", principals);
-        if let Some(scope) = scope {
-            request = request.header("Loonfs-Principal-Scope", scope);
-        }
         if let Some(subject) = subject {
             request = request.header("Loonfs-Subject", subject);
         }
@@ -64,40 +50,110 @@ async fn subject_headers_are_parsed_and_rejected_with_the_header_named() {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let error: ErrorResponse = serde_json::from_slice(&body).expect("error");
+        let error: ErrorResponse =
+            serde_json::from_value(json_body(response).await).expect("error");
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
         assert_eq!(error.param.as_deref(), Some(expected_param));
     }
     let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v0/namespaces/demo/uploads")
-                .header("authorization", "Bearer test-token")
-                .header("content-type", "application/json")
-                .header("Loonfs-Principal-Scope", "org")
-                .body(Body::from(r#"{"mode":"service_proxied"}"#))
-                .expect("request"),
-        )
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces/demo/commits",
+            Some(
+                r#"{"commit_id":"subject-commit","operations":[{"kind":"create_directory","path":"/docs"}]}"#,
+            ),
+            &[("Loonfs-Context", "service")],
+        ))
         .await
         .expect("response");
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ErrorResponse = serde_json::from_value(json_body(response).await).expect("error");
-    assert_eq!(error.param.as_deref(), Some("Loonfs-Principals"));
-    let response = router.oneshot(Request::builder().method("POST").uri("/v0/namespaces/demo/commits")
-        .header("authorization", "Bearer test-token")
-        .header("content-type", "application/json")
-        .header("Loonfs-Actor", "service")
-        .header("Loonfs-Subject", "usr_ada")
-        .header("Loonfs-Principal-Scope", "org")
-        .header("Loonfs-Principals", "team")
-        .body(Body::from(r#"{"commit_id":"subject-commit","operations":[{"kind":"create_directory","path":"/docs"}]}"#))
-        .expect("request")).await.expect("response");
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Checks that a read, a commit, and an upload operation each return
+/// `invalid_request` for a request with neither `Loonfs-Principals` nor
+/// `Loonfs-Context`, with both, or with a context other than `service`, and
+/// that the error identifies the header to fix.
+#[tokio::test]
+async fn a_request_sends_exactly_one_of_principals_and_the_service_context() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, _state) = test_app(
+        test_options(&temp_dir.path().join("store"), "request-context"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    create_namespace(&router, "demo", r#"{"team":["admin"]}"#).await;
+    let commit = r#"{"commit_id":"context-commit","operations":[{"kind":"create_directory","path":"/docs"}]}"#;
+    let upload = r#"{"mode":"service_proxied"}"#;
+    let routes = [
+        ("GET", "/v0/namespaces/demo/filesystem/entry?path=/", None),
+        ("POST", "/v0/namespaces/demo/commits", Some(commit)),
+        ("POST", "/v0/namespaces/demo/uploads", Some(upload)),
+    ];
+    for (method, uri, body) in routes {
+        for (headers, expected_param, expected_message) in [
+            (
+                vec![],
+                "Loonfs-Principals",
+                Some("send Loonfs-Principals or Loonfs-Context: service"),
+            ),
+            (
+                vec![("Loonfs-Principals", "team"), ("Loonfs-Context", "service")],
+                "Loonfs-Context",
+                None,
+            ),
+            (vec![("Loonfs-Context", "Service")], "Loonfs-Context", None),
+        ] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .header("Loonfs-Actor", "service");
+            for (name, value) in &headers {
+                request = request.header(*name, *value);
+            }
+            let response = router
+                .clone()
+                .oneshot(
+                    request
+                        .body(body.map_or_else(Body::empty, Body::from))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{method} {uri} {headers:?}"
+            );
+            let error: ErrorResponse =
+                serde_json::from_value(json_body(response).await).expect("error");
+            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(error.param.as_deref(), Some(expected_param));
+            if let Some(expected_message) = expected_message {
+                assert_eq!(error.message, expected_message);
+            }
+        }
+    }
+    for (method, uri, body) in routes {
+        for headers in [
+            vec![("Loonfs-Principals", "team")],
+            vec![("Loonfs-Context", "service")],
+        ] {
+            let response = router
+                .clone()
+                .oneshot(request(method, uri, body, &headers))
+                .await
+                .expect("response");
+            let status = response.status();
+            assert!(
+                status == StatusCode::OK || status == StatusCode::CONFLICT,
+                "{method} {uri} {headers:?}: {status} {}",
+                json_body(response).await
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -109,26 +165,8 @@ async fn every_upload_route_acts_as_the_request_subject() {
     )
     .await
     .expect("app");
-    let response = router
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces",
-            Some(
-                r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
-            ),
-            &[],
-        ))
-        .await
-        .expect("namespace response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let subject = |id| {
-        [
-            ("Loonfs-Subject", id),
-            ("Loonfs-Principal-Scope", "org"),
-            ("Loonfs-Principals", "team"),
-        ]
-    };
+    create_namespace(&router, "demo", r#"{"team":["admin"]}"#).await;
+    let subject = |id| [("Loonfs-Subject", id), ("Loonfs-Principals", "team")];
     let response = router
         .clone()
         .oneshot(request(
@@ -189,19 +227,7 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
     )
     .await
     .expect("build app");
-    let response = router
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces",
-            Some(
-                r#"{"namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
-            ),
-            &[],
-        ))
-        .await
-        .expect("create namespace response");
-    assert_eq!(response.status(), StatusCode::OK);
+    create_namespace(&router, "demo-acl", r#"{"team":["admin"]}"#).await;
 
     let response = router
         .clone()
@@ -221,15 +247,8 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
 
     for headers in [
         vec![],
-        vec![
-            ("Loonfs-Subject", "usr_ada"),
-            ("Loonfs-Principal-Scope", "org"),
-            ("Loonfs-Principals", "team"),
-        ],
-        vec![
-            ("Loonfs-Principal-Scope", "org"),
-            ("Loonfs-Principals", "team"),
-        ],
+        vec![("Loonfs-Subject", "usr_ada"), ("Loonfs-Principals", "team")],
+        vec![("Loonfs-Principals", "team")],
     ] {
         let response = router
             .clone()
@@ -254,19 +273,7 @@ async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_sub
     )
     .await
     .expect("app");
-    let response = router
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces",
-            Some(
-                r#"{"namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
-            ),
-            &[],
-        ))
-        .await
-        .expect("create namespace response");
-    assert_eq!(response.status(), StatusCode::OK);
+    create_namespace(&router, "demo-acl", r#"{"team":["admin"]}"#).await;
     let response = router
         .clone()
         .oneshot(request(
@@ -292,7 +299,6 @@ async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_sub
         let headers = principals.map_or_else(Vec::new, |principals| {
             vec![
                 ("Loonfs-Subject", "usr_ada"),
-                ("Loonfs-Principal-Scope", "org"),
                 ("Loonfs-Principals", principals),
             ]
         });
@@ -305,89 +311,38 @@ async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_sub
     }
 }
 
-#[tokio::test]
-async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
-    let temp_dir = tempdir().expect("tempdir");
-    let (router, _state) = test_app(
-        test_options(&temp_dir.path().join("store"), "subject-scope"),
-        TestAppOptions::default(),
-    )
-    .await
-    .expect("app");
+fn request(method: &str, uri: &str, body: Option<&str>, headers: &[(&str, &str)]) -> Request<Body> {
+    let headers = [&[("Loonfs-Actor", "service")][..], headers].concat();
+    fixtures::request(method, uri, body, &headers)
+}
+
+/// Creates `namespace_id` and sets its root access row to `grants`, a JSON
+/// grants map, with an `update_access` commit in the service context.
+async fn create_namespace(router: &axum::Router, namespace_id: &str, grants: &str) {
     let response = router
         .clone()
         .oneshot(request(
             "POST",
             "/v0/namespaces",
-            Some(
-                r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_expected","root_grants":{"team":["admin"]}}}"#,
-            ),
+            Some(&format!(r#"{{"namespace_id":"{namespace_id}"}}"#)),
             &[],
         ))
         .await
         .expect("create namespace response");
     assert_eq!(response.status(), StatusCode::OK);
-    let wrong_scope = [
-        ("Loonfs-Subject", "usr_ada"),
-        ("Loonfs-Principal-Scope", "org_actual"),
-        ("Loonfs-Principals", "team"),
-    ];
-    let expected_message = "subject principal scope `org_actual` does not match namespace principal scope `org_expected`";
-    for (method, uri, body) in [
-        ("GET", "/v0/namespaces/demo/filesystem/entry?path=/", None),
-        (
-            "POST",
-            "/v0/namespaces/demo/commits",
-            Some(
-                r#"{"commit_id":"wrong-scope","operations":[{"kind":"create_directory","path":"/wrong"}]}"#,
-            ),
-        ),
-    ] {
-        let response = router
-            .clone()
-            .oneshot(request(method, uri, body, &wrong_scope))
-            .await
-            .expect("wrong-scope response");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let error: ErrorResponse =
-            serde_json::from_value(json_body(response).await).expect("error");
-        assert_eq!(error.code, ErrorCode::Forbidden.as_str());
-        assert_eq!(error.message, expected_message);
-    }
-
-    let matching_scope = [
-        ("Loonfs-Subject", "usr_ada"),
-        ("Loonfs-Principal-Scope", "org_expected"),
-        ("Loonfs-Principals", "team"),
-    ];
     let response = router
         .clone()
         .oneshot(request(
-            "GET",
-            "/v0/namespaces/demo/filesystem/entry?path=/",
-            None,
-            &matching_scope,
-        ))
-        .await
-        .expect("matching read response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = router
-        .oneshot(request(
             "POST",
-            "/v0/namespaces/demo/commits",
-            Some(
-                r#"{"commit_id":"matching-scope","operations":[{"kind":"create_directory","path":"/matching"}]}"#,
-            ),
-            &matching_scope,
+            &format!("/v0/namespaces/{namespace_id}/commits"),
+            Some(&format!(
+                r#"{{"commit_id":"root-access","operations":[{{"kind":"update_access","path":"/","boundary":false,"grants":{grants}}}]}}"#
+            )),
+            &[("Loonfs-Context", "service")],
         ))
         .await
-        .expect("matching commit response");
+        .expect("root access response");
     assert_eq!(response.status(), StatusCode::OK);
-}
-
-fn request(method: &str, uri: &str, body: Option<&str>, headers: &[(&str, &str)]) -> Request<Body> {
-    let headers = [&[("Loonfs-Actor", "service")][..], headers].concat();
-    fixtures::request(method, uri, body, &headers)
 }
 
 async fn json_body(response: axum::response::Response) -> serde_json::Value {
@@ -397,97 +352,65 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&body).expect("json")
 }
 
+/// Checks that a namespace is created over the wire without access
+/// configuration, that the service context sets its administrators, and
+/// that a snapshot then needs an administrator or the service context.
 #[tokio::test]
-async fn an_acl_namespace_is_created_over_the_wire() {
+async fn the_service_context_sets_administrators_over_the_wire() {
     let temp_dir = tempdir().expect("tempdir");
     let (router, _state) = test_app(
-        test_options(&temp_dir.path().join("store"), "acl-wire"),
+        test_options(&temp_dir.path().join("store"), "access-wire"),
         TestAppOptions::default(),
     )
     .await
     .expect("app");
-    let acl = |grants: &str| {
-        format!(
-            r#"{{"namespace_id":"demo-acl","access":{{"kind":"acl","principal_scope":"org","root_grants":{grants}}}}}"#
-        )
-    };
     let response = router
         .clone()
         .oneshot(request(
             "POST",
             "/v0/namespaces",
-            Some(&acl(r#"{"team":["read"]}"#)),
+            Some(r#"{"namespace_id":"demo","access":{"kind":"unrestricted"}}"#),
             &[],
         ))
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ErrorResponse = serde_json::from_value(json_body(response).await).expect("error");
-    assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
-    assert_eq!(error.param.as_deref(), Some("/access/root_grants"));
-
-    let expected_access = serde_json::json!({"kind": "acl", "principal_scope": "org"});
+    create_namespace(&router, "demo", r#"{"prn_root":["admin"]}"#).await;
     let response = router
         .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces",
-            Some(&acl(r#"{"prn_root":["admin"]}"#)),
-            &[],
-        ))
+        .oneshot(request("GET", "/v0/namespaces/demo", None, &[]))
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json_body(response).await["access"], expected_access);
-    let response = router
-        .clone()
-        .oneshot(request("GET", "/v0/namespaces/demo-acl", None, &[]))
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json_body(response).await["access"], expected_access);
+    assert!(json_body(response).await.get("access").is_none());
 
     let snapshot = Some(r#"{"name":"snapshot","ttl_ms":60000}"#);
-    let response = router
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces/demo-acl/snapshots",
-            snapshot,
-            &[
+    for (headers, status) in [
+        (
+            vec![("Loonfs-Subject", "usr_x"), ("Loonfs-Principals", "nobody")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            vec![
                 ("Loonfs-Subject", "usr_x"),
-                ("Loonfs-Principal-Scope", "org"),
-                ("Loonfs-Principals", "nobody"),
+                ("Loonfs-Principals", "prn_root"),
             ],
-        ))
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let response = router
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces/demo-acl/snapshots",
-            snapshot,
-            &[],
-        ))
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = router
-        .oneshot(request(
-            "POST",
-            "/v0/maintenance/namespaces/demo-acl/jobs",
-            Some(r#"{"kind":"recover_administrator","principal_id":"prn_ops"}"#),
-            &[],
-        ))
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json_body(response).await;
-    assert_eq!(body["kind"], "recover_administrator");
-    assert_eq!(body["access_revision_no"], 1);
+            StatusCode::OK,
+        ),
+        (vec![("Loonfs-Context", "service")], StatusCode::OK),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/v0/namespaces/demo/snapshots",
+                snapshot,
+                &headers,
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), status, "{headers:?}");
+    }
 }
 
 #[tokio::test]
@@ -500,17 +423,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     .await
     .expect("app");
     let namespace_reader = state.runtime.namespace(&namespace_id("demo"));
-    let response = router
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces",
-            Some(r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_demo","root_grants":{"administrator":["admin"]}}}"#),
-            &[],
-        ))
-        .await
-        .expect("create namespace response");
-    assert_eq!(response.status(), StatusCode::OK);
+    create_namespace(&router, "demo", r#"{"administrator":["admin"]}"#).await;
 
     let response = router
         .oneshot(request(
@@ -531,7 +444,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
     assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
 
     let namespace = namespace_reader.metadata().await.expect("namespace");
-    assert_eq!(namespace.head_seq, loonfs_types::CommitSeq(0));
+    assert_eq!(namespace.head_seq, loonfs_types::CommitSeq(1));
 }
 
 /// Checks that a former server's first `strong` read after another server
@@ -550,20 +463,9 @@ async fn a_former_server_observes_revocation_on_its_first_strong_read() {
     let (old_router, old_state) = test_app(config.clone(), TestAppOptions::default())
         .await
         .expect("old server");
-    let response = old_router
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/v0/namespaces",
-            Some(r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_demo","root_grants":{"prn_root":["admin"]}}}"#),
-            &[],
-        ))
-        .await
-        .expect("create namespace response");
-    assert_eq!(response.status(), StatusCode::OK);
+    create_namespace(&old_router, "demo", r#"{"prn_root":["admin"]}"#).await;
     let administrator = [
         ("Loonfs-Subject", "root"),
-        ("Loonfs-Principal-Scope", "org_demo"),
         ("Loonfs-Principals", "prn_root"),
     ];
     let publication = serde_json::json!({
@@ -614,7 +516,6 @@ async fn a_former_server_observes_revocation_on_its_first_strong_read() {
             None,
             &[
                 ("Loonfs-Subject", "viewer"),
-                ("Loonfs-Principal-Scope", "org_demo"),
                 ("Loonfs-Principals", "viewer"),
             ],
         ))

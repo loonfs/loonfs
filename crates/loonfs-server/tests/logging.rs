@@ -159,7 +159,9 @@ async fn request_error_with(
 ) -> (u16, loonfs_types::ErrorResponse, String) {
     let mut request = Request::builder().method(method).uri(uri);
     if let Some(authorization) = authorization {
-        request = request.header("authorization", authorization);
+        request = request
+            .header("authorization", authorization)
+            .header("Loonfs-Context", "service");
     }
     let response = router
         .clone()
@@ -340,6 +342,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         .method(Method::PUT)
         .uri(&upload_uri)
         .header("authorization", "Bearer test-token")
+        .header("Loonfs-Context", "service")
         .body(stalled_body)
         .expect("stalled upload request");
     let stalled_upload = tokio::spawn(router.clone().oneshot(stalled_request));

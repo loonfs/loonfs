@@ -2,7 +2,7 @@
 //! put or a direct multipart upload to the provider.
 
 use super::abort::abort_unpublished_multipart_upload;
-use super::session::{authorize_upload_subject, create_upload_session, NewUploadSession};
+use super::session::{create_upload_session, NewUploadSession};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_MULTIPART_PART_BYTES, MIN_MULTIPART_PART_BYTES};
@@ -10,9 +10,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ObjectStore, PROVIDER_MULTIPART_PART_BYTES};
 use loonfs_types::options::DirectMultipartUploadOptions;
-use loonfs_types::{
-    ChecksumAlgorithm, ContentId, NamespaceAccess, NamespaceId, Subject, SubjectId, UploadSession,
-};
+use loonfs_types::{ChecksumAlgorithm, ContentId, UploadSession};
 use std::num::NonZeroU64;
 
 /// Internal target for a new direct_put session, used by the server before
@@ -44,11 +42,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<UploadSession> {
         let clock = self.namespace.start_clock();
         let catalog = self.own_catalog(catalog);
-        let recorded = recorded_subject(
-            &self.namespace.namespace_id,
-            catalog.access(),
-            self.subject.as_ref(),
-        )?;
+        let recorded = self
+            .subject
+            .as_ref()
+            .map(|subject| subject.subject_id.clone());
         create_upload_session(
             &self.namespace.store,
             catalog,
@@ -66,11 +63,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<DirectPutUploadTarget> {
         let clock = self.namespace.start_clock();
         let catalog = self.own_catalog(catalog);
-        let recorded = recorded_subject(
-            &self.namespace.namespace_id,
-            catalog.access(),
-            self.subject.as_ref(),
-        )?;
+        let recorded = self
+            .subject
+            .as_ref()
+            .map(|subject| subject.subject_id.clone());
         let content_id = ContentId::generate();
         let object_key = content_blob(catalog.pool_id(), &content_id);
         let session = create_upload_session(
@@ -102,11 +98,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let clock = self.namespace.start_clock();
         let catalog = self.own_catalog(catalog);
         let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
-        let recorded = recorded_subject(
-            &self.namespace.namespace_id,
-            catalog.access(),
-            self.subject.as_ref(),
-        )?;
+        let recorded = self
+            .subject
+            .as_ref()
+            .map(|subject| subject.subject_id.clone());
         let content_id = ContentId::generate();
         let object_key = content_blob(catalog.pool_id(), &content_id);
         let provider_upload_id = self
@@ -161,16 +156,4 @@ fn multipart_part_size(requested: Option<u64>) -> Result<NonZeroU64> {
                  {MAX_MULTIPART_PART_BYTES} bytes"
             ))
         })
-}
-
-fn recorded_subject(
-    namespace_id: &NamespaceId,
-    access: &NamespaceAccess,
-    subject: Option<&Subject>,
-) -> Result<Option<SubjectId>> {
-    authorize_upload_subject(namespace_id, access, subject)?;
-    Ok(match access {
-        NamespaceAccess::Unrestricted {} => None,
-        NamespaceAccess::Acl { .. } => subject.map(|subject| subject.subject_id.clone()),
-    })
 }

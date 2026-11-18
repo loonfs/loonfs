@@ -460,7 +460,6 @@ async fn an_idle_close_rechecks_the_seq_and_counts_subject_scoped_handles() {
         .await
         .expect("publish again");
     let scoped = handle.with_subject(loonfs_types::Subject {
-        principal_scope: loonfs_types::PrincipalScope::parse("scope").expect("scope"),
         subject_id: loonfs_types::SubjectId::parse("reader").expect("subject"),
         principals: loonfs_types::PrincipalSet::new(std::collections::BTreeSet::from([
             loonfs_types::PrincipalId::parse("reader").expect("principal"),

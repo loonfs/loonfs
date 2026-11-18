@@ -476,7 +476,6 @@ mod tests {
                     namespace_id: namespace_id.clone(),
                     created_at_ms: 1_000,
                     created_by: loonfs_test_support::test_actor(),
-                    access: loonfs_types::NamespaceAccess::Unrestricted {},
                     fork_basis: None,
                     pool_id: loonfs_test_support::ids::numbered_pool_id(1),
                     status: NamespaceStatus::Active {},
@@ -507,24 +506,22 @@ mod tests {
         )
     }
 
-    /// Creates a head like [`head_at`] whose namespace grants access to
-    /// `principals` principals, each with a 60-byte ID.
-    fn head_with_grants(seq: u64, principals: usize, checked: &Observation) -> CachedHead {
-        let grants = (0..principals)
-            .map(|index| {
-                (
-                    loonfs_types::PrincipalId::parse(format!("prn_{index:056}"))
-                        .expect("principal"),
-                    loonfs_types::AccessRights::from(loonfs_types::AccessRight::Read),
-                )
-            })
-            .collect();
-        let mut head = head_at(seq, 1, checked);
-        head.read_basis.head.access = loonfs_types::NamespaceAccess::Acl {
-            principal_scope: loonfs_types::PrincipalScope::parse("org").expect("scope"),
-            root_grants: loonfs_types::AccessGrants::new(grants).expect("grants"),
-        };
-        head
+    /// Creates a head like [`head_at`] that keeps a manifest boundary whose
+    /// etag is `etag_bytes` bytes long.
+    fn large_head(seq: u64, etag_bytes: usize, checked: &Observation) -> CachedHead {
+        CachedHead {
+            boundary: Some(LoadedBoundary {
+                object_key: "namespaces/demo/boundary.json".to_owned(),
+                etag: "e".repeat(etag_bytes),
+                state: loonfs_types::format::control::BoundaryPayload {
+                    namespace_id: namespace("demo"),
+                    boundary: loonfs_types::format::control::ManifestBoundary::Manifest {
+                        manifest_no: ManifestNo(1),
+                    },
+                },
+            }),
+            ..head_at(seq, 1, checked)
+        }
     }
 
     /// Creates a publication of manifest `manifest_no` in namespace `demo`
@@ -898,7 +895,7 @@ mod tests {
     fn a_head_larger_than_the_budget_is_not_cached() {
         let now = crate::test_support::observed_now();
         let cache = HeadAndWalTailCache::unshared(4096);
-        let large = head_with_grants(5, 1_000, &now);
+        let large = large_head(5, 100_000, &now);
         assert!(large.heap_bytes() > 16 * 4096);
         let head = cache.replace_head(large);
         assert_eq!(order(&head), (5, 1));
@@ -931,7 +928,7 @@ mod tests {
             || { check_after(&released, head_at(0, 2, &now)) }
         ));
         assert!(poll!(check.as_mut()).is_pending());
-        let large = head_with_grants(1, 1_000, &now);
+        let large = large_head(1, 100_000, &now);
         assert!(large.heap_bytes() > 4096);
         let head = cache.replace_head(large);
         assert_eq!(order(&head), (1, 1));
@@ -953,7 +950,7 @@ mod tests {
         let cache = HeadAndWalTailCache::unshared(1 << 20);
         let small = cache.replace_head(head_at(5, 1, &now));
         let before = cache.head_stats().cached_decoded_bytes;
-        let large = cache.replace_head(head_with_grants(6, 100, &now));
+        let large = cache.replace_head(large_head(6, 10_000, &now));
         let after = cache.head_stats().cached_decoded_bytes;
         assert!(
             after >= before + large.heap_bytes() - small.heap_bytes(),

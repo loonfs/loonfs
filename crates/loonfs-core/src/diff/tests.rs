@@ -9,8 +9,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::RecordingStore;
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, Commit, CommitId,
-    EffectiveLimit, EntryInodeKind, FilesystemEvent, NamespaceAccess, PrincipalId, PrincipalScope,
-    PrincipalSet, Subject, SubjectId,
+    EffectiveLimit, EntryInodeKind, FilesystemEvent, PrincipalId, PrincipalSet, Subject, SubjectId,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +28,7 @@ struct History {
 }
 
 impl History {
-    async fn new(access: NamespaceAccess) -> Self {
+    async fn new() -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let history = Self {
@@ -39,17 +38,27 @@ impl History {
         };
         history
             .fixture()
-            .create_with_options(&loonfs_types::options::CreateNamespaceOptions {
-                access,
-                ..Default::default()
-            })
+            .create()
             .await
             .expect("create the namespace");
         history
     }
 
-    async fn unrestricted() -> Self {
-        Self::new(NamespaceAccess::Unrestricted {}).await
+    /// Creates the namespace with `prn_root` as its administrator.
+    async fn with_administrator() -> Self {
+        let history = Self::new().await;
+        history
+            .fixture()
+            .set_root_access(
+                AccessGrants::new(BTreeMap::from([(
+                    PrincipalId::parse("prn_root").expect("principal id"),
+                    AccessRights::ADMIN,
+                )]))
+                .expect("root grants"),
+            )
+            .await
+            .expect("set the administrator");
+        history
     }
 
     fn fixture(&self) -> NamespaceFixture<&LocalFsStore> {
@@ -172,7 +181,7 @@ fn summary(entry: &DiffEntry) -> (DiffEntryKind, Option<&str>, Option<&str>) {
 
 #[tokio::test]
 async fn a_file_appended_by_every_commit_yields_one_entry_at_its_last_touch() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/log.txt").await.committed_seq;
     for number in 0..6 {
         // The range's first half is folded, so the view at `from_seq`
@@ -202,7 +211,7 @@ async fn a_file_appended_by_every_commit_yields_one_entry_at_its_last_touch() {
 
 #[tokio::test]
 async fn a_one_commit_file_creation_yields_one_entry() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     history.write("/docs/old.txt").await;
     history.fold().await;
     let from_seq = history.write("/docs/kept.txt").await.committed_seq;
@@ -231,7 +240,6 @@ async fn a_one_commit_file_creation_yields_one_entry() {
 
 fn administrator() -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("principal scope"),
         subject_id: SubjectId::parse("root").expect("subject id"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse("prn_root").expect("principal id")
@@ -240,8 +248,7 @@ fn administrator() -> Subject {
     }
 }
 
-/// Commits `operation` as the administrator of an access-controlled
-/// namespace, with `bytes` as the content of a put.
+/// Commits `operation` as the namespace's administrator, with `bytes` as the content of a put.
 async fn administer(
     history: &History,
     operation: impl FnOnce(Option<loonfs_types::ContentRef>) -> FilesystemOperation,
@@ -305,15 +312,7 @@ async fn administer_put(history: &History, path: &str) -> Commit {
 /// directory doesn't hide the file's own last touch.
 #[tokio::test]
 async fn an_ancestor_changed_after_a_files_last_touch_leaves_the_files_entry() {
-    let history = History::new(NamespaceAccess::Acl {
-        principal_scope: PrincipalScope::parse("org_demo").expect("principal scope"),
-        root_grants: AccessGrants::new(BTreeMap::from([(
-            PrincipalId::parse("prn_root").expect("principal id"),
-            AccessRights::ADMIN,
-        )]))
-        .expect("root grants"),
-    })
-    .await;
+    let history = History::with_administrator().await;
     for path in ["/moved/a.txt", "/deleted/b.txt", "/shared/c.txt"] {
         administer_put(&history, path).await;
     }
@@ -387,7 +386,7 @@ async fn an_ancestor_changed_after_a_files_last_touch_leaves_the_files_entry() {
 
 #[tokio::test]
 async fn a_floor_advance_between_two_pages_fails_the_later_page() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/a.txt").await.committed_seq;
     history.write("/b.txt").await;
     history.write("/c.txt").await;
@@ -435,7 +434,7 @@ async fn a_floor_advance_between_two_pages_fails_the_later_page() {
 
 #[tokio::test]
 async fn a_restored_directory_is_one_entry_and_its_children_are_not() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     history.write("/dir/x.txt").await;
     history.write("/dir/y.txt").await;
     let directory = history.inode_id("/dir").await;
@@ -461,7 +460,7 @@ async fn a_restored_directory_is_one_entry_and_its_children_are_not() {
 
 #[tokio::test]
 async fn a_subtree_moved_in_from_outside_the_path_appears_once_as_moved() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     history.write("/outside/sub/f.txt").await;
     let from_seq = history.write("/inside/kept.txt").await.committed_seq;
     history.move_path("/outside/sub", "/inside/sub").await;
@@ -486,7 +485,7 @@ async fn a_subtree_moved_in_from_outside_the_path_appears_once_as_moved() {
 /// before the move or after it, reports the move.
 #[tokio::test]
 async fn a_move_of_a_directory_above_the_path_is_an_entry() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     history.write("/a/b/file.txt").await;
     let from_seq = history.write("/other/kept.txt").await.committed_seq;
     history.move_path("/a", "/x").await;
@@ -509,7 +508,7 @@ async fn a_move_of_a_directory_above_the_path_is_an_entry() {
 /// deletion, and its restore in place.
 #[tokio::test]
 async fn a_deletion_or_restore_of_a_directory_above_the_path_is_an_entry() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let written = history.write("/a/b/file.txt").await.committed_seq;
     let directory = history.inode_id("/a").await;
     let deletion = history.delete("/a").await;
@@ -536,7 +535,7 @@ async fn a_deletion_or_restore_of_a_directory_above_the_path_is_an_entry() {
 /// own.
 #[tokio::test]
 async fn a_directory_created_above_the_path_is_not_an_entry() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/kept.txt").await.committed_seq;
     history.write("/a/b/f.txt").await;
 
@@ -555,7 +554,7 @@ async fn a_directory_created_above_the_path_is_not_an_entry() {
 /// the directory's two moves on different pages.
 #[tokio::test]
 async fn a_directory_above_the_path_touched_on_two_pages_is_one_entry() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/a/b/file.txt").await.committed_seq;
     history.move_path("/a", "/y").await;
     history.write("/other.txt").await;
@@ -577,15 +576,7 @@ async fn a_directory_above_the_path_touched_on_two_pages_is_one_entry() {
 /// it.
 #[tokio::test]
 async fn an_attribute_or_access_change_of_a_directory_above_the_path_is_not_an_entry() {
-    let history = History::new(NamespaceAccess::Acl {
-        principal_scope: PrincipalScope::parse("org_demo").expect("principal scope"),
-        root_grants: AccessGrants::new(BTreeMap::from([(
-            PrincipalId::parse("prn_root").expect("principal id"),
-            AccessRights::ADMIN,
-        )]))
-        .expect("root grants"),
-    })
-    .await;
+    let history = History::with_administrator().await;
     let from_seq = administer_put(&history, "/a/b/file.txt")
         .await
         .committed_seq;
@@ -640,7 +631,7 @@ async fn an_attribute_or_access_change_of_a_directory_above_the_path_is_not_an_e
 /// the commit after it.
 #[tokio::test]
 async fn a_page_ends_after_the_commit_that_reaches_the_touch_bound() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/kept.txt").await.committed_seq;
     let mut commits = Vec::new();
     for number in 0..3 {
@@ -695,7 +686,7 @@ async fn a_page_ends_after_the_commit_that_reaches_the_touch_bound() {
 
 #[tokio::test]
 async fn a_create_followed_by_a_delete_in_the_range_yields_nothing() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/kept.txt").await.committed_seq;
     history.write("/scratch.txt").await;
     history.delete("/scratch.txt").await;
@@ -709,7 +700,7 @@ async fn a_create_followed_by_a_delete_in_the_range_yields_nothing() {
 /// of its inode, over a history whose first half is folded.
 #[tokio::test]
 async fn an_inode_classifies_the_same_way_whichever_page_its_last_touch_is_on() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     history.write("/a/one.txt").await;
     history.write("/a/two.txt").await;
     history.write("/b/three.txt").await;
@@ -746,7 +737,7 @@ async fn an_inode_classifies_the_same_way_whichever_page_its_last_touch_is_on() 
 
 #[tokio::test]
 async fn a_range_out_of_bounds_is_rejected_and_an_empty_range_is_an_empty_page() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let first = history.write("/a.txt").await.committed_seq;
     let head = history.write("/b.txt").await.committed_seq;
 
@@ -818,7 +809,7 @@ async fn diff_pages(
 /// reported on both.
 #[tokio::test]
 async fn a_commit_over_the_touch_bound_is_read_across_pages_with_split_commits() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/kept.txt").await.committed_seq;
     let mut operations: Vec<_> = (0..40)
         .map(|index| FilesystemOperation::CreateDirectoryByInode {
@@ -897,7 +888,7 @@ async fn a_commit_over_the_touch_bound_is_read_across_pages_with_split_commits()
 /// `split_commits`, and one at `from_seq`, which is no commit of the range.
 #[tokio::test]
 async fn a_diff_refuses_an_event_index_without_split_commits_or_at_from_seq() {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/a.txt").await.committed_seq;
     let after = history.write("/b.txt").await.committed_seq;
     let namespace = namespace_store(&history.store, &history.namespace_id);
@@ -926,7 +917,7 @@ async fn a_diff_refuses_an_event_index_without_split_commits_or_at_from_seq() {
 /// are in more than one metadata segment. Returns the history and the
 /// sequence of the file's creation.
 async fn history_of_appends_in_segments() -> (History, CommitSeq) {
-    let history = History::unrestricted().await;
+    let history = History::new().await;
     let from_seq = history.write("/log.txt").await.committed_seq;
     for _ in 0..3 {
         for _ in 0..70 {

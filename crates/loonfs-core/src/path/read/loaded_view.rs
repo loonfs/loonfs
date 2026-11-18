@@ -463,7 +463,7 @@ mod tests {
             .resolve_path(
                 "/docs/annotated",
                 AttributeInclusion::Include,
-                &ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                &ReadAccess::live(crate::authorize::Authorizer::Service),
             )
             .await
             .expect("stat annotated");
@@ -487,7 +487,7 @@ mod tests {
             .resolve_path(
                 "/docs/bare",
                 AttributeInclusion::Include,
-                &ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                &ReadAccess::live(crate::authorize::Authorizer::Service),
             )
             .await
             .expect("stat bare");
@@ -505,7 +505,7 @@ mod tests {
             .resolve_path(
                 "/docs/annotated",
                 AttributeInclusion::Omit,
-                &ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                &ReadAccess::live(crate::authorize::Authorizer::Service),
             )
             .await
             .expect("stat without attributes");

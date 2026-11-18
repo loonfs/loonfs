@@ -5,12 +5,19 @@ export interface ProxyRouteContext {
     namespaceId?: string;
 }
 
+/**
+ * The identity that the proxy stamps on a forwarded request. Set `principals`
+ * to act for a user, or `service` to act in the service context, in which
+ * LoonFS checks no rights. A request forwarded with neither, or with both,
+ * fails with `invalid_request`.
+ */
 export interface ProxyAuthorization {
     /** Sent upstream in `Loonfs-Actor`. */
     actorId?: string;
     subjectId?: string;
-    principalScope?: string;
     principals?: string[];
+    /** Sent upstream as `Loonfs-Context: service` when true. */
+    service?: boolean;
 }
 
 export interface ProxyConfig {
@@ -18,7 +25,7 @@ export interface ProxyConfig {
     token: string;
     /**
      * Runs before every forwarded request. Return a Response to refuse it.
-     * Required; returning an empty authorization forwards as the token holder.
+     * Required, and it returns either principals or `service: true`.
      * The proxy forwards any namespace ID in the path, so check
      * `context.namespaceId` here.
      */
@@ -117,11 +124,6 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
         if (authorization instanceof Response) {
             return authorization;
         }
-        if ((authorization.principalScope === undefined) !== (authorization.principals === undefined)) {
-            return new Response("proxy authorization must set principalScope and principals together", {
-                status: 500,
-            });
-        }
 
         const headers = forwardedHeaders(request.headers, REQUEST_STRIPPED_HEADERS);
         headers.set("authorization", `Bearer ${token}`);
@@ -131,11 +133,11 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
         if (authorization.subjectId !== undefined) {
             headers.set("Loonfs-Subject", authorization.subjectId);
         }
-        if (authorization.principalScope !== undefined) {
-            headers.set("Loonfs-Principal-Scope", authorization.principalScope);
-        }
         if (authorization.principals !== undefined) {
             headers.set("Loonfs-Principals", authorization.principals.join(","));
+        }
+        if (authorization.service === true) {
+            headers.set("Loonfs-Context", "service");
         }
         const init: RequestInit & { duplex?: "half" } = {
             method: request.method,
@@ -202,8 +204,8 @@ const REQUEST_STRIPPED_HEADERS = [
     "cookie",
     "loonfs-actor",
     "loonfs-subject",
-    "loonfs-principal-scope",
     "loonfs-principals",
+    "loonfs-context",
 ] as const;
 // Fetch decompresses responses, so remove the old encoding and length headers.
 // Do not forward LoonFS cookies to the application.

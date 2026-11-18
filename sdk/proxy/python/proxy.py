@@ -22,10 +22,17 @@ class ProxyRouteContext:
 
 @dataclass(frozen=True)
 class ProxyAuthorization:
+    """The identity that the proxy stamps on a forwarded request.
+
+    Set `principals` to act for a user, or `service` to act in the service
+    context, in which LoonFS checks no rights. A request forwarded with
+    neither, or with both, fails with `invalid_request`.
+    """
+
     actor_id: str | None = None
     subject_id: str | None = None
-    principal_scope: str | None = None
     principals: list[str] | None = None
+    service: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,8 +121,8 @@ _REQUEST_EXCLUDED_HEADERS = frozenset(
         b"authorization",
         b"loonfs-actor",
         b"loonfs-subject",
-        b"loonfs-principal-scope",
         b"loonfs-principals",
+        b"loonfs-context",
     }
 )
 # Do not forward LoonFS cookies to the application.
@@ -160,8 +167,8 @@ class LoonFSProxy:
     ) -> None:
         """The authorize hook is required and runs before every forwarded request.
 
-        Return a ProxyRefusal to refuse it.
-        Returning an empty ProxyAuthorization forwards as the token holder.
+        Return a ProxyRefusal to refuse it, or a ProxyAuthorization with
+        either principals or `service=True`.
         The proxy forwards any namespace ID in the path, so check
         `context.namespace_id` here.
         """
@@ -187,16 +194,6 @@ class LoonFSProxy:
         if isinstance(authorization, ProxyRefusal):
             await self._refuse(send, authorization)
             return
-        if (authorization.principal_scope is None) != (authorization.principals is None):
-            await self._refuse(
-                send,
-                ProxyRefusal(
-                    500,
-                    b"proxy authorization must set principal_scope and principals together",
-                    "text/plain",
-                ),
-            )
-            return
 
         # The ASGI path is decoded. Quoting it again keeps a decoded `?` or `#`
         # inside its segment, so LoonFS receives the route that the hook approved.
@@ -209,14 +206,12 @@ class LoonFSProxy:
             headers.append((b"loonfs-actor", authorization.actor_id.encode("ascii")))
         if authorization.subject_id is not None:
             headers.append((b"loonfs-subject", authorization.subject_id.encode("ascii")))
-        if authorization.principal_scope is not None:
-            headers.append(
-                (b"loonfs-principal-scope", authorization.principal_scope.encode("ascii"))
-            )
         if authorization.principals is not None:
             headers.append(
                 (b"loonfs-principals", ",".join(authorization.principals).encode("ascii"))
             )
+        if authorization.service:
+            headers.append((b"loonfs-context", b"service"))
         request = self._client.build_request(
             scope["method"],
             target,

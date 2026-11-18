@@ -4,9 +4,9 @@
 
 use bytes::Bytes;
 use loonfs_client::{
-    AccessState, AppendFileOptions, AttributeChanges, Client, ClientConfig, ClientError,
-    CommitOptions, Consistency, CreateDirectoryOptions, DeleteOptions, DownloadOptions,
-    ListFileRevisionsOptions, ListTrashOptions, MoveOptions, NamespacePath, PutFileOptions, ReadAt,
+    AppendFileOptions, AttributeChanges, Client, ClientConfig, ClientError, CommitOptions,
+    Consistency, CreateDirectoryOptions, DeleteOptions, DownloadOptions, ListFileRevisionsOptions,
+    ListTrashOptions, MoveOptions, NamespacePath, PutFileOptions, ReadAt,
     RestoreDeletedDestination, RestoreDeletedOptions, UpdateAttributesByInodeOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, StoreShape, AUTH_TOKEN};
@@ -14,11 +14,11 @@ use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{
-    AccessGrants, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, BindingVersion,
-    Checksum, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitRequest, CommitSeq,
-    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DestinationPrecondition, DisplayName,
+    ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, BindingVersion, Checksum,
+    ChecksumAlgorithm, CommitId, CommitPrecondition, CommitRequest, CommitSeq, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, DestinationPrecondition, DisplayName,
     ErrorResponse, FilesystemOperation, NamespaceId, PathEntry, PathEntryKind, RevisionNo,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, ROOT_INODE_ID,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
 };
 use loonfs_types::{
     CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
@@ -103,7 +103,15 @@ impl Harness {
             shape,
             client,
             unauthenticated_client,
-            raw_client: reqwest::Client::new(),
+            // Every raw request acts in the service context, as the client's
+            // requests without a subject do.
+            raw_client: reqwest::Client::builder()
+                .default_headers(reqwest::header::HeaderMap::from_iter([(
+                    reqwest::header::HeaderName::from_static("loonfs-context"),
+                    reqwest::header::HeaderValue::from_static("service"),
+                )]))
+                .build()
+                .expect("raw client"),
             server_url,
             _server: server,
         }
@@ -1728,7 +1736,6 @@ struct InodeAddressingExpected {
     entry_names: Vec<String>,
     stale_binding_version: ErrorStatusExpected,
     occupied_name: ErrorStatusExpected,
-    unrestricted_access: ErrorStatusExpected,
     deleted_content: ErrorStatusExpected,
 }
 
@@ -1979,21 +1986,6 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         labeled.attributes.as_map().get(&attribute_key),
         Some(&attribute_value)
     );
-
-    let unrestricted = harness
-        .client
-        .update_access_by_inode(
-            &namespace,
-            ROOT_INODE_ID,
-            actor,
-            AccessState {
-                boundary: false,
-                grants: AccessGrants::default(),
-            },
-        )
-        .await
-        .expect_err("an unrestricted namespace holds no access rows");
-    assert_error_response(&unrestricted, &expected.unrestricted_access);
 
     let deletion = harness
         .client

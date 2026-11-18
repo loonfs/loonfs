@@ -44,15 +44,12 @@ string_id! {
     )
 }
 
-/// Who a request acts as: a principal scope, stable id, and applicable principals.
+/// Who a request acts as: a stable id and the applicable principals.
+///
+/// A request without a subject acts in the service context, with every right.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subject {
-    /// Identity domain for the subject's principals.
-    ///
-    /// Commit fingerprints and upload ownership use the subject id alone because a namespace
-    /// has one scope and refuses subjects from any other scope.
-    pub principal_scope: PrincipalScope,
     /// Stable identity for upload ownership and commit replay.
     pub subject_id: SubjectId,
     /// Principals whose grants apply to the request.
@@ -60,41 +57,30 @@ pub struct Subject {
 }
 
 impl Subject {
-    /// Builds the subject a request acts as from its four parts, or returns
-    /// `None` when no part is present and the request acts with service
-    /// authority.
+    /// Builds the subject a request acts as from its three parts, or returns
+    /// `None` when no part is present.
     ///
-    /// Principals are required with a principal scope or a subject id, and a
-    /// principal scope is required with principals. The subject id defaults
-    /// to the actor id, which must then also be a valid subject id. The parts
+    /// Principals are required with a subject id. The subject id defaults to
+    /// the actor id, which must then also be a valid subject id. The parts
     /// are checked in that order, so every surface reports the same first
     /// failure under its own name for the part.
     pub fn from_parts(
-        principal_scope: Option<&str>,
         subject_id: Option<&str>,
         actor_id: Option<&str>,
         principals: Option<&str>,
     ) -> Result<Option<Self>, SubjectPartsError> {
         let Some(principals) = principals else {
-            let required_by = match (principal_scope, subject_id) {
-                (Some(_), _) => SubjectPart::PrincipalScope,
-                (None, Some(_)) => SubjectPart::SubjectId,
-                (None, None) => return Ok(None),
+            return match subject_id {
+                Some(_) => Err(SubjectPartsError::Missing {
+                    part: SubjectPart::Principals,
+                    required_by: SubjectPart::SubjectId,
+                }),
+                None => Ok(None),
             };
-            return Err(SubjectPartsError::Missing {
-                part: SubjectPart::Principals,
-                required_by,
-            });
         };
         let principals = principals
             .parse::<PrincipalSet>()
             .map_err(|error| SubjectPartsError::invalid(SubjectPart::Principals, &error))?;
-        let principal_scope = principal_scope.ok_or(SubjectPartsError::Missing {
-            part: SubjectPart::PrincipalScope,
-            required_by: SubjectPart::Principals,
-        })?;
-        let principal_scope = PrincipalScope::parse(principal_scope)
-            .map_err(|error| SubjectPartsError::invalid(SubjectPart::PrincipalScope, &error))?;
         let subject_id = match (subject_id, actor_id) {
             (Some(subject_id), _) => SubjectId::parse(subject_id)
                 .map_err(|error| SubjectPartsError::invalid(SubjectPart::SubjectId, &error))?,
@@ -108,7 +94,6 @@ impl Subject {
             }
         };
         Ok(Some(Self {
-            principal_scope,
             subject_id,
             principals,
         }))
@@ -123,8 +108,6 @@ impl Subject {
 pub enum SubjectPart {
     /// The comma-separated principal ids.
     Principals,
-    /// The identity domain the principals belong to.
-    PrincipalScope,
     /// The stable subject id.
     SubjectId,
     /// The actor id, which stands in for an absent subject id.
@@ -136,7 +119,6 @@ impl SubjectPart {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Principals => "principals",
-            Self::PrincipalScope => "principal_scope",
             Self::SubjectId => "subject_id",
             Self::ActorId => "actor_id",
         }
@@ -146,7 +128,6 @@ impl SubjectPart {
     pub const fn header_name(self) -> &'static str {
         match self {
             Self::Principals => headers::PRINCIPALS,
-            Self::PrincipalScope => headers::PRINCIPAL_SCOPE,
             Self::SubjectId => headers::SUBJECT,
             Self::ActorId => headers::ACTOR,
         }
@@ -190,11 +171,6 @@ impl SubjectPartsError {
     }
 }
 
-validation_error!(
-    PrincipalScopeValidationError,
-    "invalid principal_scope {value:?}: {reason}"
-);
-
 string_id! {
     /// A validated principal identifier that the application supplies.
     ///
@@ -207,22 +183,6 @@ string_id! {
         description = "A stable, opaque principal ID of 1 to 256 visible ASCII characters other than the comma.",
         pattern = r"^[\x21-\x2B\x2D-\x7E]{1,256}$",
         example = "prn_8f3c"
-    )
-}
-
-string_id! {
-    /// The identity domain that a namespace's principal IDs belong to.
-    ///
-    /// A deployment compares this value to check whether it issued a namespace's grants, and it
-    /// refuses to interpret grants that it didn't issue. A principal scope follows the same rules
-    /// as a principal ID.
-    PrincipalScope,
-    error = PrincipalScopeValidationError,
-    validate = validate_principal_scope,
-    schema(
-        description = "An opaque identity domain ID of 1 to 256 visible ASCII characters other than the comma.",
-        pattern = r"^[\x21-\x2B\x2D-\x7E]{1,256}$",
-        example = "org_acme"
     )
 }
 
@@ -258,12 +218,6 @@ fn validate_principal_id(value: &str) -> Result<(), PrincipalIdValidationError> 
 fn validate_subject_id(value: &str) -> Result<(), SubjectIdValidationError> {
     visible_ascii_reason(value).map_or(Ok(()), |reason| {
         Err(SubjectIdValidationError::new(value, reason))
-    })
-}
-
-fn validate_principal_scope(value: &str) -> Result<(), PrincipalScopeValidationError> {
-    visible_ascii_reason(value).map_or(Ok(()), |reason| {
-        Err(PrincipalScopeValidationError::new(value, reason))
     })
 }
 
@@ -704,8 +658,6 @@ mod tests {
             .expect_err("a principal ID with a comma should be rejected");
         super::SubjectId::parse("usr,ada")
             .expect_err("a subject ID with a comma should be rejected");
-        super::PrincipalScope::parse("org,demo")
-            .expect_err("a principal scope with a comma should be rejected");
         assert!(PrincipalId::parse("visitor").is_ok());
     }
     use std::collections::BTreeMap;

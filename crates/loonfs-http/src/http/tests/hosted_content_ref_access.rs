@@ -3,11 +3,11 @@
 use super::fixtures::{test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use loonfs::{CreateNamespaceOptions, PutFileOptions};
+use loonfs::PutFileOptions;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    AccessGrants, AccessRight, ErrorCode, ErrorResponse, NamespaceAccess, PrincipalId,
-    PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, ErrorCode, ErrorResponse, PrincipalId, PrincipalSet, Subject,
+    SubjectId,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +16,6 @@ use tower::ServiceExt as _;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
@@ -25,15 +24,12 @@ fn subject(principal: &str) -> Subject {
     }
 }
 
-fn acl(administrator: &str) -> NamespaceAccess {
-    NamespaceAccess::Acl {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-        root_grants: AccessGrants::new(BTreeMap::from([(
-            PrincipalId::parse(administrator).expect("principal"),
-            AccessRight::Admin.into(),
-        )]))
-        .expect("grants"),
-    }
+fn grants(principal: &str, rights: &[AccessRight]) -> AccessGrants {
+    AccessGrants::new(BTreeMap::from([(
+        PrincipalId::parse(principal).expect("principal"),
+        rights.iter().copied().collect(),
+    )]))
+    .expect("grants")
 }
 
 fn request(method: &str, uri: &str, body: Option<String>) -> Request<Body> {
@@ -43,7 +39,6 @@ fn request(method: &str, uri: &str, body: Option<String>) -> Request<Body> {
         .header("authorization", "Bearer test-token")
         .header("Loonfs-Actor", "hosted-test")
         .header("Loonfs-Subject", "stranger")
-        .header("Loonfs-Principal-Scope", "org_demo")
         .header("Loonfs-Principals", "stranger");
     if body.is_some() {
         request = request.header("content-type", "application/json");
@@ -72,16 +67,15 @@ async fn hosted_subject_cannot_commit_a_foreign_bare_content_reference() {
     let destination_namespace = state.runtime.namespace(&destination);
     state
         .runtime
-        .create_namespace_with_options(
-            &source,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: acl("administrator"),
-                ..Default::default()
-            },
-        )
+        .create_namespace(&source, &loonfs_test_support::test_actor())
         .await
         .expect("source namespace");
+    loonfs::test_support::set_root_access(
+        &state.runtime,
+        &source,
+        grants("administrator", &[AccessRight::Admin]),
+    )
+    .await;
     let namespace = state
         .runtime
         .open_namespace(&source)
@@ -91,6 +85,12 @@ async fn hosted_subject_cannot_commit_a_foreign_bare_content_reference() {
         .create_namespace(&destination, &loonfs_test_support::test_actor())
         .await
         .expect("destination namespace");
+    loonfs::test_support::set_root_access(
+        &state.runtime,
+        &destination,
+        grants("stranger", &[AccessRight::Read, AccessRight::Create]),
+    )
+    .await;
     let options = PutFileOptions::default();
     namespace
         .with_subject(subject("administrator"))

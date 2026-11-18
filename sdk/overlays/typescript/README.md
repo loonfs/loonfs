@@ -9,6 +9,7 @@ import { LoonFSClient } from "@loonfs/sdk/server";
 const client = new LoonFSClient({
     baseUrl: process.env.LOONFS_URL!,
     token: process.env.LOONFS_AUTH_TOKEN!,
+    headers: { "Loonfs-Context": "service" },
 });
 await client.files.upload({
     namespace_id: "demo",
@@ -17,6 +18,14 @@ await client.files.upload({
     commit_id: "cmt_7kn71d9dq885x91hejz3gvf9p0",
 });
 ```
+
+Every request that reads or changes a namespace's contents sends exactly one
+of two headers. `Loonfs-Principals` lists the principals that the request acts
+for, and the server checks their rights. `Loonfs-Context: service` acts on the
+application's own account, and the server checks no rights. A request that
+sends neither or both fails with `invalid_request`. A new namespace has no
+access rows and no administrators, so grant the first ones with a commit whose
+one operation is `update_access` on `/`, sent in the service context.
 
 Server clients accept an optional `actorId`. In a browser, set `baseUrl` to the
 application's proxy (see [Proxy](#proxy)) and `token` to the credential that the
@@ -112,12 +121,36 @@ route.
 The hook receives the request and the route context, which includes the decoded
 `namespaceId`. Any namespace ID in the path reaches LoonFS, so the hook checks
 that the caller may use that namespace. Return a `Response` to refuse access, or
-an authorization object to forward as the approved identity. Returning `{}`
-forwards as the token holder.
+an authorization object with one of two choices:
+
+- `principals`, to act for the signed-in user. LoonFS checks the request
+  against the namespace's access rows.
+- `service: true`, to act on the application's own account. The proxy sends
+  `Loonfs-Context: service`, and LoonFS checks no rights.
+
+A hook that returns neither, or both, forwards a request that LoonFS rejects
+with `invalid_request`. For example:
+
+```ts
+const proxy = createProxyHandler({
+    serverBaseUrl: process.env.LOONFS_URL!,
+    token: process.env.LOONFS_AUTH_TOKEN!,
+    authorize: async (request, context) => {
+        const user = await authorizedUser(request, context.namespaceId);
+        if (user === undefined) return new Response(null, { status: 403 });
+        return { actorId: user.id, principals: user.principals };
+    },
+});
+```
+
+An application without per-user permissions returns
+`{ actorId: user.id, service: true }` instead.
 
 The proxy forwards bodies without rewriting JSON. It strips browser credentials,
-cookies, `Host`, actor and subject headers, and hop-by-hop headers. It supplies
-the configured token and the identity returned by `authorize`.
+cookies, `Host`, the `Loonfs-Actor`, `Loonfs-Subject`, `Loonfs-Principals`, and
+`Loonfs-Context` headers, and hop-by-hop headers, so the browser can't choose
+its own authority. It supplies the configured token and the identity returned
+by `authorize`.
 
 ## Retries
 

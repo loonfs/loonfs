@@ -345,10 +345,6 @@ fn command_kind_envelope_values_are_pinned() {
         (CommandKind::FilesystemStat, "filesystem_stat"),
         (CommandKind::FilesystemAnnotate, "filesystem_annotate"),
         (CommandKind::AccessSet, "access_set"),
-        (
-            CommandKind::MaintenanceRecoverAdministrator,
-            "maintenance_recover_administrator",
-        ),
         (CommandKind::FilesystemCat, "filesystem_cat"),
         (CommandKind::FilesystemGrep, "filesystem_grep"),
         (CommandKind::FilesystemGet, "filesystem_get"),
@@ -430,7 +426,6 @@ fn management_command_model_uses_noun_families() {
     assert_subcommands(
         maintenance,
         &[
-            "recover-administrator",
             "metadata",
             "fold",
             "snapshot",

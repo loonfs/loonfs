@@ -41,7 +41,7 @@ async fn assert_files_readable(
             .read_file_bytes(
                 &format!("/{commit_id}-{index}"),
                 None,
-                &ReadAccess::live(Authorizer::Unrestricted),
+                &ReadAccess::live(Authorizer::Service),
             )
             .await
             .expect("read committed bytes");

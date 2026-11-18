@@ -1,6 +1,6 @@
 {
   "name": "proxy",
-  "intent": "A proxy forwards the routes in its route table unchanged, adds server credentials, streams bodies, rejects every other route, and lets an authorization hook refuse requests (including requests for a namespace the hook doesn't allow) or replace browser-claimed actor, subject, scope, and principal headers with the hook's.",
+  "intent": "A proxy forwards the routes in its route table unchanged, adds server credentials, streams bodies, rejects every other route, and lets an authorization hook refuse requests (including requests for a namespace the hook doesn't allow) or replace browser-claimed actor, subject, principal, and context headers with the hook's, which chooses either principals or the service context.",
   "request": {
     "namespace_id": "conf-proxy-namespace",
     "actor_id": "conformance-proxy",
@@ -25,7 +25,6 @@
     },
     "acl": {
       "namespace_id": "conf-proxy-acl",
-      "principal_scope": "conformance",
       "administrator": "prn_admin",
       "member": "prn_member",
       "member_subject_id": "usr_member",
@@ -43,7 +42,7 @@
     "stamped_committed_by": "proxy-stamped-actor",
     "stamped_committed_seq": 4,
     "refused_status": 403,
-    "acl_stamped_committed_seq": 1,
+    "acl_stamped_committed_seq": 2,
     "acl_forbidden_status": 403,
     "routes": [
       "GET /v0/capabilities",

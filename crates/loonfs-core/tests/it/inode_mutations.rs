@@ -937,7 +937,7 @@ async fn inode_writes_refuse_the_root_except_for_access() {
         .expect_err("the root is not a mutation target");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
     }
-    let unrestricted = submit_operation(
+    submit_operation(
         &store,
         &namespace_id,
         CommitId::generate(),
@@ -950,8 +950,7 @@ async fn inode_writes_refuse_the_root_except_for_access() {
         &context,
     )
     .await
-    .expect_err("an unrestricted namespace holds no access rows");
-    assert_eq!(unrestricted.code(), ErrorCode::NamespaceUnrestricted);
+    .expect("the root's access row is a mutation target");
 }
 
 #[tokio::test]

@@ -142,7 +142,7 @@ async fn folded_file(
         .resolve_path(
             "/file-0",
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("entry")
@@ -234,7 +234,7 @@ async fn read_file(
             "/file-0",
             revision_no,
             None,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("read")
@@ -327,7 +327,7 @@ async fn inline_publication_writes_only_wal_and_replays_metadata_in_entry_order(
             .resolve_path(
                 &format!("/publish-{index}"),
                 AttributeInclusion::Omit,
-                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
             )
             .await
             .expect("stat");

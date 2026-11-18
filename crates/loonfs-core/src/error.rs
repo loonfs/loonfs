@@ -19,7 +19,7 @@ pub use loonfs_types::MergeBound;
 use loonfs_types::{ActiveWriter, CommittedReceipt, MergeConflict};
 use loonfs_types::{
     BindingVersion, CommitId, CommitSeq, ErrorCause, ErrorDetails, InodeId, InodeKind, ManifestNo,
-    NamespaceId, PathError, PoolId, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
+    NamespaceId, PathError, PoolId, RevisionNo, UploadId, WriterEpoch,
 };
 use thiserror::Error;
 
@@ -329,21 +329,6 @@ pub enum CoreError {
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
-    #[error("namespace `{namespace_id}` is unrestricted and holds no access rows")]
-    NamespaceUnrestricted { namespace_id: NamespaceId },
-    /// An ACL namespace's creation named no principal with `admin` in its
-    /// root grants, so no principal could administer the namespace.
-    #[error("an ACL namespace needs at least one administrator in root_grants")]
-    RootGrantsWithoutAdministrator,
-    #[error("namespace `{namespace_id}` requires a subject; send Loonfs-Principals")]
-    SubjectRequired { namespace_id: NamespaceId },
-    #[error(
-        "subject principal scope `{actual_principal_scope}` does not match namespace principal scope `{expected_principal_scope}`"
-    )]
-    PrincipalScopeMismatch {
-        expected_principal_scope: PrincipalScope,
-        actual_principal_scope: PrincipalScope,
-    },
     #[error("the subject lacks a right the operation needs on inode `{inode_id}`")]
     Forbidden { inode_id: InodeId },
     /// A caller-supplied `expected_head_seq` did not match the current head.
@@ -503,7 +488,6 @@ impl CoreError {
             CoreError::StoreContention { .. } => ErrorCode::StoreContention,
             CoreError::InvalidPath(_)
             | CoreError::RootMutationForbidden
-            | CoreError::SubjectRequired { .. }
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
             | CoreError::InvalidSnapshotRequest(_)
@@ -516,8 +500,7 @@ impl CoreError {
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::ResumedPrefix(_)
-            | CoreError::PrefixForRangedRead
-            | CoreError::RootGrantsWithoutAdministrator => ErrorCode::InvalidRequest,
+            | CoreError::PrefixForRangedRead => ErrorCode::InvalidRequest,
             CoreError::RangeNotSatisfiable { .. } => ErrorCode::RangeNotSatisfiable,
             CoreError::SnapshotNotFound { .. } | CoreError::SnapshotManifestMissing { .. } => {
                 ErrorCode::SnapshotNotFound
@@ -534,10 +517,7 @@ impl CoreError {
             CoreError::PoolNotFound { .. } => ErrorCode::PoolNotFound,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-            CoreError::NamespaceUnrestricted { .. } => ErrorCode::NamespaceUnrestricted,
-            CoreError::Forbidden { .. } | CoreError::PrincipalScopeMismatch { .. } => {
-                ErrorCode::Forbidden
-            }
+            CoreError::Forbidden { .. } => ErrorCode::Forbidden,
             CoreError::StaleHeadPrecondition { .. }
             | CoreError::ManifestReplaced { .. }
             | CoreError::HeadMoved(_) => ErrorCode::StaleHead,
@@ -625,8 +605,6 @@ impl CoreError {
             | CoreError::VisiblePath(_)
             | CoreError::CommitValidation(_)
             | CoreError::InvalidPath(_)
-            | CoreError::SubjectRequired { .. }
-            | CoreError::PrincipalScopeMismatch { .. }
             | CoreError::InvalidCommitRequest(_)
             | CoreError::InvalidCommitField { .. }
             | CoreError::PathNotFound(_)
@@ -680,8 +658,6 @@ impl CoreError {
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
             | CoreError::Forbidden { .. }
-            | CoreError::NamespaceUnrestricted { .. }
-            | CoreError::RootGrantsWithoutAdministrator
             | CoreError::LiveSetExceedsCollectionMemory { .. }
             | CoreError::ManifestTooLarge { .. }
             | CoreError::StaleHeadPrecondition { .. }

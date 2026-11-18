@@ -265,16 +265,13 @@ There are eight rights. The [API specification][api-spec] defines exactly which 
 
 A set of rights is stored as a list of distinct names, in the order of the table above. A decoder accepts the names in any order, but it rejects a repeated name or a repeated principal. An access map has at most 1,000 principals and at most 65,536 bytes of principal IDs, and every entry has at least one right. A durable map that breaks these limits is rejected, not truncated.
 
-An inode starts at access revision `0`, with no boundary and no grants, and that initial state has no stored row. The exception is the root inode of an ACL namespace, which starts with a row at revision `0` that contains the manifest's `root_grants` (written when the namespace is created, like the root inode row). Each accepted update increases the access revision number (`access_revision_no`) by one and stores the complete resulting state. A row with no boundary and no grants is a real revision, distinguishable from an inode whose access was never changed.
+An inode starts at access revision `0`, with no boundary and no grants, and that initial state has no stored row. The root inode starts the same way, so a new namespace has no access rows and no administrators until an `update_access` on the root sets them. Each accepted update increases the access revision number (`access_revision_no`) by one and stores the complete resulting state. A row with no boundary and no grants is a real revision, distinguishable from an inode whose access was never changed.
 
-Every namespace has an "access mode", which is stored in its manifest and set when the namespace is created (a fork uses its source's access mode and scope):
-
-- `unrestricted`: requests aren't checked against any rights, and the namespace has no access rows.
-- `acl`: requests are authorized against access rows. The mode includes a `principal_scope`, which identifies the identity domain of the namespace's principal IDs, and the `root_grants` that the root inode starts with (normally `admin` for each initial administrator). Before authorization reads a grant, the request's subject scope MUST match the namespace's `principal_scope`.
+LoonFS authorizes a request with principals against the access rows, and checks no rights for a request in the [service context](glossary.md#service-context) (see the [API specification][api-spec]). A fork starts with its source's access rows, as it starts with every other row of its source.
 
 A principal's effective rights on an inode are the union of its grants on the inode's own row and on each ancestor's row. LoonFS walks up the current parent bindings, and it stops after a row whose boundary flag is set, or at the root. For example, suppose a principal has `read` on `/projects`, and `/projects/secret` has its boundary flag set. That `read` doesn't apply inside `/projects/secret`, unless the row for `/projects/secret` (or a row below it) grants it.
 
-A deletion root has no current binding, so while its deletion is in the trash, the walk uses its tombstone's saved parent for that step. The walk stops at the root of an expired deletion, so the inodes an expired deletion hides inherit no grants from above its root. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited. [Paths, listings, and revision reads](#44-paths-listings-and-revision-reads) defines when a read by inode ID returns `inode_not_found` before any grant is evaluated, such as for an inode that an expired deletion hides. A snapshot from before the expiry still shows the inode, and in an ACL namespace, the [API specification][api-spec] allows only an administrator to read it through the snapshot.
+A deletion root has no current binding, so while its deletion is in the trash, the walk uses its tombstone's saved parent for that step. The walk stops at the root of an expired deletion, so the inodes an expired deletion hides inherit no grants from above its root. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited. [Paths, listings, and revision reads](#44-paths-listings-and-revision-reads) defines when a read by inode ID returns `inode_not_found` before any grant is evaluated, such as for an inode that an expired deletion hides. A snapshot from before the expiry still shows the inode, and for a request with principals, the [API specification][api-spec] allows only an administrator to read it through the snapshot.
 
 The `update_access` operation replaces an inode's access row and appears in the change feed as an `access_changed` event. The [API specification][api-spec] defines that operation, and how reads, commits, and upload sessions are authorized against access rows.
 
@@ -286,7 +283,7 @@ A [fold](glossary.md#fold) and a replay of the WAL tail both compute each durabl
 
 These rows are computed another way:
 
-- The root inode row, and the first access row of an ACL namespace, are written from the namespace's first manifest, at sequence 0.
+- The root inode row is written from the namespace's first manifest, at sequence 0.
 - A fold writes a layout row for each chain whose pieces it writes to a content object, from the chain's earlier layout and the new extent (see [Publishing a manifest](#72-publishing-a-manifest)).
 
 Each family is one of three kinds:
@@ -1102,7 +1099,6 @@ The first manifest of a namespace has these values:
 | --- | --- | --- |
 | Manifest number | 1 | 1 |
 | Namespace ID, creation time, `created_by` | From the request | From the request |
-| Access mode | From the request | From the source (see [Forking a namespace](#92-forking-a-namespace)) |
 | Retention window | From the request if the request includes `retention_window_ms`, and otherwise the host's default window (if the host has a default window) | From the source manifest that the fork is built from, if that manifest sets `retention_window_ms` |
 | Status | Initializing (manifest 2 is the same manifest with the status `active`) | Initializing (the fork's manifest 2 folds the source's WAL tail when the tail has commits, and the active manifest follows the newest initializing manifest, as described below the table) |
 | Writer block | None | None |
@@ -1169,7 +1165,7 @@ Folds, validation that writes pending pieces to content objects, a merge's write
 
 Every successor manifest MUST:
 
-- keep the namespace's identity, including its access mode and pool,
+- keep the namespace's identity, including its pool,
 - not lower the folded head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the next run number, or the cumulative activity counters, and
 - keep the activity counters exactly the same, if it's at the same folded head.
 
@@ -1376,7 +1372,7 @@ Why does manifest 1 record the snapshot of step 2? A finishing call reads that s
 
 A create or fork call that finds the target's ID initializing compares its request with the fork basis of the namespace's newest manifest, or with its manifest 1 for a create:
 
-- A create request matches when manifest 1 has no fork basis and records the access mode and retention window that the request would record.
+- A create request matches when manifest 1 has no fork basis and records the retention window that the request would record.
 - A fork request matches when the fork basis records the same source namespace, the same user snapshot if the request identifies one, and the same rebase source if the request is a rebase (or no rebase source in both). A request that identifies no snapshot matches whichever snapshot the fork basis records, so the call finishes the fork from the snapshot that the first call chose.
 
 A create never matches a fork's manifest 1, and a fork never matches a create's. `created_by` and `created_at_ms` aren't compared. A request that doesn't match returns `namespace_exists`, with or without `allow_existing`. A matching call continues from the step after the newest manifest that it found (step 3 of a create, or step 4 or 5 of a fork), with the values that manifest 1 records: the pool ID, and for a fork, the fork basis. A fork call first checks that the source is active and loads the snapshot that the fork basis records (the snapshot of step 2), and returns `namespace_deleted` or `snapshot_not_found` without writing anything if the source was deleted or that snapshot doesn't exist, is deleted, or has expired. A fork that folds the source's WAL tail (its fork point is above the head of the source manifest that its fork basis refers to) also has the first call's deadline, measured from that snapshot's `created_at_ms`.
@@ -1389,7 +1385,7 @@ When a fork's write or its check in step 6 fails (see [Creating and verifying a 
 
 Why does a finishing fork load the snapshot before its write, when the first call relies on the check after the write? The budget argument in [Creating and verifying a snapshot](#82-creating-and-verifying-a-snapshot) needs a time at which the call found the snapshot live. Manifest 1 can be as old as the grace window, so without the load, a finishing call could put a fork snapshot on a manifest that the source's collection has deleted. That fork snapshot would keep a missing manifest, which the source's collection reports as corruption until the target is retired.
 
-For example, a create of `main` stops after `main`'s manifest 1. If the client sends the same create request again, the second call writes the member entry, publishes manifest 2, and returns success. A create of `main` with a different access mode returns `namespace_exists`.
+For example, a create of `main` stops after `main`'s manifest 1. If the client sends the same create request again, the second call writes the member entry, publishes manifest 2, and returns success. A create of `main` with a different retention window returns `namespace_exists`.
 
 For example, a fork of `main` into `sandbox` stops after `sandbox`'s manifest 1. If the client sends the same fork request again within 5 minutes of the first call's temporary snapshot, the second call folds `main`'s WAL objects 81 to 83 again into `sandbox`'s manifest 2, writes the fork point snapshot, the fork snapshot, and the member entry, publishes the active manifest, and returns success. If the client sends it 10 minutes later, the 5 minutes have passed, whether or not the snapshot's record was extended, so the call writes nothing and returns `snapshot_not_found`, and `sandbox` stays initializing until it's deleted.
 
@@ -2199,8 +2195,7 @@ A namespace manifest contains:
 | `namespace_id` | The namespace that the manifest describes. |
 | `created_at_ms` | The namespace's creation time. |
 | `created_by` | The application-supplied actor that created or forked the namespace. |
-| `access` | The access mode, which can't change after creation: `{"kind":"unrestricted"}`, or `{"kind":"acl"}` with `principal_scope` and `root_grants`. |
-| `retention_window_ms?` | The retention window, a number of milliseconds that's at least the grace window (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Without a window, a maintainer doesn't advance the namespace's floor on a schedule. Unlike the access mode, the window can change in a successor. |
+| `retention_window_ms?` | The retention window, a number of milliseconds that's at least the grace window (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Without a window, a maintainer doesn't advance the namespace's floor on a schedule. A successor can change the window. |
 | `fork_basis?` | The source reference, the fork point (`fork_point_seq`), the ID of the fork snapshot on the source, the ID of the user snapshot that the fork was built from (`forked_from_snapshot_id`), and the fork point snapshot's ID (`fork_point_snapshot_id`), which can't change after creation. A fork that a rebase created also records `rebased_from` there: the fork whose commits the rebase replays into this namespace, and the fork sequence that the first replay commit starts after (see [Merges](#merges)). |
 | `pool_id` | The [pool](glossary.md#pool) whose prefix stores the namespace's content objects and upload records (see [File contents and ownership](#15-file-contents-and-ownership)). A plain create records a pool ID that the create call generates, and a fork copies its source's value. The value can't change after creation. |
 | `status` | Whether the namespace is initializing, active, or deleted. |
@@ -2562,7 +2557,7 @@ A commit fingerprint is stored as `v1:sha256:<64 lowercase hex>`, where `v1` ide
 
 The hashed bytes have no formatting whitespace. Every member is always present: `preconditions` is `[]` when empty, and `message` and `subject_id` are `null` when absent. A merge uses a different preimage (see [Merge commits](#b5-merge-commits)).
 
-A changed `actor_id` is a different request, even from a process retrying for the same application. The preimage leaves out the principal scope, because a namespace accepts one scope and refuses the rest. It also leaves out the commit ID, writer epoch, and commit timestamp.
+A changed `actor_id` is a different request, even from a process retrying for the same application. The preimage leaves out the commit ID, writer epoch, and commit timestamp.
 
 ### B.1 Operation fields
 

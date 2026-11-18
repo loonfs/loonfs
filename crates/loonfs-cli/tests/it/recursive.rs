@@ -843,22 +843,10 @@ fn recursive_copy_lists_a_small_tree_in_one_request() {
 fn recursive_transfers_report_a_directory_the_subject_cannot_read() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
-    assert_success(&harness.run(&[
-        "namespace",
-        "create",
-        "demo",
-        "--access",
-        "acl",
-        "--principal-scope",
-        "org",
-        "--administrator",
-        "prn_root",
-    ]));
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
-    let administrator = [
-        ("LOONFS_PRINCIPAL_SCOPE", "org"),
-        ("LOONFS_PRINCIPALS", "prn_root"),
-    ];
+    assert_success(&harness.run(&["access", "set", "/", "--grant", "prn_root=admin"]));
+    let administrator = [("LOONFS_PRINCIPALS", "prn_root")];
     let tree = harness.temp_dir.path().join("tree");
     fs::create_dir_all(tree.join("open")).expect("create open");
     fs::create_dir_all(tree.join("secret")).expect("create secret");
@@ -878,10 +866,7 @@ fn recursive_transfers_report_a_directory_the_subject_cannot_read() {
         &["access", "set", "/", "--grant", "reader=read,create"],
     ));
 
-    let reader = [
-        ("LOONFS_PRINCIPAL_SCOPE", "org"),
-        ("LOONFS_PRINCIPALS", "reader"),
-    ];
+    let reader = [("LOONFS_PRINCIPALS", "reader")];
     let destination = harness.temp_dir.path().join("back");
     let get = harness.run_with_env(
         &reader,

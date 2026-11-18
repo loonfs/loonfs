@@ -7,10 +7,7 @@ use loonfs_client::ClientConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_types::config::{validate_non_empty, ConfigFieldError};
 use loonfs_types::env::AUTH_TOKEN_ENV;
-use loonfs_types::{
-    ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, SubjectId, SubjectPart,
-    SubjectPartsError, REDACTED,
-};
+use loonfs_types::{ActorId, NamespaceId, PrincipalId, SecretString, SubjectId, REDACTED};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,7 +23,6 @@ pub(crate) const PROFILE_ENV: &str = "LOONFS_PROFILE";
 pub(crate) const NAMESPACE_ENV: &str = "LOONFS_NAMESPACE";
 pub(crate) const ACTOR_ID_ENV: &str = "LOONFS_ACTOR_ID";
 pub(crate) const SUBJECT_ID_ENV: &str = "LOONFS_SUBJECT_ID";
-pub(crate) const PRINCIPAL_SCOPE_ENV: &str = "LOONFS_PRINCIPAL_SCOPE";
 pub(crate) const PRINCIPALS_ENV: &str = "LOONFS_PRINCIPALS";
 
 /// A blank environment value has no usable setting, so treat it as unset
@@ -69,7 +65,6 @@ pub(crate) struct ProfileConfig {
 pub(crate) struct ProfileIdentity {
     pub actor_id: Option<ActorId>,
     pub subject_id: Option<SubjectId>,
-    pub principal_scope: Option<PrincipalScope>,
     pub principals: Option<Vec<PrincipalId>>,
 }
 
@@ -126,8 +121,6 @@ enum ProfileConfigFile {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject_id: Option<SubjectId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        principal_scope: Option<PrincipalScope>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         principals: Option<Vec<PrincipalId>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
@@ -140,8 +133,6 @@ enum ProfileConfigFile {
         actor_id: Option<ActorId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject_id: Option<SubjectId>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        principal_scope: Option<PrincipalScope>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         principals: Option<Vec<PrincipalId>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,7 +151,6 @@ impl From<ProfileConfigFile> for ProfileConfig {
                 store,
                 actor_id,
                 subject_id,
-                principal_scope,
                 principals,
                 default_namespace,
                 writer_id,
@@ -168,7 +158,6 @@ impl From<ProfileConfigFile> for ProfileConfig {
                 identity: ProfileIdentity {
                     actor_id,
                     subject_id,
-                    principal_scope,
                     principals,
                 },
                 default_namespace,
@@ -178,7 +167,6 @@ impl From<ProfileConfigFile> for ProfileConfig {
                 server_url,
                 actor_id,
                 subject_id,
-                principal_scope,
                 principals,
                 default_namespace,
                 auth_token,
@@ -187,7 +175,6 @@ impl From<ProfileConfigFile> for ProfileConfig {
                 identity: ProfileIdentity {
                     actor_id,
                     subject_id,
-                    principal_scope,
                     principals,
                 },
                 default_namespace,
@@ -206,7 +193,6 @@ impl From<ProfileConfig> for ProfileConfigFile {
         let ProfileIdentity {
             actor_id,
             subject_id,
-            principal_scope,
             principals,
         } = profile.identity;
         let default_namespace = profile.default_namespace;
@@ -215,7 +201,6 @@ impl From<ProfileConfig> for ProfileConfigFile {
                 store,
                 actor_id,
                 subject_id,
-                principal_scope,
                 principals,
                 default_namespace,
                 writer_id,
@@ -228,7 +213,6 @@ impl From<ProfileConfig> for ProfileConfigFile {
                 server_url,
                 actor_id,
                 subject_id,
-                principal_scope,
                 principals,
                 default_namespace,
                 auth_token,
@@ -308,11 +292,6 @@ impl ProfileConfig {
         if let Some(namespace) = self.default_namespace.as_deref() {
             validate_default_namespace(&profile_field(name, "default_namespace"), namespace)?;
         }
-        validate_profile_subject(
-            name,
-            self.identity.principal_scope.as_ref(),
-            self.identity.principals.as_deref(),
-        )?;
         match &self.connection {
             ProfileConnection::Embedded { store, .. } => store
                 .validate()
@@ -368,38 +347,6 @@ impl ProfileConfig {
             connection,
         }
     }
-}
-
-/// Refuses a stored principal scope without principals, or principals
-/// without a scope.
-///
-/// This is the pairing half of what `Subject::from_parts` checks for a
-/// request. A profile may also store a subject id alone, because the subject
-/// is used only with principals, so the rest of that rule does not apply here.
-pub(crate) fn ensure_subject_pairing(
-    principal_scope: Option<&PrincipalScope>,
-    principals: Option<&[PrincipalId]>,
-) -> Result<(), SubjectPartsError> {
-    let (part, required_by) = match (principal_scope, principals) {
-        (Some(_), None) => (SubjectPart::Principals, SubjectPart::PrincipalScope),
-        (None, Some(_)) => (SubjectPart::PrincipalScope, SubjectPart::Principals),
-        (Some(_), Some(_)) | (None, None) => return Ok(()),
-    };
-    Err(SubjectPartsError::Missing { part, required_by })
-}
-
-/// Reports a stored subject's missing part under the profile's field names.
-fn validate_profile_subject(
-    profile_name: &str,
-    principal_scope: Option<&PrincipalScope>,
-    principals: Option<&[PrincipalId]>,
-) -> Result<()> {
-    ensure_subject_pairing(principal_scope, principals).map_err(|error| match error {
-        SubjectPartsError::Missing { part, required_by } => CliError::invalid_config(format!(
-            "`profiles.{profile_name}.{part}` is required with `profiles.{profile_name}.{required_by}`"
-        )),
-        other => CliError::invalid_config(other.to_string()),
-    })
 }
 
 /// Reports a store or client config field failure under the profile's path.

@@ -84,13 +84,10 @@ pub(crate) struct Cli {
     /// `LOONFS_SUBJECT_ID`, the profile, then the actor ID.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
     pub(crate) subject_id: Option<SubjectId>,
-    /// Principal scope for an ACL namespace or a subject's principal IDs.
-    /// Subject precedence is the flag, `LOONFS_PRINCIPAL_SCOPE`, then the profile.
-    #[arg(long, global = true, value_hint = ValueHint::Other)]
-    pub(crate) principal_scope: Option<String>,
     /// Comma-separated principal IDs whose grants apply. Precedence is
     /// `--principals`, `LOONFS_PRINCIPALS`, then the profile. Without
-    /// principals the CLI acts as the token holder.
+    /// principals the CLI acts in the service context, which checks no
+    /// rights.
     #[arg(long, global = true, value_hint = ValueHint::Other)]
     pub(crate) principals: Option<String>,
     /// Emit machine-readable JSON instead of human output.
@@ -321,8 +318,7 @@ impl Command {
                         | MaintenanceCommand::Fold
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Gc
-                        | MaintenanceCommand::Pool { .. }
-                        | MaintenanceCommand::RecoverAdministrator(_),
+                        | MaintenanceCommand::Pool { .. },
                 }
         )
     }
@@ -402,7 +398,6 @@ pub(crate) struct Selectors {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SubjectSelectors {
     pub subject_id: Option<SubjectId>,
-    pub principal_scope: Option<String>,
     pub principals: Option<String>,
 }
 
@@ -413,7 +408,6 @@ impl Cli {
             namespace: self.namespace.clone(),
             subject: SubjectSelectors {
                 subject_id: self.subject_id.clone(),
-                principal_scope: self.principal_scope.clone(),
                 principals: self.principals.clone(),
             },
         }

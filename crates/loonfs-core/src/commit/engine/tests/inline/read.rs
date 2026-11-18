@@ -85,7 +85,7 @@ async fn every_read_verifies_tail_content_without_requesting_an_object() {
                 .resolve_path(
                     &path,
                     AttributeInclusion::Omit,
-                    &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                    &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
                 )
                 .await
                 .expect("entry")

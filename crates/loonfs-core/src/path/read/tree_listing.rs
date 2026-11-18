@@ -282,7 +282,7 @@ mod tests {
                     cursor: None,
                 },
                 AttributeInclusion::Omit,
-                &mut ReadAccess::live(Authorizer::Unrestricted),
+                &mut ReadAccess::live(Authorizer::Service),
             )
             .await
             .expect("recursive page");

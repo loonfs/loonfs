@@ -30,10 +30,6 @@
       "status": 409,
       "code": "path_conflict"
     },
-    "unrestricted_access": {
-      "status": 409,
-      "code": "namespace_unrestricted"
-    },
     "deleted_content": {
       "status": 404,
       "code": "inode_not_found"

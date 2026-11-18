@@ -2,10 +2,7 @@
 //! session's content ID.
 
 use super::records::UploadSessionState;
-use super::session::{
-    authorize_upload_subject, ensure_session_open, ensure_session_subject, session_response,
-    upload_mode,
-};
+use super::session::{ensure_session_open, ensure_session_subject, session_response, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -83,7 +80,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<UploadSession> {
         let pool_id = catalog.pool_id();
-        authorize_upload_subject(&self.namespace_id, catalog.access(), subject)?;
         let loaded = self
             .load_open_proxied_session(catalog, upload_id, subject, clock)
             .await?;

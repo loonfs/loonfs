@@ -527,7 +527,7 @@ async fn a_deleted_members_own_content_is_deleted_at_its_deadline_while_its_fork
         .read_file_bytes(
             "/shared",
             None,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("the fork reads inherited content");

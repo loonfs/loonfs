@@ -134,7 +134,6 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
     ) -> PlanningView<'v, S> {
         PlanningView {
             namespace_id: &self.head.namespace_id,
-            access: &self.head.access,
             authorizer,
             metadata,
         }
@@ -522,7 +521,7 @@ mod tests {
             let plan = session
                 .prepare_commit(
                     &CommitCandidate::new(request.clone()),
-                    Authorizer::Unrestricted,
+                    Authorizer::Service,
                     commit_fingerprint(&namespace_id, &request, &std::collections::BTreeMap::new()),
                 )
                 .await
@@ -599,7 +598,7 @@ mod tests {
         session
             .prepare_commit(
                 &CommitCandidate::new(first_request.clone()),
-                Authorizer::Unrestricted,
+                Authorizer::Service,
                 test_fingerprint(),
             )
             .await
@@ -621,7 +620,7 @@ mod tests {
         session
             .prepare_commit(
                 &CommitCandidate::new(second_request.clone()),
-                Authorizer::Unrestricted,
+                Authorizer::Service,
                 test_fingerprint(),
             )
             .await
@@ -699,7 +698,7 @@ mod tests {
                 .resolve_path(
                     "/discarded",
                     loonfs_types::options::AttributeInclusion::Omit,
-                    &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                    &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
                 )
                 .await
                 .expect_err("the rejected candidate's directory doesn't exist");
@@ -780,7 +779,7 @@ mod tests {
             .resolve_path(
                 "/docs/doomed.txt",
                 loonfs_types::options::AttributeInclusion::Omit,
-                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
             )
             .await
             .expect_err("deleted file is no longer visible");

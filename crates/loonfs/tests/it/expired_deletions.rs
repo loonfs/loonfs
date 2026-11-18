@@ -2,17 +2,15 @@
 //! reached, and the trash listing of a fork.
 
 use loonfs::{
-    AccessState, CommitSeq, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
-    ErrorCode, InodeId, LoonFs, Namespace, ReadAt, ReadOnly, RevisionNo, SharedObjectStore,
-    SnapshotId, StatOptions, Writable,
+    AccessState, CommitSeq, DeleteDirectoryBehavior, DeleteOptions, ErrorCode, InodeId, LoonFs,
+    Namespace, ReadAt, ReadOnly, RevisionNo, SharedObjectStore, SnapshotId, StatOptions, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AccessGrants, AccessRight, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope,
-    PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, NamespaceId, PrincipalId, PrincipalSet, Subject, SubjectId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -217,7 +215,6 @@ async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_one_in_the_tr
 
 fn subject(subject_id: &str, principal: &str) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(subject_id).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
@@ -296,26 +293,22 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
     let namespace_id = namespace_id("acl-expiry");
     let actor = test_actor();
     let admin = subject("root", "prn_root");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let service = LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id("acl-expiry"))
         .build()
         .await
-        .expect("writer")
-        .with_subject(admin.clone());
-    writer
-        .create_namespace_with_options(
-            &namespace_id,
-            &actor,
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: access(false, "prn_root", &[AccessRight::Admin]).grants,
-                },
-                ..Default::default()
-            },
-        )
+        .expect("writer");
+    service
+        .create_namespace(&namespace_id, &actor)
         .await
         .expect("create namespace");
+    loonfs::test_support::set_root_access(
+        &service,
+        &namespace_id,
+        access(false, "prn_root", &[AccessRight::Admin]).grants,
+    )
+    .await;
+    let writer = service.with_subject(admin.clone());
     let namespace: Namespace<Writable> = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -397,34 +390,33 @@ fn deletion_seqs(page: loonfs_types::ListTrashResponse) -> Vec<CommitSeq> {
 #[tokio::test]
 async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() {
     let admin = subject("root", "prn_root");
-    for access_mode in [
-        NamespaceAccess::Unrestricted {},
-        NamespaceAccess::Acl {
-            principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-            root_grants: access(false, "prn_root", &[AccessRight::Admin]).grants,
-        },
-    ] {
+    // Each namespace is read and written in the service context, and then
+    // as an administrator of a namespace with a root access row.
+    for administered in [false, true] {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let (source_id, fork_id) = (namespace_id("source"), namespace_id("fork"));
         let actor = test_actor();
-        let writer = LoonFs::builder_with_store(store.clone())
+        let service = LoonFs::builder_with_store(store.clone())
             .writer_id(writer_id("fork-trash"))
             .build()
             .await
-            .expect("writer")
-            .with_subject(admin.clone());
-        writer
-            .create_namespace_with_options(
-                &source_id,
-                &actor,
-                &CreateNamespaceOptions {
-                    access: access_mode.clone(),
-                    ..Default::default()
-                },
-            )
+            .expect("writer");
+        service
+            .create_namespace(&source_id, &actor)
             .await
             .expect("create namespace");
+        let writer = if administered {
+            loonfs::test_support::set_root_access(
+                &service,
+                &source_id,
+                access(false, "prn_root", &[AccessRight::Admin]).grants,
+            )
+            .await;
+            service.with_subject(admin.clone())
+        } else {
+            service
+        };
         let source = writer.open_namespace(&source_id).expect("open source");
         for path in ["/inherited.txt", "/forked.txt"] {
             source.put_file(path, b"bytes", &actor).await.expect("put");
@@ -441,7 +433,12 @@ async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() 
 
         // The reader holds no writer session, and nothing has written to the
         // fork yet.
-        let reader = reader(&store).await.with_subject(admin.clone());
+        let reader = reader(&store).await;
+        let reader = if administered {
+            reader.with_subject(admin.clone())
+        } else {
+            reader
+        };
         let trash = |namespace_id: &NamespaceId| {
             let namespace = reader.namespace(namespace_id);
             async move { deletion_seqs(namespace.list_trash().page().await.expect("list trash")) }
@@ -449,7 +446,7 @@ async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() 
         assert_eq!(
             trash(&fork_id).await,
             Vec::<CommitSeq>::new(),
-            "{access_mode:?}: a new fork"
+            "administered {administered}: a new fork"
         );
         let own = writer
             .open_namespace(&fork_id)
@@ -458,11 +455,15 @@ async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() 
             .await
             .expect("delete in the fork")
             .committed_seq;
-        assert_eq!(trash(&fork_id).await, [own], "{access_mode:?}: the fork");
+        assert_eq!(
+            trash(&fork_id).await,
+            [own],
+            "administered {administered}: the fork"
+        );
         assert_eq!(
             trash(&source_id).await,
             [inherited],
-            "{access_mode:?}: the source"
+            "administered {administered}: the source"
         );
     }
 }

@@ -4,8 +4,8 @@
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
     AttributesRevisionNo, CommitId, CommitPrecondition, CommitSeq, DeleteDirectoryBehavior,
-    DestinationBehavior, DestinationPrecondition, DisplayName, EffectiveLimit, InodeId,
-    NamespaceAccess, RevisionNo, SnapshotId,
+    DestinationBehavior, DestinationPrecondition, DisplayName, EffectiveLimit, InodeId, RevisionNo,
+    SnapshotId,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -592,10 +592,8 @@ pub struct MergeForkOptions {
 }
 
 /// Options for creating a namespace.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreateNamespaceOptions {
-    /// The access mode, which can't be changed after the namespace is created.
-    pub access: NamespaceAccess,
     /// The namespace's retention window, which a host's scheduled retention
     /// advance uses, or `None` for the runtime's default window, if the
     /// runtime has a default. A window shorter than the grace window
@@ -605,16 +603,6 @@ pub struct CreateNamespaceOptions {
     /// Whether creating a namespace that already exists succeeds and returns
     /// the existing namespace's state.
     pub allow_existing: bool,
-}
-
-impl Default for CreateNamespaceOptions {
-    fn default() -> Self {
-        Self {
-            access: NamespaceAccess::Unrestricted {},
-            retention_window_ms: None,
-            allow_existing: false,
-        }
-    }
 }
 
 /// Options for deleting a namespace.

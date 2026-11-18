@@ -16,8 +16,8 @@ use loonfs_types::format::wal::{
     WalObjectPayload,
 };
 use loonfs_types::{
-    AbsolutePath, ActorId, Commit, CommitId, CommitSeq, ContentId, DeleteDirectoryBehavior,
-    DestinationBehavior, NamespaceMetadata, RevisionNo,
+    AbsolutePath, AccessGrants, ActorId, Commit, CommitId, CommitSeq, ContentId,
+    DeleteDirectoryBehavior, DestinationBehavior, NamespaceMetadata, RevisionNo,
 };
 
 /// The actor every test commit records. It's the actor that
@@ -42,6 +42,24 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         self.engine()
             .bootstrap_namespace(&test_actor(), options)
             .await
+    }
+
+    /// Sets the root's access row to `grants` with an `update_access` commit
+    /// in the service context, as an application sets a new namespace's
+    /// first administrators.
+    pub async fn set_root_access(&self, grants: AccessGrants) -> Result<Commit> {
+        self.submit_operation(
+            CommitId::generate(),
+            FilesystemOperation::UpdateAccess {
+                path: AbsolutePath::root(),
+                boundary: false,
+                grants,
+                expected_inode_id: None,
+                expected_access_revision_no: None,
+            },
+            Vec::new(),
+        )
+        .await
     }
 
     /// Publishes `candidates` as one batch through a fresh commit engine, and

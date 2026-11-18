@@ -3,13 +3,11 @@
 
 use crate::common::http_split_support::*;
 use crate::common::{collect_path_entries, start_server};
-use loonfs_client::AccessState;
 use loonfs_client::AttributeChanges;
 use loonfs_client::{ListOptions, NamespacePath, StatOptions};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use loonfs_types::AttributesRevisionNo;
-use std::assert_matches;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -54,6 +52,7 @@ fn get_json(harness: &crate::common::TestServer, query: &str) -> serde_json::Val
     let response = raw_agent()
         .get(&format!("{}/v0/namespaces/demo{query}", harness.server_url))
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .call()
         .expect("read request");
     serde_json::from_reader(response.into_reader()).expect("response JSON")
@@ -63,6 +62,7 @@ fn get_status(harness: &crate::common::TestServer, query: &str) -> u16 {
     match raw_agent()
         .get(&format!("{}/v0/namespaces/demo{query}", harness.server_url))
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .call()
     {
         Ok(response) => response.status(),
@@ -278,37 +278,4 @@ async fn the_client_round_trips_the_read_options() {
         .entries
         .iter()
         .all(|entry| entry.attributes.is_some()));
-}
-
-#[tokio::test]
-async fn an_unrestricted_namespace_answers_namespace_unrestricted_over_http() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-access",
-        "http-access",
-    ))
-    .await;
-    harness
-        .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let error = harness
-        .client
-        .update_access(
-            &path("/"),
-            &loonfs_test_support::test_actor(),
-            AccessState {
-                boundary: false,
-                grants: loonfs_types::AccessGrants::default(),
-            },
-        )
-        .await
-        .expect_err("unrestricted namespace");
-    assert_eq!(
-        error.code(),
-        Some(loonfs_types::ErrorCode::NamespaceUnrestricted)
-    );
-    assert_matches!(error, loonfs_client::ClientError::Api { status: 409, .. });
 }

@@ -12,7 +12,6 @@ use capture::take_log;
 use loonfs::LoonFs;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::{ErrorCode, PrincipalId};
 use tempfile::tempdir;
 
 fn closed_spans(log: &str, span_name: &str) -> Vec<serde_json::Value> {
@@ -36,16 +35,19 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("create namespace");
-        let recovery = writer
+        writer
             .open_namespace(&namespace_id)
             .expect("open namespace")
-            .recover_administrator(
-                &PrincipalId::parse("prn_root").expect("principal"),
+            .update_access(
+                "/",
                 &loonfs_test_support::test_actor(),
+                loonfs::AccessState {
+                    boundary: false,
+                    grants: loonfs_types::AccessGrants::default(),
+                },
             )
             .await
-            .expect_err("an unrestricted namespace has no administrator to recover");
-        assert_eq!(recovery.code(), ErrorCode::NamespaceUnrestricted);
+            .expect("set the root access row");
 
         let reader = writer.read_only();
         let namespace = reader.namespace(&namespace_id);
@@ -75,7 +77,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
     let log = take_log(&captured);
     for span_name in [
         "loonfs.create_namespace",
-        "loonfs.recover_administrator",
+        "loonfs.update_access",
         "loonfs.stat",
         "loonfs.metadata",
         "loonfs.diagnostics",

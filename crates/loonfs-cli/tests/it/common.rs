@@ -18,7 +18,7 @@ pub(super) const MINIMAL_CONFIG: &str = "config_version = 1\n";
 
 /// Environment variables removed from every CLI command under test, so the
 /// developer's own CLI configuration doesn't change a test's outcome.
-const ISOLATED_ENVIRONMENT: [&str; 10] = [
+const ISOLATED_ENVIRONMENT: [&str; 9] = [
     "XDG_CONFIG_HOME",
     "XDG_STATE_HOME",
     "LOONFS_CONFIG",
@@ -27,7 +27,6 @@ const ISOLATED_ENVIRONMENT: [&str; 10] = [
     "LOONFS_ACTOR_ID",
     "LOONFS_SUBJECT_ID",
     "LOONFS_PRINCIPALS",
-    "LOONFS_PRINCIPAL_SCOPE",
     "LOONFS_AUTH_TOKEN",
 ];
 

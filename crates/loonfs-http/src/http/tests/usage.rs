@@ -143,6 +143,7 @@ fn request(method: &str, uri: &str, body: &str) -> Request<Body> {
         .method(method)
         .uri(uri)
         .header("authorization", "Bearer test-token")
+        .header("Loonfs-Context", "service")
         .header("loonfs-actor", "usage-test")
         .header("content-type", "application/json")
         .body(Body::from(body.to_owned()))
@@ -356,6 +357,7 @@ async fn a_request_canceled_before_its_response_still_produces_a_report() {
             upload["upload_id"].as_str().expect("upload id")
         ))
         .header("authorization", "Bearer test-token")
+        .header("Loonfs-Context", "service")
         .body(Body::from_stream(body))
         .expect("upload request");
     let task = tokio::spawn(fixture.router.clone().oneshot(upload_request));

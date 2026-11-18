@@ -6,8 +6,13 @@ pub const ACTOR: &str = "Loonfs-Actor";
 /// The header that includes the stable subject id.
 pub const SUBJECT: &str = "Loonfs-Subject";
 
-/// The header that names the identity domain of the subject's principals.
-pub const PRINCIPAL_SCOPE: &str = "Loonfs-Principal-Scope";
-
 /// The header that includes the comma-separated principal ids.
 pub const PRINCIPALS: &str = "Loonfs-Principals";
+
+/// The header that puts a request in the service context instead of acting
+/// for principals.
+pub const CONTEXT: &str = "Loonfs-Context";
+
+/// The one value of [`CONTEXT`]: the service context, in which LoonFS checks
+/// no rights.
+pub const SERVICE_CONTEXT: &str = "service";

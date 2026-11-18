@@ -157,7 +157,7 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
         view.resolve_path(
             &format!("/file-{number}"),
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("inherited file stays visible");

@@ -42,6 +42,7 @@ fn get_json<T: DeserializeOwned>(url: &str) -> ApiResult<T> {
             raw_agent()
                 .get(url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call(),
         )
     })
@@ -52,6 +53,7 @@ fn get_bytes(url: &str) -> ApiResult<Vec<u8>> {
         match raw_agent()
             .get(url)
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
         {
             Ok(response) => {
@@ -79,6 +81,7 @@ fn post_json<T: DeserializeOwned>(url: &str, body: serde_json::Value) -> ApiResu
             raw_agent()
                 .post(url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .send_json(body.clone()),
         )
     })
@@ -117,6 +120,7 @@ fn delete_snapshot(server_url: &str, namespace: &str, snapshot_id: &str) {
                     "{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call(),
         )
     })

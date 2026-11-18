@@ -5,7 +5,7 @@ use crate::args::{SubjectSelectors, TransientRetry};
 use crate::backend::MaintenanceHost;
 use crate::config::{
     non_empty_env, remote_client_config, ProfileConfig, ProfileConnection, ProfileMode,
-    StoreConfig, ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, PRINCIPAL_SCOPE_ENV, SUBJECT_ID_ENV,
+    StoreConfig, ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, SUBJECT_ID_ENV,
 };
 use crate::error::{CliError, Result};
 use loonfs::engine::DecodedBlockCacheConfig;
@@ -15,8 +15,8 @@ use loonfs_grep::{
     GrepBlockCache, GrepService, GrepStepBudget, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_types::{
-    ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, Subject, SubjectId,
-    SubjectPart, SubjectPartsError,
+    ActorId, NamespaceId, PrincipalId, SecretString, Subject, SubjectId, SubjectPart,
+    SubjectPartsError,
 };
 use std::sync::Arc;
 
@@ -59,8 +59,8 @@ pub(crate) fn resolve_actor(
 
 /// The subject the command acts as. Principals come from the flag, the
 /// environment, or the profile; the subject id defaults to the actor id
-/// the same way the server's header does. No principals means the token
-/// holder.
+/// the same way the server's header does. No principals means the service
+/// context.
 pub(crate) fn resolve_subject(
     profile: &ProfileConfig,
     actor_id: &ActorId,
@@ -84,13 +84,6 @@ pub(crate) fn resolve_subject(
         environment_principals.as_deref(),
         profile_principals.as_deref(),
     );
-    let environment_principal_scope = non_empty_env(PRINCIPAL_SCOPE_ENV);
-    let profile_principal_scope = profile.identity.principal_scope.as_ref();
-    let (principal_scope_source, principal_scope) = first_subject_part(
-        selectors.principal_scope.as_deref(),
-        environment_principal_scope.as_deref(),
-        profile_principal_scope.map(PrincipalScope::as_str),
-    );
     let environment_subject_id = non_empty_env(SUBJECT_ID_ENV);
     let profile_subject_id_with_principals = profile
         .identity
@@ -104,23 +97,11 @@ pub(crate) fn resolve_subject(
     );
     let source = |part| match part {
         SubjectPart::Principals => principals_source,
-        SubjectPart::PrincipalScope => principal_scope_source,
         SubjectPart::SubjectId => subject_id_source,
         SubjectPart::ActorId => SubjectSource::Profile,
     };
-    Subject::from_parts(
-        principal_scope,
-        subject_id,
-        Some(actor_id.as_str()),
-        principals,
-    )
-    .map_err(|error| subject_parts_error(error, source))
-}
-
-/// Reports a subject that its flags alone name, as the profile commands'
-/// flags do.
-pub(crate) fn subject_flag_error(error: SubjectPartsError) -> CliError {
-    subject_parts_error(error, |_| SubjectSource::Flag)
+    Subject::from_parts(subject_id, Some(actor_id.as_str()), principals)
+        .map_err(|error| subject_parts_error(error, source))
 }
 
 /// Reports `error` under the name each part had where it came from.
@@ -172,8 +153,6 @@ fn subject_part_name(part: SubjectPart, source: SubjectSource) -> &'static str {
     match (part, source) {
         (SubjectPart::Principals, SubjectSource::Flag) => "--principals",
         (SubjectPart::Principals, SubjectSource::Environment) => PRINCIPALS_ENV,
-        (SubjectPart::PrincipalScope, SubjectSource::Flag) => "--principal-scope",
-        (SubjectPart::PrincipalScope, SubjectSource::Environment) => PRINCIPAL_SCOPE_ENV,
         (SubjectPart::SubjectId, SubjectSource::Flag) => "--subject-id",
         (SubjectPart::SubjectId, SubjectSource::Environment) => SUBJECT_ID_ENV,
         (SubjectPart::ActorId, _) => SubjectPart::SubjectId.as_str(),

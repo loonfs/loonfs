@@ -1,14 +1,13 @@
-//! Namespace administration and recovery under ACL access.
+//! Namespace administration, and setting administrators in the service context.
 
 use loonfs::publish::{CommitIntent, FilesystemOperation};
-use loonfs::{CreateNamespaceOptions, CreateSnapshotOptions, LoonFs, Writable};
+use loonfs::{CreateSnapshotOptions, LoonFs, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::FilesystemEvent;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId, CommitSeq,
-    ErrorCode, NamespaceAccess, NamespaceAccessMode, NamespaceId, PrincipalId, PrincipalScope,
-    PrincipalSet, Subject, SubjectId, ROOT_INODE_ID,
+    ErrorCode, NamespaceId, PrincipalId, PrincipalSet, Subject, SubjectId, ROOT_INODE_ID,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +15,6 @@ use std::sync::Arc;
 
 fn subject(name: &str, principal: &str) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(name).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
@@ -39,18 +37,13 @@ fn root_grants(administrator: bool) -> AccessGrants {
     AccessGrants::new(grants).expect("grants")
 }
 
-fn access_mode() -> NamespaceAccessMode {
-    NamespaceAccessMode::Acl {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-    }
-}
-
 async fn create_namespace() -> (tempfile::TempDir, LoonFs<Writable>, NamespaceId) {
     create_namespace_with(loonfs::RuntimeConfig::default()).await
 }
 
-/// Creates an ACL namespace from a writer runtime with `config`, and no
-/// minimum interval between its publications.
+/// Creates a namespace whose root row makes `prn_root` an administrator,
+/// from a writer runtime with `config` and no minimum interval between its
+/// publications.
 async fn create_namespace_with(
     config: loonfs::RuntimeConfig,
 ) -> (tempfile::TempDir, LoonFs<Writable>, NamespaceId) {
@@ -67,34 +60,19 @@ async fn create_namespace_with(
             .expect("writer");
     let namespace_id = namespace_id("access-namespace");
     writer
-        .create_namespace_with_options(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: root_grants(true),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(&writer, &namespace_id, root_grants(true)).await;
     (temp_dir, writer, namespace_id)
 }
 
 #[tokio::test]
-async fn namespace_operations_need_an_administrator_or_no_subject() {
+async fn namespace_operations_need_an_administrator_or_the_service_context() {
     let (_temp_dir, writer, namespace) = create_namespace().await;
-    let namespace_reader = writer.namespace(&namespace);
     let root = writer.with_subject(subject("root", "prn_root"));
     let member = writer.with_subject(subject("member", "team"));
-    assert_eq!(
-        namespace_reader.metadata().await.expect("namespace").access,
-        access_mode()
-    );
     let fork = namespace_id("fork");
-    let fork_namespace = writer.namespace(&fork);
     let member_fork_namespace = member.namespace(&fork);
     assert_eq!(
         member
@@ -110,10 +88,6 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     let root_namespace_writer = root.open_namespace(&namespace).expect("open namespace");
     let member_namespace_writer = member.open_namespace(&namespace).expect("open namespace");
-    assert_eq!(
-        fork_namespace.metadata().await.expect("fork").access,
-        access_mode()
-    );
     member_fork_namespace
         .stat("/")
         .await
@@ -155,7 +129,7 @@ async fn namespace_operations_need_an_administrator_or_no_subject() {
     namespace_writer
         .delete()
         .await
-        .expect("token holder delete");
+        .expect("service context delete");
 }
 
 async fn commit_as(
@@ -178,65 +152,6 @@ async fn commit_as(
         .await
 }
 
-#[tokio::test]
-async fn subject_scope_is_enforced_only_for_acl_namespaces() {
-    let (_temp_dir, writer, namespace) = create_namespace().await;
-    let mut wrong_scope = subject("root", "prn_root");
-    wrong_scope.principal_scope = PrincipalScope::parse("org_other").expect("scope");
-    let expected_message =
-        "subject principal scope `org_other` does not match namespace principal scope `org_demo`";
-    let wrong_scope_namespace = writer
-        .read_only()
-        .with_subject(wrong_scope.clone())
-        .namespace(&namespace);
-    let error = wrong_scope_namespace
-        .stat("/")
-        .await
-        .expect_err("wrong-scope read");
-    assert_eq!(error.code(), ErrorCode::Forbidden);
-    assert_eq!(error.to_string(), expected_message);
-    let error = commit_as(
-        &writer,
-        &namespace,
-        wrong_scope.clone(),
-        create_directory("/wrong"),
-    )
-    .await
-    .expect_err("wrong-scope commit");
-    assert_eq!(error.code(), ErrorCode::Forbidden);
-    assert_eq!(error.to_string(), expected_message);
-    commit_as(
-        &writer,
-        &namespace,
-        subject("root", "prn_root"),
-        create_directory("/matching"),
-    )
-    .await
-    .expect("matching-scope commit");
-
-    let unrestricted = namespace_id("unrestricted-scope");
-    writer
-        .create_namespace(&unrestricted, &loonfs_test_support::test_actor())
-        .await
-        .expect("unrestricted namespace");
-    let unrestricted_namespace = writer
-        .read_only()
-        .with_subject(wrong_scope.clone())
-        .namespace(&unrestricted);
-    unrestricted_namespace
-        .stat("/")
-        .await
-        .expect("unrestricted read");
-    commit_as(
-        &writer,
-        &unrestricted,
-        wrong_scope,
-        create_directory("/accepted"),
-    )
-    .await
-    .expect("unrestricted commit");
-}
-
 fn create_directory(path: &str) -> FilesystemOperation {
     FilesystemOperation::CreateDirectory {
         path: AbsolutePath::parse(path).expect("path"),
@@ -244,8 +159,11 @@ fn create_directory(path: &str) -> FilesystemOperation {
     }
 }
 
+/// Checks that an `update_access` on the root in the service context sets the
+/// namespace's administrators, after the last administrator removed itself,
+/// and that a principal it names then has `admin`.
 #[tokio::test]
-async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
+async fn the_service_context_sets_the_administrators() {
     let (_temp_dir, writer, namespace) = create_namespace().await;
     let namespace_reader = writer.namespace(&namespace);
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
@@ -275,12 +193,18 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
         .code(),
         ErrorCode::PathNotFound
     );
-    let principal = PrincipalId::parse("prn_root").expect("principal");
-    let recovered = namespace_writer
-        .recover_administrator(&principal, &loonfs_test_support::test_actor())
+    let restored = namespace_writer
+        .update_access(
+            "/",
+            &loonfs_test_support::test_actor(),
+            loonfs::AccessState {
+                boundary: false,
+                grants: root_grants(true),
+            },
+        )
         .await
-        .expect("recovery");
-    assert_eq!(recovered.access_revision_no, AccessRevisionNo(2));
+        .expect("the service context sets the administrators");
+    assert_eq!(restored.committed_seq, CommitSeq(3));
     commit_as(
         &writer,
         &namespace,
@@ -289,6 +213,13 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
     )
     .await
     .expect("administrator again");
+    writer
+        .with_subject(subject("root", "prn_root"))
+        .namespace(&namespace)
+        .list_changes(CommitSeq(0))
+        .page()
+        .await
+        .expect("an administrator reads the feed");
     let feed = namespace_reader
         .list_changes(CommitSeq(0))
         .page()
@@ -309,14 +240,13 @@ async fn recovery_restores_an_administrator_and_keeps_the_other_root_grants() {
         })
         .collect();
     assert_eq!(
-        root_rows.last(),
-        Some(&(AccessRevisionNo(2), root_grants(true)))
+        root_rows,
+        [
+            (AccessRevisionNo(1), root_grants(true)),
+            (AccessRevisionNo(2), root_grants(false)),
+            (AccessRevisionNo(3), root_grants(true)),
+        ]
     );
-    let again = namespace_writer
-        .recover_administrator(&principal, &loonfs_test_support::test_actor())
-        .await
-        .expect("second recovery");
-    assert_eq!(again.access_revision_no, AccessRevisionNo(3));
 }
 
 /// Checks that an administrator whom another writer revoked can't delete a
@@ -568,7 +498,8 @@ async fn snapshot_admin_reads_accept_the_current_administrator() {
         .page()
         .await
         .expect("current administrator can read historical changes");
-    assert_eq!(changes.changes.len(), 1);
+    // The root access row's commit and the file's.
+    assert_eq!(changes.changes.len(), 2);
     assert_eq!(
         view.read_content(&content, 100)
             .await

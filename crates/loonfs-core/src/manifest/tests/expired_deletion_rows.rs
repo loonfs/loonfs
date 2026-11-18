@@ -11,19 +11,15 @@ use crate::test_support::kept_inodes::{
 };
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, DeleteDirectoryBehavior,
-    InodeKind, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
-    ROOT_INODE_ID,
+    InodeKind, PrincipalId, PrincipalSet, Subject, SubjectId, ROOT_INODE_ID,
 };
 use plan::CompactionPlacement;
 use std::assert_matches;
-
-const PRINCIPAL_SCOPE: &str = "org_demo";
 
 /// A subject with every right, so the namespace's commits can update access
 /// rows.
 fn administrator() -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE).expect("principal scope"),
         subject_id: SubjectId::parse("root").expect("subject id"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse("prn_root").expect("principal id")
@@ -32,31 +28,25 @@ fn administrator() -> Subject {
     }
 }
 
-/// Creates a namespace with access control, whose access group has rows.
+/// Creates a namespace whose root access row makes `prn_root` an
+/// administrator, so its access group has rows.
 async fn bootstrap_restricted_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) {
-    crate::test_support::NamespaceFixture::new(store, namespace_id, context)
-        .engine()
-        .bootstrap_namespace(
-            &loonfs_test_support::test_actor(),
-            &loonfs_types::options::CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE)
-                        .expect("principal scope"),
-                    root_grants: AccessGrants::new(BTreeMap::from([(
-                        PrincipalId::parse("prn_root").expect("principal id"),
-                        AccessRights::ADMIN,
-                    )]))
-                    .expect("root grants"),
-                },
-                ..Default::default()
-            },
+    let fixture = crate::test_support::NamespaceFixture::new(store, namespace_id, context);
+    fixture.create().await.expect("bootstrap a namespace");
+    fixture
+        .set_root_access(
+            AccessGrants::new(BTreeMap::from([(
+                PrincipalId::parse("prn_root").expect("principal id"),
+                AccessRights::ADMIN,
+            )]))
+            .expect("root grants"),
         )
         .await
-        .expect("bootstrap a restricted namespace");
+        .expect("set the administrator");
     crate::test_support::namespace_store(store, namespace_id)
         .acquire_writer_epoch(&context.writer_id)
         .await

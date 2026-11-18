@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
@@ -31,6 +32,7 @@ func main() {
 		option.WithBaseURL(os.Getenv("LOONFS_URL")),
 		option.WithToken(os.Getenv("LOONFS_AUTH_TOKEN")),
 		option.WithActorID(loonfs.String("example-user")),
+		option.WithHTTPHeader(http.Header{"Loonfs-Context": []string{"service"}}),
 	)
 
 	capabilities, err := loon.Capabilities.Retrieve(context.Background())
@@ -50,6 +52,14 @@ func main() {
 	fmt.Println(commit.CommitID, commit.Events)
 }
 ```
+
+Every request that reads or changes a namespace's contents sends exactly one
+of two headers. `Loonfs-Principals` lists the principals that the request acts
+for, and the server checks their rights. `Loonfs-Context: service` acts on the
+application's own account, and the server checks no rights. A request that
+sends neither or both fails with `invalid_request`. A new namespace has no
+access rows and no administrators, so grant the first ones with a commit whose
+one operation is `update_access` on `/`, sent in the service context.
 
 Publishing helpers return the commit, including its events. Pass `CommitID`
 explicitly if you may retry. Use `option.WithHTTPHeader` with `Loonfs-Actor`
@@ -138,12 +148,22 @@ keeping the LoonFS credential on the server. The proxy forwards
 changes, and grep with the path unchanged, and returns 404 for every other
 route.
 
-Set `Authorize` to check each request and set `Loonfs-Actor` on forwarded
-requests. The proxy always removes the browser's actor header.
-The `Authorize` hook is required. Returning `proxy.Authorization{}` with no
-error forwards as the token holder. Any namespace ID in the path reaches LoonFS,
-so the hook checks that the caller may use `route.NamespaceID`.
-Here, `authorizedActor` checks the application's session and namespace access.
+Set `Authorize` to check each request and choose the identity that the proxy
+stamps on it. The proxy always removes the browser's `Loonfs-Actor`,
+`Loonfs-Subject`, `Loonfs-Principals`, and `Loonfs-Context` headers, so the
+browser can't choose its own authority. The hook returns one of two
+choices:
+
+- `Principals`, to act for the signed-in user. LoonFS checks the request
+  against the namespace's access rows.
+- `Service: true`, to act on the application's own account. The proxy sends
+  `Loonfs-Context: service`, and LoonFS checks no rights.
+
+A hook that returns neither, or both, forwards a request that LoonFS rejects
+with `invalid_request`. The `Authorize` hook is required. Any namespace ID in
+the path reaches LoonFS, so the hook checks that the caller may use
+`route.NamespaceID`. Here, `authorizedUser` checks the application's session
+and namespace access, and returns the user's principals.
 
 ```go
 import (
@@ -157,17 +177,23 @@ handler, err := proxy.NewHandler(proxy.Config{
 	ServerBaseURL: os.Getenv("LOONFS_URL"),
 	Token: os.Getenv("LOONFS_AUTH_TOKEN"),
 	Authorize: func(r *http.Request, route proxy.RouteContext) (proxy.Authorization, error) {
-		actorID, ok := authorizedActor(r, route.NamespaceID)
+		user, ok := authorizedUser(r, route.NamespaceID)
 		if !ok {
 			return proxy.Authorization{}, &proxy.Refusal{Status: http.StatusForbidden}
 		}
-		return proxy.Authorization{ActorID: actorID}, nil
+		return proxy.Authorization{ActorID: user.ID, Principals: user.Principals}, nil
 	},
 })
 if err != nil {
 	panic(err)
 }
 http.Handle("/v0/", handler)
+```
+
+An application without per-user permissions returns the service choice instead:
+
+```go
+return proxy.Authorization{ActorID: user.ID, Service: true}, nil
 ```
 
 ## Retries

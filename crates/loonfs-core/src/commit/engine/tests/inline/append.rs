@@ -62,7 +62,7 @@ async fn revision_bytes(
             path,
             RevisionNo(revision_no),
             None,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("read")
@@ -81,7 +81,7 @@ async fn current_ref(
         .resolve_path(
             path,
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("entry");
@@ -824,7 +824,7 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
         .resolve_path(
             "/file-0",
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("file")

@@ -145,7 +145,7 @@ A resolver reads `ours` and `theirs` through the ordinary read routes. It reads 
 
 If a replay call fails, the new fork stays, because a later replay call continues into it.
 
-A rebase needs the rights for each of its two steps. Creating the new fork needs the right to fork `ns`, which an ACL namespace grants to the token holder, and to a supplied subject only when the subject is an administrator ([`POST /forks`](../specs/api.md#613-post-forks)). The replay commit needs a subject context in an ACL namespace, as every commit does, with the merge rights described above. So in an ACL namespace a rebase runs as an administrator subject, and so does deleting a fork afterwards. A subject that can merge into `ns` but isn't an administrator can't recover from `merge_conflict` on its own.
+A rebase needs the rights for each of its two steps. Creating the new fork needs the right to fork `ns`, which the service context and an administrator have ([`POST /forks`](../specs/api.md#613-post-forks)). A replay commit with principals needs the merge rights described above, as every commit does. So a rebase runs as an administrator or in the service context, and so does deleting a fork afterwards. A subject that can merge into `ns` but isn't an administrator can't recover from `merge_conflict` on its own.
 
 After a rebase, the loop stops using the fork. The fork's created inodes reach main through the new fork with the same IDs, so a later merge from the fork would treat them as inodes that already exist in main. The resolver's changes in the new fork also differ from the fork's versions, so a later merge from the fork would conflict on those files.
 

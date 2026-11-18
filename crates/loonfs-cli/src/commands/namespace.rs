@@ -3,8 +3,8 @@
 use super::context::{Invocation, ProfileContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
-    NamespaceAccessArg, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
-    NamespaceForkArgs, NamespaceShowArgs, NamespaceUseArgs,
+    NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs, NamespaceForkArgs,
+    NamespaceShowArgs, NamespaceUseArgs,
 };
 use crate::config_file::{load_config, mutate_config};
 use crate::error::{CliError, Result};
@@ -13,8 +13,7 @@ use crate::prompt::prompt_line;
 use crate::render::{write_stderr_progress, OutputFormat};
 use crate::resolve::resolve_namespace;
 use loonfs_client::{CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions};
-use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, NamespaceId, PrincipalScope};
-use std::collections::BTreeMap;
+use loonfs_types::NamespaceId;
 
 pub(crate) async fn run_namespace_command(
     invocation: &Invocation,
@@ -54,7 +53,6 @@ async fn run_namespace_create(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = ProfileContext::resolve(invocation).await?;
     let actor_id = context.actor(args.actor.actor_id.as_ref())?;
-    let access = namespace_access(invocation, &args).map_err(|error| context.fail(error))?;
     let namespace_id = args.namespace_id.unwrap_or_else(|| {
         let generated = NamespaceId::generate();
         if invocation.behavior.output == OutputFormat::Human {
@@ -69,7 +67,6 @@ async fn run_namespace_create(
             &namespace_id,
             &actor_id,
             &CreateNamespaceOptions {
-                access,
                 retention_window_ms: args.retention_window_ms,
                 allow_existing: false,
             },
@@ -78,41 +75,6 @@ async fn run_namespace_create(
         .map_err(|error| context.fail(error))?;
 
     Ok(context.output(CommandData::NamespaceStatus(namespace)))
-}
-
-fn namespace_access(
-    invocation: &Invocation,
-    args: &NamespaceCreateArgs,
-) -> Result<NamespaceAccess> {
-    match args.access {
-        NamespaceAccessArg::Unrestricted => Ok(NamespaceAccess::unrestricted()),
-        NamespaceAccessArg::Acl => {
-            let principal_scope = invocation
-                .selectors
-                .subject
-                .principal_scope
-                .as_deref()
-                .ok_or_else(|| {
-                    CliError::invalid_request("`--principal-scope` is required with `--access acl`")
-                        .with_param("--principal-scope")
-                })?;
-            let principal_scope = PrincipalScope::parse(principal_scope).map_err(|error| {
-                CliError::invalid_request(error.to_string()).with_param("--principal-scope")
-            })?;
-            let root_grants = args
-                .administrators
-                .iter()
-                .map(|principal| (principal.clone(), AccessRights::ADMIN))
-                .collect::<BTreeMap<_, _>>();
-            let root_grants = AccessGrants::new(root_grants).map_err(|error| {
-                CliError::invalid_request(error.to_string()).with_param("--administrator")
-            })?;
-            Ok(NamespaceAccess::Acl {
-                principal_scope,
-                root_grants,
-            })
-        }
-    }
 }
 
 async fn run_namespace_delete(

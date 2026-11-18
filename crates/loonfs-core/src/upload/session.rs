@@ -4,7 +4,6 @@
 
 use super::complete::completed_status;
 use super::records::UploadSessionState;
-use crate::authorize::{Authorizer, CommitAuthority};
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::limits::UPLOAD_SESSION_LEASE_MS;
@@ -18,8 +17,8 @@ use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, UploadOutcome, UploadSessionMode, UploadSessionPayload,
 };
 use loonfs_types::{
-    ChecksumAlgorithm, ContentId, ContentRef, NamespaceAccess, NamespaceId, Subject, SubjectId,
-    UploadId, UploadMode, UploadSession, UploadSessionStatus,
+    ChecksumAlgorithm, ContentId, ContentRef, Subject, SubjectId, UploadId, UploadMode,
+    UploadSession, UploadSessionStatus,
 };
 use std::num::NonZeroU64;
 
@@ -106,30 +105,18 @@ pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
     Ok(record)
 }
 
-pub(crate) fn authorize_upload_subject(
-    namespace_id: &NamespaceId,
-    access: &NamespaceAccess,
-    subject: Option<&Subject>,
-) -> Result<()> {
-    Authorizer::for_request(namespace_id, access, CommitAuthority::Subject(subject)).map(|_| ())
-}
-
+/// Returns `upload_not_found` unless the caller is the session's owner: both
+/// in the service context, or acting as the same subject.
 pub(crate) fn ensure_session_subject(
     session: &UploadSessionPayload,
     subject: Option<&Subject>,
 ) -> Result<()> {
-    match (
-        &session.subject_id,
-        subject.map(|subject| &subject.subject_id),
-    ) {
-        (None, _) => Ok(()),
-        (Some(_), None) => Err(CoreError::SubjectRequired {
-            namespace_id: session.namespace_id.clone(),
-        }),
-        (Some(owner), Some(caller)) if owner == caller => Ok(()),
-        (Some(_), Some(_)) => Err(CoreError::UploadNotFound {
+    if session.subject_id.as_ref() == subject.map(|subject| &subject.subject_id) {
+        Ok(())
+    } else {
+        Err(CoreError::UploadNotFound {
             upload_id: session.upload_id.clone(),
-        }),
+        })
     }
 }
 

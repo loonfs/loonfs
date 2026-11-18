@@ -25,15 +25,8 @@ pub(super) fn human_current(profile: &str, namespace: Option<&str>) -> String {
 }
 
 pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
-    let access = match &namespace.access {
-        loonfs_types::NamespaceAccessMode::Unrestricted {} => "unrestricted".to_owned(),
-        loonfs_types::NamespaceAccessMode::Acl { principal_scope } => {
-            format!("acl (scope {principal_scope})")
-        }
-        loonfs_types::NamespaceAccessMode::Unknown => "access mode unknown to this CLI".to_owned(),
-    };
     format!(
-        "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\n\
+        "{} @ seq {} (retention floor {})\ncreated_by: {}\n\
          retention_window_ms: {}\npool: {}",
         namespace.namespace_id,
         namespace.head_seq.0,
@@ -143,10 +136,6 @@ pub(super) fn human_snapshot_records_listed(response: &ListSnapshotRecordsRespon
 
 pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
     match &ran.response {
-        RunMaintenanceJobResponse::RecoverAdministrator(recovery) => format!(
-            "administrator recovery for {}: access revision {} at seq {}",
-            recovery.namespace_id, recovery.access_revision_no, recovery.committed_seq,
-        ),
         RunMaintenanceJobResponse::Metadata(metadata) => {
             let mut lines = vec![format!(
                 "metadata maintenance for {}: {} ({} compaction units published)",

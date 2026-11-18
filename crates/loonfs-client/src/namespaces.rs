@@ -16,7 +16,7 @@ use loonfs_types::{
 };
 
 impl Client {
-    /// Creates an empty unrestricted namespace with the given ID and returns
+    /// Creates an empty namespace with the given ID and returns
     /// its genesis state.
     pub async fn create_namespace(
         &self,
@@ -45,7 +45,6 @@ impl Client {
                 self.request(operations::CREATE_NAMESPACE, &url)
                     .header(headers::ACTOR, actor.as_str())
                     .json(&CreateNamespaceRequest {
-                        access: options.access.clone(),
                         namespace_id: Some(namespace_id.clone()),
                         retention_window_ms: options.retention_window_ms,
                     })?,

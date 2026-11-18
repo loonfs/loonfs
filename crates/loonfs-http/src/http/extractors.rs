@@ -100,7 +100,11 @@ pub(super) fn missing_actor() -> ApiResponseError {
     .with_param(headers::ACTOR)
 }
 
-/// The subject a request acts as, or `None` for service authority.
+/// The subject a request acts as, or `None` in the service context.
+///
+/// The request sends exactly one of `Loonfs-Principals`, with the subject's
+/// principals, or `Loonfs-Context: service`, so a client that leaves out its
+/// principals by mistake gets `invalid_request` instead of every right.
 pub(super) struct SubjectHeaders(pub(super) Option<Subject>);
 
 impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
@@ -113,13 +117,11 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
                 .get(name)
                 .map(|value| String::from_utf8_lossy(value.as_bytes()))
         };
-        Subject::from_parts(
-            header(headers::PRINCIPAL_SCOPE).as_deref(),
+        let subject = Subject::from_parts(
             header(headers::SUBJECT).as_deref(),
             header(headers::ACTOR).as_deref(),
             header(headers::PRINCIPALS).as_deref(),
         )
-        .map(Self)
         .map_err(|error| {
             let (part, message) = match error {
                 SubjectPartsError::Missing { part, .. } => (
@@ -131,7 +133,40 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
             };
             ApiResponseError::new(ErrorCode::InvalidRequest, &message)
                 .with_param(part.header_name())
-        })
+        })?;
+        let context = header(headers::CONTEXT);
+        match (subject, context.as_deref()) {
+            (Some(subject), None) => Ok(Self(Some(subject))),
+            (None, Some(headers::SERVICE_CONTEXT)) => Ok(Self(None)),
+            (None, None) => Err(ApiResponseError::new(
+                ErrorCode::InvalidRequest,
+                &format!(
+                    "send {} or {}: {}",
+                    headers::PRINCIPALS,
+                    headers::CONTEXT,
+                    headers::SERVICE_CONTEXT
+                ),
+            )
+            .with_param(headers::PRINCIPALS)),
+            (Some(_), Some(_)) => Err(ApiResponseError::new(
+                ErrorCode::InvalidRequest,
+                &format!(
+                    "send {} or {}, not both",
+                    headers::PRINCIPALS,
+                    headers::CONTEXT
+                ),
+            )
+            .with_param(headers::CONTEXT)),
+            (None, Some(context)) => Err(ApiResponseError::new(
+                ErrorCode::InvalidRequest,
+                &format!(
+                    "invalid {} {context:?}: the one value is {}",
+                    headers::CONTEXT,
+                    headers::SERVICE_CONTEXT
+                ),
+            )
+            .with_param(headers::CONTEXT)),
+        }
     }
 }
 

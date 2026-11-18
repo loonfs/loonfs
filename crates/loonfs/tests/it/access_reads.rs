@@ -4,21 +4,20 @@
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::test_support::writer;
 use loonfs::{
-    Consistency, CreateNamespaceOptions, CurrentFile, CurrentFileState, DestinationBehavior,
-    InodeId, LoonFs, NamespaceId, ReadAt, ReadFileOptions, RevisionNo, Writable,
+    Consistency, CurrentFile, CurrentFileState, DestinationBehavior, InodeId, LoonFs, NamespaceId,
+    ReadAt, ReadFileOptions, RevisionNo, Writable,
 };
 use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ErrorCode, NamespaceAccess,
-    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ErrorCode, PrincipalId,
+    PrincipalSet, Subject, SubjectId,
 };
 use std::sync::Arc;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(std::collections::BTreeSet::from([PrincipalId::parse(
             principal,
@@ -49,19 +48,15 @@ async fn check_buffered_read_access(content_size: usize) {
     let writer = writer(store.clone(), "access-reads").await;
     let namespace_id = namespace_id("access-reads");
     writer
-        .create_namespace_with_options(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: grants("prn_root", AccessRight::Admin),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(
+        &writer,
+        &namespace_id,
+        grants("prn_root", AccessRight::Admin),
+    )
+    .await;
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -214,19 +209,15 @@ async fn check_eventual_read_access(content_size: usize) {
     let writer = writer(store.clone(), "eventual-access").await;
     let namespace_id = namespace_id("eventual-access");
     writer
-        .create_namespace_with_options(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: grants("prn_root", AccessRight::Admin),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(
+        &writer,
+        &namespace_id,
+        grants("prn_root", AccessRight::Admin),
+    )
+    .await;
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -348,19 +339,15 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
         .expect("old writer");
     let namespace_id = namespace_id("access-handoff");
     old_writer
-        .create_namespace_with_options(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: grants("prn_root", AccessRight::Admin),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(
+        &old_writer,
+        &namespace_id,
+        grants("prn_root", AccessRight::Admin),
+    )
+    .await;
     let old_namespace_writer = old_writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -567,19 +554,15 @@ async fn publish_team_and_private_files(
     files: usize,
 ) {
     writer
-        .create_namespace_with_options(
-            namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: grants("prn_root", AccessRight::Admin),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(
+        writer,
+        namespace_id,
+        grants("prn_root", AccessRight::Admin),
+    )
+    .await;
     let namespace_writer = writer
         .open_namespace(namespace_id)
         .expect("open namespace")

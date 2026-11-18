@@ -19,11 +19,6 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         grants: &AccessGrants,
         expected_access_revision_no: Option<AccessRevisionNo>,
     ) -> Result<CompiledFilesystemOperation> {
-        if self.view.access.is_unrestricted() {
-            return Err(CoreError::NamespaceUnrestricted {
-                namespace_id: self.view.namespace_id.clone(),
-            });
-        }
         let (authorized_inode_id, resolved) = match target {
             // A file in the middle of the path is authorized like a target,
             // so the error that names it reaches only a subject allowed to

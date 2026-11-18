@@ -34,7 +34,7 @@ fn demo_path(path: &str) -> NamespacePath {
     NamespacePath::parse("demo", path).expect("valid namespace path")
 }
 
-/// A server with one empty, unrestricted namespace named `demo`.
+/// A server with one empty namespace named `demo`.
 async fn server_with_namespace(root: &Path, writer_id: &str) -> TestServer {
     let harness = start_server(test_config(root.join("store"), writer_id, writer_id)).await;
     harness
@@ -155,6 +155,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
                 harness.server_url,
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
             .expect("raw revision listing")
             .into_reader(),
@@ -394,6 +395,7 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
             .expect("first children page")
             .into_reader(),
@@ -450,6 +452,7 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
             .expect("projected children page")
             .into_reader(),
@@ -606,6 +609,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
             .expect("valid inode route");
     }
@@ -631,6 +635,7 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
             let request = raw_agent()
                 .request(method, &url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .set("Loonfs-Actor", "test-actor");
             let result = if method == "POST" {
                 request.send_json(serde_json::json!({}))

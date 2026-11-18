@@ -48,7 +48,6 @@ from loonfs.server import (
     FilesystemOperation_PutFileRevisionByInode,
     FilesystemOperation_RestoreRevisionByInode,
     FilesystemOperation_RestoreDeleted,
-    FilesystemOperation_UpdateAccessByInode,
     FilesystemOperation_UpdateAttributesByInode,
     ListPathEntriesResponse,
     LoonFS,
@@ -394,7 +393,6 @@ class InodeAddressingExpected:
     entry_names: list[str]
     stale_binding_version: ErrorStatusExpected
     occupied_name: ErrorStatusExpected
-    unrestricted_access: ErrorStatusExpected
     deleted_content: ErrorStatusExpected
 
 
@@ -451,7 +449,6 @@ class ProxyAuthorize:
 @pydantic.dataclasses.dataclass(config=pydantic.ConfigDict(extra="forbid", strict=True), frozen=True)
 class ProxyACL:
     namespace_id: str
-    principal_scope: str
     administrator: str
     member: str
     member_subject_id: str
@@ -617,6 +614,11 @@ def _serve_asgi(app: Any, thread_name: str) -> Iterator[str]:
             raise AssertionError("ASGI server did not stop within five seconds")
 
 
+# Sent on every request that acts on the application's own account, so the
+# server checks no rights.
+_SERVICE_CONTEXT = {"Loonfs-Context": "service"}
+
+
 def _remove_authorization(request: httpx.Request) -> None:
     request.headers.pop("Authorization", None)
 
@@ -651,7 +653,12 @@ def harness() -> Iterator[Harness]:
     )
     try:
         yield Harness(
-            client=LoonFS(base_url=base_url, token=token, actor_id="conformance"),
+            client=LoonFS(
+                base_url=base_url,
+                token=token,
+                actor_id="conformance",
+                headers=_SERVICE_CONTEXT,
+            ),
             unauthenticated=LoonFS(
                 base_url=base_url,
                 token="",
@@ -668,7 +675,7 @@ def proxy_harness(
 ) -> Iterator[str]:
     request, _ = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
     async def authorize(_scope: dict[str, Any], _context: ProxyRouteContext) -> ProxyAuthorization:
-        return ProxyAuthorization(actor_id=request.actor_id)
+        return ProxyAuthorization(actor_id=request.actor_id, service=True)
 
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),
@@ -710,17 +717,6 @@ def _byte_pattern(pattern: BytePattern) -> bytes:
     if pattern.modulus == 0:
         raise AssertionError("byte pattern modulus must be greater than zero")
     return bytes(offset % pattern.modulus for offset in range(pattern.length))
-
-
-@pytest.mark.parametrize(
-    "options",
-    [{"principals": "prn_team"}, {"principal_scope": "org_demo"}],
-)
-def test_server_client_rejects_a_partial_subject_context(options: dict[str, str]) -> None:
-    with pytest.raises(
-        ValueError, match="principal_scope and principals must be configured together"
-    ):
-        LoonFS(base_url="http://127.0.0.1", token="test", **options)
 
 
 def _checksum(algorithm: str, content: bytes) -> Checksum:
@@ -1430,19 +1426,6 @@ def test_inode_addressing(cases: dict[str, ConformanceCase], harness: Harness) -
     assert labeled.attributes_revision_no == expected.attributes_revision_no
     assert labeled.attributes == {request.attribute_key: request.attribute_value}
 
-    with pytest.raises(ConflictError) as unrestricted:
-        _apply(
-            client,
-            namespace_id,
-            "conf-inode-addressing-access",
-            request.actor_id,
-            FilesystemOperation_UpdateAccessByInode(
-                inode_id="ino_00000000000000000000000000", boundary=False, grants={}
-            ),
-        )
-    assert unrestricted.value.status_code == expected.unrestricted_access.status
-    assert unrestricted.value.body.code == expected.unrestricted_access.code
-
     deletion = _apply(
         client,
         namespace_id,
@@ -1724,7 +1707,7 @@ def test_proxy(
 
     with httpx.Client(
         base_url=proxy_harness,
-        headers={"Authorization": "Bearer browser-token"},
+        headers={"Authorization": "Bearer browser-token", **_SERVICE_CONTEXT},
     ) as client:
         mkdir = _proxy_create_commit(
             client,
@@ -1879,7 +1862,7 @@ def test_proxy(
                 body=json.dumps(refusal_body).encode("utf-8"),
                 content_type="application/json",
             )
-        return ProxyAuthorization(actor_id=request.authorize.actor_id)
+        return ProxyAuthorization(actor_id=request.authorize.actor_id, service=True)
 
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),
@@ -1887,7 +1870,7 @@ def test_proxy(
         authorize=authorize,
     )
     with _serve_asgi(app, "loonfs-python-authorized-proxy") as base_url:
-        with httpx.Client(base_url=base_url) as client:
+        with httpx.Client(base_url=base_url, headers=_SERVICE_CONTEXT) as client:
             stamped_response = client.post(
                 f"{namespace_base}/commits",
                 headers={"Loonfs-Actor": request.authorize.browser_actor_id},
@@ -1937,23 +1920,34 @@ def _proxy_acl(request: ProxyRequest, expected: ProxyExpected) -> None:
     acl = request.acl
     server_url = _required_environment("LOONFS_CONFORMANCE_URL")
     token = _required_environment("LOONFS_CONFORMANCE_TOKEN")
-    with httpx.Client(base_url=server_url) as client:
-        created = client.post(
-            "/v0/namespaces",
-            headers={"Authorization": f"Bearer {token}", "Loonfs-Actor": request.actor_id},
+    with httpx.Client(
+        base_url=server_url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Loonfs-Actor": request.actor_id,
+            **_SERVICE_CONTEXT,
+        },
+    ) as client:
+        created = client.post("/v0/namespaces", json={"namespace_id": acl.namespace_id})
+        created.raise_for_status()
+        # A new namespace has no administrators, so the application grants the
+        # first ones in the service context.
+        administrators = client.post(
+            f"/v0/namespaces/{acl.namespace_id}/commits",
             json={
-                "namespace_id": acl.namespace_id,
-                "access": {
-                    "kind": "acl",
-                    "principal_scope": acl.principal_scope,
-                    "root_grants": {
+                "commit_id": f"{acl.commit_id}-administrators",
+                "operations": [{
+                    "kind": "update_access",
+                    "path": "/",
+                    "boundary": False,
+                    "grants": {
                         acl.administrator: ["admin"],
                         acl.member: ["create", "read"],
                     },
-                },
+                }],
             },
         )
-        created.raise_for_status()
+        administrators.raise_for_status()
 
     async def authorize(
         _scope: dict[str, Any], _context: ProxyRouteContext
@@ -1961,7 +1955,6 @@ def _proxy_acl(request: ProxyRequest, expected: ProxyExpected) -> None:
         return ProxyAuthorization(
             actor_id=request.actor_id,
             subject_id=acl.member_subject_id,
-            principal_scope=acl.principal_scope,
             principals=[acl.member],
         )
 
@@ -1969,10 +1962,10 @@ def _proxy_acl(request: ProxyRequest, expected: ProxyExpected) -> None:
     with _serve_asgi(app, "loonfs-python-acl-proxy") as base_url:
         with httpx.Client(base_url=base_url) as client:
             commits = f"/v0/namespaces/{acl.namespace_id}/commits"
-            headers = {
-                "Loonfs-Principal-Scope": acl.principal_scope,
-                "Loonfs-Principals": acl.browser_principals,
-            }
+            # The browser claims principals, which the hook replaces. It
+            # doesn't send the service context, because a request that sends
+            # both is invalid.
+            headers = {"Loonfs-Principals": acl.browser_principals}
             stamped_response = client.post(
                 commits,
                 headers=headers,
@@ -2246,6 +2239,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
             base_url=_required_environment("LOONFS_CONFORMANCE_URL"),
             token=_required_environment("LOONFS_CONFORMANCE_TOKEN"),
             actor_id=request.actor_id,
+            headers=_SERVICE_CONTEXT,
             httpx_client=http,
         )
         helper_commit = client.files.upload(
@@ -2278,6 +2272,7 @@ def test_async_upload_download(cases: dict[str, ConformanceCase]) -> None:
                 base_url=_required_environment("LOONFS_CONFORMANCE_URL"),
                 token=_required_environment("LOONFS_CONFORMANCE_TOKEN"),
                 actor_id=request.actor_id,
+                headers=_SERVICE_CONTEXT,
                 httpx_client=http,
             )
             await client.namespaces.create(namespace_id=namespace_id, request_options={"additional_headers": {"Loonfs-Actor": request.actor_id}})

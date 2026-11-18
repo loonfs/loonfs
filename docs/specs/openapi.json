@@ -852,10 +852,6 @@
         "additionalProperties": false,
         "description": "A request to create a namespace.",
         "properties": {
-          "access": {
-            "$ref": "#/components/schemas/NamespaceAccess",
-            "description": "The namespace's access mode, which can't be changed after the namespace is created. The\ndefault is unrestricted."
-          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The durable ID of the new namespace. Without this field, LoonFS generates an ID. The\nresponse's `namespace_id` is the new namespace's ID."
@@ -3291,117 +3287,6 @@
         "example": "report.txt",
         "type": "string"
       },
-      "NamespaceAccess": {
-        "description": "A namespace's access mode, which can't be changed after the namespace is created.",
-        "discriminator": {
-          "mapping": {
-            "acl": "#/components/schemas/NamespaceAccessAcl",
-            "unrestricted": "#/components/schemas/NamespaceAccessUnrestricted"
-          },
-          "propertyName": "kind"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/NamespaceAccessUnrestricted"
-          },
-          {
-            "$ref": "#/components/schemas/NamespaceAccessAcl"
-          }
-        ]
-      },
-      "NamespaceAccessAcl": {
-        "description": "Access rows control every operation.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "acl"
-            ],
-            "type": "string"
-          },
-          "principal_scope": {
-            "$ref": "#/components/schemas/PrincipalScope",
-            "description": "The identity domain that the namespace's principal IDs belong to."
-          },
-          "root_grants": {
-            "$ref": "#/components/schemas/AccessGrants",
-            "description": "The root inode's grants when the namespace is created. Usually each initial\nadministrator has `admin`."
-          }
-        },
-        "required": [
-          "principal_scope",
-          "root_grants",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "NamespaceAccessMode": {
-        "description": "A namespace's access mode, without the grants that the namespace was created with.",
-        "discriminator": {
-          "mapping": {
-            "acl": "#/components/schemas/NamespaceAccessModeAcl",
-            "unrestricted": "#/components/schemas/NamespaceAccessModeUnrestricted"
-          },
-          "propertyName": "kind"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/NamespaceAccessModeUnrestricted"
-          },
-          {
-            "$ref": "#/components/schemas/NamespaceAccessModeAcl"
-          }
-        ]
-      },
-      "NamespaceAccessModeAcl": {
-        "description": "Access rows control the operations that principals in this identity domain can perform.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "acl"
-            ],
-            "type": "string"
-          },
-          "principal_scope": {
-            "$ref": "#/components/schemas/PrincipalScope",
-            "description": "The identity domain that the namespace's principal IDs belong to."
-          }
-        },
-        "required": [
-          "principal_scope",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "NamespaceAccessModeUnrestricted": {
-        "description": "Every caller with the deployment credential can perform every operation.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "unrestricted"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind"
-        ],
-        "type": "object"
-      },
-      "NamespaceAccessUnrestricted": {
-        "description": "Every caller with the deployment credential can perform every operation.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "unrestricted"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind"
-        ],
-        "type": "object"
-      },
       "NamespaceDiagnostics": {
         "description": "A namespace's state and the storage details that maintenance uses.",
         "properties": {
@@ -3495,10 +3380,6 @@
       "NamespaceMetadata": {
         "description": "The current state of one namespace.",
         "properties": {
-          "access": {
-            "$ref": "#/components/schemas/NamespaceAccessMode",
-            "description": "The namespace's access mode."
-          },
           "created_at_ms": {
             "description": "The time the namespace was created, in Unix milliseconds.",
             "format": "int64",
@@ -3537,7 +3418,6 @@
           }
         },
         "required": [
-          "access",
           "namespace_id",
           "created_at_ms",
           "created_by",
@@ -4037,18 +3917,6 @@
         ],
         "type": "object"
       },
-      "PrincipalId": {
-        "description": "A stable, opaque principal ID of 1 to 256 visible ASCII characters other than the comma.",
-        "example": "prn_8f3c",
-        "pattern": "^[\\x21-\\x2B\\x2D-\\x7E]{1,256}$",
-        "type": "string"
-      },
-      "PrincipalScope": {
-        "description": "An opaque identity domain ID of 1 to 256 visible ASCII characters other than the comma.",
-        "example": "org_acme",
-        "pattern": "^[\\x21-\\x2B\\x2D-\\x7E]{1,256}$",
-        "type": "string"
-      },
       "ProbeId": {
         "description": "The ID of one run of the store contract probe.\n\nThe probe stores its temporary objects under a key prefix that includes this ID.",
         "example": "probe_3w7td1ypsd9hq8m3rv7nf7s6hb",
@@ -4174,7 +4042,6 @@
           "mapping": {
             "gc": "#/components/schemas/RunMaintenanceJobRequestGc",
             "metadata": "#/components/schemas/RunMaintenanceJobRequestMetadata",
-            "recover_administrator": "#/components/schemas/RunMaintenanceJobRequestRecoverAdministrator",
             "retention": "#/components/schemas/RunMaintenanceJobRequestRetention",
             "retention_window": "#/components/schemas/RunMaintenanceJobRequestRetentionWindow"
           },
@@ -4192,9 +4059,6 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceJobRequestRetentionWindow"
-          },
-          {
-            "$ref": "#/components/schemas/RunMaintenanceJobRequestRecoverAdministrator"
           }
         ]
       },
@@ -4230,26 +4094,6 @@
           }
         },
         "required": [
-          "kind"
-        ],
-        "type": "object"
-      },
-      "RunMaintenanceJobRequestRecoverAdministrator": {
-        "description": "A job that restores a root administrator.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "recover_administrator"
-            ],
-            "type": "string"
-          },
-          "principal_id": {
-            "$ref": "#/components/schemas/PrincipalId",
-            "description": "The principal that receives administrator rights."
-          }
-        },
-        "required": [
-          "principal_id",
           "kind"
         ],
         "type": "object"
@@ -4306,7 +4150,6 @@
           "mapping": {
             "gc": "#/components/schemas/RunMaintenanceJobResponseGc",
             "metadata": "#/components/schemas/RunMaintenanceJobResponseMetadata",
-            "recover_administrator": "#/components/schemas/RunMaintenanceJobResponseRecoverAdministrator",
             "retention": "#/components/schemas/RunMaintenanceJobResponseRetention",
             "retention_window": "#/components/schemas/RunMaintenanceJobResponseRetentionWindow"
           },
@@ -4324,9 +4167,6 @@
           },
           {
             "$ref": "#/components/schemas/RunMaintenanceJobResponseRetentionWindow"
-          },
-          {
-            "$ref": "#/components/schemas/RunMaintenanceJobResponseRecoverAdministrator"
           }
         ]
       },
@@ -4419,41 +4259,6 @@
           "namespace_id",
           "outcome",
           "compaction_units",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "RunMaintenanceJobResponseRecoverAdministrator": {
-        "description": "The committed administrator recovery.",
-        "properties": {
-          "access_revision_no": {
-            "$ref": "#/components/schemas/AccessRevisionNo",
-            "description": "The root's access revision after the recovery."
-          },
-          "commit_id": {
-            "$ref": "#/components/schemas/CommitId",
-            "description": "The ID of the recovery commit."
-          },
-          "committed_seq": {
-            "$ref": "#/components/schemas/CommitSeq",
-            "description": "The sequence of the recovery commit."
-          },
-          "kind": {
-            "enum": [
-              "recover_administrator"
-            ],
-            "type": "string"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace whose root grants changed."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "commit_id",
-          "committed_seq",
-          "access_revision_no",
           "kind"
         ],
         "type": "object"
@@ -5749,7 +5554,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/jobs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `retention_window`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         "operationId": "run_maintenance_job",
         "parameters": [
           {
@@ -11088,13 +10893,13 @@
       "optional": true
     },
     {
-      "header": "Loonfs-Principal-Scope",
-      "name": "principalScope",
+      "header": "Loonfs-Principals",
+      "name": "principals",
       "optional": true
     },
     {
-      "header": "Loonfs-Principals",
-      "name": "principals",
+      "header": "Loonfs-Context",
+      "name": "loonfsContext",
       "optional": true
     }
   ]

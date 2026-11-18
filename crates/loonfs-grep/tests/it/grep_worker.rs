@@ -5,8 +5,8 @@ use crate::common::{
     grep_with, page_request, request, worker, writable_namespace, GrepHost,
 };
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions,
-    RestoreDeletedDestination, RestoreDeletedOptions, SharedObjectStore,
+    ErrorCode, LoonFs, NamespaceId, PutFileOptions, RestoreDeletedDestination,
+    RestoreDeletedOptions, SharedObjectStore,
 };
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::NamespaceReads;
@@ -1608,11 +1608,10 @@ async fn enable_disable_and_warm_queries_read_and_write_no_grep_object() {
 async fn grep_filters_candidates_the_subject_cannot_read() {
     use loonfs::publish::{CommitIntent, FilesystemOperation};
     use loonfs_types::{
-        AccessGrants, AccessRight, AccessRights, CommitId, NamespaceAccess, PrincipalId,
-        PrincipalScope, PrincipalSet, Subject, SubjectId,
+        AccessGrants, AccessRight, AccessRights, CommitId, PrincipalId, PrincipalSet, Subject,
+        SubjectId,
     };
     let subject = |principal: &str| Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(std::collections::BTreeSet::from([PrincipalId::parse(
             principal,
@@ -1640,19 +1639,15 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
         .expect("writer");
     let namespace_id = NamespaceId::parse("grep-access").expect("namespace");
     writer
-        .create_namespace_with_options(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: grants("prn_root", &[AccessRight::Admin]),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(
+        &writer,
+        &namespace_id,
+        grants("prn_root", &[AccessRight::Admin]),
+    )
+    .await;
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
@@ -1762,11 +1757,10 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
 async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
     use loonfs::publish::{CommitIntent, FilesystemOperation};
     use loonfs_types::{
-        AccessGrants, AccessRight, AccessRights, CommitId, NamespaceAccess, PrincipalId,
-        PrincipalScope, PrincipalSet, Subject, SubjectId,
+        AccessGrants, AccessRight, AccessRights, CommitId, PrincipalId, PrincipalSet, Subject,
+        SubjectId,
     };
     let subject = |principal: &str| Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
@@ -1793,19 +1787,15 @@ async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
         .expect("writer");
     let namespace_id = NamespaceId::parse("grep-pages-access").expect("namespace");
     writer
-        .create_namespace_with_options(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: grants("prn_root", &[AccessRight::Admin]),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(
+        &writer,
+        &namespace_id,
+        grants("prn_root", &[AccessRight::Admin]),
+    )
+    .await;
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");

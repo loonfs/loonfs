@@ -122,6 +122,7 @@ fn request(path: &str) -> Request<Body> {
     Request::builder()
         .uri(path)
         .header("authorization", "Bearer test-token")
+        .header("Loonfs-Context", "service")
         .body(Body::empty())
         .expect("request")
 }
@@ -131,6 +132,7 @@ fn create_namespace_request(body: Body) -> Request<Body> {
         .method("POST")
         .uri("/v0/namespaces")
         .header("authorization", "Bearer test-token")
+        .header("Loonfs-Context", "service")
         .header("content-type", "application/json")
         .header("content-length", "128")
         .header("loonfs-actor", "test-actor")
@@ -172,7 +174,7 @@ async fn a_full_server_answers_busy_before_the_client_sends_any_body_byte() {
     let mut first = tokio::net::TcpStream::connect(address)
         .await
         .expect("connect");
-    first.write_all(b"GET /v0/namespaces/missing HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-token\r\nConnection: close\r\n\r\n").await.expect("send headers");
+    first.write_all(b"GET /v0/namespaces/missing HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-token\r\nLoonfs-Context: service\r\nConnection: close\r\n\r\n").await.expect("send headers");
     store.wait_until_blocked().await;
 
     let mut refused = tokio::net::TcpStream::connect(address)

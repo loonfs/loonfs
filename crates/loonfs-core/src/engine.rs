@@ -3,7 +3,7 @@
 //! constructors, its authorization, and its per-subject reads; each other
 //! operation is a method in the module that implements it.
 
-use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
+use crate::authorize::{Authorizer, ReadAccess};
 use crate::commit::engine::NamespaceCommitEngine;
 use crate::diff::DiffPage;
 use crate::error::{CoreError, Result};
@@ -20,13 +20,13 @@ use crate::storage::content_location::ContentLocation;
 use crate::storage::content_stream::{FileContentStream, StreamRange};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::options::{AccessState, CommitSplitting, DiffOptions, ListOptions, StatOptions};
+use loonfs_types::options::{CommitSplitting, DiffOptions, ListOptions, StatOptions};
 use loonfs_types::ListChangesResponse;
 use loonfs_types::{ChangeFeedPosition, EffectiveLimit};
 use loonfs_types::{
     CommitId, CommitSeq, ContentRef, FileRevision, FileRevisionsPageCursor, InodeId,
-    ListPageCursor, NamespaceAccess, NamespaceId, Page, PageRequest, PathEntry, RevisionNo,
-    Subject, TrashEntry, TrashPageCursor, WriterId, ROOT_INODE_ID,
+    ListPageCursor, NamespaceId, Page, PageRequest, PathEntry, RevisionNo, Subject, TrashEntry,
+    TrashPageCursor, WriterId, ROOT_INODE_ID,
 };
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -72,17 +72,6 @@ pub type NamespaceReaderEngine<S> = NamespaceEngine<S, ReadOnly>;
 /// A namespace engine that exposes both read and mutation operations.
 pub type NamespaceWriterEngine<S> = NamespaceEngine<S, Writable>;
 
-/// The root's access row: its boundary flag, grants, and revision.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RootAccess {
-    /// The root's boundary flag and direct grants, which are empty before the
-    /// root has an access row.
-    pub access: AccessState,
-    /// The row's access revision, which is 0 before the root has an access
-    /// row. Commit validation treats a missing row as revision 0 too.
-    pub access_revision_no: loonfs_types::AccessRevisionNo,
-}
-
 /// Whose rights an engine's per-subject reads check.
 #[derive(Debug)]
 #[allow(
@@ -95,8 +84,8 @@ enum ReadAuthority {
     /// Reads of an earlier state check the subject's rights at this
     /// context, the namespace's current head.
     SubjectAtHead(RuntimeReadContext),
-    /// Reads check no rights, as reads of an unrestricted namespace do, for
-    /// a reader that administers the namespace or has no subject.
+    /// Reads check no rights, as reads in the service context do, for a
+    /// reader that administers the namespace or has no subject.
     Administrator,
 }
 
@@ -149,8 +138,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self
     }
 
-    /// Makes this engine's per-subject reads check no rights, as reads of an
-    /// unrestricted namespace do. The caller first checks that the reader is
+    /// Makes this engine's per-subject reads check no rights, as reads in
+    /// the service context do. The caller first checks that the reader is
     /// the namespace administrator or has no subject, with
     /// [`NamespaceEngine::ensure_administrator`].
     pub fn with_administrator_reads(mut self) -> Self {
@@ -174,7 +163,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                         .instrument(crate::phase_span!(crate::Phase::LoadView))
                         .await?,
                     head_view: None,
-                    authorizer: Authorizer::Unrestricted,
+                    authorizer: Authorizer::Service,
                 });
             }
             ReadAuthority::Subject => None,
@@ -185,11 +174,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                     .await?,
             ),
         };
-        let authorizer = Authorizer::for_request(
-            &self.namespace.namespace_id,
-            &context.read_basis.head.access,
-            CommitAuthority::Subject(self.subject.as_ref()),
-        )?;
+        let authorizer = Authorizer::for_request(self.subject.as_ref());
         let view = self
             .namespace
             .load_metadata_view(context)
@@ -202,20 +187,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         })
     }
 
-    /// Refuses a reader with no subject on an ACL namespace, for callers
-    /// that could otherwise return before any per-subject read.
-    pub fn ensure_subject(&self, context: &RuntimeReadContext) -> Result<()> {
-        if matches!(self.read_authority, ReadAuthority::Administrator) {
-            return Ok(());
-        }
-        Authorizer::for_request(
-            &self.namespace.namespace_id,
-            &context.read_basis.head.access,
-            CommitAuthority::Subject(self.subject.as_ref()),
-        )
-        .map(|_| ())
-    }
-
     /// Checks that the sequence `context` reads at is at or above the
     /// retention floor of its metadata, and returns `below_retention_floor`
     /// otherwise.
@@ -223,8 +194,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self.namespace.load_metadata_view(context).await.map(drop)
     }
 
-    /// The change feed and bare content reference reads work for the token
-    /// holder and for an administrator; any other subject is refused.
+    /// The change feed and bare content reference reads work in the service
+    /// context and for an administrator; any other subject is refused.
     pub async fn ensure_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
         let Some(subject) = &self.subject else {
             return Ok(());
@@ -236,59 +207,17 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             // Historical data does not restore historical administrator grants.
             ReadAuthority::SubjectAtHead(head) => head,
         };
-        let authorizer = Authorizer::for_request(
-            &self.namespace.namespace_id,
-            &context.read_basis.head.access,
-            CommitAuthority::Subject(Some(subject)),
-        )?;
-        let Authorizer::Subject { principals } = authorizer else {
-            return Ok(());
-        };
         let view = self
             .namespace
             .load_metadata_view_for_authorization(context)
             .await?;
-        if is_administrator(&mut view.metadata_view().session(), principals).await? {
+        if is_administrator(&mut view.metadata_view().session(), &subject.principals).await? {
             Ok(())
         } else {
             Err(CoreError::Forbidden {
                 inode_id: ROOT_INODE_ID,
             })
         }
-    }
-
-    /// Reads the root's current access row. Refused on an unrestricted
-    /// namespace, which has no access rows.
-    pub async fn root_access(&self, context: &RuntimeReadContext) -> Result<RootAccess> {
-        if matches!(
-            context.read_basis.head.access,
-            NamespaceAccess::Unrestricted {}
-        ) {
-            return Err(CoreError::NamespaceUnrestricted {
-                namespace_id: self.namespace.namespace_id.clone(),
-            });
-        }
-        let view = self.namespace.load_metadata_view(context).await?;
-        let row = view
-            .metadata_view()
-            .latest_access_revision(ROOT_INODE_ID)
-            .await?;
-        Ok(row.map_or(
-            RootAccess {
-                access: AccessState {
-                    boundary: false,
-                    grants: loonfs_types::AccessGrants::default(),
-                },
-                access_revision_no: loonfs_types::AccessRevisionNo(0),
-            },
-            |row| RootAccess {
-                access: AccessState {
-                    boundary: row.boundary,
-                    grants: row.grants,
-                },
-                access_revision_no: row.access_revision_no,
-            },
-        ))
     }
 
     /// Returns the namespace this engine is bound to.

@@ -168,11 +168,12 @@ Profile management
     Make a profile the default
 
 Namespace management
-  loonfs namespace create [namespace] [--access acl --principal-scope <scope> --administrator <principal>...]
-                            [--retention-window-ms <ms>] [--actor-id <stable-id>]
+  loonfs namespace create [namespace] [--retention-window-ms <ms>] [--actor-id <stable-id>]
     Create a new empty namespace. Without a namespace ID, the CLI generates
     an ID, prints it on stderr before it sends the request, and shows it
     with the new namespace. With --json, the ID appears only in the result.
+    A new namespace has no administrators. Set them with
+    `loonfs access set / --grant <principal>=admin` without principals.
     --retention-window-ms sets how many milliseconds of the namespace's
     history the server's maintenance sweep keeps, at least 86400000 (24
     hours). Without this option, the namespace's window is the server's
@@ -295,12 +296,12 @@ Writing
   defaults to loonfs-cli, which identifies the tool, not the person
   running it.
 
-  Every command that reaches a namespace accepts --subject-id <id>,
-  --principal-scope <scope>, and --principals <a,b>. The flags override
-  LOONFS_SUBJECT_ID, LOONFS_PRINCIPAL_SCOPE, and LOONFS_PRINCIPALS, which
-  override the matching profile fields. Scope and principals are required
-  together. Without them, the CLI acts as the token holder. With them, the
-  subject ID defaults to the actor ID.
+  Every command that reaches a namespace accepts --subject-id <id> and
+  --principals <a,b>. The flags override LOONFS_SUBJECT_ID and
+  LOONFS_PRINCIPALS, which override the matching profile fields. With
+  principals, LoonFS checks each request against the namespace's access
+  rows, and the subject ID defaults to the actor ID. Without principals,
+  the CLI sends `Loonfs-Context: service`, and LoonFS checks no rights.
 
   loonfs put <local-path|-> [remote-path] [-r] [--force]
              [--expected-inode-id <id>] [--expected-revision <n>]
@@ -407,8 +408,6 @@ Inspection and diagnostics
     result and exits nonzero if a check fails
 
 Maintenance
-  loonfs maintenance recover-administrator <principal>
-
   loonfs maintenance metadata [--max-wal-tail-objects <n>]
     Fold the WAL tail if it's due, and compact metadata until nothing is
     due. A compaction unit can take minutes, so the command can too.

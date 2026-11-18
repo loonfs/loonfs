@@ -80,8 +80,8 @@ impl<M: Mode> Namespace<M> {
         &self.namespace_id
     }
 
-    /// Returns the subject this handle acts for, or `None` for an unscoped
-    /// service handle.
+    /// Returns the subject this handle acts for, or `None` when it acts in
+    /// the service context, which checks no rights.
     pub fn subject(&self) -> Option<&Subject> {
         self.core.subject()
     }

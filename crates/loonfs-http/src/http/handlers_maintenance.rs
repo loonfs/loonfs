@@ -1,7 +1,7 @@
 //! The maintenance job handlers of a namespace and of a pool.
 
 use super::error::ApiResponseError;
-use super::extractors::{missing_actor, OptionalActorHeader};
+use super::extractors::OptionalActorHeader;
 
 use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -29,7 +29,7 @@ use std::sync::Arc;
         path = "/v0/maintenance/namespaces/{namespace_id}/jobs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
+        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `retention_window`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body(content = RunMaintenanceJobRequest, description = "The maintenance job to run"),
         responses(
@@ -45,7 +45,7 @@ use std::sync::Arc;
 )]
 pub(super) async fn run_maintenance_job(
     State(state): State<Arc<HttpState>>,
-    OptionalActorHeader(actor_id): OptionalActorHeader,
+    OptionalActorHeader(_): OptionalActorHeader,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunMaintenanceJobRequest>,
@@ -87,15 +87,6 @@ pub(super) async fn run_maintenance_job(
                     ApiResponseError::runtime(error)
                         .with_body_field_params(&["/retention_window_ms"])
                 });
-        }
-        RunMaintenanceJobRequest::RecoverAdministrator(request) => {
-            let actor_id = actor_id.ok_or_else(missing_actor)?;
-            let namespace = state.open_writer(&namespace_id, None).await?;
-            return namespace
-                .recover_administrator(&request.principal_id, &actor_id)
-                .await
-                .map(|recovered| Json(RunMaintenanceJobResponse::RecoverAdministrator(recovered)))
-                .map_err(ApiResponseError::runtime);
         }
     };
     response.map(Json).map_err(ApiResponseError::runtime)

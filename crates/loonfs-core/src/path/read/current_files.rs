@@ -110,7 +110,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
         return Ok(missing(inode_id, false));
     }
     let Some(resolved) = resolve_visible_inode(session, ancestor_paths, inode_id).await? else {
-        return Ok(missing(inode_id, access.is_unrestricted()));
+        return Ok(missing(inode_id, access.is_service()));
     };
     let revision_no = if resolved.inode_kind == InodeKind::File {
         session

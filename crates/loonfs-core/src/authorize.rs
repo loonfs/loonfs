@@ -6,60 +6,27 @@ use crate::metadata::MetadataViewSession;
 use crate::metadata::{ancestry_allows_read, MetadataVisibilityReads};
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{
-    AccessRight, AccessRights, InodeId, NamespaceAccess, NamespaceId, PrincipalSet, Subject,
-};
+use loonfs_types::{AccessRight, AccessRights, InodeId, PrincipalSet, Subject};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Authorizer<'a> {
-    /// An unrestricted namespace: every check passes without a lookup.
-    Unrestricted,
+    /// The service context, an internal read, or maintenance: every check
+    /// passes without a lookup.
+    Service,
     Subject {
         principals: &'a PrincipalSet,
     },
 }
 
-/// Who a commit is authorized as.
-#[derive(Clone, Copy)]
-pub(crate) enum CommitAuthority<'a> {
-    /// The request's subject, or the token holder when absent.
-    Subject(Option<&'a Subject>),
-    /// A maintenance commit: no subject check on any namespace.
-    Maintenance,
-}
-
 impl<'a> Authorizer<'a> {
-    pub(crate) fn for_request(
-        namespace_id: &NamespaceId,
-        access: &NamespaceAccess,
-        authority: CommitAuthority<'a>,
-    ) -> Result<Self> {
-        match (access, authority) {
-            (NamespaceAccess::Unrestricted {}, _) | (_, CommitAuthority::Maintenance) => {
-                Ok(Self::Unrestricted)
-            }
-            (
-                NamespaceAccess::Acl {
-                    principal_scope, ..
-                },
-                CommitAuthority::Subject(Some(subject)),
-            ) if subject.principal_scope == *principal_scope => Ok(Self::Subject {
+    /// Returns the authorizer for a request that acts as `subject`, or in
+    /// the service context when `subject` is `None`.
+    pub(crate) fn for_request(subject: Option<&'a Subject>) -> Self {
+        match subject {
+            Some(subject) => Self::Subject {
                 principals: &subject.principals,
-            }),
-            (
-                NamespaceAccess::Acl {
-                    principal_scope, ..
-                },
-                CommitAuthority::Subject(Some(subject)),
-            ) => Err(CoreError::PrincipalScopeMismatch {
-                expected_principal_scope: principal_scope.clone(),
-                actual_principal_scope: subject.principal_scope.clone(),
-            }),
-            (NamespaceAccess::Acl { .. }, CommitAuthority::Subject(None)) => {
-                Err(CoreError::SubjectRequired {
-                    namespace_id: namespace_id.clone(),
-                })
-            }
+            },
+            None => Self::Service,
         }
     }
 }
@@ -183,18 +150,18 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
         }
     }
 
-    pub(crate) fn is_unrestricted(&self) -> bool {
-        matches!(self.authorizer, Authorizer::Unrestricted)
+    pub(crate) fn is_service(&self) -> bool {
+        matches!(self.authorizer, Authorizer::Service)
     }
 
     /// Requires `rights` on `inode_id`, plus `history` for a snapshot read.
     ///
-    /// In an ACL namespace, a snapshot read of an inode that an expired
+    /// For a request with principals, a snapshot read of an inode that an expired
     /// deletion hides at the head (a deletion at or below the head
     /// manifest's retention floor), or whose ancestry is disconnected there,
     /// also requires an administrator, so any other subject gets the
     /// not-found error that a live read gives
-    /// ([API section 6.8](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#authorization-in-acl-namespaces)).
+    /// ([API section 6.8](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#authorization)).
     /// Base compactions remove the head's rows under an expired subtree a
     /// family group at a time, so a boundary row can be gone while a grant
     /// above it is still stored, and judging a non-administrator's rights on
@@ -218,8 +185,8 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
         }
     }
 
-    /// Whether the subject has `read` on `inode_id` (always for an
-    /// unrestricted namespace). For a snapshot read, the subject also needs
+    /// Whether the subject has `read` on `inode_id` (always in the service
+    /// context). For a snapshot read, the subject also needs
     /// administrator rights when the inode's ancestry at the head refuses the
     /// read, as [`Self::require`] describes.
     pub(crate) async fn can_read(
@@ -249,7 +216,7 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
 }
 
 /// Whether a snapshot read of `inode_id` is refused at the head, as
-/// [`ReadAccess::require`] describes: the namespace is an ACL namespace, the
+/// [`ReadAccess::require`] describes: the request has principals, the
 /// subject isn't an administrator, and the inode's ancestry at the head
 /// refuses the read.
 async fn refuses_at_head<S: ObjectStore + ?Sized>(

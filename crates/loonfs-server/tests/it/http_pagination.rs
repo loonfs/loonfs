@@ -189,7 +189,8 @@ fn get_json<T: serde::de::DeserializeOwned>(
     retry_result_on_macos_teardown_einval(|| {
         let request = raw_agent()
             .get(url)
-            .set("authorization", &format!("Bearer {auth_token}"));
+            .set("authorization", &format!("Bearer {auth_token}"))
+            .set("Loonfs-Context", "service");
         match request.call() {
             Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| {
                 Box::new(ErrorResponse {

@@ -15,8 +15,8 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		contentType string
 		actor       string
 		subject     string
-		scope       string
 		principals  string
+		context     string
 	}
 	forwarded := make(chan forwardedRequest, 3)
 	upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,7 +24,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		if err != nil {
 			t.Errorf("read forwarded body: %v", err)
 		}
-		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor"), r.Header.Get("Loonfs-Subject"), r.Header.Get("Loonfs-Principal-Scope"), r.Header.Get("Loonfs-Principals")}
+		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor"), r.Header.Get("Loonfs-Subject"), r.Header.Get("Loonfs-Principals"), r.Header.Get("Loonfs-Context")}
 		w.WriteHeader(http.StatusAccepted)
 	})}
 	refusal := &Refusal{Status: http.StatusForbidden, ContentType: "application/json", Body: []byte(`{"code":"unauthorized","message":"refused"}`)}
@@ -39,7 +39,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 			if r.Header.Get("X-Refuse") != "" {
 				return Authorization{}, refusal
 			}
-			return Authorization{ActorID: "proxy-actor", SubjectID: "proxy-subject", PrincipalScope: "org_proxy", Principals: []string{"prn_ada", "prn_team"}}, nil
+			return Authorization{ActorID: "proxy-actor", SubjectID: "proxy-subject", Principals: []string{"prn_ada", "prn_team"}}, nil
 		},
 	})
 	if err != nil {
@@ -61,8 +61,8 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 			request.Header.Set("Content-Type", "text/plain")
 			request.Header.Set("Loonfs-Actor", "browser-actor")
 			request.Header.Set("Loonfs-Subject", "browser-subject")
-			request.Header.Set("Loonfs-Principal-Scope", "org_browser")
 			request.Header.Set("Loonfs-Principals", "prn_browser")
+			request.Header.Set("Loonfs-Context", "service")
 			if testCase.refuse {
 				request.Header.Set("X-Refuse", "1")
 			}
@@ -80,7 +80,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		t.Fatalf("forwarded request count = %d, want 1", len(forwarded))
 	}
 	actual := <-forwarded
-	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" || actual.subject != "proxy-subject" || actual.scope != "org_proxy" || actual.principals != "prn_ada,prn_team" {
+	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" || actual.subject != "proxy-subject" || actual.principals != "prn_ada,prn_team" || actual.context != "" {
 		t.Errorf("forwarded request = %#v", actual)
 	}
 	if string(actual.body) != `{"expected_head_seq":9007199254740993}` {
@@ -88,69 +88,51 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 	}
 }
 
-func TestAuthorizeRejectsPartialSubjectContextBeforeForwarding(t *testing.T) {
-	forwarded := 0
-	upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		forwarded++
-		w.WriteHeader(http.StatusAccepted)
-	})}
-	tests := []struct {
+func TestBrowserIdentityHeadersAreReplacedByTheHooksChoice(t *testing.T) {
+	for _, testCase := range []struct {
 		name          string
 		authorization Authorization
+		context       string
+		principals    string
 	}{
-		{"principals without a scope", Authorization{Principals: []string{"prn_team"}}},
-		{"scope without principals", Authorization{PrincipalScope: "org_demo"}},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+		{"service", Authorization{ActorID: "proxy-actor", Service: true}, "service", ""},
+		{"principals", Authorization{Principals: []string{"prn_ada"}}, "", "prn_ada"},
+		{"neither", Authorization{}, "", ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if actor := r.Header.Get("Loonfs-Actor"); actor != testCase.authorization.ActorID {
+					t.Errorf("forwarded actor = %q", actor)
+				}
+				if context := r.Header.Get("Loonfs-Context"); context != testCase.context {
+					t.Errorf("forwarded context = %q, want %q", context, testCase.context)
+				}
+				if principals := r.Header.Get("Loonfs-Principals"); principals != testCase.principals {
+					t.Errorf("forwarded principals = %q, want %q", principals, testCase.principals)
+				}
+				w.WriteHeader(http.StatusAccepted)
+			})}
 			proxy, err := NewHandler(Config{
 				ServerBaseURL: "http://upstream.invalid",
 				Token:         "server-token",
 				Authorize: func(_ *http.Request, _ RouteContext) (Authorization, error) {
-					return test.authorization, nil
+					return testCase.authorization, nil
 				},
 			})
 			if err != nil {
 				t.Fatalf("create proxy: %v", err)
 			}
 			proxy.(*handler).transport = upstream
+			request := httptest.NewRequest(http.MethodGet, "/v0/capabilities", nil)
+			request.Header.Set("Loonfs-Actor", "browser-actor")
+			request.Header.Set("Loonfs-Context", "service")
+			request.Header.Set("Loonfs-Principals", "prn_browser")
 			response := httptest.NewRecorder()
-			proxy.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v0/capabilities", nil))
-			if response.Code != http.StatusInternalServerError {
-				t.Errorf("response status = %d, want %d", response.Code, http.StatusInternalServerError)
+			proxy.ServeHTTP(response, request)
+			if response.Code != http.StatusAccepted {
+				t.Errorf("response status = %d", response.Code)
 			}
 		})
-	}
-	if forwarded != 0 {
-		t.Errorf("forwarded request count = %d, want 0", forwarded)
-	}
-}
-
-func TestActorHeaderIsRemovedWithEmptyAuthorization(t *testing.T) {
-	upstream := recordingTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if actor := r.Header.Get("Loonfs-Actor"); actor != "" {
-			t.Errorf("forwarded actor = %q", actor)
-		}
-		w.WriteHeader(http.StatusAccepted)
-	})}
-	proxy, err := NewHandler(Config{
-		ServerBaseURL: "http://upstream.invalid",
-		Token:         "server-token",
-		Authorize: func(_ *http.Request, _ RouteContext) (Authorization, error) {
-			return Authorization{}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("create proxy: %v", err)
-	}
-	proxy.(*handler).transport = upstream
-	request := httptest.NewRequest(http.MethodGet, "/v0/capabilities", nil)
-	request.Header.Set("Loonfs-Actor", "browser-actor")
-	response := httptest.NewRecorder()
-	proxy.ServeHTTP(response, request)
-	if response.Code != http.StatusAccepted {
-		t.Errorf("response status = %d", response.Code)
 	}
 }
 

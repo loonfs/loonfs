@@ -6,15 +6,12 @@
 
 use crate::common::{page_request, GrepHost};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
-use loonfs::{
-    CreateNamespaceOptions, LoonFs, Namespace, NamespaceId, PutFileOptions, SharedObjectStore,
-    Writable,
-};
+use loonfs::{LoonFs, Namespace, NamespaceId, PutFileOptions, SharedObjectStore, Writable};
 use loonfs_grep::NamespaceReads;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, GrepRequest, GrepResponse,
-    GrepScope, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    GrepScope, PrincipalId, PrincipalSet, Subject, SubjectId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -22,7 +19,6 @@ use tempfile::TempDir;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
@@ -93,19 +89,15 @@ impl AclPages {
             .expect("writer");
         let namespace_id = NamespaceId::parse(name).expect("namespace");
         writer
-            .create_namespace_with_options(
-                &namespace_id,
-                &loonfs_test_support::test_actor(),
-                &CreateNamespaceOptions {
-                    access: NamespaceAccess::Acl {
-                        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                        root_grants: grants(&[("prn_root", &[AccessRight::Admin])]),
-                    },
-                    ..Default::default()
-                },
-            )
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
             .expect("namespace");
+        loonfs::test_support::set_root_access(
+            &writer,
+            &namespace_id,
+            grants(&[("prn_root", &[AccessRight::Admin])]),
+        )
+        .await;
         let admin = writer
             .open_namespace(&namespace_id)
             .expect("open namespace")
