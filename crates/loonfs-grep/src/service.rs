@@ -23,7 +23,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Unindexed-tail revisions one query will scan exhaustively before
+/// Distinct files changed in the unindexed tail that one query will scan before
 /// failing with `index_lagging` (or skipping the tail under `allow_stale`).
 /// Advertised as the `query.grep.tail_budget_files` capability limit.
 pub const MAX_GREP_TAIL_FILES: usize = 512;

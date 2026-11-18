@@ -399,11 +399,11 @@ pub(super) async fn tail_revisions(
                             value: ContentValue::of(revision.content_ref),
                         },
                     );
+                    if files.len() > MAX_GREP_TAIL_FILES {
+                        return Ok(TailScan::OverBudget);
+                    }
                 }
             }
-        }
-        if files.len() > MAX_GREP_TAIL_FILES {
-            return Ok(TailScan::OverBudget);
         }
         match feed.next_after_seq {
             Some(next_after_seq) => after_seq = next_after_seq,

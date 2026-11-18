@@ -117,7 +117,7 @@ Registered limit keys:
 | `commit.max_external_content_refs` | The largest number of distinct external content references that one commit's operations can refer to. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_message_bytes` | The largest commit `message` accepted, in bytes. A longer message returns `invalid_request` before planning. |
 | `query.grep.scan_budget_files` | The number of files that an `allow_scan` grep without a plan scans before the request fails with `query_unindexable`. |
-| `query.grep.tail_budget_files` | The number of revisions in the unindexed tail that one grep scans exhaustively before it fails with `index_lagging`. |
+| `query.grep.tail_budget_files` | The maximum number of distinct files whose content can change after the index watermark before grep returns `index_lagging` or, with `allow_stale`, skips the tail. |
 
 ### 2.2 Feature registry
 

@@ -122,7 +122,7 @@ limit_keys! {
     /// Advisory limit: files a plan-less `allow_scan` grep will scan before
     /// refusing with `query_unindexable`.
     LIMIT_QUERY_GREP_SCAN_BUDGET_FILES = "query.grep.scan_budget_files";
-    /// Advisory limit: unindexed-tail revisions one grep scans exhaustively
+    /// Advisory limit: distinct files changed in the unindexed tail that one grep scans
     /// before failing with `index_lagging`.
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES = "query.grep.tail_budget_files";
 }
