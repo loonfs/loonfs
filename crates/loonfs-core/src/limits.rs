@@ -145,10 +145,6 @@ pub const MAX_COMMIT_PRECONDITIONS: usize = 1024;
 /// preparation rejects it.
 pub const MAX_COMMIT_CONTENT_TOKENS: usize = 4096;
 
-/// Maximum distinct new external content refs in one explicit commit, bounding
-/// its in-memory coverage work while it occupies the serialized publisher.
-pub const MAX_COMMIT_EXTERNAL_CONTENT_REFS: usize = 4096;
-
 /// Maximum byte length of a commit's optional `message` annotation, which is
 /// stored in every durable WAL record, hashed into the mutation fingerprint,
 /// and replayed by the change feed.

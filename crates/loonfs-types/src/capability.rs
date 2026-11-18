@@ -110,9 +110,6 @@ limit_keys! {
     LIMIT_COMMIT_MAX_PRECONDITIONS = "commit.max_preconditions";
     /// Advisory limit: the most content tokens one commit may include.
     LIMIT_COMMIT_MAX_CONTENT_TOKENS = "commit.max_content_tokens";
-    /// Advisory limit: the most distinct external content refs one commit's
-    /// operations may name.
-    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS = "commit.max_external_content_refs";
     /// Advisory limit: the largest accepted commit `message`, in bytes.
     LIMIT_COMMIT_MAX_MESSAGE_BYTES = "commit.max_message_bytes";
     /// Advisory capability key for the default page size applied when callers omit `limit`.

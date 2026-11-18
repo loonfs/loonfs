@@ -18,7 +18,7 @@ use loonfs_types::{
     CommitId, CommitSeq, ContentId, ContentRef, FileContent, InlineContentIdentity, InodeId,
     NamespaceId,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 /// One namespace mutation together with the result of preparing any content
@@ -541,18 +541,6 @@ impl CommitCandidate {
             return Err(CoreError::InvalidCommitRequest(format!(
                 "mutation has {prepared_count} prepared content proofs; maximum is {}",
                 crate::limits::MAX_COMMIT_CONTENT_TOKENS
-            )));
-        }
-        let distinct_content_refs = intent
-            .operations
-            .iter()
-            .filter_map(FilesystemOperation::content_ref)
-            .collect::<HashSet<_>>()
-            .len();
-        if distinct_content_refs > crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS {
-            return Err(CoreError::InvalidCommitRequest(format!(
-                "mutation references {distinct_content_refs} distinct external content refs; maximum is {}",
-                crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS
             )));
         }
         Ok(())

@@ -63,7 +63,6 @@ The example below is the reference deployment's document, with the server's defa
   "limits": {
     "access.max_principals_per_request": 64,
     "commit.max_content_tokens": 4096,
-    "commit.max_external_content_refs": 4096,
     "commit.max_inline_content_bytes_per_operation": 65536,
     "commit.max_message_bytes": 4096,
     "commit.max_operations": 4096,
@@ -114,7 +113,6 @@ Registered limit keys:
 | `commit.max_operations` | The largest number of path operations that one commit can include. A longer list returns `invalid_request` before planning, on every transport. |
 | `commit.max_preconditions` | The largest number of precondition entries that one commit can include. It counts entries, not resources. A longer list returns `invalid_request` before planning, on every transport. |
 | `commit.max_content_tokens` | The largest number of content tokens that one commit can include. A request over the limit returns `invalid_request` before planning. |
-| `commit.max_external_content_refs` | The largest number of distinct external content references that one commit's operations can refer to. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_message_bytes` | The largest commit `message` accepted, in bytes. A longer message returns `invalid_request` before planning. |
 | `query.grep.scan_budget_files` | The number of files that an `allow_scan` grep without a plan scans before the request fails with `query_unindexable`. |
 | `query.grep.tail_budget_files` | The number of revisions in the unindexed tail that one grep scans exhaustively before it fails with `index_lagging`. |
