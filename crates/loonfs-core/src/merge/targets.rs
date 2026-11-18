@@ -1,6 +1,7 @@
 //! Checks that each inode that a merge changes is reachable after the
 //! merge's own creates and restores, and that each name it takes is free,
-//! against the head of the namespace being merged into.
+//! against the head of the namespace being merged into. A delete of an inode
+//! that stays hidden there is dropped, because it has nothing to do.
 
 use super::classify::Classifier;
 use super::operations::BindingChange;
@@ -82,7 +83,11 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
 
     /// Checks the plan at `index`, first at the inode's current position and
     /// then at its destination, and adds to `directories` the directories
-    /// that the merge creates or restores and that the plan needs.
+    /// that the merge creates or restores and that the plan needs. A delete
+    /// of an inode that stays hidden at the head has nothing to do, because
+    /// the deletion that hides the inode there isn't one that the merge
+    /// undoes, so the check drops the delete from the plan instead of
+    /// reporting a conflict.
     async fn check_plan(
         &mut self,
         rebound: &Rebound,
@@ -96,6 +101,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             .as_ref()
             .and_then(BindingChange::destination)
             .map(|(parent_inode_id, display_name)| (parent_inode_id, display_name.clone()));
+        let deletes = matches!(plan.binding, Some(BindingChange::Delete { .. }));
         let bound_at_head = !matches!(
             plan.binding,
             Some(BindingChange::Create { .. } | BindingChange::RestoreDeleted { .. })
@@ -121,6 +127,9 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             match reach {
                 Reach::Visible => {}
                 Reach::Through(directory) => directories.push(directory),
+                // The inode stays hidden after the merge, so a delete has
+                // nothing to do, and any other change can't be applied.
+                Reach::Hidden if deletes => self.plans[index].binding = None,
                 Reach::Hidden => return self.visibility_conflict(inode_id).await,
             }
         }

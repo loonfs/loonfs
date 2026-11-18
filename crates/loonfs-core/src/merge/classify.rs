@@ -159,8 +159,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         if !ours.is_visible() {
             // The fork shows nothing of the inode at the range's end, so the
             // merge deletes it where the merged-into namespace has it bound.
-            // The commit's order leaves out a delete that a directory's
-            // recursive delete covers there.
+            // The target check drops the delete when a deletion that the
+            // merge doesn't undo hides the inode there (see
+            // [`Self::check_targets`]), and the commit's order leaves out a
+            // delete that a directory's recursive delete covers there.
             plan.binding = theirs
                 .edge()
                 .map(|from| delete_change(namespace_id, theirs, from));

@@ -858,13 +858,12 @@ async fn a_change_below_a_directory_that_main_deleted_conflicts() {
 }
 
 /// Checks that the fork's delete of a file below a directory that `main`
-/// deleted conflicts. A deletion that the merge doesn't restore hides the
-/// file, so the merge can't apply the delete, and `theirs` is `None`,
-/// because the file is hidden in `main`.
+/// deleted has nothing to do. The deletion in `main` hides the file, and the
+/// merge doesn't undo that deletion, so the file stays hidden there without
+/// a delete of its own.
 #[tokio::test]
-async fn a_delete_below_a_directory_that_main_deleted_conflicts() {
+async fn a_delete_below_a_directory_that_main_deleted_has_nothing_to_do() {
     let family = Family::new().await;
-    let file = family.inode(&family.main, "/docs/a.txt").await;
     family
         .main()
         .delete_path("/docs", None)
@@ -876,15 +875,38 @@ async fn a_delete_below_a_directory_that_main_deleted_conflicts() {
         .await
         .expect("fork");
 
-    let error = family.merge("both", None).await.expect_err("conflict");
-    let conflict = error
-        .details()
-        .and_then(|details| details.conflict)
-        .expect("the first conflict");
-    assert_eq!(
-        (conflict.kind, conflict.inode_id, conflict.theirs),
-        (MergeConflictKind::Visibility, file, None)
-    );
+    let commit = family.merge("both", None).await.expect("merge");
+    assert!(commit.events.is_empty());
+    assert!(family.entry(&family.main, "/docs").await.is_none());
+}
+
+/// Checks that the fork's change to a file below a directory that both
+/// namespaces deleted has nothing to do. The fork writes `/docs/a.txt` and
+/// then deletes `/docs`, and `main` deletes `/docs` itself. The fork shows
+/// nothing of the file at the range's end, and neither does `main`, so the
+/// merge neither applies the write nor deletes the file.
+#[tokio::test]
+async fn a_change_below_a_directory_that_both_deleted_has_nothing_to_do() {
+    let family = Family::new().await;
+    family
+        .main()
+        .delete_path("/docs", None)
+        .await
+        .expect("main");
+    family
+        .fork()
+        .write_file_bytes("/docs/a.txt", b"ours", None)
+        .await
+        .expect("write in the fork");
+    family
+        .fork()
+        .delete_path("/docs", None)
+        .await
+        .expect("delete in the fork");
+
+    let commit = family.merge("both", None).await.expect("merge");
+    assert!(commit.events.is_empty());
+    assert!(family.entry(&family.main, "/docs").await.is_none());
 }
 
 /// Deletes `/docs` in the fork, merges the delete, and returns the
