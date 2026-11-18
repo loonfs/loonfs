@@ -726,24 +726,41 @@ async fn moves_require_read_on_the_moved_item() {
             ),
             create_directory("/work/trashed"),
             update_access("/work/trashed", true, AccessGrants::default()),
+            create_directory("/work/returned"),
+            update_access("/work/returned", true, AccessGrants::default()),
         ],
     )
     .await;
     let sealed = resolve_path(&store, &namespace_id, "/work/sealed")
         .await
         .expect("sealed directory");
+    let file = resolve_path(&store, &namespace_id, "/work/file")
+        .await
+        .expect("file");
     let other = resolve_path(&store, &namespace_id, "/other")
         .await
         .expect("other directory");
     let trashed = resolve_path(&store, &namespace_id, "/work/trashed")
         .await
         .expect("trashed directory");
+    let returned = resolve_path(&store, &namespace_id, "/work/returned")
+        .await
+        .expect("returned directory");
     let deletion = commit_as(
         &store,
         &namespace_id,
         &context,
         subject("root", &["prn_root"]),
         delete("/work/trashed"),
+    )
+    .await
+    .expect("delete");
+    let returned_deletion = commit_as(
+        &store,
+        &namespace_id,
+        &context,
+        subject("root", &["prn_root"]),
+        delete("/work/returned"),
     )
     .await
     .expect("delete");
@@ -779,6 +796,24 @@ async fn moves_require_read_on_the_moved_item() {
             },
             Some(ErrorCode::InodeNotFound),
         ),
+        // The read check comes before the binding-version precondition and
+        // the name conflict.
+        (
+            "mover",
+            FilesystemOperation::MoveByInode {
+                inode_id: sealed.inode_id,
+                expected_binding_version: file.binding_version.clone().expect("binding"),
+                destination_parent_inode_id: other.inode_id,
+                destination_display_name: DisplayName::parse("sealed").expect("display name"),
+                precondition: loonfs_types::DestinationPrecondition::default(),
+            },
+            Some(ErrorCode::InodeNotFound),
+        ),
+        (
+            "mover",
+            move_path("/work/sealed", "/work/file"),
+            Some(ErrorCode::PathNotFound),
+        ),
         (
             "writer",
             move_path("/work/limited", "/other/limited"),
@@ -797,6 +832,18 @@ async fn moves_require_read_on_the_moved_item() {
         (
             "mover",
             restore_to(loonfs_types::options::RestoreDeletedDestination::Recorded),
+            None,
+        ),
+        // An explicit destination in the saved parent is a restore in place.
+        (
+            "mover",
+            FilesystemOperation::RestoreDeleted {
+                inode_id: returned.inode_id,
+                deletion_seq: returned_deletion.committed_seq,
+                destination: loonfs_types::options::RestoreDeletedDestination::Path(
+                    AbsolutePath::parse("/work/returned").expect("path"),
+                ),
+            },
             None,
         ),
     ] {

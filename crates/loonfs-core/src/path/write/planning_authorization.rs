@@ -1,7 +1,7 @@
 //! The authorization checks that the planners share: the rights on a target,
 //! on a destination, on both ends of a relocation, and on an access update.
 
-use crate::authorize::{check_rights, Absence, Authorizer, Replacement};
+use crate::authorize::{Absence, Authorizer, Replacement};
 
 use crate::error::{CoreError, Result};
 use crate::metadata::access::{access_chain, effective_rights, is_administrator};
@@ -68,30 +68,32 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         self.authorize(inode_id, rights, destination.absence).await
     }
 
+    /// Returns the rights that a mover has on `moved`, which are every right
+    /// in an unrestricted namespace.
+    pub(super) async fn mover_rights(&self, moved: InodeId) -> Result<AccessRights> {
+        let Authorizer::Subject { principals } = self.authorizer else {
+            return Ok(AccessRights::ALL);
+        };
+        effective_rights(&mut self.metadata.reads(), principals, moved).await
+    }
+
     /// Authorizes moving `moved` from `source_parent` to `destination_parent`
-    /// as if the mover had granted every right the move confers. With
-    /// `read_absence`, the mover also needs `read` on `moved`, and
-    /// `read_absence` says how a subject with no right on `moved` is
-    /// refused. It's `None` for the second leg of a merge's move through a
-    /// temporary name, because the first leg checked `read`.
+    /// as if the mover, whose rights on `moved` are `mover`, had granted
+    /// every right the move confers.
     pub(super) async fn authorize_relocation(
         &self,
         moved: InodeId,
         source_parent: InodeId,
         destination_parent: InodeId,
-        read_absence: Option<Absence<'_>>,
+        mover: AccessRights,
     ) -> Result<()> {
-        let Authorizer::Subject { principals } = self.authorizer else {
+        if matches!(self.authorizer, Authorizer::Unrestricted) {
             return Ok(());
-        };
-        let mut reads = self.metadata.reads();
-        let mover = effective_rights(&mut reads, principals, moved).await?;
-        if let Some(absence) = read_absence {
-            check_rights(mover, AccessRight::Read.into(), moved, absence)?;
         }
         if source_parent == destination_parent {
             return Ok(());
         }
+        let mut reads = self.metadata.reads();
         let own = reads.find_access_row(moved).await?;
         if own.as_ref().is_some_and(|row| row.boundary) {
             return Ok(());
