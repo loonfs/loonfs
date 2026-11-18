@@ -162,8 +162,7 @@ async fn capabilities_endpoint_advertises_capabilities() {
         .expect("the capability document is well formed");
     assert!(!capabilities.supports("filesystem.namespaces.list"));
     // A local-filesystem deployment presigns nothing, so none of the three
-    // transfer capabilities is advertised — and because it presigns no
-    // uploads either, no file it holds can be larger than it will proxy.
+    // transfer capabilities is advertised.
     assert!(!capabilities.supports("filesystem.uploads.direct_put"));
     assert!(!capabilities.supports("filesystem.uploads.direct_multipart"));
     assert!(!capabilities.supports("filesystem.downloads.direct_get"));
