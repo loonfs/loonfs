@@ -22,9 +22,17 @@ class ProxyRouteContext:
 
 @dataclass(frozen=True)
 class ProxyAuthorization:
+    """The identity that the proxy stamps on a forwarded request.
+
+    Set `principals` to act for a user, or `service` to act in the service
+    context, in which LoonFS checks no rights. A request forwarded with
+    neither, or with both, fails with `invalid_request`.
+    """
+
     actor_id: str | None = None
     subject_id: str | None = None
     principals: list[str] | None = None
+    service: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,6 +122,7 @@ _REQUEST_EXCLUDED_HEADERS = frozenset(
         b"loonfs-actor",
         b"loonfs-subject",
         b"loonfs-principals",
+        b"loonfs-context",
     }
 )
 # Do not forward LoonFS cookies to the application.
@@ -158,10 +167,8 @@ class LoonFSProxy:
     ) -> None:
         """The authorize hook is required and runs before every forwarded request.
 
-        Return a ProxyRefusal to refuse it.
-        Returning an empty ProxyAuthorization forwards the request without an
-        actor or principals, so it acts in the service context only when the
-        browser sent `Loonfs-Context: service`.
+        Return a ProxyRefusal to refuse it, or a ProxyAuthorization with
+        either principals or `service=True`.
         The proxy forwards any namespace ID in the path, so check
         `context.namespace_id` here.
         """
@@ -203,6 +210,8 @@ class LoonFSProxy:
             headers.append(
                 (b"loonfs-principals", ",".join(authorization.principals).encode("ascii"))
             )
+        if authorization.service:
+            headers.append((b"loonfs-context", b"service"))
         request = self._client.build_request(
             scope["method"],
             target,

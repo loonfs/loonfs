@@ -2044,7 +2044,7 @@ fn actor_headers_are_global_and_only_attributed_operations_require_them() {
         {"header": "Loonfs-Actor", "name": "actorId", "optional": true},
         {"header": "Loonfs-Subject", "name": "subjectId", "optional": true},
         {"header": "Loonfs-Principals", "name": "principals", "optional": true},
-        {"header": "Loonfs-Context", "name": "context", "optional": true}
+        {"header": "Loonfs-Context", "name": "loonfsContext", "optional": true}
         ])
     );
     let mut required = BTreeSet::new();

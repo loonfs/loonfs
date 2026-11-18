@@ -13,6 +13,8 @@ test("proxy uses upstream authority and replaces browser credentials", async () 
             assert.equal(request.headers.has(header), false);
         assert.equal(request.headers.get("authorization"), "Bearer server-token");
         assert.equal(request.headers.get("loonfs-actor"), "app-user");
+        assert.equal(request.headers.get("loonfs-context"), "service");
+        assert.equal(request.headers.has("loonfs-principals"), false);
         assert.equal(request.headers.get("range"), "bytes=0-8");
         return new Response("123456789");
     };
@@ -20,7 +22,7 @@ test("proxy uses upstream authority and replaces browser credentials", async () 
         const proxy = createProxyHandler({
             serverBaseUrl: "https://api.test",
             token: "server-token",
-            authorize: () => ({ actorId: "app-user" }),
+            authorize: () => ({ actorId: "app-user", service: true }),
         });
         const response = await proxy(
             new Request("https://app.test/v0/namespaces/demo/filesystem/content?path=%2Ffile", {
@@ -29,6 +31,8 @@ test("proxy uses upstream authority and replaces browser credentials", async () 
                     cookie: "session=private",
                     authorization: "Bearer browser-token",
                     "loonfs-actor": "browser-user",
+                    "loonfs-context": "browser-context",
+                    "loonfs-principals": "prn_browser",
                     connection: "x-hop",
                     "x-hop": "private",
                     range: "bytes=0-8",

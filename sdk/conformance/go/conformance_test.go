@@ -2761,7 +2761,7 @@ func runProxy(t *testing.T, h *harness, testCase conformanceCase) {
 		ServerBaseURL: h.serverBaseURL,
 		Token:         h.serverToken,
 		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
-			return loonfsproxy.Authorization{ActorID: string(request.ActorID)}, nil
+			return loonfsproxy.Authorization{ActorID: string(request.ActorID), Service: true}, nil
 		},
 	})
 	if err != nil {
@@ -2928,7 +2928,7 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 					Body:        refusalBody,
 				}
 			}
-			return loonfsproxy.Authorization{ActorID: string(request.Authorize.ActorID)}, nil
+			return loonfsproxy.Authorization{ActorID: string(request.Authorize.ActorID), Service: true}, nil
 		},
 	})
 	if err != nil {
@@ -3025,12 +3025,9 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 	proxyServer := httptest.NewServer(proxyHandler)
 	defer proxyServer.Close()
 	namespaceBaseURL := proxyServer.URL + "/v0/namespaces/" + url.PathEscape(acl.NamespaceID)
-	// The browser claims principals, which the hook replaces. It doesn't claim
-	// the service context, because a request that sends both is invalid.
-	headers := http.Header{
-		"Loonfs-Context":    nil,
-		"Loonfs-Principals": []string{acl.BrowserPrincipals},
-	}
+	// The browser claims principals and the service context, and the proxy
+	// replaces both with the hook's principals.
+	headers := http.Header{"Loonfs-Principals": []string{acl.BrowserPrincipals}}
 	stamped := proxyCreateCommit(t, proxyServer.Client(), namespaceBaseURL,
 		createDirectoryCommit(acl.NamespaceID, acl.CommitID, acl.Directory, nil), request.ActorID, headers)
 	if int64(stamped.CommittedSeq) != expected.ACLStampedCommittedSeq {
@@ -3182,19 +3179,15 @@ func sendProxyRequest(
 		t.Fatalf("build proxy request: %v", err)
 	}
 	request.Header.Set("Authorization", "Bearer browser-token")
-	// A request acts on the application's own account unless the caller
-	// removes this header with a nil value. The proxy forwards it unchanged.
+	// A request straight to LoonFS acts on the application's own account. The
+	// proxy removes this header and stamps the hook's choice instead.
 	request.Header.Set("Loonfs-Context", "service")
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
 	for _, extra := range headers {
 		for name, values := range extra {
-			if values == nil {
-				request.Header.Del(name)
-			} else {
-				request.Header[name] = values
-			}
+			request.Header[name] = values
 		}
 	}
 

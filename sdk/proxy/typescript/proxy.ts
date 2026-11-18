@@ -5,11 +5,19 @@ export interface ProxyRouteContext {
     namespaceId?: string;
 }
 
+/**
+ * The identity that the proxy stamps on a forwarded request. Set `principals`
+ * to act for a user, or `service` to act in the service context, in which
+ * LoonFS checks no rights. A request forwarded with neither, or with both,
+ * fails with `invalid_request`.
+ */
 export interface ProxyAuthorization {
     /** Sent upstream in `Loonfs-Actor`. */
     actorId?: string;
     subjectId?: string;
     principals?: string[];
+    /** Sent upstream as `Loonfs-Context: service` when true. */
+    service?: boolean;
 }
 
 export interface ProxyConfig {
@@ -17,9 +25,7 @@ export interface ProxyConfig {
     token: string;
     /**
      * Runs before every forwarded request. Return a Response to refuse it.
-     * Required; returning an empty authorization forwards the request without
-     * an actor or principals, so it acts in the service context only when the
-     * browser sent `Loonfs-Context: service`.
+     * Required, and it returns either principals or `service: true`.
      * The proxy forwards any namespace ID in the path, so check
      * `context.namespaceId` here.
      */
@@ -130,6 +136,9 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
         if (authorization.principals !== undefined) {
             headers.set("Loonfs-Principals", authorization.principals.join(","));
         }
+        if (authorization.service === true) {
+            headers.set("Loonfs-Context", "service");
+        }
         const init: RequestInit & { duplex?: "half" } = {
             method: request.method,
             headers,
@@ -196,6 +205,7 @@ const REQUEST_STRIPPED_HEADERS = [
     "loonfs-actor",
     "loonfs-subject",
     "loonfs-principals",
+    "loonfs-context",
 ] as const;
 // Fetch decompresses responses, so remove the old encoding and length headers.
 // Do not forward LoonFS cookies to the application.

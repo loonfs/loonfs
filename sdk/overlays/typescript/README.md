@@ -121,14 +121,36 @@ route.
 The hook receives the request and the route context, which includes the decoded
 `namespaceId`. Any namespace ID in the path reaches LoonFS, so the hook checks
 that the caller may use that namespace. Return a `Response` to refuse access, or
-an authorization object to forward as the approved identity. Returning `{}`
-forwards the request without an actor or principals.
+an authorization object with one of two choices:
+
+- `principals`, to act for the signed-in user. LoonFS checks the request
+  against the namespace's access rows.
+- `service: true`, to act on the application's own account. The proxy sends
+  `Loonfs-Context: service`, and LoonFS checks no rights.
+
+A hook that returns neither, or both, forwards a request that LoonFS rejects
+with `invalid_request`. For example:
+
+```ts
+const proxy = createProxyHandler({
+    serverBaseUrl: process.env.LOONFS_URL!,
+    token: process.env.LOONFS_AUTH_TOKEN!,
+    authorize: async (request, context) => {
+        const user = await authorizedUser(request, context.namespaceId);
+        if (user === undefined) return new Response(null, { status: 403 });
+        return { actorId: user.id, principals: user.principals };
+    },
+});
+```
+
+An application without per-user permissions returns
+`{ actorId: user.id, service: true }` instead.
 
 The proxy forwards bodies without rewriting JSON. It strips browser credentials,
-cookies, `Host`, actor, subject and principals headers, and hop-by-hop headers.
-It supplies the configured token and the identity returned by `authorize`. It
-forwards `Loonfs-Context` unchanged, so a request that the hook forwards without
-principals has to carry `Loonfs-Context: service` from the client.
+cookies, `Host`, the `Loonfs-Actor`, `Loonfs-Subject`, `Loonfs-Principals`, and
+`Loonfs-Context` headers, and hop-by-hop headers, so the browser can't choose
+its own authority. It supplies the configured token and the identity returned
+by `authorize`.
 
 ## Retries
 

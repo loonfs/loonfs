@@ -1,6 +1,6 @@
 {
   "name": "proxy",
-  "intent": "A proxy forwards the routes in its route table unchanged, adds server credentials, streams bodies, rejects every other route, and lets an authorization hook refuse requests (including requests for a namespace the hook doesn't allow) or replace browser-claimed actor, subject, and principal headers with the hook's.",
+  "intent": "A proxy forwards the routes in its route table unchanged, adds server credentials, streams bodies, rejects every other route, and lets an authorization hook refuse requests (including requests for a namespace the hook doesn't allow) or replace browser-claimed actor, subject, principal, and context headers with the hook's, which chooses either principals or the service context.",
   "request": {
     "namespace_id": "conf-proxy-namespace",
     "actor_id": "conformance-proxy",

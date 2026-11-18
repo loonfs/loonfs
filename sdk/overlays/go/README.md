@@ -148,15 +148,22 @@ keeping the LoonFS credential on the server. The proxy forwards
 changes, and grep with the path unchanged, and returns 404 for every other
 route.
 
-Set `Authorize` to check each request and set `Loonfs-Actor`,
-`Loonfs-Subject` and `Loonfs-Principals` on forwarded requests. The proxy
-always removes the browser's actor, subject and principals headers. It forwards
-`Loonfs-Context` unchanged, so a request that the hook forwards without
-principals has to carry `Loonfs-Context: service` from the client.
-The `Authorize` hook is required. Returning `proxy.Authorization{}` with no
-error forwards the request without an actor or principals. Any namespace ID in the path reaches LoonFS,
-so the hook checks that the caller may use `route.NamespaceID`.
-Here, `authorizedActor` checks the application's session and namespace access.
+Set `Authorize` to check each request and choose the identity that the proxy
+stamps on it. The proxy always removes the browser's `Loonfs-Actor`,
+`Loonfs-Subject`, `Loonfs-Principals`, and `Loonfs-Context` headers, so the
+browser can't choose its own authority. The hook returns one of two
+choices:
+
+- `Principals`, to act for the signed-in user. LoonFS checks the request
+  against the namespace's access rows.
+- `Service: true`, to act on the application's own account. The proxy sends
+  `Loonfs-Context: service`, and LoonFS checks no rights.
+
+A hook that returns neither, or both, forwards a request that LoonFS rejects
+with `invalid_request`. The `Authorize` hook is required. Any namespace ID in
+the path reaches LoonFS, so the hook checks that the caller may use
+`route.NamespaceID`. Here, `authorizedUser` checks the application's session
+and namespace access, and returns the user's principals.
 
 ```go
 import (
@@ -170,17 +177,23 @@ handler, err := proxy.NewHandler(proxy.Config{
 	ServerBaseURL: os.Getenv("LOONFS_URL"),
 	Token: os.Getenv("LOONFS_AUTH_TOKEN"),
 	Authorize: func(r *http.Request, route proxy.RouteContext) (proxy.Authorization, error) {
-		actorID, ok := authorizedActor(r, route.NamespaceID)
+		user, ok := authorizedUser(r, route.NamespaceID)
 		if !ok {
 			return proxy.Authorization{}, &proxy.Refusal{Status: http.StatusForbidden}
 		}
-		return proxy.Authorization{ActorID: actorID}, nil
+		return proxy.Authorization{ActorID: user.ID, Principals: user.Principals}, nil
 	},
 })
 if err != nil {
 	panic(err)
 }
 http.Handle("/v0/", handler)
+```
+
+An application without per-user permissions returns the service choice instead:
+
+```go
+return proxy.Authorization{ActorID: user.ID, Service: true}, nil
 ```
 
 ## Retries

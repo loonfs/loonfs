@@ -675,7 +675,7 @@ def proxy_harness(
 ) -> Iterator[str]:
     request, _ = _decode(cases["proxy"], ProxyRequest, ProxyExpected)
     async def authorize(_scope: dict[str, Any], _context: ProxyRouteContext) -> ProxyAuthorization:
-        return ProxyAuthorization(actor_id=request.actor_id)
+        return ProxyAuthorization(actor_id=request.actor_id, service=True)
 
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),
@@ -1862,7 +1862,7 @@ def test_proxy(
                 body=json.dumps(refusal_body).encode("utf-8"),
                 content_type="application/json",
             )
-        return ProxyAuthorization(actor_id=request.authorize.actor_id)
+        return ProxyAuthorization(actor_id=request.authorize.actor_id, service=True)
 
     app = LoonFSProxy(
         _required_environment("LOONFS_CONFORMANCE_URL"),

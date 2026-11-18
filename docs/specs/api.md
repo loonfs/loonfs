@@ -729,7 +729,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `namespace_id`, `access`, and `retention_window_ms` body fields. A create of an ID whose creation hasn't finished, with the same options, finishes it (see [Creating and forking namespaces](#creating-and-forking-namespaces)). |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `namespace_id` and `retention_window_ms` body fields. A create of an ID whose creation hasn't finished, with the same options, finishes it (see [Creating and forking namespaces](#creating-and-forking-namespaces)). |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}?consistency=strong` (`consistency` and `max_staleness_ms` are optional) |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=true&snapshot_id=...` (`include_attributes` is optional and defaults to `false`, and `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=true&snapshot_id=...` (`include_attributes` is optional and defaults to `false`, and `snapshot_id` is optional) |
@@ -1261,7 +1261,10 @@ A path-oriented `put_file` operation then references the completed `content_ref`
 
 For example, this commit request puts the uploaded content at `/docs/report.pdf`:
 
-`Loonfs-Actor: document-importer`
+```text
+Loonfs-Actor: document-importer
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1702,7 +1705,10 @@ The root path `/` is readable, but with one exception it can't be the target of 
 
 A representative request:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1726,7 +1732,10 @@ A request with one operation is the one-element case of this shape, not a differ
 
 The operations commit together, in order, as one logical commit, so either every operation commits or none does. Operation `k` sees the authoritative namespace state plus the effects of operations `0..k`, so one request can create a directory and write into it:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1782,7 +1791,10 @@ For content uploaded to this namespace, the client includes the proof in `conten
 
 For inline content, the client encodes the complete file as a standard padded base64 JSON string, and no content token is needed. For example, this request writes `hello\n` to `/hello.txt`:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1814,7 +1826,10 @@ To stay within the configured WAL limits, some inline files might be uploaded as
 
 For example, this request adds `second line\n` to `/logs/app.log`:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1873,7 +1888,10 @@ Ten operations use inode IDs instead of paths, so a client can act on an entry i
 
 For example:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1930,7 +1948,10 @@ A representative response:
 
 The same endpoint also accepts directory creation by path:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1941,7 +1962,10 @@ The same endpoint also accepts directory creation by path:
 
 It also accepts a revision restore by path:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1958,7 +1982,10 @@ It also accepts a revision restore by path:
 
 It also accepts `restore_deleted`, which restores a deleted file or subtree by binding the deletion's root inode again. The inode's identity and its retained revision history come back with the inode. The request identifies both parts of the restore handle that the delete reported (and that the change feed includes): the inode ID and the deletion's committed sequence.
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -1984,7 +2011,10 @@ Only the root of a deletion can be restored, and `deletion_seq` MUST match the d
 
 The endpoint also accepts `update_attributes`, which writes and removes attributes on the inode that a path resolves to:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -2040,7 +2070,10 @@ A wrong `expected_inode_id` returns `path_conflict`, like the delete preconditio
 
 `update_access` replaces the access row of the inode that a path resolves to. The root path is a valid target, and the root's row is where administrators are listed.
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -2658,7 +2691,10 @@ This operation requires an administrator, or the service context.
 
 Representative request:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -2726,7 +2762,10 @@ Merges a fork's commits into a namespace as one commit. A [merge](glossary.md#me
 
 Representative request:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -2910,7 +2949,10 @@ Creates the new fork of a rebase. A [rebase](glossary.md#rebase) replays a fork'
 
 Representative request:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {
@@ -2981,7 +3023,10 @@ Replays a fork's unmerged commits into this namespace, a rebase's new fork that 
 
 Representative request:
 
-`Loonfs-Actor: usr_8f3c`
+```text
+Loonfs-Actor: usr_8f3c
+Loonfs-Context: service
+```
 
 ```json
 {

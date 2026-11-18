@@ -1404,12 +1404,9 @@ async function fetchThroughProxy(
 ): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set("authorization", "Bearer browser-credential");
-    // A request that claims principals acts for a subject, and sending the
-    // service context with it would be invalid. Every other request acts on
-    // the application's own account, and the proxy forwards the context.
-    if (!headers.has("loonfs-principals")) {
-        headers.set("Loonfs-Context", "service");
-    }
+    // The browser claims the service context, and the proxy replaces it
+    // with the hook's choice.
+    headers.set("Loonfs-Context", "service");
     return fetch(url, { ...init, headers });
 }
 
@@ -2521,7 +2518,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const proxyHandler = createProxyHandler({
         serverBaseUrl: activeHarness.serverBaseUrl,
         token: activeHarness.token,
-        authorize: () => ({ actorId: request.actor_id }),
+        authorize: () => ({ actorId: request.actor_id, service: true }),
     });
     const beginPath = `/v0/namespaces/${encodeURIComponent(request.namespace_id)}/uploads`;
     const beginModes: string[] = [];
@@ -2689,7 +2686,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
                           status: request.authorize.refused_status,
                           headers: { "content-type": "application/json" },
                       })
-                    : { actorId: request.authorize.actor_id },
+                    : { actorId: request.authorize.actor_id, service: true },
         }),
     );
     context.after(() => authorizedProxy.close());
