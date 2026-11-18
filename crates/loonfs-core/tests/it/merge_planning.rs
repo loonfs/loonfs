@@ -881,13 +881,25 @@ async fn a_delete_below_a_directory_that_main_deleted_has_nothing_to_do() {
 }
 
 /// Checks that the fork's change to a file below a directory that both
-/// namespaces deleted has nothing to do. The fork writes `/docs/a.txt` and
-/// then deletes `/docs`, and `main` deletes `/docs` itself. The fork shows
-/// nothing of the file at the range's end, and neither does `main`, so the
-/// merge neither applies the write nor deletes the file.
+/// namespaces deleted has nothing to do. `main` writes `/docs/a.txt`, renames
+/// it, and deletes `/docs`, and the fork writes `/docs/a.txt` and deletes
+/// `/docs`. Both namespaces show nothing of the file at the end, so the merge
+/// neither applies the fork's write nor deletes the file, and the file's
+/// binding and revision rows in `main`, which are both foreign, don't
+/// conflict, because no change replaces them.
 #[tokio::test]
 async fn a_change_below_a_directory_that_both_deleted_has_nothing_to_do() {
     let family = Family::new().await;
+    family
+        .main()
+        .write_file_bytes("/docs/a.txt", b"theirs", None)
+        .await
+        .expect("write in main");
+    family
+        .main()
+        .move_path("/docs/a.txt", "/docs/c.txt", None)
+        .await
+        .expect("rename in main");
     family
         .main()
         .delete_path("/docs", None)

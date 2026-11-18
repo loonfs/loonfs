@@ -1,7 +1,10 @@
 //! Checks that each inode that a merge changes is reachable after the
 //! merge's own creates and restores, and that each name it takes is free,
 //! against the head of the namespace being merged into. A delete of an inode
-//! that stays hidden there is dropped, because it has nothing to do.
+//! that a deletion hides there is checked here too: the rows that it replaces
+//! when the merge restores a directory above the inode, and nothing when the
+//! inode stays hidden, because the delete then has nothing to do and is
+//! dropped.
 
 use super::classify::Classifier;
 use super::operations::BindingChange;
@@ -84,9 +87,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Checks the plan at `index`, first at the inode's current position and
     /// then at its destination, and adds to `directories` the directories
     /// that the merge creates or restores and that the plan needs. A delete
-    /// of an inode that stays hidden at the head has nothing to do, because
-    /// the deletion that hides the inode there isn't one that the merge
-    /// undoes, so the check drops the delete from the plan instead of
+    /// of an inode that a deletion hides at the head runs only after a
+    /// restore that the merge makes above the inode, so the check reads the
+    /// rows that the delete replaces once it knows that, and drops a delete
+    /// that has nothing to do, because the inode stays hidden, instead of
     /// reporting a conflict.
     async fn check_plan(
         &mut self,
@@ -127,10 +131,27 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             match reach {
                 Reach::Visible => {}
                 Reach::Through(directory) => directories.push(directory),
-                // The inode stays hidden after the merge, so a delete has
-                // nothing to do, and any other change can't be applied.
-                Reach::Hidden if deletes => self.plans[index].binding = None,
+                Reach::Hidden if deletes => {
+                    // The inode stays hidden after the merge, so the delete
+                    // has nothing to do.
+                    self.plans[index].binding = None;
+                    return Ok(Ok(None));
+                }
                 Reach::Hidden => return self.visibility_conflict(inode_id).await,
+            }
+            if deletes {
+                // The delete runs after the restore that shows the inode
+                // again, so the rows that it replaces are checked now (see
+                // [`Classifier::plan_change`]).
+                let theirs = self.theirs.state(inode_id).await?.ok_or_else(|| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "the merged-into namespace doesn't have inode `{inode_id}`, whose delete \
+                         the merge planned"
+                    ))
+                })?;
+                if let Some(kind) = self.replaced_rows_conflict(&theirs, true).await? {
+                    return Ok(Err((kind, theirs.conflict_version())));
+                }
             }
         }
         let Some((parent_inode_id, display_name)) = destination else {

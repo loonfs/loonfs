@@ -166,7 +166,12 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             plan.binding = theirs
                 .edge()
                 .map(|from| delete_change(namespace_id, theirs, from));
-            if let Some(binding) = &plan.binding {
+            // A delete of an inode that a deletion hides in the merged-into
+            // namespace runs only when the merge restores a directory above
+            // the inode, so the target check checks the rows that the delete
+            // replaces once it knows that the delete runs, and drops the
+            // delete otherwise (see [`Self::check_targets`]).
+            if let (Some(binding), true) = (&plan.binding, theirs.is_visible()) {
                 conflict = self
                     .binding_conflict(inode_id, ours, theirs, binding)
                     .await?;
@@ -218,8 +223,8 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Returns the kind of conflict of `binding`, the move or the delete of
     /// an inode whose own row is bound in the merged-into namespace, when the
     /// row or the revision that it replaces isn't the fork's own (see
-    /// [`Self::is_own`]), and adds a directory with no such conflict to the
-    /// subtree checks.
+    /// [`Self::replaced_rows_conflict`]), and adds a directory with no such
+    /// conflict to the subtree checks.
     async fn binding_conflict(
         &mut self,
         inode_id: InodeId,
@@ -227,18 +232,8 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         theirs: &InodeState,
         binding: &BindingChange,
     ) -> Result<Option<MergeConflictKind>> {
-        let their_edge = theirs
-            .edge()
-            .expect("a move or a delete replaces a bound row");
-        let mut conflict = None;
-        if !self.is_own(their_edge.binding.seq).await? {
-            conflict = Some(MergeConflictKind::Binding);
-        }
-        if let (BindingChange::Delete { .. }, Some(revision)) = (binding, &theirs.revision) {
-            if conflict.is_none() && !self.is_own(revision.committed_seq).await? {
-                conflict = Some(MergeConflictKind::Content);
-            }
-        }
+        let deletes = matches!(binding, BindingChange::Delete { .. });
+        let conflict = self.replaced_rows_conflict(theirs, deletes).await?;
         // The subtree check reads the directory's path at the head. A
         // directory that a deletion hides there has none, and nothing below
         // it can change while it's hidden, so it needs no check.
@@ -251,6 +246,30 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             });
         }
         Ok(conflict)
+    }
+
+    /// Returns the kind of conflict of the move or the delete of an inode
+    /// whose state in the merged-into namespace is `theirs`, when the binding
+    /// row that the change replaces isn't the fork's own (see
+    /// [`Self::is_own`]), or, for a delete, when the revision that it
+    /// replaces isn't.
+    pub(super) async fn replaced_rows_conflict(
+        &mut self,
+        theirs: &InodeState,
+        deletes: bool,
+    ) -> Result<Option<MergeConflictKind>> {
+        let their_edge = theirs
+            .edge()
+            .expect("a move or a delete replaces a bound row");
+        if !self.is_own(their_edge.binding.seq).await? {
+            return Ok(Some(MergeConflictKind::Binding));
+        }
+        if let (true, Some(revision)) = (deletes, &theirs.revision) {
+            if !self.is_own(revision.committed_seq).await? {
+                return Ok(Some(MergeConflictKind::Content));
+            }
+        }
+        Ok(None)
     }
 
     /// Plans the revision, attribute, and access updates of a visible inode
