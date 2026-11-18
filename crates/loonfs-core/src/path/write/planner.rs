@@ -347,7 +347,6 @@ fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authorize::Authorizer;
     use crate::commit::engine::CommitCandidate;
     use crate::commit::CommitPlan;
     use crate::path::write::PublishPlanningSession;
@@ -358,11 +357,9 @@ mod tests {
     use loonfs_types::{
         AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
         CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-        DestinationPrecondition, NamespaceAccess, PrincipalId, PrincipalScope, PrincipalSet,
-        RevisionNo, Subject, SubjectId, ROOT_INODE_ID,
+        DestinationPrecondition, PrincipalId, RevisionNo, ROOT_INODE_ID,
     };
     use std::assert_matches;
-    use std::collections::BTreeSet;
 
     fn test_context() -> WriterAt {
         crate::test_support::writer_at("writer", 1)
@@ -461,8 +458,7 @@ mod tests {
             })
             .collect();
         let candidate = CommitCandidate::prepared(request.clone(), content);
-        let authorizer =
-            Authorizer::for_request(namespace_id, &view.head().access, candidate.authority())?;
+        let authorizer = candidate.authorizer();
         session
             .prepare_commit(
                 &candidate,
@@ -735,28 +731,16 @@ mod tests {
         .content_ref()
         .clone();
 
-        // Access rows exist only in a restricted namespace.
         let restricted = NamespaceId::parse("restricted").expect("valid namespace id");
-        let principal_scope = PrincipalScope::parse("org_demo").expect("principal scope");
         let administrator = PrincipalId::parse("prn_root").expect("principal id");
         crate::test_support::NamespaceFixture::new(&store, &restricted, &context)
             .engine()
             .bootstrap_namespace(
                 &loonfs_test_support::test_actor(),
-                &loonfs_types::options::CreateNamespaceOptions {
-                    access: NamespaceAccess::Acl {
-                        principal_scope: principal_scope.clone(),
-                        root_grants: AccessGrants::new(BTreeMap::from([(
-                            administrator.clone(),
-                            AccessRights::ADMIN,
-                        )]))
-                        .expect("root grants"),
-                    },
-                    ..Default::default()
-                },
+                &loonfs_types::options::CreateNamespaceOptions::default(),
             )
             .await
-            .expect("bootstrap a restricted namespace");
+            .expect("bootstrap a namespace");
         let update_access = request(FilesystemOperation::UpdateAccess {
             path: AbsolutePath::root(),
             boundary: false,
@@ -770,11 +754,6 @@ mod tests {
             .expect("grants"),
             expected_inode_id: None,
             expected_access_revision_no: None,
-        })
-        .with_subject(Subject {
-            principal_scope,
-            subject_id: SubjectId::parse("root").expect("subject id"),
-            principals: PrincipalSet::new(BTreeSet::from([administrator])).expect("principals"),
         });
 
         let rows: Vec<(&str, &NamespaceId, CommitIntent, &[&str])> = vec![

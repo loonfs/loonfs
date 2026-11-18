@@ -1033,21 +1033,12 @@ fn openapi_names_tagged_one_of_alternatives() {
 
     for (schema_name, expected_names) in [
         (
-            "NamespaceAccess",
-            &["NamespaceAccessUnrestricted", "NamespaceAccessAcl"][..],
-        ),
-        (
-            "NamespaceAccessMode",
-            &["NamespaceAccessModeUnrestricted", "NamespaceAccessModeAcl"][..],
-        ),
-        (
             "RunMaintenanceJobRequest",
             &[
                 "RunMaintenanceJobRequestMetadata",
                 "RunMaintenanceJobRequestGc",
                 "RunMaintenanceJobRequestRetention",
                 "RunMaintenanceJobRequestRetentionWindow",
-                "RunMaintenanceJobRequestRecoverAdministrator",
             ][..],
         ),
         (
@@ -1057,7 +1048,6 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "RunMaintenanceJobResponseGc",
                 "RunMaintenanceJobResponseRetention",
                 "RunMaintenanceJobResponseRetentionWindow",
-                "RunMaintenanceJobResponseRecoverAdministrator",
             ][..],
         ),
         ("PathEntry", &["PathEntryDirectory", "PathEntryFile"][..]),
@@ -1584,24 +1574,13 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
 fn access_id_schemas_exclude_commas() {
     use utoipa::PartialSchema as _;
 
-    let spec: Value = serde_json::from_str(
-        &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
-    )
-    .expect("parse openapi json");
-    let schemas = spec
-        .pointer("/components/schemas")
-        .and_then(Value::as_object)
-        .expect("openapi schemas object");
-    let subject_schema =
-        serde_json::to_value(loonfs_types::SubjectId::schema()).expect("subject id schema");
-    assert_eq!(
-        subject_schema.get("pattern").and_then(Value::as_str),
-        Some(r"^[\x21-\x2B\x2D-\x7E]{1,256}$"),
-        "SubjectId pattern"
-    );
-    for name in ["PrincipalId", "PrincipalScope"] {
+    for (name, schema) in [
+        ("SubjectId", loonfs_types::SubjectId::schema()),
+        ("PrincipalId", loonfs_types::PrincipalId::schema()),
+    ] {
+        let schema = serde_json::to_value(schema).expect("id schema");
         assert_eq!(
-            schemas[name].get("pattern").and_then(Value::as_str),
+            schema.get("pattern").and_then(Value::as_str),
             Some(r"^[\x21-\x2B\x2D-\x7E]{1,256}$"),
             "{name} pattern"
         );
@@ -2064,8 +2043,8 @@ fn actor_headers_are_global_and_only_attributed_operations_require_them() {
         json!([
         {"header": "Loonfs-Actor", "name": "actorId", "optional": true},
         {"header": "Loonfs-Subject", "name": "subjectId", "optional": true},
-        {"header": "Loonfs-Principal-Scope", "name": "principalScope", "optional": true},
-        {"header": "Loonfs-Principals", "name": "principals", "optional": true}
+        {"header": "Loonfs-Principals", "name": "principals", "optional": true},
+        {"header": "Loonfs-Context", "name": "context", "optional": true}
         ])
     );
     let mut required = BTreeSet::new();

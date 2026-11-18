@@ -13,8 +13,8 @@ pub(crate) fn openapi_json_pretty(
     document["x-fern-global-headers"] = serde_json::json!([
         {"header": headers::ACTOR, "name": "actorId", "optional": true},
         {"header": headers::SUBJECT, "name": "subjectId", "optional": true},
-        {"header": headers::PRINCIPAL_SCOPE, "name": "principalScope", "optional": true},
-        {"header": headers::PRINCIPALS, "name": "principals", "optional": true}
+        {"header": headers::PRINCIPALS, "name": "principals", "optional": true},
+        {"header": headers::CONTEXT, "name": "context", "optional": true}
     ]);
     add_retry_metadata(&mut document)?;
     add_pagination_metadata(&mut document)?;

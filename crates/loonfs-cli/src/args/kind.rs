@@ -57,7 +57,6 @@ command_kinds! {
     FilesystemStat => "filesystem_stat",
     FilesystemAnnotate => "filesystem_annotate",
     AccessSet => "access_set",
-    MaintenanceRecoverAdministrator => "maintenance_recover_administrator",
     FilesystemCat => "filesystem_cat",
     FilesystemGrep => "filesystem_grep",
     FilesystemGet => "filesystem_get",
@@ -153,9 +152,6 @@ impl Command {
             Command::Changes(_) => CommandKind::Changes,
             Command::Capabilities => CommandKind::Capabilities,
             Command::Maintenance { command } => match command {
-                MaintenanceCommand::RecoverAdministrator(_) => {
-                    CommandKind::MaintenanceRecoverAdministrator
-                }
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
                 MaintenanceCommand::Fold => CommandKind::MaintenanceFold,
                 MaintenanceCommand::Snapshot { command } => match command {

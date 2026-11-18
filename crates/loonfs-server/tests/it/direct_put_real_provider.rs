@@ -430,6 +430,7 @@ fn post_commit(server_url: &str, namespace: &str, request: &CommitRequest) -> Co
     let response = raw_agent()
         .post(&format!("{server_url}/v0/namespaces/{namespace}/commits"))
         .set("authorization", &format!("Bearer {AUTH_TOKEN}"))
+        .set("Loonfs-Context", "service")
         .set("Loonfs-Actor", "test-actor")
         .send_json(request)
         .expect("post mutation");

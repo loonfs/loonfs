@@ -1,7 +1,7 @@
 //! Signed part targets for a direct multipart upload, and the part checksum
 //! rule that completion checks again.
 
-use super::session::{authorize_upload_subject, ensure_session_open, ensure_session_subject};
+use super::session::{ensure_session_open, ensure_session_subject};
 use crate::engine::NamespaceEngine;
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
@@ -39,11 +39,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<MultipartPartTargets> {
         let now_ms = self.now_ms();
         let catalog = self.own_catalog(catalog);
-        authorize_upload_subject(
-            &self.namespace.namespace_id,
-            catalog.access(),
-            self.subject.as_ref(),
-        )?;
         if requested.is_empty() {
             return Err(CoreError::InvalidUploadContent(
                 "a part-signing request names at least one part".to_owned(),

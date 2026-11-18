@@ -6,16 +6,16 @@ use crate::common::{default_writer, namespace_engine, read_context, resolve_path
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_core::test_support::{namespace_store_with_segment_cache, NamespaceFixture, WriterAt};
 use loonfs_core::{
-    CoreError, CreateNamespaceOptions, MergeAllowance, MergeBound, MergePlan, MergeRequest,
-    NamespaceWriterEngine, RetentionTarget,
+    CoreError, MergeAllowance, MergeBound, MergePlan, MergeRequest, NamespaceWriterEngine,
+    RetentionTarget,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, Commit, CommitId, CommitSeq, ErrorCode,
-    InodeId, Merge, MergeConflictKind, NamespaceAccess, NamespaceId, NextMergeRangeOutcome,
-    NextMergeRangeResponse, PathEntry, PrincipalId, PrincipalScope, Subject,
+    InodeId, Merge, MergeConflictKind, NamespaceId, NextMergeRangeOutcome, NextMergeRangeResponse,
+    PathEntry, PrincipalId, Subject,
 };
 use std::assert_matches;
 use tempfile::TempDir;
@@ -27,7 +27,8 @@ struct Family {
     main: NamespaceId,
     fork: NamespaceId,
     writer: WriterAt,
-    /// The subject that writes and merges act as, in a namespace with ACLs.
+    /// The subject that writes and merges act as, or `None` for the service
+    /// context.
     subject: Option<Subject>,
     /// The merge allowance that merges are planned against, which admits
     /// any merge unless a test lowers it.
@@ -64,33 +65,29 @@ impl Family {
         family
     }
 
-    /// Creates `main` with ACLs and the directory `/docs`, and forks it.
+    /// Creates `main` with a root access row and the directory `/docs`, and
+    /// forks it.
     /// `prn_root` administers the root, `prn_team` can read, write, create,
     /// and remove there, and writes and merges act as `prn_root`.
     async fn acl() -> Self {
         let family = Self::empty(Some(subject("root", &["prn_root"])));
+        family.main().create().await.expect("create main");
         family
             .main()
-            .create_with_options(&CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: grants(&[
-                        ("prn_root", &[AccessRight::Admin]),
-                        (
-                            "prn_team",
-                            &[
-                                AccessRight::Read,
-                                AccessRight::Write,
-                                AccessRight::Create,
-                                AccessRight::Remove,
-                            ],
-                        ),
-                    ]),
-                },
-                ..CreateNamespaceOptions::default()
-            })
+            .set_root_access(grants(&[
+                ("prn_root", &[AccessRight::Admin]),
+                (
+                    "prn_team",
+                    &[
+                        AccessRight::Read,
+                        AccessRight::Write,
+                        AccessRight::Create,
+                        AccessRight::Remove,
+                    ],
+                ),
+            ]))
             .await
-            .expect("create main");
+            .expect("set the root access row");
         family
             .commit(&family.main, create_directory("/docs"))
             .await
@@ -308,7 +305,6 @@ impl Family {
 
 fn subject(id: &str, principals: &[&str]) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: loonfs_types::SubjectId::parse(id).expect("subject id"),
         principals: loonfs_types::PrincipalSet::new(
             principals

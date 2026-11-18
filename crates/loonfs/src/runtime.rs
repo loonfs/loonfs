@@ -142,8 +142,8 @@ impl<M> LoonFs<M> {
         self.core.execution_budget()
     }
 
-    /// Returns the subject this runtime acts for, or `None` for an unscoped
-    /// service runtime.
+    /// Returns the subject this runtime acts for, or `None` when it acts in
+    /// the service context, which checks no rights.
     pub fn subject(&self) -> Option<&Subject> {
         self.core.subject()
     }
@@ -361,7 +361,7 @@ impl LoonFs<Writable> {
             .writer_engine(&self.mode.writer.writer_id, namespace_id)
     }
 
-    /// Creates an unrestricted namespace, bootstrapping its durable state.
+    /// Creates a namespace, bootstrapping its durable state.
     ///
     /// An existing namespace is an error.
     pub async fn create_namespace(

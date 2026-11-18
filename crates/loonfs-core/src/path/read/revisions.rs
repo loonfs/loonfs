@@ -117,7 +117,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 Absence::Inode,
             )
             .await?;
-        if !access.is_unrestricted()
+        if !access.is_service()
             && self
                 .metadata_view()
                 .latest_revision_head(inode_id)

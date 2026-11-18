@@ -445,7 +445,6 @@ fn namespace(
             json!({"source_namespace_id": rebased_from, "resume_after_seq": 10});
     }
     serde_json::from_value(json!({
-        "access": {"kind": "unrestricted"},
         "namespace_id": namespace_id,
         "created_at_ms": 0,
         "created_by": "test-actor",

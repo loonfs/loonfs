@@ -44,7 +44,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             last_deletion_seq: seq,
             last_root_inode_id: inode_id,
         };
-        let (deletions, next_cursor) = if access.is_unrestricted() {
+        let (deletions, next_cursor) = if access.is_service() {
             let mut deletions = session
                 .trash_entries_page(
                     &TrashRange::after(start_after).above_seq(retention_floor_seq),

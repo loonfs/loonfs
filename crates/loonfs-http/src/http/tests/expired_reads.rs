@@ -116,7 +116,8 @@ async fn an_expired_subtree_is_an_unknown_inode_on_every_inode_route() {
             let mut request = Request::builder()
                 .method(method)
                 .uri(&uri)
-                .header("authorization", "Bearer test-token");
+                .header("authorization", "Bearer test-token")
+                .header("Loonfs-Context", "service");
             if method == "POST" {
                 request = request.header("content-type", "application/json");
             }

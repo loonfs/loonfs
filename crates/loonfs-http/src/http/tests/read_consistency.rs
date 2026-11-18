@@ -131,7 +131,9 @@ impl LiveRead {
 
     /// Returns the request for this read with `parameters` added.
     fn request(&self, parameters: &[(&str, Value)]) -> Request<Body> {
-        let builder = Request::builder().header("authorization", "Bearer test-token");
+        let builder = Request::builder()
+            .header("authorization", "Bearer test-token")
+            .header("Loonfs-Context", "service");
         let Some(body) = &self.body else {
             let mut uri = self.uri.clone();
             for (name, value) in parameters {

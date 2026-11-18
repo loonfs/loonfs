@@ -1,9 +1,6 @@
 //! Namespace requests and responses for the v0 HTTP API.
 
-use crate::{
-    ActorId, CommitSeq, ManifestNo, NamespaceAccess, NamespaceId, PoolId, PrincipalScope,
-    SnapshotId,
-};
+use crate::{ActorId, CommitSeq, ManifestNo, NamespaceId, PoolId, SnapshotId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -12,10 +9,6 @@ use std::num::NonZeroU64;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateNamespaceRequest {
-    /// The namespace's access mode, which can't be changed after the namespace is created. The
-    /// default is unrestricted.
-    #[serde(default = "NamespaceAccess::unrestricted")]
-    pub access: NamespaceAccess,
     /// The durable ID of the new namespace. Without this field, LoonFS generates an ID. The
     /// response's `namespace_id` is the new namespace's ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,8 +51,6 @@ pub struct ForkNamespaceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NamespaceMetadata {
-    /// The namespace's access mode.
-    pub access: NamespaceAccessMode,
     /// The namespace ID.
     pub namespace_id: NamespaceId,
     /// The time the namespace was created, in Unix milliseconds.
@@ -85,36 +76,6 @@ pub struct NamespaceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention_window_ms: Option<u64>,
-}
-
-/// A namespace's access mode, without the grants that the namespace was created with.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NamespaceAccessMode {
-    /// Every caller with the deployment credential can perform every operation.
-    Unrestricted {},
-    /// Access rows control the operations that principals in this identity domain can perform.
-    Acl {
-        /// The identity domain that the namespace's principal IDs belong to.
-        principal_scope: PrincipalScope,
-    },
-    /// An access mode from a newer server. This variant doesn't include the mode's own fields.
-    #[serde(other)]
-    Unknown,
-}
-
-impl From<&NamespaceAccess> for NamespaceAccessMode {
-    fn from(access: &NamespaceAccess) -> Self {
-        match access {
-            NamespaceAccess::Unrestricted {} => Self::Unrestricted {},
-            NamespaceAccess::Acl {
-                principal_scope, ..
-            } => Self::Acl {
-                principal_scope: principal_scope.clone(),
-            },
-        }
-    }
 }
 
 /// The source namespace and sequence that a forked namespace started from.
@@ -194,7 +155,6 @@ mod tests {
     #[test]
     fn namespace_wire_shape_has_only_core_state() {
         let namespace = NamespaceMetadata {
-            access: NamespaceAccessMode::Unrestricted {},
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
@@ -208,7 +168,6 @@ mod tests {
             serde_json::to_value(namespace.clone()).expect("serialize namespace"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "access": {"kind": "unrestricted"},
                 "created_at_ms": 1000,
                 "created_by": "test",
                 "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
@@ -224,22 +183,6 @@ mod tests {
             serde_json::to_value(windowed).expect("serialize namespace")["retention_window_ms"],
             86_400_000,
             "the metadata of a namespace with its own window includes retention_window_ms"
-        );
-    }
-
-    #[test]
-    fn a_namespace_access_mode_from_a_newer_server_decodes_with_an_unknown_field() {
-        let mode: NamespaceAccessMode = serde_json::from_value(serde_json::json!({
-            "kind": "acl",
-            "principal_scope": "corp",
-            "added_by_a_newer_server": true
-        }))
-        .expect("a response accepts unknown fields");
-        assert_eq!(
-            mode,
-            NamespaceAccessMode::Acl {
-                principal_scope: PrincipalScope::parse("corp").expect("principal scope"),
-            }
         );
     }
 

@@ -151,7 +151,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "manifest_missing",
     "max_wal_tail_objects",
     "merge_allowance",
-    "recover_administrator",
     "metadata_segments",
     "move_by_inode",
     "move_path",
@@ -196,7 +195,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "revision_committed_at_ms",
     "revision_committed_by",
     "revision_no",
-    "root_grants",
     "serve_and_maintain",
     "serve_only",
     "service_proxied",
@@ -1493,6 +1491,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .get(&changes_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "malformed after_seq should answer 400",
@@ -1516,6 +1515,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
                     "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740991"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "valid sequence reaches the missing namespace",
@@ -1530,6 +1530,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
                     "http://{addr}/v0/namespaces/demo/changes?after_seq=9007199254740992"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "out-of-range after_seq should return 400",
@@ -1558,6 +1559,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
                     "http://{addr}/v0/namespaces/demo?expected_head_seq=abc"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "malformed expected_head_seq should answer 400",
@@ -1580,6 +1582,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
                     "http://{addr}/v0/namespaces/demo/filesystem/entry"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "missing path parameter should answer 400",
@@ -1596,6 +1599,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .post(&create_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .set("Loonfs-Actor", "test-actor")
                 .set("content-type", "application/json")
                 .send_string(r#"{"namespace_id":"bad-actor","actor_id":7}"#)
@@ -1610,6 +1614,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .post(&create_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .set("Loonfs-Actor", "test-actor")
                 .set("content-type", "application/json")
                 .send_string("{not json")
@@ -1642,6 +1647,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .post(&commits_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .set("Loonfs-Actor", "test-actor")
                 .set("content-type", "application/json")
                 .send_string(invalid_operation)
@@ -1672,6 +1678,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .post(&commits_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .set("Loonfs-Actor", "test-actor")
                 .set("content-type", "application/json")
                 .send_string(body)
@@ -1699,6 +1706,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .get(&grep_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "invalid grep path should answer 400",
@@ -1719,6 +1727,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .get(&grep_inode_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "invalid grep inode scope should answer 400",
@@ -1734,6 +1743,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             raw_agent()
                 .get(&grep_two_scopes_url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "a grep with both scopes should answer 400",
@@ -1757,6 +1767,7 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
                 raw_agent()
                     .get(&url)
                     .set("authorization", "Bearer test-token")
+                    .set("Loonfs-Context", "service")
                     .call()
             },
             "a former parameter spelling should answer 400",
@@ -1971,6 +1982,7 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
                     "http://{addr}/v0/namespaces/demo/filesystem/revisions"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .query("path", "/notes/file.txt")
                 .query("limit", "1")
                 .call()
@@ -2005,6 +2017,7 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
                     "http://{addr}/v0/namespaces/demo/filesystem/revisions"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .query("path", "/notes/file.txt")
                 .query("limit", "1")
                 .query("cursor", &cursor)
@@ -2029,6 +2042,7 @@ async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future()
             "http://{addr}/v0/namespaces/demo/filesystem/revisions"
         ))
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .query("path", "/notes/file.txt")
         .query("limit", "1")
         .query("cursor", &future_cursor)
@@ -2187,6 +2201,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
                     "http://{addr}/v0/namespaces/demo/filesystem/content"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "a missing path should answer 400 at the concurrency cap",
@@ -2200,6 +2215,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
                     "http://{addr}/v0/namespaces/demo/inodes/not-an-inode/revisions/1/content"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call()
         },
         "a malformed inode id should answer 400 at the concurrency cap",
@@ -3070,6 +3086,7 @@ mod direct_download {
                             .method("POST")
                             .uri(&uri)
                             .header("authorization", "Bearer test-token")
+                            .header("Loonfs-Context", "service")
                             .body(axum::body::Body::from(body))
                             .expect("request"),
                     )

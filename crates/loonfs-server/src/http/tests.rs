@@ -471,6 +471,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
             axum::http::Request::builder()
                 .uri("/v0/capabilities")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Context", "service")
                 .header("Loonfs-Actor", "test-actor")
                 .body(axum::body::Body::empty())
                 .expect("capabilities request"),
@@ -504,6 +505,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
             axum::http::Request::builder()
                 .uri("/v0/maintenance/namespaces/hidden/diagnostics")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Context", "service")
                 .header("Loonfs-Actor", "test-actor")
                 .body(axum::body::Body::empty())
                 .expect("diagnostics request"),
@@ -532,6 +534,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
                 .method(axum::http::Method::POST)
                 .uri("/v0/namespaces/hidden/commits")
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
+                .header("Loonfs-Context", "service")
                 .header("Loonfs-Actor", "test-actor")
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(axum::body::Body::from(
@@ -559,7 +562,7 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
             .await
             .expect("connect to serving listener");
         let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-token\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-token\r\nLoonfs-Context: service\r\nConnection: close\r\n\r\n"
         );
         stream
             .write_all(request.as_bytes())

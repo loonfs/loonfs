@@ -16,8 +16,8 @@ const MERGES_SUBDIR: &str = "merges";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MergeAttempt {
-    /// The subject that the session's requests act as, or `None` for the
-    /// token holder.
+    /// The subject that the session's requests act as, or `None` in the
+    /// service context.
     pub subject: Option<Subject>,
     /// The fork sequence that the command asked to merge the fork through.
     pub through_seq: Option<CommitSeq>,

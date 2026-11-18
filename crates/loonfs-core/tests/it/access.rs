@@ -4,7 +4,6 @@ use crate::common::{namespace_engine, read_context, submit_commit};
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::CreateNamespaceOptions;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::options::AttributeInclusion;
@@ -12,13 +11,12 @@ use loonfs_types::options::{ListOptions, StatOptions};
 use loonfs_types::FilesystemEvent;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
-    CommitPrecondition, DestinationBehavior, DisplayName, ErrorCode, InodeId, NamespaceAccess,
-    NamespaceId, PrincipalId, PrincipalScope, ROOT_INODE_ID,
+    CommitPrecondition, DestinationBehavior, DisplayName, ErrorCode, InodeId, NamespaceId,
+    PrincipalId, ROOT_INODE_ID,
 };
 use loonfs_types::{
     CommitSeq, ContentRef, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
-use std::assert_matches;
 use std::num::NonZeroU64;
 use tempfile::tempdir;
 
@@ -45,19 +43,12 @@ async fn setup() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = namespace_id("demo");
     let context = loonfs_core::test_support::writer_at("writer", 1);
-    namespace_engine(&store, &namespace_id, &context)
-        .bootstrap_namespace(
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-                    root_grants: grants("prn_root", &[AccessRight::Admin]),
-                },
-                ..Default::default()
-            },
-        )
+    let fixture = NamespaceFixture::new(&store, &namespace_id, &context);
+    fixture.create().await.expect("bootstrap");
+    fixture
+        .set_root_access(grants("prn_root", &[AccessRight::Admin]))
         .await
-        .expect("bootstrap ACL namespace");
+        .expect("set the administrator");
     (temp_dir, store, namespace_id, context)
 }
 
@@ -93,7 +84,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
     .expect("root access");
     assert_eq!(
         root.events,
-        vec![event(ROOT_INODE_ID, 1, false, root_grants)]
+        vec![event(ROOT_INODE_ID, 2, false, root_grants)]
     );
 
     commit_as(
@@ -145,7 +136,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
         details.expected_access_revision_no,
         Some(AccessRevisionNo(0))
     );
-    assert_eq!(details.actual_access_revision_no, Some(AccessRevisionNo(1)));
+    assert_eq!(details.actual_access_revision_no, Some(AccessRevisionNo(2)));
 
     commit_as(
         &store,
@@ -226,28 +217,6 @@ async fn structural_rules_reject_admin_off_the_root_and_a_boundary_on_a_file() {
 }
 
 #[tokio::test]
-async fn an_unrestricted_namespace_refuses_access_updates() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = namespace_id("demo");
-    let context = loonfs_core::test_support::writer_at("writer", 1);
-    NamespaceFixture::new(&store, &namespace_id, &context)
-        .create()
-        .await
-        .expect("bootstrap");
-    let error = submit_operation(
-        &store,
-        &namespace_id,
-        CommitId::parse("unrestricted-access").expect("commit id"),
-        update_access("/", false, AccessGrants::default()),
-        &context,
-    )
-    .await
-    .expect_err("unrestricted namespace");
-    assert_eq!(error.code(), ErrorCode::NamespaceUnrestricted);
-}
-
-#[tokio::test]
 async fn access_rows_survive_a_fold_and_the_counter_keeps_going() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     submit_operation(
@@ -272,7 +241,7 @@ async fn access_rows_survive_a_fold_and_the_counter_keeps_going() {
             boundary: false,
             grants: AccessGrants::default(),
             expected_inode_id: Some(ROOT_INODE_ID),
-            expected_access_revision_no: Some(AccessRevisionNo(1)),
+            expected_access_revision_no: Some(AccessRevisionNo(2)),
         },
         &context,
     )
@@ -280,13 +249,12 @@ async fn access_rows_survive_a_fold_and_the_counter_keeps_going() {
     .expect("update after fold");
     assert_eq!(
         after.events,
-        vec![event(ROOT_INODE_ID, 2, false, AccessGrants::default())]
+        vec![event(ROOT_INODE_ID, 3, false, AccessGrants::default())]
     );
 }
 
 fn subject(id: &str, principals: &[&str]) -> loonfs_types::Subject {
     loonfs_types::Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: loonfs_types::SubjectId::parse(id).expect("subject id"),
         principals: loonfs_types::PrincipalSet::new(
             principals
@@ -391,41 +359,51 @@ async fn seed(
     }
 }
 
+/// Checks that a namespace without access rows refuses every request with
+/// principals as if the item didn't exist, and that the service context
+/// changes it without a check.
 #[tokio::test]
-async fn an_acl_namespace_requires_a_subject_and_an_unrestricted_one_ignores_it() {
-    let (_temp_dir, store, namespace_id, context) = setup().await;
-    let request = CommitIntent::single(
-        CommitId::generate(),
-        loonfs_test_support::test_actor(),
-        None,
-        create_directory("/docs"),
-    );
-    let error = submit_commit(&store, &namespace_id, request.clone(), &context)
-        .await
-        .expect_err("subject required");
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    submit_commit(
-        &store,
-        &namespace_id,
-        request.with_subject(subject("root", &["prn_root"])),
-        &context,
-    )
-    .await
-    .expect("administrator commits");
-    let unrestricted = NamespaceId::parse("unrestricted").expect("namespace");
-    NamespaceFixture::new(&store, &unrestricted, &context)
+async fn principals_have_no_right_in_a_namespace_without_access_rows() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = loonfs_core::test_support::writer_at("writer", 1);
+    NamespaceFixture::new(&store, &namespace_id, &context)
         .create()
         .await
         .expect("bootstrap");
-    commit_as(
+    submit_commit(
         &store,
-        &unrestricted,
+        &namespace_id,
+        CommitIntent::single(
+            CommitId::generate(),
+            loonfs_test_support::test_actor(),
+            None,
+            create_directory("/docs"),
+        ),
         &context,
-        subject("any", &["any"]),
-        create_directory("/docs"),
     )
     .await
-    .expect("subject ignored");
+    .expect("the service context commits");
+    let error = commit_as(
+        &store,
+        &namespace_id,
+        &context,
+        subject("any", &["any"]),
+        create_directory("/docs/child"),
+    )
+    .await
+    .expect_err("principals have no right");
+    assert_eq!(error.code(), ErrorCode::PathNotFound);
+    let error = read_engine(&store, &namespace_id, "any")
+        .resolve_path(
+            "/docs",
+            StatOptions::default(),
+            &read_context(&store, &namespace_id).await,
+        )
+        .await
+        .expect_err("principals read nothing");
+    assert_eq!(error.code(), ErrorCode::PathNotFound);
 }
 
 #[tokio::test]
@@ -985,52 +963,15 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
 }
 
 #[tokio::test]
-async fn a_replay_from_another_principal_scope_is_refused() {
-    let (_temp_dir, store, namespace_id, context) = setup().await;
-    let request = CommitIntent::single(
-        CommitId::parse("scope-replay").expect("commit id"),
-        loonfs_test_support::test_actor(),
-        None,
-        create_directory("/docs"),
-    )
-    .with_subject(subject("root", &["prn_root"]));
-    submit_commit(&store, &namespace_id, request.clone(), &context)
-        .await
-        .expect("commit");
-
-    let mut wrong_scope = subject("root", &["prn_root"]);
-    wrong_scope.principal_scope = PrincipalScope::parse("org_other").expect("scope");
-    let error = submit_commit(
-        &store,
-        &namespace_id,
-        request.with_subject(wrong_scope),
-        &context,
-    )
-    .await
-    .expect_err("wrong-scope replay");
-    assert_matches!(
-        error,
-        loonfs_core::CoreError::PrincipalScopeMismatch {
-            expected_principal_scope,
-            actual_principal_scope,
-        } if expected_principal_scope.as_str() == "org_demo"
-            && actual_principal_scope.as_str() == "org_other"
-    );
-}
-
-#[tokio::test]
 async fn upload_sessions_belong_to_their_subject() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
-    let engine = namespace_engine(&store, &namespace_id, &context);
-    assert_eq!(
-        engine
-            .begin_upload(&catalog)
-            .await
-            .expect_err("subject required")
-            .code(),
-        ErrorCode::InvalidRequest
-    );
+    let service = namespace_engine(&store, &namespace_id, &context);
+    let service_session = service.begin_upload(&catalog).await.expect("begin");
+    service
+        .get_upload(&catalog, &service_session.upload_id)
+        .await
+        .expect("the service context's session");
     let ada = subject("usr_ada", &[]);
     let bob = subject("usr_bob", &[]);
     let as_ada = namespace_engine(&store, &namespace_id, &context).with_subject(ada.clone());
@@ -1048,21 +989,19 @@ async fn upload_sessions_belong_to_their_subject() {
         .get_upload(&catalog, &session.upload_id)
         .await
         .expect("owner session");
-    let unrestricted = NamespaceId::parse("unrestricted").expect("namespace");
-    NamespaceFixture::new(&store, &unrestricted, &context)
-        .create()
-        .await
-        .expect("bootstrap");
-    let catalog = loonfs_core::test_support::load_catalog(&store, &unrestricted).await;
-    let session = namespace_engine(&store, &unrestricted, &context)
-        .with_subject(ada)
-        .begin_upload(&catalog)
-        .await
-        .expect("begin");
-    namespace_engine(&store, &unrestricted, &context)
-        .get_upload(&catalog, &session.upload_id)
-        .await
-        .expect("subject ignored");
+    for (engine, upload_id) in [
+        (&service, &session.upload_id),
+        (&as_ada, &service_session.upload_id),
+    ] {
+        assert_eq!(
+            engine
+                .get_upload(&catalog, upload_id)
+                .await
+                .expect_err("another owner's session")
+                .code(),
+            ErrorCode::UploadNotFound
+        );
+    }
 }
 
 async fn submit_operation(
@@ -1527,7 +1466,7 @@ async fn trash_lists_entries_whose_original_parent_is_readable() {
 }
 
 #[tokio::test]
-async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
+async fn the_feed_and_content_refs_need_an_administrator_or_the_service_context() {
     let (_temp_dir, store, namespace_id, _, content) = read_fixture().await;
     let context = read_context(&store, &namespace_id).await;
     let viewer = read_engine(&store, &namespace_id, "viewer");
@@ -1574,13 +1513,44 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
             b"body"
         );
     }
-    let engine = loonfs_core::NamespaceReaderEngine::reader(namespace_store(&store, &namespace_id));
-    let error = engine
-        .resolve_path("/team/file", StatOptions::default(), &context)
-        .await
-        .expect_err("subject required");
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    assert_matches!(error, loonfs_core::CoreError::SubjectRequired { .. });
+}
+
+/// Checks that the service context reads an item that no grant reaches, in
+/// a namespace with access rows.
+#[tokio::test]
+async fn the_service_context_reads_an_item_that_no_grant_reaches() {
+    let (_temp_dir, store, namespace_id, context) = setup().await;
+    seed(
+        &store,
+        &namespace_id,
+        &context,
+        vec![
+            create_directory("/sealed"),
+            update_access("/sealed", true, AccessGrants::default()),
+        ],
+    )
+    .await;
+    let context = read_context(&store, &namespace_id).await;
+    assert_eq!(
+        read_engine(&store, &namespace_id, "prn_root")
+            .resolve_path("/sealed", StatOptions::default(), &context)
+            .await
+            .expect("an administrator reads every item")
+            .inode_id,
+        loonfs_core::NamespaceReaderEngine::reader(namespace_store(&store, &namespace_id))
+            .resolve_path("/sealed", StatOptions::default(), &context)
+            .await
+            .expect("the service context reads the item")
+            .inode_id
+    );
+    assert_eq!(
+        read_engine(&store, &namespace_id, "prn_member")
+            .resolve_path("/sealed", StatOptions::default(), &context)
+            .await
+            .expect_err("no grant reaches the item")
+            .code(),
+        ErrorCode::PathNotFound
+    );
 }
 
 #[tokio::test]

@@ -144,7 +144,6 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             loonfs_types::PoolId::generate(),
             0,
             loonfs_types::ActorId::parse("runs").expect("a static actor id should parse"),
-            loonfs_types::NamespaceAccess::Unrestricted {},
         );
         let manifest = loonfs_types::format::manifest::encode_namespace_manifest_json(payload)
             .expect("an initial manifest should encode")

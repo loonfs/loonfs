@@ -4,9 +4,7 @@
 use super::direct::validate_upload_checksum;
 use super::proxied::find_proxied_content_ref;
 use super::records::{create_upload_outcome, OutcomeCreation};
-use super::session::{
-    authorize_upload_subject, ensure_session_open, ensure_session_subject, upload_mode,
-};
+use super::session::{ensure_session_open, ensure_session_subject, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, COMPLETED_UPLOAD_RECEIPT_WINDOW_MS};
@@ -41,11 +39,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<CompletedUpload> {
         let clock = self.namespace.start_clock();
         let catalog = self.own_catalog(catalog);
-        authorize_upload_subject(
-            &self.namespace.namespace_id,
-            catalog.access(),
-            self.subject.as_ref(),
-        )?;
         let now_ms = clock.request_at_ms();
         let loaded = self
             .namespace

@@ -2,9 +2,7 @@
 
 use bytes::Bytes;
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
-use loonfs::{
-    CreateNamespaceOptions, InlineContentPolicy, LoonFs, Namespace, SharedObjectStore, Writable,
-};
+use loonfs::{InlineContentPolicy, LoonFs, Namespace, SharedObjectStore, Writable};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::bounded;
@@ -15,8 +13,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId,
-    DestinationBehavior, ErrorCode, NamespaceAccess, NamespaceId, PrincipalId, PrincipalScope,
-    PrincipalSet, Subject, SubjectId,
+    DestinationBehavior, ErrorCode, NamespaceId, PrincipalId, PrincipalSet, Subject, SubjectId,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +26,6 @@ fn namespace() -> NamespaceId {
 
 fn subject(name: &str) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("scope").expect("scope"),
         subject_id: SubjectId::parse(name).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(name).expect("principal")
@@ -108,19 +104,15 @@ async fn open(store: SharedObjectStore, wal_object_budget: usize) -> LoonFs<Writ
 
 async fn seed(writer: &LoonFs<Writable>) -> Namespace<Writable> {
     writer
-        .create_namespace_with_options(
-            &namespace(),
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: PrincipalScope::parse("scope").expect("scope"),
-                    root_grants: grants("root", &[AccessRight::Admin]),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(&namespace(), &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    loonfs::test_support::set_root_access(
+        writer,
+        &namespace(),
+        grants("root", &[AccessRight::Admin]),
+    )
+    .await;
     let namespace_writer = writer.open_namespace(&namespace()).expect("open namespace");
     let mut seed = request(
         "seed",

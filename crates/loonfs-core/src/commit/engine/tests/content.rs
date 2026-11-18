@@ -346,7 +346,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         .load_current_metadata_view()
         .await
         .expect("reopen");
-    let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
+    let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service);
     assert_eq!(
         reopened
             .resolve_path(
@@ -463,7 +463,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
             .resolve_path(
                 path,
                 loonfs_types::options::AttributeInclusion::Omit,
-                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+                &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
             )
             .await
             .expect("committed path");
@@ -472,7 +472,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .resolve_path(
             "/original",
             loonfs_types::options::AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("original remains");

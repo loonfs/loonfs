@@ -60,7 +60,7 @@ pub(crate) struct ProfileContext {
 
 impl ProfileContext {
     /// Resolves the selected profile and opens its backend, with a client
-    /// that acts as the token holder.
+    /// that acts in the service context.
     pub(crate) async fn resolve(invocation: &Invocation) -> Result<Self, CommandFailure> {
         let explicit_profile = invocation.selectors.profile.as_deref();
         let config = load_config(&invocation.config.path)

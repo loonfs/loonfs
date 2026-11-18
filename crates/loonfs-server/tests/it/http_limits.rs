@@ -36,6 +36,7 @@ async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
         raw_agent()
             .post(&format!("{}/v0/namespaces", harness.server_url))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .set("Loonfs-Actor", "test-actor")
             .send_json(json!({ "namespace_id": "bad/name" })),
     );
@@ -47,6 +48,7 @@ async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call(),
     );
 
@@ -100,6 +102,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     match raw_agent()
         .post(&commits_url)
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .set("Loonfs-Actor", "test-actor")
         .send_json(move_request("move-exchange", "exchange"))
     {
@@ -115,6 +118,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     let accepted = raw_agent()
         .post(&commits_url)
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .set("Loonfs-Actor", "test-actor")
         .send_json(move_request("move-replace", "replace"))
         .expect("replace is a valid move behavior");
@@ -131,6 +135,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
             harness.server_url
         ))
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .set("content-type", "application/json")
         .send_string("{\"mode\": \"direkt_put\"}")
     {
@@ -189,6 +194,7 @@ async fn a_misspelled_delete_guard_is_rejected_and_the_namespace_survives() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call(),
         "expected_head_sq",
     );
@@ -231,6 +237,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call(),
         "include_atributes",
     );
@@ -243,6 +250,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call(),
         "include_attributes",
     );
@@ -255,6 +263,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call(),
         "verbose",
     );
@@ -267,6 +276,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
             harness.server_url
         ))
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .call()
     {
         Err(ureq::Error::Status(status, response)) => {
@@ -288,6 +298,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
     let empty_query = raw_agent()
         .get(&format!("{}/v0/capabilities?", harness.server_url))
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .call()
         .expect("an empty query string names no parameter");
     assert_eq!(empty_query.status(), 200);
@@ -298,6 +309,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
         let response = raw_agent()
             .get(&format!("{}/{path}?cache_buster=1", harness.server_url))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
             .unwrap_or_else(|error| panic!("`/{path}` ignores query strings, got {error:?}"));
         assert_eq!(response.status(), 200);

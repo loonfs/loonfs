@@ -383,7 +383,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     ) -> Result<Vec<ScannedChild>> {
         let mut readable = vec![true; children.len()];
         async {
-            if !access.is_unrestricted() {
+            if !access.is_service() {
                 session.preload_access_rows(&children).await?;
                 for (child, readable) in children.iter().zip(&mut readable) {
                     *readable = access

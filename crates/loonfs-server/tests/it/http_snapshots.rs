@@ -35,6 +35,7 @@ fn list_snapshots(server_url: &str, namespace: &str) -> ApiResult<ListSnapshotsR
             raw_agent()
                 .get(&format!("{server_url}/v0/namespaces/{namespace}/snapshots"))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call(),
         )
     })
@@ -68,6 +69,7 @@ fn delete_json<T: DeserializeOwned>(url: &str) -> ApiResult<T> {
             raw_agent()
                 .delete(url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call(),
         )
     })
@@ -79,6 +81,7 @@ fn post_json_body<T: DeserializeOwned>(url: &str, body: serde_json::Value) -> Ap
             raw_agent()
                 .post(url)
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .send_json(body.clone()),
         )
     })
@@ -328,6 +331,7 @@ async fn http_user_and_maintenance_snapshot_listings_list_the_same_snapshot() {
                     harness.server_url, namespace
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call(),
         )
     })

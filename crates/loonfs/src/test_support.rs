@@ -62,6 +62,35 @@ pub async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writabl
         .expect("build writer")
 }
 
+/// Sets the root access row of `namespace_id` to `grants` with an
+/// `update_access` commit in the service context.
+///
+/// An application sets a new namespace's first administrators this way.
+/// `writer` acts in the service context, as a runtime without a subject does.
+pub async fn set_root_access(
+    writer: &LoonFs<Writable>,
+    namespace_id: &loonfs_types::NamespaceId,
+    grants: loonfs_types::AccessGrants,
+) {
+    assert!(
+        writer.subject().is_none(),
+        "the root access row is set in the service context"
+    );
+    writer
+        .open_namespace(namespace_id)
+        .expect("open the namespace")
+        .update_access(
+            "/",
+            &loonfs_types::ActorId::parse("test-actor").expect("the test actor id should parse"),
+            loonfs_types::options::AccessState {
+                boundary: false,
+                grants,
+            },
+        )
+        .await
+        .expect("set the root access row");
+}
+
 /// Drops `writer`'s views of the namespace (its writer session's position and
 /// its cached head) the way a change of unknown effect does, so the
 /// runtime's next read of the namespace loads it from the store.

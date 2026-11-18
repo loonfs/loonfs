@@ -4,9 +4,8 @@ use crate::common::*;
 use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, FoldWalOutcome,
-    FoldWalResponse, InlineContentPolicy, LoonFs, MetadataCompactionOutcome, PutFileOptions,
-    GC_GRACE_WINDOW_MS,
+    CreateDirectoryOptions, DestinationBehavior, FoldWalOutcome, FoldWalResponse,
+    InlineContentPolicy, LoonFs, MetadataCompactionOutcome, PutFileOptions, GC_GRACE_WINDOW_MS,
 };
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -17,8 +16,7 @@ use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, RunTier};
 use loonfs_types::format::segment_blocks::{decode_data_block, decode_index_block};
 use loonfs_types::{
     AccessGrants, AccessRevisionNo, AccessRight, Attributes, AttributesRevisionNo, CommitSeq,
-    ErrorCode, NamespaceAccess, PathEntry, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo,
-    Subject, SubjectId,
+    ErrorCode, PathEntry, PrincipalId, PrincipalSet, RevisionNo, Subject, SubjectId,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,30 +42,23 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
     let fork = namespace_id("fork");
     let principal = PrincipalId::parse("prn_admin").expect("principal");
     let subject = Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse("administrator").expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([principal.clone()])).expect("principals"),
     };
+    runtime
+        .writer
+        .create_namespace(&source, &test_actor())
+        .await
+        .expect("create the namespace");
+    loonfs::test_support::set_root_access(
+        &runtime.writer,
+        &source,
+        AccessGrants::new(BTreeMap::from([(principal, AccessRight::Admin.into())]))
+            .expect("root grants"),
+    )
+    .await;
     let writer = runtime.writer.with_subject(subject.clone());
     let source_namespace = writer.namespace(&source);
-    writer
-        .create_namespace_with_options(
-            &source,
-            &test_actor(),
-            &CreateNamespaceOptions {
-                access: NamespaceAccess::Acl {
-                    principal_scope: subject.principal_scope.clone(),
-                    root_grants: AccessGrants::new(BTreeMap::from([(
-                        principal,
-                        AccessRight::Admin.into(),
-                    )]))
-                    .expect("root grants"),
-                },
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("create ACL namespace");
     let namespace_writer = writer.open_namespace(&source).expect("open namespace");
     namespace_writer
         .create_directory_with_options(

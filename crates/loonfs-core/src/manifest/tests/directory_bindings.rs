@@ -154,7 +154,7 @@ async fn assert_names<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     expected: &[(&str, InodeId)],
 ) {
-    let mut access = ReadAccess::live(Authorizer::Unrestricted);
+    let mut access = ReadAccess::live(Authorizer::Service);
     let page = view
         .list_path_page(
             "/",
@@ -217,7 +217,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_snapshot_reads() {
         .resolve_path(
             "/a",
             AttributeInclusion::Omit,
-            &ReadAccess::live(Authorizer::Unrestricted),
+            &ReadAccess::live(Authorizer::Service),
         )
         .await
         .expect("first path")
@@ -316,7 +316,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_snapshot_reads() {
         .resolve_path(
             "/a",
             AttributeInclusion::Omit,
-            &ReadAccess::live(Authorizer::Unrestricted),
+            &ReadAccess::live(Authorizer::Service),
         )
         .await
         .expect("replacement")
@@ -373,7 +373,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
         .load_current_metadata_view()
         .await
         .expect("created view");
-    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let access = ReadAccess::live(Authorizer::Service);
     let mut children = Vec::new();
     for path in ["/b", "/c"] {
         let entry = created
@@ -499,7 +499,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .expect("fold the creates");
     let last_parent = parents[2].0;
     let child = crate::test_support::visible_inode_id(&store, &namespace_id, &reports[0]).await;
-    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let access = ReadAccess::live(Authorizer::Service);
 
     for (source, destination) in [(&reports[0], &reports[1]), (&reports[1], &reports[2])] {
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)

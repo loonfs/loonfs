@@ -171,8 +171,8 @@ impl HttpState {
         self.request_limit.as_ref()
     }
 
-    /// Returns the runtime scoped to `subject`, or the service runtime when
-    /// the request has no subject.
+    /// Returns the runtime scoped to `subject`, or the runtime that acts in
+    /// the service context when `subject` is `None`.
     pub(crate) fn runtime_for(&self, subject: Option<Subject>) -> LoonFs<Writable> {
         match subject {
             Some(subject) => self.runtime.with_subject(subject),
@@ -181,7 +181,7 @@ impl HttpState {
     }
 
     /// Opens the host's writable handle for `namespace_id`, scoped to
-    /// `subject` unless `subject` is `None`.
+    /// `subject`, or acting in the service context when `subject` is `None`.
     pub(crate) async fn open_writer(
         &self,
         namespace_id: &NamespaceId,

@@ -76,7 +76,6 @@ impl NamespaceReads {
         let view = namespace
             .read_view_with_options(&LiveReadOptions { consistency })
             .await?;
-        view.ensure_subject()?;
         Ok(NamespaceReadView { reads: self, view })
     }
 

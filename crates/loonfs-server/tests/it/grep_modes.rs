@@ -974,7 +974,8 @@ async fn send(
     let mut request = Request::builder()
         .method(method)
         .uri(uri)
-        .header("authorization", "Bearer test-token");
+        .header("authorization", "Bearer test-token")
+        .header("Loonfs-Context", "service");
     if body.is_some() {
         request = request.header("content-type", "application/json");
     }

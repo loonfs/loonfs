@@ -1,7 +1,7 @@
 //! Maintenance job requests and responses for the v0 HTTP API.
 
 use super::{GcRequest, GcResponse, PoolGcResponse};
-use crate::{AccessRevisionNo, CommitId, CommitSeq, NamespaceId, PrincipalId};
+use crate::{CommitSeq, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -91,8 +91,6 @@ pub enum RunMaintenanceJobRequest {
     Retention(AdvanceRetentionRequest),
     /// A job that sets or clears the namespace's retention window.
     RetentionWindow(SetRetentionWindowRequest),
-    /// A job that restores a root administrator.
-    RecoverAdministrator(RecoverAdministratorRequest),
 }
 
 /// One maintenance job for one pool.
@@ -117,32 +115,6 @@ pub enum RunPoolMaintenanceJobResponse {
     /// A job kind from a newer server. This variant doesn't include the job's own fields.
     #[serde(other)]
     Unknown,
-}
-
-/// A request to grant `admin` on the root access row to one principal, through a commit that
-/// doesn't check any subject's rights.
-///
-/// Every other root grant stays in place.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct RecoverAdministratorRequest {
-    /// The principal that receives administrator rights.
-    pub principal_id: PrincipalId,
-}
-
-/// The committed administrator recovery.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct RecoverAdministratorResponse {
-    /// The namespace whose root grants changed.
-    pub namespace_id: NamespaceId,
-    /// The ID of the recovery commit.
-    pub commit_id: CommitId,
-    /// The sequence of the recovery commit.
-    pub committed_seq: CommitSeq,
-    /// The root's access revision after the recovery.
-    pub access_revision_no: AccessRevisionNo,
 }
 
 /// Overrides for the `metadata` maintenance job.
@@ -175,8 +147,6 @@ pub enum RunMaintenanceJobResponse {
     Retention(AdvanceRetentionResponse),
     /// The namespace's retention window after the job.
     RetentionWindow(SetRetentionWindowResponse),
-    /// The committed administrator recovery.
-    RecoverAdministrator(RecoverAdministratorResponse),
     /// A job kind from a newer server. This variant doesn't include the job's own fields.
     #[serde(other)]
     Unknown,

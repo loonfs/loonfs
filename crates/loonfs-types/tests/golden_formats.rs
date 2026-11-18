@@ -27,8 +27,8 @@ use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::format::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, DeletedBinding, DeltaPosition,
     ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef, MetadataRow, MetadataRowFamily,
-    MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload, RunTier,
-    TombstoneRowAction, TrashRowAction, METADATA_SEGMENT_ENCODING,
+    MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload, RunTier, TombstoneRowAction,
+    TrashRowAction, METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
     decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, MergeRecord, WalCodecError,
@@ -41,8 +41,7 @@ use loonfs_types::{
     AttributeValue, Attributes, AttributesRevisionNo, Checksum, ChecksumAlgorithm, ChecksumHex,
     CommitFingerprint, CommitId, CommitSeq, ContentId, ContentRef, ContentRefKind, ExtensionName,
     IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId,
-    PayloadChecksum, PrincipalId, PrincipalScope, RevisionNo, RunNo, SnapshotId, UploadId, WalNo,
-    WriterEpoch,
+    PayloadChecksum, PrincipalId, RevisionNo, RunNo, SnapshotId, UploadId, WalNo, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -586,7 +585,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         },
         created_at_ms: 1_000,
         created_by: loonfs_types::ActorId::parse("test").expect("actor"),
-        access: NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,
         pool_id: loonfs_types::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x")
@@ -683,20 +681,6 @@ fn sample_manifest_ref(number: u64) -> ManifestRef {
 
         head_seq: CommitSeq(number),
         payload_checksum: payload_checksum(),
-    }
-}
-
-fn sample_acl_manifest() -> NamespaceManifestPayload {
-    NamespaceManifestPayload {
-        access: NamespaceAccess::Acl {
-            principal_scope: PrincipalScope::parse("org_test").expect("scope"),
-            root_grants: AccessGrants::new(std::collections::BTreeMap::from([(
-                PrincipalId::parse("prn_root").expect("principal"),
-                [AccessRight::Admin].into_iter().collect(),
-            )]))
-            .expect("grants"),
-        },
-        ..sample_manifest_payload()
     }
 }
 
@@ -2003,7 +1987,6 @@ fn namespace_manifest_decode_rejects_unknown_fields_at_every_level() {
         .into_bytes();
     for path in [
         "",
-        "/access",
         "/activity",
         "/runs/0",
         "/runs/0/segments/0",
@@ -3331,7 +3314,6 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
             sample_initializing_manifest(),
         ),
         ("manifest.rebase.v1.json", sample_rebase_manifest()),
-        ("manifest.acl.v1.json", sample_acl_manifest()),
         (
             "manifest.retention_window.v1.json",
             sample_retention_window_manifest(),

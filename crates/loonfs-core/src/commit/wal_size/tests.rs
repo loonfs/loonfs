@@ -312,7 +312,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         let plan = session
             .prepare_commit(
                 &candidate,
-                crate::authorize::Authorizer::Unrestricted,
+                crate::authorize::Authorizer::Service,
                 candidate.semantic_identity(&namespace_id),
             )
             .await

@@ -17,10 +17,9 @@ type RouteContext struct {
 }
 
 type Authorization struct {
-	ActorID        string // Sent upstream in Loonfs-Actor when non-empty.
-	SubjectID      string
-	PrincipalScope string
-	Principals     []string
+	ActorID    string // Sent upstream in Loonfs-Actor when non-empty.
+	SubjectID  string
+	Principals []string
 }
 
 // Refusal is returned from Authorize as the error to send the refusal back.
@@ -40,7 +39,9 @@ type Config struct {
 	Token         string
 	// Authorize runs before every forwarded request. A *Refusal error is sent
 	// back as the response; any other error answers 500.
-	// Authorize is required; an empty authorization forwards as the token holder.
+	// Authorize is required. An empty authorization forwards the request
+	// without an actor or principals, so it acts in the service context only
+	// when the browser sent Loonfs-Context: service.
 	// The proxy forwards any namespace ID in the path, so check c.NamespaceID here.
 	Authorize func(r *http.Request, c RouteContext) (Authorization, error)
 }
@@ -157,10 +158,6 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 		}
 		return
 	}
-	if (authorization.PrincipalScope == "") != (authorization.Principals == nil) {
-		responseWriter.WriteHeader(http.StatusInternalServerError)
-		return
-	}
 
 	outgoing := request.Clone(request.Context())
 	outgoing.URL.Scheme = h.target.Scheme
@@ -181,7 +178,6 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 	}
 	outgoing.Header.Del("Loonfs-Actor")
 	outgoing.Header.Del("Loonfs-Subject")
-	outgoing.Header.Del("Loonfs-Principal-Scope")
 	outgoing.Header.Del("Loonfs-Principals")
 	if authorization.ActorID != "" {
 		outgoing.Header.Set("Loonfs-Actor", authorization.ActorID)
@@ -189,9 +185,6 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 
 	if authorization.SubjectID != "" {
 		outgoing.Header.Set("Loonfs-Subject", authorization.SubjectID)
-	}
-	if authorization.PrincipalScope != "" {
-		outgoing.Header.Set("Loonfs-Principal-Scope", authorization.PrincipalScope)
 	}
 	if authorization.Principals != nil {
 		outgoing.Header.Set("Loonfs-Principals", strings.Join(authorization.Principals, ","))

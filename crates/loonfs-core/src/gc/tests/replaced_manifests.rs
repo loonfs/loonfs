@@ -149,11 +149,7 @@ async fn a_replaced_manifest_and_its_own_segments_go_at_the_first_pass_once_old_
     assert_eq!(report.deleted.metadata_segments, dropped.len() as u64);
 
     let error = view
-        .read_file_bytes(
-            "/docs/one",
-            None,
-            &ReadAccess::live(Authorizer::Unrestricted),
-        )
+        .read_file_bytes("/docs/one", None, &ReadAccess::live(Authorizer::Service))
         .await
         .expect_err("the replaced view's bindings are gone");
     assert_matches!(

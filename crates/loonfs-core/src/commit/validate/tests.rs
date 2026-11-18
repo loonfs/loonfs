@@ -202,7 +202,6 @@ fn validation_context(metadata_state: &MetadataState, seq: CommitSeq) -> TestVal
     let head = NamespaceReadState {
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
-        access: loonfs_types::NamespaceAccess::Unrestricted {},
         fork_basis: None,
         pool_id: loonfs_test_support::ids::numbered_pool_id(1),
         namespace_id: namespace_id.clone(),

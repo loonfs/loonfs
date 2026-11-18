@@ -14,7 +14,7 @@ async fn assert_leaf_reads_every_members_file(store: &LocalFsStore, namespaces: 
             .read_file_bytes(
                 &format!("/owned-{index}"),
                 None,
-                &ReadAccess::live(Authorizer::Unrestricted),
+                &ReadAccess::live(Authorizer::Service),
             )
             .await
             .expect("read inherited or local content");

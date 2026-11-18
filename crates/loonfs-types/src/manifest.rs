@@ -9,8 +9,8 @@ use crate::segment_blocks::BlockHandle;
 use crate::Checksum;
 use crate::CompactorEpoch;
 use crate::PoolId;
-use crate::{AccessGrants, ActorId, CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
-use crate::{ExtensionName, IndexSegmentId, PrincipalScope, WalNo, WriterEpoch};
+use crate::{ActorId, CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
+use crate::{ExtensionName, IndexSegmentId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -226,36 +226,6 @@ pub struct ExtensionSegmentRef {
     pub filter_inline: Option<String>,
 }
 
-/// A namespace's access mode, which can't be changed after the namespace is created.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum NamespaceAccess {
-    /// Every caller with the deployment credential can perform every operation.
-    Unrestricted {},
-    /// Access rows control every operation.
-    Acl {
-        /// The identity domain that the namespace's principal IDs belong to.
-        principal_scope: PrincipalScope,
-        /// The root inode's grants when the namespace is created. Usually each initial
-        /// administrator has `admin`.
-        root_grants: AccessGrants,
-    },
-}
-
-impl NamespaceAccess {
-    /// Returns the unrestricted access mode.
-    pub fn unrestricted() -> Self {
-        Self::Unrestricted {}
-    }
-
-    /// Reports whether every caller with the deployment credential may do
-    /// everything.
-    pub const fn is_unrestricted(&self) -> bool {
-        matches!(self, Self::Unrestricted {})
-    }
-}
-
 /// Stores a counter within the public integer bound.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
@@ -326,12 +296,9 @@ pub struct NamespaceManifestPayload {
     pub created_at_ms: u64,
     /// Actor that created the namespace, as supplied by the application.
     pub created_by: ActorId,
-    /// The namespace's access mode, which can't be changed.
-    pub access: NamespaceAccess,
     /// The namespace's retention window in milliseconds, which a scheduled
     /// retention advance uses. A namespace without a window isn't advanced
-    /// on a schedule. Unlike the
-    /// access mode, a successor can change it (see [Advancing the retention
+    /// on a schedule. A successor can change it (see [Advancing the retention
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_window_ms: Option<NonZeroU64>,
@@ -414,14 +381,12 @@ impl NamespaceManifestPayload {
         pool_id: PoolId,
         created_at_ms: u64,
         created_by: ActorId,
-        access: NamespaceAccess,
     ) -> Self {
         Self {
             namespace_id,
             pool_id,
             created_at_ms,
             created_by,
-            access,
             retention_window_ms: None,
             fork_basis: None,
             status: NamespaceStatus::Initializing {},
@@ -465,7 +430,6 @@ impl NamespaceManifestPayload {
                 source.pool_id.clone(),
                 created_at_ms,
                 created_by,
-                source.access.clone(),
             )
         }
     }
@@ -512,7 +476,6 @@ impl NamespaceManifestPayload {
             namespace_id: self.namespace_id.clone(),
             created_at_ms: self.created_at_ms,
             created_by: self.created_by.clone(),
-            access: self.access.clone(),
             retention_window_ms: self.retention_window_ms,
             fork_basis: self.fork_basis.clone(),
             pool_id: self.pool_id.clone(),
@@ -645,9 +608,6 @@ impl NamespaceManifestPayload {
         }
         if successor.created_by != self.created_by {
             return invalid("created_by");
-        }
-        if successor.access != self.access {
-            return invalid("access");
         }
         if successor.fork_basis != self.fork_basis {
             return invalid("fork_basis");
@@ -799,7 +759,6 @@ mod tests {
             pool_id(),
             0,
             crate::ActorId::parse("test").expect("actor"),
-            super::NamespaceAccess::unrestricted(),
         )
         .activated();
         assert_eq!(maximum.checked_add(Default::default()), Some(maximum));
@@ -870,7 +829,6 @@ mod tests {
             pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
-            super::NamespaceAccess::Unrestricted {},
         )
         .activated();
         let mut next = initial.clone();
@@ -879,8 +837,7 @@ mod tests {
             ("namespace_id", 0),
             ("created_at_ms", 1),
             ("fork_basis", 2),
-            ("access", 3),
-            ("pool_id", 4),
+            ("pool_id", 3),
         ] {
             let mut successor = next.clone();
             match change {
@@ -910,13 +867,7 @@ mod tests {
                         rebased_from: None,
                     })
                 }
-                4 => successor.pool_id = crate::PoolId::generate(),
-                _ => {
-                    successor.access = super::NamespaceAccess::Acl {
-                        principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
-                        root_grants: crate::AccessGrants::default(),
-                    }
-                }
+                _ => successor.pool_id = crate::PoolId::generate(),
             }
             assert_eq!(
                 initial
@@ -961,7 +912,6 @@ mod tests {
             pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
-            super::NamespaceAccess::Unrestricted {},
         )
         .activated();
         let snapshot_id = |random: u8| {
@@ -1046,7 +996,6 @@ mod tests {
             pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
-            super::NamespaceAccess::Unrestricted {},
         )
         .activated();
         let snapshot_id = |manifest_no: u8, random: u8| {
@@ -1171,7 +1120,6 @@ mod tests {
             pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
-            super::NamespaceAccess::Unrestricted {},
         )
         .activated();
         let mut later = initial.clone();
@@ -1231,7 +1179,6 @@ mod tests {
             pool_id(),
             0,
             crate::ActorId::parse("test").expect("actor"),
-            super::NamespaceAccess::unrestricted(),
         ))
         .expect("encode");
         let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");

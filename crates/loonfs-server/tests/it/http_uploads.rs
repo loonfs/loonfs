@@ -40,6 +40,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
             harness.server_url
         ))
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .set("content-type", "application/octet-stream")
         .send_bytes(b"hello");
     let ureq::Error::Status(status, response) = result.expect_err("invalid upload id should fail")
@@ -84,6 +85,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .set("content-type", "application/json")
             .send_string(body);
         let ureq::Error::Status(status, response) =
@@ -130,6 +132,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
     let result = raw_agent()
         .post(&completion_url)
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .set("content-type", "application/json")
         .send_string(
             r#"{"mode":"direct_multipart","content":{"size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}},"parts":[]}"#,
@@ -228,6 +231,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
     let result = raw_agent()
         .post(&completion_url)
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .set("content-type", "application/json")
         .send_bytes(&just_under);
     let ureq::Error::Status(status, response) =
@@ -250,6 +254,7 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
     let result = raw_agent()
         .post(&completion_url)
         .set("authorization", "Bearer test-token")
+        .set("Loonfs-Context", "service")
         .set("content-type", "application/json")
         .send_bytes(&one_over);
     let ureq::Error::Status(status, response) =
@@ -587,6 +592,7 @@ fn get_upload(server_url: &str, upload_id: &loonfs_types::UploadId) -> UploadSes
                 "{server_url}/v0/namespaces/demo/uploads/{upload_id}"
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
             .expect("get upload status");
         serde_json::from_reader(response.into_reader()).expect("decode upload status")
@@ -603,6 +609,7 @@ fn abort_upload(
                 "{server_url}/v0/namespaces/demo/uploads/{upload_id}/abort"
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
             .map_err(Box::new)?;
         Ok(serde_json::from_reader(response.into_reader()).expect("decode abort response"))

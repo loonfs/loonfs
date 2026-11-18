@@ -231,7 +231,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
         .load_current_metadata_view()
         .await
         .expect("fresh fork reader");
-    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let access = ReadAccess::live(Authorizer::Service);
     for path in ["/one", "/two"] {
         let file = view
             .read_file_bytes(path, None, &access)

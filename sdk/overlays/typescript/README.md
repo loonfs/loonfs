@@ -9,6 +9,7 @@ import { LoonFSClient } from "@loonfs/sdk/server";
 const client = new LoonFSClient({
     baseUrl: process.env.LOONFS_URL!,
     token: process.env.LOONFS_AUTH_TOKEN!,
+    headers: { "Loonfs-Context": "service" },
 });
 await client.files.upload({
     namespace_id: "demo",
@@ -17,6 +18,14 @@ await client.files.upload({
     commit_id: "cmt_7kn71d9dq885x91hejz3gvf9p0",
 });
 ```
+
+Every request that reads or changes a namespace's contents sends exactly one
+of two headers. `Loonfs-Principals` lists the principals that the request acts
+for, and the server checks their rights. `Loonfs-Context: service` acts on the
+application's own account, and the server checks no rights. A request that
+sends neither or both fails with `invalid_request`. A new namespace has no
+access rows and no administrators, so grant the first ones with a commit whose
+one operation is `update_access` on `/`, sent in the service context.
 
 Server clients accept an optional `actorId`. In a browser, set `baseUrl` to the
 application's proxy (see [Proxy](#proxy)) and `token` to the credential that the
@@ -113,11 +122,13 @@ The hook receives the request and the route context, which includes the decoded
 `namespaceId`. Any namespace ID in the path reaches LoonFS, so the hook checks
 that the caller may use that namespace. Return a `Response` to refuse access, or
 an authorization object to forward as the approved identity. Returning `{}`
-forwards as the token holder.
+forwards the request without an actor or principals.
 
 The proxy forwards bodies without rewriting JSON. It strips browser credentials,
-cookies, `Host`, actor and subject headers, and hop-by-hop headers. It supplies
-the configured token and the identity returned by `authorize`.
+cookies, `Host`, actor, subject and principals headers, and hop-by-hop headers.
+It supplies the configured token and the identity returned by `authorize`. It
+forwards `Loonfs-Context` unchanged, so a request that the hook forwards without
+principals has to carry `Loonfs-Context: service` from the client.
 
 ## Retries
 

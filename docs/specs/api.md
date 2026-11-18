@@ -232,7 +232,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | --- | --- | --- |
 | `invalid_request` | 400 | The request is malformed. A path, ID, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message identifies the offending field or limit. |
 | `unauthorized` | 401 | The credentials are missing or wrong. |
-| `forbidden` | 403 | The subject lacks authority that the operation needs: some but not all of the required rights on a checked inode, the authority that a move or access update requires, administrator rights on an administrator-only operation, or the namespace's principal scope. If the subject has no rights on a checked inode, the request returns `path_not_found` or `inode_not_found` instead (see [Authorization in ACL namespaces](#authorization-in-acl-namespaces)). |
+| `forbidden` | 403 | The subject lacks authority that the operation needs: some but not all of the required rights on a checked inode, the authority that a move or access update requires, or administrator rights on an administrator-only operation. If the subject has no rights on a checked inode, the request returns `path_not_found` or `inode_not_found` instead (see [Authorization](#authorization)). |
 | `content_too_large` | 413 | A request or proxied response exceeds its size limit, or an append or an inline content value is over its limit. Every JSON request body MUST fit within 2 MiB, except on the upload operations, which have their own limits. One append contains at most 256 KiB, and one inline value contains at most `commit.max_inline_content_bytes_per_operation` bytes. Send smaller proxied uploads, or use `direct_put` when it's available. Multipart completions MUST fit within `upload.complete.max_request_body_bytes`. For large proxied reads, read the file in ranges, or request a presigned download URL when `filesystem.downloads.direct_get` is available. |
 | `merge_too_large` | 413 | A [merge](glossary.md#merge) is larger than one of the two bounds that apply to a merge in place of the request limits: the size of one WAL object (512 MiB), or the server's merge allowance, which limits the estimated peak memory of the merges that the server plans and publishes at the same time (`max_merge_bytes` in the reference server, 512 MiB by default). The server estimates a merge's memory as three times the merge's planned WAL bytes, or as the memory that planning the merge uses (the fork's touched inodes, their paths, and one page of the fork's commits), whichever is larger. A merge whose range touched more inodes than one WAL object could contain an operation for returns this code too, before the server reads those inodes. The details' `merge_bound` says which bound refused the merge: `wal_object`, `merge_allowance`, or `touched_inodes` for a range that touched too many inodes. Clients MUST tolerate other values. The details also include `split_at_seq`, a fork sequence such that a merge of the fork's commits through it fits, unless no shorter range fits (see [`POST /merges`](#614-post-merges)). Merge the fork's commits in smaller ranges: a merge of the commits after `P` through `T2` that's too large becomes a merge of the commits after `P` through `T1`, where `T1` is `split_at_seq`, followed by a merge of the commits after `T1` through `T2`. Each piece is a complete merge of its range. A single fork commit whose changes exceed the size of one WAL object can't be split, and it can't be merged. One that exceeds only the merge allowance can be merged on a server with a higher allowance. In the reference implementation, the upper bound on a created file's WAL bytes, which LoonFS computes before planning, is about 4,850 bytes, so one WAL object fits about 110,000 file creates. The allowance is charged three times that bound for each created file, so the default allowance admits a merge of about 36,000 file creates. With the defaults, a fork commit that creates more inodes than that (for example, many deep paths whose parent directories the commit creates) has to be made as several smaller commits so that they can be merged, or the server needs a higher allowance. |
 | `commit_too_large` | 413 | A commit is larger than one WAL object (512 MiB), so it can't be published. Nothing is committed, and a retry fails the same way. Split the operations into several smaller commits. |
@@ -243,8 +243,8 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `pool_not_found` | 404 | No object is under the pool's prefix, so the pool doesn't exist and the pool's collection deletes nothing. |
 | `namespace_deleted` | 410 | The namespace ID is deleted or [retired](format.md#95-retirement), and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
 | `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, retrieve, fork, or extension found the snapshot expired. A fork that folds the source's WAL tail also returns this code when 5 minutes have passed since the first call's temporary snapshot was created, and when a call that finishes an initializing fork finds that a WAL object of the source's tail that the fork folds is gone. The snapshot inventory's retrieve also returns this code for an ID with no snapshot. A snapshot whose record exists but whose manifest is gone returns this code with the `cause` `manifest_missing`. Refresh state or choose another snapshot. |
-| `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
-| `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
+| `path_not_found` | 404 | No visible entry exists at the path. The server also returns this code for a checked entry on which the subject has no rights. |
+| `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. The server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session exists with this ID. The server also returns this code for an aborted session, and for an open session asked to stage, sign parts, or complete at or after its `expires_at_ms`. Neither session will ever select content, so the server reports each one as missing, as it will once the session is deleted. |
 | `namespace_exists` | 409 | The create or fork target already exists (another namespace has the ID), or a create or fork request doesn't match the first manifest of an initializing namespace with the ID (see [Creating and forking namespaces](#creating-and-forking-namespaces)). |
@@ -256,7 +256,6 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `stale_attributes` | 409 | The inode's attribute revision changed while the update was being decided. Two cases return this code: a caller-supplied expected attribute revision that's no longer current, and the revision precondition that every attribute update includes even when the caller states no expectation. Re-read the attributes and retry. |
 | `stale_access` | 409 | The inode's access revision changed while the update was being decided. Re-read the access row and retry. |
-| `namespace_unrestricted` | 409 | The namespace's access mode is unrestricted, so it has no access rows. |
 | `binding_version_mismatch` | 409 | The binding version supplied for an inode move or delete, or by a binding precondition, isn't the entry's current binding version. Re-read the entry before retrying. |
 | `not_deleted` | 409 | The restore target isn't the root of a deletion in the trash (a deletion above the retention floor that no restore has revoked), so there's nothing to restore. |
 | `writer_fenced` | 409 | Another writer superseded this session. The session is dead, and this request fails. The host drops the session, and a later request opens a new session whose first publication takes the namespace back. Repeated fencing of one namespace means that two writers are receiving its traffic. |
@@ -511,7 +510,7 @@ A failed precondition reserves no sequence or inode, and it leaves the planning 
 
 ### Actor attribution
 
-Every commit, namespace creation, namespace fork, and administrator recovery requires an actor in the `Loonfs-Actor` header (see [Identity headers](#identity-headers)). The application supplies the actor as a stable, opaque identifier of 1 to 256 visible ASCII characters (0x21 through 0x7E), with the identity scope that it needs. LoonFS records the actor on the commit and on the metadata created by that commit. Namespace creation and forking record it as `created_by` on the namespace.
+Every commit, namespace creation, and namespace fork requires an actor in the `Loonfs-Actor` header (see [Identity headers](#identity-headers)). The application supplies the actor as a stable, opaque identifier of 1 to 256 visible ASCII characters (0x21 through 0x7E), with the identity scope that it needs. LoonFS records the actor on the commit and on the metadata created by that commit. Namespace creation and forking record it as `created_by` on the namespace.
 
 LoonFS doesn't authenticate the actor or resolve profile information. The application MUST authenticate the user and authorize the operation before it sends the request. The application should use a stable internal ID, not an email address or display name.
 
@@ -531,49 +530,46 @@ Responses report attribution in these fields:
 
 ### Subject and principals
 
-A request can act as a subject. Three headers form the "subject context" that describes the subject:
+Every request that reads or changes a namespace's contents says whose authority it uses, with exactly one of two headers:
 
-- `Loonfs-Subject` identifies the subject that the request acts as.
-- `Loonfs-Principal-Scope` identifies the domain that issued the subject's principal IDs.
-- `Loonfs-Principals` contains comma-separated principal IDs, without whitespace. The advertised `access.max_principals_per_request` limit caps the number of principals.
+- `Loonfs-Principals` contains comma-separated principal IDs, without whitespace. The request acts as a "subject", whose rights are the union of the grants to those principals, and LoonFS checks the request against the namespace's access rows (see [Authorization](#authorization)). The advertised `access.max_principals_per_request` limit caps the number of principals.
+- `Loonfs-Context: service` puts the request in the "service context". The application makes the request on its own account, with the whole authority of its deployment token, and LoonFS checks no rights. For example, an indexer or a migration sends the service context, and so does an application that has no per-user permissions.
 
-Principal, subject, and scope IDs never contain a comma, so the list is unambiguous.
-
-Without a subject context, a request acts with the token holder's service authority, except on the operations that require a subject context in an ACL namespace. The [identity header table](#identity-headers) lists those operations, and it describes how the subject ID falls back to `Loonfs-Actor`. If the subject scope differs from the namespace's `principal_scope`, the request returns `forbidden` before any grant is read, and the error reports the expected and actual scopes.
+A request with principals also has a subject ID, which identifies the subject that the request acts as. `Loonfs-Subject` sets it, and the [identity header table](#identity-headers) describes how it falls back to `Loonfs-Actor`. Principal and subject IDs never contain a comma, so the list is unambiguous.
 
 These IDs are opaque, and like the actor ID, they appear in access logs. The application should use internal IDs, never email addresses or display names.
 
-The subject ID is part of a commit's semantic identity. A retry of a commit ID from another subject returns `commit_id_reuse_conflict`. The scope isn't part of the fingerprint or of upload ownership.
+The subject ID is part of a commit's semantic identity. A retry of a commit ID from another subject returns `commit_id_reuse_conflict`. A commit in the service context has no subject ID, so its retry also has to be in the service context.
 
-An embedded caller sets the subject once, on the handle that it uses. Every read, commit, and upload through that handle acts as that subject, and the commit and upload methods don't take a separate subject. The CLI records the handle's subject in its upload journal next to the request, and it refuses to resume the upload under a different subject.
+An embedded caller sets the subject once, on the handle that it uses. Every read, commit, and upload through that handle acts as that subject, and the commit and upload methods don't take a separate subject. A handle without a subject acts in the service context. The CLI records the handle's subject in its upload journal next to the request, and it refuses to resume the upload under a different subject.
 
-Why isn't the scope part of the fingerprint or of upload ownership? A namespace has one scope, and LoonFS refuses subjects from every other scope.
+Why must a request state its context, instead of acting in the service context when it sends no principals? The application's backend uses one deployment token for all of its users, so the token can't say whom a request is for. If a request without principals had every right, a client that left out the principals by mistake would read and change everything, and nothing would report the mistake. With two explicit headers, the same mistake returns `invalid_request`.
 
 ### Identity headers
 
-Four request headers contain identity information. `Loonfs-Actor` is for attribution, and its value is an actor ID of 1 to 256 visible ASCII characters (0x21 through 0x7E). `Loonfs-Subject`, `Loonfs-Principal-Scope`, and `Loonfs-Principals` form the subject context that an ACL namespace authorizes against (see [Subject and principals](#subject-and-principals)). All four headers are optional in the transport schema. The server enforces each operation's own requirements while it handles the request:
+Four request headers contain identity information. `Loonfs-Actor` is for attribution, and its value is an actor ID of 1 to 256 visible ASCII characters (0x21 through 0x7E). `Loonfs-Principals` and `Loonfs-Context` say whose authority a request uses, and `Loonfs-Subject` sets the subject ID of a request with principals (see [Subject and principals](#subject-and-principals)). All four headers are optional in the transport schema. The server enforces each operation's own requirements while it handles the request:
 
-| Operations | `Loonfs-Actor` | Subject context |
+| Operations | `Loonfs-Actor` | `Loonfs-Principals` or `Loonfs-Context` |
 | --- | --- | --- |
-| `create_commit`, `merge_fork`, `replay_fork` | Required. Recorded as `committed_by`. | Required in an ACL namespace. |
+| `create_commit`, `merge_fork`, `replay_fork` | Required. Recorded as `committed_by`. | Required. |
 | `create_namespace` | Required. Recorded as `created_by`. | Not read. |
-| `fork_namespace`, `fork_namespace_for_rebase` | Required. Recorded as `created_by`. | Optional. When it's present, an ACL source requires an administrator subject. When it's absent, the request acts as the token holder. |
-| `delete_namespace`, `create_snapshot`, `list_snapshots`, `get_snapshot`, `extend_snapshot`, `delete_snapshot`, `list_changes`, `list_diff`, `get_next_merge_range` | Not required. | Optional, with the same administrator rule as `fork_namespace`. |
-| Path and inode reads, downloads, `list_trash`, `grep`, and upload-session operations | Not required. | Required in an ACL namespace. |
-| `run_maintenance_job` | Required by `recover_administrator`, which records it as `committed_by` on the recovery commit. Other jobs don't record it, but they still reject a malformed value. | Not read. |
+| `fork_namespace`, `fork_namespace_for_rebase` | Required. Recorded as `created_by`. | Required. A request with principals needs an administrator of the source. |
+| `delete_namespace`, `create_snapshot`, `list_snapshots`, `get_snapshot`, `extend_snapshot`, `delete_snapshot`, `list_changes`, `list_diff`, `get_next_merge_range` | Not required. | Required, with the same administrator rule as `fork_namespace`. |
+| Path and inode reads, downloads, `list_trash`, `grep`, and upload-session operations | Not required. | Required. |
+| `run_maintenance_job` | Not recorded, but a malformed value is rejected. | Not read. |
 | `get_capabilities`, `get_namespace`, the other maintenance operations, and the health, readiness, and metrics routes | Not read. | Not read. |
 
-Where an operation reads the subject context:
+Where an operation reads these headers:
 
-- `Loonfs-Principals` and `Loonfs-Principal-Scope` are sent together. A request with `Loonfs-Subject` or the scope, but without principals, returns `invalid_request` with `param` `Loonfs-Principals`. A request with principals but without the scope returns `invalid_request` with `param` `Loonfs-Principal-Scope`.
-- The subject ID is `Loonfs-Subject` when it's present, and `Loonfs-Actor` otherwise. A request with neither returns `invalid_request` with `param` `Loonfs-Subject`. An actor used as the subject ID MUST also be a valid subject ID, which can't contain a comma. If it isn't, the `param` is `Loonfs-Actor`.
-- An operation that doesn't require an actor accepts a complete explicit subject (`Loonfs-Subject`, scope, and principals) without an actor.
-- In an unrestricted namespace, the server checks no rights, but it still rejects an incomplete or malformed subject context. A commit's subject ID is part of its fingerprint in either access mode.
-- In an ACL namespace, an operation that requires the subject context returns `invalid_request` with `param` `Loonfs-Principals` when the subject context is absent. A subject scope that differs from the namespace's `principal_scope` returns `forbidden`.
+- The request sends exactly one of `Loonfs-Principals` and `Loonfs-Context`. A request with neither returns `invalid_request` with `param` `Loonfs-Principals` and the message `send Loonfs-Principals or Loonfs-Context: service`. A request with both returns `invalid_request` with `param` `Loonfs-Context`.
+- `service` is the one value of `Loonfs-Context`, in lowercase. Any other value returns `invalid_request` with `param` `Loonfs-Context`.
+- `Loonfs-Subject` is sent only with principals. A request with `Loonfs-Subject` but without principals returns `invalid_request` with `param` `Loonfs-Principals`.
+- The subject ID of a request with principals is `Loonfs-Subject` when it's present, and `Loonfs-Actor` otherwise. A request with neither returns `invalid_request` with `param` `Loonfs-Subject`. An actor used as the subject ID MUST also be a valid subject ID, which can't contain a comma. If it isn't, the `param` is `Loonfs-Actor`.
+- An operation that doesn't require an actor accepts principals with an explicit `Loonfs-Subject` and no actor.
 
 A missing required `Loonfs-Actor` returns `invalid_request` with `param` `Loonfs-Actor` and the message `missing required header Loonfs-Actor`. A malformed actor returns `invalid_request` with the same `param` and the validator's reason. Authorization is checked first.
 
-Header names are case-insensitive, and HTTP/2 sends them in lowercase. Retries and replayed requests MUST include the same header values, so saved requests MUST keep the actor and subject context next to the body. Request headers appear in access logs, so every value MUST be an opaque identifier, never an email address or a display name.
+Header names are case-insensitive, and HTTP/2 sends them in lowercase. Retries and replayed requests MUST include the same header values, so saved requests MUST keep the actor, the principals or the service context, and the subject ID next to the body. Request headers appear in access logs, so every value MUST be an opaque identifier, never an email address or a display name.
 
 ### 5.2 Commit responses and safe retry
 
@@ -704,7 +700,7 @@ Why check authorization first? A validation error could reveal information to a 
 
 Two routes, `GET /health` and `GET /readiness`, don't require the token and always respond to unauthenticated requests, because load balancers probe them. Every other route requires the token, including `GET /v0/capabilities`. The generated `openapi.json` describes this as a global `bearer_auth` requirement, which those two operations override.
 
-The identity headers `Loonfs-Actor`, `Loonfs-Subject`, `Loonfs-Principal-Scope`, and `Loonfs-Principals` are optional in the transport schema. The [identity header table](#identity-headers) lists which headers each operation requires.
+The identity headers `Loonfs-Actor`, `Loonfs-Subject`, `Loonfs-Principals`, and `Loonfs-Context` are optional in the transport schema. The [identity header table](#identity-headers) lists which headers each operation requires.
 
 The server rejects a request body that contains an unknown field, at any level of nesting, with 400 `invalid_request`. Most request fields are optional, and several of them are preconditions, so the server can't ignore a field it doesn't recognize. If it did, a misspelled precondition would decode to its default, and the server would perform a different request than the one the caller asked for.
 
@@ -820,9 +816,8 @@ A maintenance request body identifies exactly one job with `kind`:
 | `gc` | None | The collection result |
 | `retention` | Optional `to_seq` or `cutoff_at_ms` | `retention_floor_seq` |
 | `retention_window` | Optional `retention_window_ms` | `retention_window_ms`, when the namespace has a window. The job sets the namespace's retention window, or clears it when the request doesn't include `retention_window_ms`. |
-| `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. The job grants `admin` on the root row to the principal and keeps every other root grant. It makes the grant through a commit that doesn't check a subject and is attributed to the request's `Loonfs-Actor`. The job is meant for an ACL namespace that has lost every administrator. |
 
-The `metadata`, `retention`, `retention_window`, and `gc` jobs run as the namespace's [maintainer](glossary.md#maintainer), so they don't need its writer session. The `recover_administrator` job commits, so it runs in the writer session.
+Every job runs as the namespace's [maintainer](glossary.md#maintainer), so no job needs the namespace's writer session.
 
 The response includes the same `kind`, the addressed `namespace_id`, and the job's result. None of the jobs creates a snapshot. For example, this request body runs one collection:
 
@@ -1006,7 +1001,7 @@ After a delete, a caller can't read through the snapshot, fork it, extend it, re
 
 Deleting a missing snapshot, or one that was already deleted, returns the same response without a write, so a client can retry a delete safely. The ID of a fork snapshot returns `snapshot_not_found`, because only garbage collection deletes a fork snapshot. Deletion stays available after the namespace is deleted (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
 
-In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
+Creating, retrieving, listing, extending, and deleting snapshots requires an administrator, or the service context. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
 
 The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. The path content and path download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision content read (`GET /inodes/{inode_id}/revisions/{revision_no}/content`) and the inode revision download identify their revision in the route, and with `snapshot_id` they read that revision in the snapshot's state, and the snapshot keeps that revision readable after the namespace's retention floor passes it. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
 
@@ -1296,8 +1291,7 @@ Creating a namespace uses the namespace ID directly. In v0, there are no namespa
 
 ```json
 {
-  "namespace_id": "demo",
-  "access": {"kind":"unrestricted"}
+  "namespace_id": "demo"
 }
 ```
 
@@ -1308,7 +1302,6 @@ The response contains the new namespace's initial state. A new namespace starts 
   "namespace_id": "demo",
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
-  "access": {"kind":"unrestricted"},
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 0,
   "retention_floor_seq": 0
@@ -1331,7 +1324,7 @@ A create or fork that stops between manifest 1 and the active manifest leaves th
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
-If a creation acknowledgement is lost, a new create or fork request with the same ID and the same options returns success while the first call's namespace is initializing, and `namespace_exists` once the namespace is active (or the namespace's summary, when a create request explicitly allows an existing namespace). A create request matches an initializing create when it has the same access mode and retention window. A fork request matches an initializing fork when it has the same source and, if the request identifies a snapshot, the same snapshot, and for a rebase's new fork, the same rebased fork. A request that identifies no snapshot matches whichever snapshot the first request used. A request that doesn't match returns `namespace_exists`, even when a create request allows an existing namespace. The time of the request and the principal that sent it aren't compared. Within the original attempt, after an unknown transport outcome of the manifest 1 put, the call finds the newest manifest and finishes the namespace in the same way (see [Finishing an initializing namespace](format.md#finishing-an-initializing-namespace)).
+If a creation acknowledgement is lost, a new create or fork request with the same ID and the same options returns success while the first call's namespace is initializing, and `namespace_exists` once the namespace is active (or the namespace's summary, when a create request explicitly allows an existing namespace). A create request matches an initializing create when it has the same retention window. A fork request matches an initializing fork when it has the same source and, if the request identifies a snapshot, the same snapshot, and for a rebase's new fork, the same rebased fork. A request that identifies no snapshot matches whichever snapshot the first request used. A request that doesn't match returns `namespace_exists`, even when a create request allows an existing namespace. The time of the request and the principal that sent it aren't compared. Within the original attempt, after an unknown transport outcome of the manifest 1 put, the call finds the newest manifest and finishes the namespace in the same way (see [Finishing an initializing namespace](format.md#finishing-an-initializing-namespace)).
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -1344,7 +1337,6 @@ Returns the metadata of one namespace, without listing every namespace. A missin
 ```json
 {
   "namespace_id": "demo",
-  "access": {"kind": "unrestricted"},
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
@@ -1358,7 +1350,6 @@ The `NamespaceMetadata` object has exactly these fields:
 | Field | Meaning |
 | --- | --- |
 | `namespace_id` | The durable namespace ID. |
-| `access` | The access mode, either `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork point snapshot, which keeps the namespace's state at that sequence readable (`fork_point_snapshot_id`), and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
@@ -1367,7 +1358,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
 | `retention_window_ms` | The namespace's [retention window](glossary.md#retention-window), in milliseconds, which is at least the [grace window](glossary.md#grace-window) (24 hours). Only a namespace with a window has this field. |
 
-The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The access mode is set when the namespace is created and can't be changed, and a fork uses its source's access mode. The create request can also include `retention_window_ms`, a number of milliseconds that sets the namespace's retention window. A window shorter than the grace window (24 hours), including zero, returns `invalid_request` with `param` `/retention_window_ms`. Without that field, the reference server records its `retention_window_ms` setting as the namespace's window, if the server has that setting. Unlike the access mode, the window can be changed later with a `retention_window` job (see [Retention jobs](#retention-jobs)), and a fork copies its source's window.
+A new namespace has no access rows, so a request with principals has no right on any item in it. The application sets the first administrators with an `update_access` commit on `/` in the service context (see [`POST /commits`](#68-post-commits)). The create request can include `retention_window_ms`, a number of milliseconds that sets the namespace's retention window. A window shorter than the grace window (24 hours), including zero, returns `invalid_request` with `param` `/retention_window_ms`. Without that field, the reference server records its `retention_window_ms` setting as the namespace's window, if the server has that setting. The window can be changed later with a `retention_window` job (see [Retention jobs](#retention-jobs)), and a fork copies its source's window.
 
 LoonFS derives the namespace's live sequence from the manifest and the numbered WAL tip. A cold read reads the namespace's [manifest boundary](glossary.md#manifest-boundary) and lists the manifests numbered above it (see [Resolving the metadata basis](format.md#41-resolving-the-metadata-basis)). If no manifest is above the boundary and no boundary object exists, the read treats the namespace as absent. In a runtime without the namespace's writer session, a `strong` read (see [Read consistency](#read-consistency)) from a cached view probes the next WAL number with GET, applies any new WAL objects, and continues until it gets a 404. Commits are visible on the next `strong` read before a fold publishes a manifest that covers them.
 
@@ -1442,7 +1433,7 @@ The embedded `NamespaceStore::load_statistics` and `NamespaceStore::load_snapsho
 
 ### 6.3 `DELETE /v0/namespaces/{ns}`
 
-Deletes a namespace. In an ACL namespace, this operation requires an administrator subject. A request with no subject headers acts as the token holder.
+Deletes a namespace. This operation requires an administrator, or the service context.
 
 Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). A delete of a namespace whose creation hasn't finished (its newest manifest is `initializing`) publishes its tombstone without a writer session. The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, snapshot listings and retrievals, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest until the namespace is [retired](format.md#95-retirement), and these requests return `namespace_deleted` after the retirement too.
 
@@ -1538,7 +1529,7 @@ A recursive listing's cursor records the walk's position in each directory from 
 
 The walk scans every directory it enters, and every directory a page scans is one of its entries, apart from the listed directory and the directories that the page's cursor records. So a page scans at most `limit` directories, plus the listed directory on the first page or the cursor's depth on a later one. The walk descends at most 128 levels below the listed directory, which keeps the cursor small. A request path has at most 128 components (see [Names and paths](format.md#14-names-and-paths)), so only a subtree that a move made deeper than any request path reaches that depth. A directory at that depth is returned without the entries below it, and a client lists it by inode to continue.
 
-In an ACL namespace, a recursive listing requires `read` on the target, like any listing. Below the target, a child directory that the subject can't read is returned without its `attributes` projection, and the walk doesn't descend into it (see [Authorization in ACL namespaces](#authorization-in-acl-namespaces)). A subject with `read` on a deeper directory, but not on the directories above it, lists that directory directly.
+For a request with principals, a recursive listing requires `read` on the target, like any listing. Below the target, a child directory that the subject can't read is returned without its `attributes` projection, and the walk doesn't descend into it (see [Authorization](#authorization)). A subject with `read` on a deeper directory, but not on the directories above it, lists that directory directly.
 
 A cursor is normally an opaque resume position in the listing order, not a snapshot. Directory listing, trash listing, revision listing, grep, and change-feed cursors tolerate forward head drift. A commit made while a client is paging doesn't invalidate these cursors, and the resumed page is evaluated at the head that's current when it's read, continuing strictly after the last returned position.
 
@@ -1599,7 +1590,7 @@ Why does a recursive listing return a directory that the subject can't read? A c
 
 ### 6.6 `GET /filesystem/trash`
 
-Lists the namespace's trash, oldest deletion first (in ascending `(deletion_seq, inode_id)` order). The listing is paged with the standard `limit` and `cursor` pattern, and its cursor is an ordering resume like every other cursor. In an ACL namespace, a page can return fewer entries than `limit` and still include `next_cursor`.
+Lists the namespace's trash, oldest deletion first (in ascending `(deletion_seq, inode_id)` order). The listing is paged with the standard `limit` and `cursor` pattern, and its cursor is an ordering resume like every other cursor. For a request with principals, a page can return fewer entries than `limit` and still include `next_cursor`.
 
 The listing accepts `consistency` and `max_staleness_ms`, which work as they do on the entry route (see [Read consistency](#read-consistency)). Each page applies them to the head that the page reads.
 
@@ -2072,7 +2063,7 @@ A wrong `expected_inode_id` returns `path_conflict`, like the delete preconditio
 
 `boundary` and `grants` are both required, and they replace the whole row. So an update that lists no principals clears every direct grant, and an update with `boundary` set to false resumes inheritance. Grants are a map from principal ID to a list of distinct right names. [Access rows](format.md#18-access-rows) defines the rights, the size limits, and the rule that no entry has an empty list. A repeated principal key or right name returns `invalid_request`. Two more rules also return `invalid_request`: `admin` is valid only on the root inode, and a boundary applies only to a directory.
 
-An unrestricted namespace has no access rows, and an access update in an unrestricted namespace returns `namespace_unrestricted`. Every accepted update advances the inode's access revision, and it produces an `access_changed` event that includes the complete new state.
+An access update works in every namespace. In the service context, it can set any row, including the root's set of administrators, which is how an application sets a new namespace's first administrators. Every accepted update advances the inode's access revision, and it produces an `access_changed` event that includes the complete new state.
 
 `expected_inode_id` and `expected_access_revision_no` follow exactly the same rules as the attribute preconditions:
 
@@ -2081,9 +2072,9 @@ An unrestricted namespace has no access rows, and an access update in an unrestr
 - A wrong inode returns `path_conflict`.
 - A stale revision returns `stale_access`, whether the caller stated the revision or the update's own precondition observed it.
 
-#### Authorization in ACL namespaces
+#### Authorization
 
-Before an operation's conflict checks, LoonFS checks the subject's effective rights on the inodes the operation touches. If the subject has no right on a checked inode, the response is `path_not_found` or `inode_not_found`, depending on how the request identified that inode. If the subject has some right but lacks a required right, the response is `forbidden`, with the checked `inode_id` in the error details.
+A request in the service context passes every check in this section, and LoonFS reads no access rows for it. For a request with principals, before an operation's conflict checks, LoonFS checks the subject's effective rights on the inodes the operation touches. If the subject has no right on a checked inode, the response is `path_not_found` or `inode_not_found`, depending on how the request identified that inode. If the subject has some right but lacks a required right, the response is `forbidden`, with the checked `inode_id` in the error details.
 
 | Operation | Required rights |
 | --- | --- |
@@ -2122,7 +2113,7 @@ Names belong to the directory, so a subject with `read` on a directory sees ever
 
 The trash listing filters out entries whose saved original parent the subject can't read. A filtered page can be short and still include `next_cursor`. Grep filters out candidates that the subject can't read before it reads their content, but those candidates still count against the page's candidate budget.
 
-When a subject is supplied, change feed reads, diff reads, reads of a fork's next merge range, and bare content reference reads require an administrator. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The snapshot inventory and maintenance operations still read as the service.
+For a request with principals, change feed reads, diff reads, reads of a fork's next merge range, and bare content reference reads require an administrator. In the service context, they need no right. The snapshot inventory and maintenance operations read neither header.
 
 Why does a snapshot read of an expired subtree require an administrator? LoonFS evaluates a snapshot read's rights on the access rows at the current head, and after a deletion expires, base compactions remove the head's rows under it a family group at a time. So at the head, a boundary row can be gone while a grant above it is still stored, and evaluating another subject's rights on those rows could widen them. An administrator's rights don't depend on those rows.
 
@@ -2132,7 +2123,7 @@ The upload routes stage a file's content in an upload session, so that a commit 
 
 An upload is the only operation that spans more than one request. Its upload session is the server-side state that connects the steps, and every other operation completes in one request. (A paged listing or a change-feed read resumes from a cursor that the client stores, and the server stores nothing between pages.) A recursive command is a sequence of these requests that the client drives. For example, the CLI's `put -r` uploads each file and publishes it in its own commit, `cp -r` copies each file in its own commit, and `get -r` lists the tree and reads each file. The server stores no state for the recursive command as a whole.
 
-In an ACL namespace, an upload session belongs to the subject that opened it. Every upload operation requires the namespace's scope and principals (see [Subject and principals](#subject-and-principals)), and a request from any other subject returns `upload_not_found`. An unrestricted namespace doesn't record which subject owns a session.
+An upload session belongs to the subject that opened it, or to the service context when a request in the service context opened it. Every upload operation sends principals or the service context (see [Subject and principals](#subject-and-principals)), and a request from any other subject, or from the service context for a subject's session, returns `upload_not_found`. A session that the service context opened records no subject, and a request with principals gets `upload_not_found` for it.
 
 Each upload step has a defined effect:
 
@@ -2389,7 +2380,7 @@ Why does every deployment with a direct write offer direct reads? `direct_put` a
 
 Returns a page of the namespace's change feed, which lists the commits after `after_seq`.
 
-In an ACL namespace, the change feed requires an administrator when the request includes subject headers. Without subject headers, the request reads as the token holder.
+The change feed requires an administrator, or the service context.
 
 The feed accepts `consistency` and `max_staleness_ms`, which work as they do on the read routes (see [Read consistency](#read-consistency)), and neither can be combined with `snapshot_id`. An `eventual` poll within its maximum staleness reads at the head that the server confirmed last, so it can miss commits from that time, and a later poll returns them. An `after_seq` above the head that an `eventual` poll would read makes LoonFS confirm the head first (see [Read consistency](#read-consistency)), and an `after_seq` that's still above the confirmed head returns `invalid_request`.
 
@@ -2586,7 +2577,7 @@ The route takes these query parameters:
 
 The sequences MUST be in order: the retention floor, `from_seq`, `after_seq`, `to_seq`, and the head that the request reads, each at or above the one before. A `from_seq` below the retention floor returns `below_retention_floor`, whose details include `from_seq` and `retention_floor_seq`. A `from_seq` or a `to_seq` above the head that an `eventual` request would read makes LoonFS confirm the head first (see [Read consistency](#read-consistency)), and a sequence that's still above the confirmed head returns `invalid_request`. A `from_seq` after `to_seq`, or an `after_seq` outside `from_seq` through `to_seq`, also returns `invalid_request`, and `param` identifies the parameter. A positive `event_index` resumes the commit at `after_seq`, so it returns `invalid_request` when `after_seq` equals `from_seq`, as it does without `split_commits=true` or at or past the end of the commit's events. A `from_seq` equal to `to_seq` returns an empty page.
 
-In an ACL namespace, the diff requires an administrator when the request includes subject headers. Without subject headers, the request reads as the token holder, as the change feed does.
+The diff requires an administrator, or the service context, as the change feed does.
 
 Representative response:
 
@@ -2663,7 +2654,7 @@ Why doesn't the diff list the descendants of a moved or deleted directory? Listi
 
 Creates a new namespace that starts as a copy of a source namespace, at the source's current head or at a snapshot.
 
-In an ACL namespace, this operation requires an administrator subject. A request with no subject headers acts as the token holder.
+This operation requires an administrator, or the service context.
 
 Representative request:
 
@@ -2684,7 +2675,6 @@ Representative response:
   "namespace_id": "demo-branch",
   "created_at_ms": 1752625000000,
   "created_by": "usr_8f3c",
-  "access": {"kind":"unrestricted"},
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 418,
@@ -2835,7 +2825,7 @@ The `conflict` field of a `merge_conflict` error's details is a "conflict entry"
 
 Each version has the inode's `path` there, and for a file, its `revision_no` and `content_ref`. A client reads the base from this namespace by inode and revision number, because this namespace keeps that revision while the fork can merge.
 
-The merge is authorized against its net change, not against the order of its operations. In an ACL namespace, the request needs a subject context, and the subject needs the rights that it would need to make each inode's change directly, checked against this namespace's access rows. A move through a temporary name needs the remove right on the directory that the inode leaves and the create right on the directory that it enters, and no right on the temporary name's directory, because that binding doesn't survive the commit. The subject also needs `read` on each inode in the fork whose change the merge applies, so a subject can't merge a change that the subject can't read. The server checks the subject's rights in this namespace when it plans the merge, as the commit does, so a subject that lacks them gets the commit's error without a second plan, and the commit's `inode_not_found` means that a deletion hid an inode after the plan.
+The merge is authorized against its net change, not against the order of its operations. For a request with principals, the subject needs the rights that it would need to make each inode's change directly, checked against this namespace's access rows. A move through a temporary name needs the remove right on the directory that the inode leaves and the create right on the directory that it enters, and no right on the temporary name's directory, because that binding doesn't survive the commit. The subject also needs `read` on each inode in the fork whose change the merge applies, so a subject can't merge a change that the subject can't read. The server checks the subject's rights in this namespace when it plans the merge, as the commit does, so a subject that lacks them gets the commit's error without a second plan, and the commit's `inode_not_found` means that a deletion hid an inode after the plan.
 
 Errors beyond those that any commit returns:
 
@@ -2903,7 +2893,7 @@ For example, once this namespace's retention floor is above the fork point, the 
 
 When this namespace is a rebase's new fork, and `source_namespace_id` is the fork that the new fork's `fork_basis.rebased_from` identifies, the query reads where the next replay commit starts, as [`POST /replays`](#617-post-replays) does. `merge` is then the new fork's newest replay commit, never a merge that the new fork inherited from the namespace that it was forked from, and `next_after_seq` is `resume_after_seq` before the first replay commit. `fork_point_seq` is the fork's fork point in the namespace that the rebase forked. The outcome is `fork_point_below_floor` when the new fork's own fork point is below the new fork's retention floor, because the new fork then refuses replay commits.
 
-In an ACL namespace, the query requires an administrator, in this namespace and in the fork, when the request includes subject headers. Without subject headers, the request reads as the token holder, as the change feed does.
+The query requires an administrator, in this namespace and in the fork, or the service context, as the change feed does.
 
 Errors beyond those that any read returns:
 
@@ -2936,7 +2926,6 @@ Representative response:
   "namespace_id": "demo-branch-2",
   "created_at_ms": 1752625200000,
   "created_by": "usr_8f3c",
-  "access": {"kind":"unrestricted"},
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 431,
@@ -2965,7 +2954,7 @@ To create the new fork, the server:
 3. Refuses a fork point below this namespace's retention floor, or a start of the fork's next merge into this namespace below the fork's own retention floor, with `below_retention_floor`.
 4. Creates the new fork from this namespace's head, as [`POST /forks`](#613-post-forks) does, and records `rebased_from` in the new fork's fork basis.
 
-Creating the new fork needs the right to fork this namespace, which an ACL namespace grants to the token holder, and to a subject only when the subject is an administrator.
+Creating the new fork needs the right to fork this namespace, which the service context and an administrator have.
 
 Errors:
 
@@ -3009,7 +2998,6 @@ Representative response:
     "namespace_id": "demo-branch-2",
     "created_at_ms": 1752625200000,
     "created_by": "usr_8f3c",
-    "access": {"kind":"unrestricted"},
     "fork_basis": {
       "source_namespace_id": "demo",
       "fork_point_seq": 431,

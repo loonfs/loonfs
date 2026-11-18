@@ -35,6 +35,10 @@ type conformanceCase struct {
 	Expected json.RawMessage `json:"expected"`
 }
 
+// serviceContext marks a request that acts on the application's own account,
+// so the server checks no rights.
+var serviceContext = http.Header{"Loonfs-Context": []string{"service"}}
+
 var expectedCases = []string{
 	"append",
 	"changes",
@@ -83,10 +87,13 @@ func TestSDKConformance(t *testing.T) {
 		t.Fatalf("load conformance cases: %v", err)
 	}
 	h := &harness{
+		// Every request through this client acts on the application's own
+		// account. The per-subject requests in the proxy case send their own.
 		client: server.NewClient(
 			option.WithBaseURL(baseURL),
 			option.WithToken(token),
 			option.WithActorID(loonfs.String("conformance")),
+			option.WithHTTPHeader(serviceContext),
 		),
 		unauthenticated: server.NewClient(option.WithBaseURL(baseURL)),
 		serverBaseURL:   baseURL,
@@ -659,6 +666,7 @@ func runMultipart(t *testing.T, h *harness, testCase conformanceCase) {
 		option.WithBaseURL(h.serverBaseURL),
 		option.WithToken(h.serverToken),
 		option.WithActorID(loonfs.String(string(request.ActorID))),
+		option.WithHTTPHeader(serviceContext),
 	)
 	helperCommit, err := client.Files.Upload(context.Background(), files.UploadInput{
 		NamespaceID: loonfs.NamespaceID(request.NamespaceID),
@@ -1826,7 +1834,6 @@ type inodeAddressingExpected struct {
 	EntryNames           []string            `json:"entry_names"`
 	StaleBindingVersion  errorStatusExpected `json:"stale_binding_version"`
 	OccupiedName         errorStatusExpected `json:"occupied_name"`
-	UnrestrictedAccess   errorStatusExpected `json:"unrestricted_access"`
 	DeletedContent       errorStatusExpected `json:"deleted_content"`
 }
 
@@ -2040,21 +2047,6 @@ func runInodeAddressing(t *testing.T, h *harness, testCase conformanceCase) {
 	if labeled.Attributes == nil || (*labeled.Attributes)[request.AttributeKey] != request.AttributeValue {
 		t.Errorf("attributes = %v, want %s=%s", labeled.Attributes, request.AttributeKey, request.AttributeValue)
 	}
-
-	_, err = h.client.Commits.Create(ctx, &loonfs.CommitRequest{
-		NamespaceID: request.NamespaceID,
-		CommitID:    loonfs.CommitID("conf-inode-addressing-access"),
-		Operations: []*loonfs.FilesystemOperation{
-			{
-				UpdateAccessByInode: &loonfs.FilesystemOperationUpdateAccessByInode{
-					InodeID:  "ino_00000000000000000000000000",
-					Boundary: false,
-					Grants:   loonfs.AccessGrants{},
-				},
-			},
-		},
-	}, actor)
-	assertConflict("access update in an unrestricted namespace", err, expected.UnrestrictedAccess)
 
 	nonRecursive := loonfs.DeleteDirectoryBehaviorNonRecursive
 	deletion := applyCommit(t, h.client, &loonfs.CommitRequest{
@@ -2724,7 +2716,6 @@ type proxyCaseRequest struct {
 
 type proxyACL struct {
 	NamespaceID       string `json:"namespace_id"`
-	PrincipalScope    string `json:"principal_scope"`
 	Administrator     string `json:"administrator"`
 	Member            string `json:"member"`
 	MemberSubjectID   string `json:"member_subject_id"`
@@ -2999,29 +2990,32 @@ func runProxyAuthorize(t *testing.T, h *harness, request proxyCaseRequest, expec
 func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected proxyExpected) {
 	t.Helper()
 	acl := request.ACL
+	direct := http.Header{
+		"Authorization": []string{"Bearer " + h.serverToken},
+		"Loonfs-Actor":  []string{string(request.ActorID)},
+	}
 	proxyJSONRequest[json.RawMessage](t, http.DefaultClient, http.MethodPost, h.serverBaseURL+"/v0/namespaces", map[string]any{
 		"namespace_id": acl.NamespaceID,
-		"access": map[string]any{
-			"kind":            "acl",
-			"principal_scope": acl.PrincipalScope,
-			"root_grants": map[string][]string{
+	}, direct)
+	// A new namespace has no administrators, so the application grants the
+	// first ones in the service context.
+	proxyJSONRequest[json.RawMessage](t, http.DefaultClient, http.MethodPost, h.serverBaseURL+"/v0/namespaces/"+url.PathEscape(acl.NamespaceID)+"/commits", map[string]any{
+		"commit_id": acl.CommitID + "-administrators",
+		"operations": []any{map[string]any{
+			"kind": "update_access", "path": "/", "boundary": false, "grants": map[string][]string{
 				acl.Administrator: {"admin"},
 				acl.Member:        {"create", "read"},
 			},
-		},
-	}, http.Header{
-		"Authorization": []string{"Bearer " + h.serverToken},
-		"Loonfs-Actor":  []string{string(request.ActorID)},
-	})
+		}},
+	}, direct)
 	proxyHandler, err := loonfsproxy.NewHandler(loonfsproxy.Config{
 		ServerBaseURL: h.serverBaseURL,
 		Token:         h.serverToken,
 		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
 			return loonfsproxy.Authorization{
-				ActorID:        string(request.ActorID),
-				SubjectID:      acl.MemberSubjectID,
-				PrincipalScope: acl.PrincipalScope,
-				Principals:     []string{acl.Member},
+				ActorID:    string(request.ActorID),
+				SubjectID:  acl.MemberSubjectID,
+				Principals: []string{acl.Member},
 			}, nil
 		},
 	})
@@ -3031,9 +3025,11 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 	proxyServer := httptest.NewServer(proxyHandler)
 	defer proxyServer.Close()
 	namespaceBaseURL := proxyServer.URL + "/v0/namespaces/" + url.PathEscape(acl.NamespaceID)
+	// The browser claims principals, which the hook replaces. It doesn't claim
+	// the service context, because a request that sends both is invalid.
 	headers := http.Header{
-		"Loonfs-Principal-Scope": []string{acl.PrincipalScope},
-		"Loonfs-Principals":      []string{acl.BrowserPrincipals},
+		"Loonfs-Context":    nil,
+		"Loonfs-Principals": []string{acl.BrowserPrincipals},
 	}
 	stamped := proxyCreateCommit(t, proxyServer.Client(), namespaceBaseURL,
 		createDirectoryCommit(acl.NamespaceID, acl.CommitID, acl.Directory, nil), request.ActorID, headers)
@@ -3186,12 +3182,19 @@ func sendProxyRequest(
 		t.Fatalf("build proxy request: %v", err)
 	}
 	request.Header.Set("Authorization", "Bearer browser-token")
+	// A request acts on the application's own account unless the caller
+	// removes this header with a nil value. The proxy forwards it unchanged.
+	request.Header.Set("Loonfs-Context", "service")
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
 	for _, extra := range headers {
 		for name, values := range extra {
-			request.Header[name] = values
+			if values == nil {
+				request.Header.Del(name)
+			} else {
+				request.Header[name] = values
+			}
 		}
 	}
 

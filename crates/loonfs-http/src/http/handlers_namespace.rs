@@ -247,15 +247,13 @@ pub(super) async fn create_namespace(
             &request.namespace_id.unwrap_or_else(NamespaceId::generate),
             &actor_id,
             &CreateNamespaceOptions {
-                access: request.access,
                 retention_window_ms: request.retention_window_ms,
                 ..Default::default()
             },
         )
         .await
         .map_err(|error| {
-            ApiResponseError::runtime(error)
-                .with_body_field_params(&["/access/root_grants", "/retention_window_ms"])
+            ApiResponseError::runtime(error).with_body_field_params(&["/retention_window_ms"])
         })?;
     Ok(Json(namespace))
 }

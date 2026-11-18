@@ -466,15 +466,6 @@ impl ReadView {
         .await
     }
 
-    /// Refuses a reader with no subject on an ACL namespace, for callers
-    /// that could otherwise return before any per-subject read.
-    ///
-    /// This is a hook for an extension that serves reads from its own state
-    /// before it reads through this view, such as `loonfs-grep`.
-    pub fn ensure_subject(&self) -> Result<()> {
-        Ok(self.pinned.engine.ensure_subject(&self.pinned.context)?)
-    }
-
     /// Reads one inode revision through this view's authorization.
     pub async fn read_file_revision_by_inode(
         &self,

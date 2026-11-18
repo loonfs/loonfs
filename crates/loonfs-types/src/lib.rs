@@ -96,10 +96,9 @@ pub mod format {
 
 pub use access::{
     AccessGrants, AccessGrantsError, AccessRevisionNo, AccessRight, AccessRights,
-    AccessRightsError, PrincipalId, PrincipalIdValidationError, PrincipalScope,
-    PrincipalScopeValidationError, PrincipalSet, PrincipalSetError, Subject, SubjectId,
-    SubjectIdValidationError, SubjectPart, SubjectPartsError, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES,
-    MAX_ACCESS_GRANT_ENTRIES, MAX_SUBJECT_PRINCIPALS,
+    AccessRightsError, PrincipalId, PrincipalIdValidationError, PrincipalSet, PrincipalSetError,
+    Subject, SubjectId, SubjectIdValidationError, SubjectPart, SubjectPartsError,
+    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_SUBJECT_PRINCIPALS,
 };
 pub use actor::{ActorId, ActorIdValidationError, MAX_ACTOR_ID_BYTES};
 pub use attributes::{
@@ -158,7 +157,6 @@ pub use ids::{
 };
 pub use inode_id::{InodeId, InodeIdValidationError, ROOT_INODE_ID};
 pub use layout::{ContentExtent, ContentLayout, ContentLayoutError, ExtentObject};
-pub use manifest::NamespaceAccess;
 pub use metadata_rows::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;
 pub use pagination::{

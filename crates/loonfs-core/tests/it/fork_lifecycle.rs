@@ -1264,7 +1264,6 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
             loonfs_types::PoolId::generate(),
             1_000,
             loonfs_test_support::test_actor(),
-            loonfs_types::NamespaceAccess::Unrestricted {},
         )
     };
     let foreign_bytes =

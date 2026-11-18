@@ -9,8 +9,7 @@
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
 use crate::test_support::writer;
 use crate::{
-    CreateNamespaceOptions, DestinationBehavior, LoonFs, MetadataCompactionOutcome, NamespaceId,
-    SharedObjectStore,
+    DestinationBehavior, LoonFs, MetadataCompactionOutcome, NamespaceId, SharedObjectStore,
 };
 use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -21,8 +20,8 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::format::manifest::MetadataRowFamily;
 use loonfs_types::{
-    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, NamespaceAccess,
-    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, ContentId, PrincipalId,
+    PrincipalSet, Subject, SubjectId,
 };
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -98,32 +97,27 @@ async fn create_compacted_directory(
         ))
         .narrow_segment_row_budget(NonZeroUsize::new(ROWS_PER_SEGMENT).expect("nonzero"));
     writer
-        .create_namespace_with_options(
-            namespace_id,
-            &actor,
-            &CreateNamespaceOptions {
-                access: match subject {
-                    Some(subject) => NamespaceAccess::Acl {
-                        principal_scope: subject.principal_scope.clone(),
-                        root_grants: AccessGrants::new(
-                            grants
-                                .iter()
-                                .map(|(principal, rights)| (principal.clone(), rights))
-                                .chain([(
-                                    PrincipalId::parse("prn_administrator").expect("principal"),
-                                    AccessRights::ADMIN,
-                                )])
-                                .collect(),
-                        )
-                        .expect("root grants"),
-                    },
-                    None => NamespaceAccess::unrestricted(),
-                },
-                ..Default::default()
-            },
-        )
+        .create_namespace(namespace_id, &actor)
         .await
         .expect("namespace");
+    if subject.is_some() {
+        crate::test_support::set_root_access(
+            &writer,
+            namespace_id,
+            AccessGrants::new(
+                grants
+                    .iter()
+                    .map(|(principal, rights)| (principal.clone(), rights))
+                    .chain([(
+                        PrincipalId::parse("prn_administrator").expect("principal"),
+                        AccessRights::ADMIN,
+                    )])
+                    .collect(),
+            )
+            .expect("root grants"),
+        )
+        .await;
+    }
     let writer = match subject {
         Some(subject) => writer.with_subject(subject.clone()),
         None => writer,
@@ -238,7 +232,6 @@ async fn a_compacted_directory_page_reads_no_revision_segment() {
 #[tokio::test]
 async fn compacted_directory_page_overlaps_access_segment_reads() {
     let subject = Subject {
-        principal_scope: PrincipalScope::parse("directory-page").expect("scope"),
         subject_id: SubjectId::parse("viewer").expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse("viewer").expect("principal")

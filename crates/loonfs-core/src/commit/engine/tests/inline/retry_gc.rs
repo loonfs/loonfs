@@ -122,11 +122,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .expect("fresh view");
     assert_eq!(view.head().seq, CommitSeq(1));
     let file = view
-        .read_file_bytes(
-            "/lost-ack-0",
-            None,
-            &ReadAccess::live(Authorizer::Unrestricted),
-        )
+        .read_file_bytes("/lost-ack-0", None, &ReadAccess::live(Authorizer::Service))
         .await
         .expect("original bytes survive collection");
     assert_eq!(file.bytes.as_slice(), original.bytes().as_ref());
@@ -134,7 +130,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .resolve_path(
             "/lost-ack-0",
             AttributeInclusion::Omit,
-            &ReadAccess::live(Authorizer::Unrestricted),
+            &ReadAccess::live(Authorizer::Service),
         )
         .await
         .expect("original reference");

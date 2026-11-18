@@ -204,7 +204,7 @@ pub use compaction::{
 pub use diff::DiffPage;
 pub use engine::RuntimeReadContext;
 pub use engine::{
-    NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, RootAccess, Writable,
+    NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, Writable,
 };
 pub use error::{
     classify_store_failure, CoreError, ErrorCode, ErrorKind, HistoryPosition, MergeBound,

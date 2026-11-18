@@ -19,8 +19,8 @@ use loonfs_types::format::manifest::{
     AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
     DeletedBinding, DirentryBindingRecord, ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef,
     InodeRecord, MergeIndexRecord, MetadataRow, MetadataRunRef, MetadataSegmentRef,
-    NamespaceAccess, NamespaceManifestEnvelope, NamespaceManifestPayload, RevisionRecord,
-    SubtreeTombstoneRecord, TombstoneRowAction, TrashRecord, TrashRowAction,
+    NamespaceManifestEnvelope, NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord,
+    TombstoneRowAction, TrashRecord, TrashRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
@@ -32,7 +32,7 @@ use loonfs_types::{
     Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
     MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PoolId, PrincipalId,
-    PrincipalScope, SnapshotId, SpanObjectId, Subject, SubjectId, UploadId, WriterId,
+    SnapshotId, SpanObjectId, Subject, SubjectId, UploadId, WriterId,
 };
 use loonfs_types::{DiffEntry, FilesystemEvent, MergeConflict, MergeConflictVersion};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -177,7 +177,6 @@ text_heap_bytes!(
     SnapshotId,
     PoolId,
     PrincipalId,
-    PrincipalScope,
     SpanObjectId,
     SubjectId,
     UploadId,
@@ -255,8 +254,7 @@ impl HeapBytes for CommitIntent {
 impl HeapBytes for Subject {
     fn heap_bytes(&self) -> usize {
         self.principals.iter().map(HeapBytes::heap_bytes).fold(
-            self.principal_scope.heap_bytes()
-                + self.subject_id.heap_bytes()
+            self.subject_id.heap_bytes()
                 + btree_node_bytes::<PrincipalId, ()>(self.principals.len()),
             usize::saturating_add,
         )
@@ -638,7 +636,6 @@ impl HeapBytes for NamespaceManifestPayload {
     fn heap_bytes(&self) -> usize {
         self.namespace_id.heap_bytes()
             + self.created_by.heap_bytes()
-            + self.access.heap_bytes()
             + self.fork_basis.heap_bytes()
             + self.pool_id.heap_bytes()
             + self.writer.heap_bytes()
@@ -705,23 +702,10 @@ fn json_object_heap_bytes(object: &serde_json::Map<String, serde_json::Value>) -
     bytes
 }
 
-impl HeapBytes for NamespaceAccess {
-    fn heap_bytes(&self) -> usize {
-        match self {
-            NamespaceAccess::Unrestricted {} => 0,
-            NamespaceAccess::Acl {
-                principal_scope,
-                root_grants,
-            } => principal_scope.heap_bytes() + root_grants.heap_bytes(),
-        }
-    }
-}
-
 impl HeapBytes for NamespaceReadState {
     fn heap_bytes(&self) -> usize {
         self.namespace_id.heap_bytes()
             + self.created_by.heap_bytes()
-            + self.access.heap_bytes()
             + self.fork_basis.heap_bytes()
             + self.pool_id.heap_bytes()
             + self.writer.heap_bytes()

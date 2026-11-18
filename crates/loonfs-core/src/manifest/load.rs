@@ -256,10 +256,7 @@ fn metadata_basis_from_segments<S: ObjectStore + ?Sized>(
 ) -> LoadedMetadataBasis<'_, S> {
     LoadedMetadataBasis {
         base_state: if segments.manifest().payload().runs.is_empty() {
-            bootstrap_metadata_state(
-                segments.manifest().payload().created_at_ms,
-                &segments.manifest().payload().access,
-            )
+            bootstrap_metadata_state(segments.manifest().payload().created_at_ms)
         } else {
             MetadataState::default()
         },

@@ -8,7 +8,6 @@
 
 use super::*;
 use crate::limits::READ_REVALIDATION_BOUND_MS;
-use crate::NamespaceAccess;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use utoipa::openapi::{schema::Schema, RefOr};
@@ -26,8 +25,6 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<CommitPrecondition>("kind", None);
     named.tagged::<FilesystemEvent>("kind", Some("unknown"));
     named.tagged::<FilesystemOperation>("kind", None);
-    named.tagged::<NamespaceAccess>("kind", None);
-    named.tagged::<NamespaceAccessMode>("kind", Some("unknown"));
     named.tagged::<ObjectTransfer>("kind", Some("unknown"));
     named.tagged::<RunMaintenanceJobRequest>("kind", None);
     named.tagged::<RunMaintenanceJobResponse>("kind", Some("unknown"));

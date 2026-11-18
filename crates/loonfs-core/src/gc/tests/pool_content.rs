@@ -371,7 +371,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_snapshot_exist
         .read_file_bytes(
             "/file",
             None,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("the fork reads what it inherited");

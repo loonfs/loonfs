@@ -128,7 +128,6 @@ fn namespace_metadata(
     manifest: &NamespaceManifestPayload,
 ) -> NamespaceMetadata {
     NamespaceMetadata {
-        access: (&head.access).into(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by,
         fork_basis: fork_basis(head.fork_basis),

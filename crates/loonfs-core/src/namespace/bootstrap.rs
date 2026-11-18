@@ -3,16 +3,13 @@
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::ExistingNamespace;
-use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
+use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::basis::PublicationBasis;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::options::CreateNamespaceOptions;
-use loonfs_types::{
-    AccessRevisionNo, AccessRight, ActorId, CommitSeq, InodeKind, NamespaceMetadata, PoolId,
-    ROOT_INODE_ID,
-};
+use loonfs_types::{CommitSeq, InodeKind, NamespaceMetadata, PoolId, ROOT_INODE_ID};
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates the namespace if it does not already exist, or finishes a
@@ -39,14 +36,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &loonfs_types::ActorId,
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
-        if let NamespaceAccess::Acl { root_grants, .. } = &options.access {
-            if !root_grants
-                .iter()
-                .any(|(_, rights)| rights.contains(AccessRight::Admin))
-            {
-                return Err(CoreError::RootGrantsWithoutAdministrator);
-            }
-        }
         let clock = self.namespace.start_clock();
         let existing = match self.namespace.find_existing_namespace().await? {
             Some(existing) => existing,
@@ -58,7 +47,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                         PoolId::generate(),
                         clock.request_at_ms(),
                         actor_id.clone(),
-                        options.access.clone(),
                     )
                 };
                 match self
@@ -117,14 +105,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 /// `namespace_exists` otherwise.
 ///
 /// The request matches when manifest 1 has no fork basis and records the
-/// access and the retention window of `options`. The creator, the creation
+/// retention window of `options`. The creator, the creation
 /// time and the pool ID aren't compared.
 fn ensure_create_request_matches(
     manifest_1: &NamespaceManifestPayload,
     options: &CreateNamespaceOptions,
 ) -> Result<()> {
     let matches = manifest_1.fork_basis.is_none()
-        && manifest_1.access == options.access
         && manifest_1.retention_window_ms == options.retention_window_ms;
     if !matches {
         return Err(CoreError::NamespaceExists {
@@ -134,26 +121,9 @@ fn ensure_create_request_matches(
     Ok(())
 }
 
-pub(crate) fn bootstrap_metadata_state(
-    created_at_ms: u64,
-    access: &NamespaceAccess,
-) -> MetadataState {
-    let access_revisions = match access {
-        NamespaceAccess::Acl { root_grants, .. } if !root_grants.is_empty() => {
-            vec![AccessRevisionRecord {
-                inode_id: ROOT_INODE_ID,
-                access_revision_no: AccessRevisionNo(0),
-                committed_seq: CommitSeq(0),
-                commit_id: loonfs_types::format::control::genesis_commit_id(),
-                delta_index: 0,
-                committed_by: ActorId::loonfs(),
-                committed_at_ms: created_at_ms,
-                boundary: false,
-                grants: root_grants.clone(),
-            }]
-        }
-        _ => Vec::new(),
-    };
+/// Returns the metadata of a namespace before its first fold: the root
+/// inode and no other row.
+pub(crate) fn bootstrap_metadata_state(created_at_ms: u64) -> MetadataState {
     MetadataState::from_rows(
         vec![InodeRecord {
             inode_id: ROOT_INODE_ID,
@@ -170,6 +140,6 @@ pub(crate) fn bootstrap_metadata_state(
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        access_revisions,
+        Vec::new(),
     )
 }

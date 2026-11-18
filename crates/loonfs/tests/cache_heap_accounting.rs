@@ -20,7 +20,7 @@ use loonfs::publish::{
 };
 use loonfs::test_support::writer;
 use loonfs::{
-    ActorId, CommitId, ContentId, CreateNamespaceOptions, DestinationBehavior, ListOptions, LoonFs,
+    ActorId, CommitId, ContentId, DestinationBehavior, ListOptions, LoonFs,
     MaintainMetadataOptions, MetadataCache, NamespaceId, ReadOnly, SharedObjectStore, StatOptions,
     DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_MANIFEST_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES,
 };
@@ -30,9 +30,8 @@ use loonfs_test_support::ids::{
     attribute_key, attribute_text, namespace_id, page_limit, test_actor,
 };
 use loonfs_types::{
-    AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, NamespaceAccess,
-    PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId, MAX_ACCESS_GRANT_ENTRIES,
-    MAX_ATTRIBUTE_ENTRIES,
+    AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, PrincipalId,
+    PrincipalSet, Subject, SubjectId, MAX_ACCESS_GRANT_ENTRIES, MAX_ATTRIBUTE_ENTRIES,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,8 +86,6 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 const DIRECTORIES: usize = 16;
 const SEGMENT_BUDGET_BYTES: usize = 2 * 1024 * 1024;
 const TOLERANCE: f64 = 0.10;
-const PRINCIPAL_SCOPE: &str = "org_dense";
-
 /// What each entry is.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Rows {
@@ -252,7 +249,6 @@ fn principal(index: usize) -> PrincipalId {
 
 fn subject(index: usize) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE).expect("principal scope"),
         subject_id: SubjectId::parse(principal(index).as_str()).expect("subject id"),
         principals: PrincipalSet::new(BTreeSet::from([principal(index)])).expect("principals"),
     }
@@ -300,17 +296,13 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
     };
     for index in 0..shape.namespaces {
         let namespace_id = shape.namespace(index);
-        let mut options = CreateNamespaceOptions::default();
-        if shape.rows == Rows::Dense {
-            options.access = NamespaceAccess::Acl {
-                principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE).expect("principal scope"),
-                root_grants: full_grants(true),
-            };
-        }
         writer
-            .create_namespace_with_options(&namespace_id, &shape.actor(), &options)
+            .create_namespace(&namespace_id, &shape.actor())
             .await
             .expect("create namespace");
+        if shape.rows == Rows::Dense {
+            loonfs::test_support::set_root_access(&writer, &namespace_id, full_grants(true)).await;
+        }
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
@@ -635,64 +627,6 @@ fn an_ssd_budget_full_of_tiny_blocks_stays_within_the_sizing_term() {
     );
 }
 
-/// Checks that a namespace head heavier than the whole head budget isn't
-/// kept by the cache once the read that loaded it is done, and that
-/// the next read of the namespace loads it again. The head of a namespace
-/// with access control includes its root grants, so a namespace whose root
-/// grants are at the entry limit has a head of tens of KiB.
-async fn a_head_larger_than_the_budget_is_not_kept() {
-    const BUDGET: usize = 4096;
-    let shape = Shape {
-        label: "oversized",
-        namespaces: 1,
-        folded_entries: 16,
-        tail_commits: 0,
-        tail_entries_per_commit: 0,
-        rows: Rows::Dense,
-    };
-    let root = tempfile::tempdir().expect("tempdir");
-    let store: SharedObjectStore = Arc::new(LocalFsStore::new(root.path()).expect("local store"));
-    seed(&store, &shape).await;
-    drop(store);
-    let heads = |max_head_bytes| {
-        MetadataCache::builder()
-            .max_segment_bytes(0)
-            .max_manifest_bytes(0)
-            .max_head_bytes(max_head_bytes)
-            .max_wal_tail_bytes(0)
-            .max_content_object_bytes(0)
-            .build()
-    };
-
-    let (with_budget, reader) = retained_heap(root.path(), heads(BUDGET), |reader| {
-        stat_one_path_per_namespace(&shape, reader)
-    })
-    .await;
-    let first = reader.metadata_cache().stats();
-    let (without_budget, unbudgeted) = retained_heap(root.path(), heads(0), |reader| {
-        stat_one_path_per_namespace(&shape, reader)
-    })
-    .await;
-    drop(unbudgeted);
-    let retained = with_budget.saturating_sub(without_budget);
-    println!(
-        "oversized head | {BUDGET} | {} accounted | {retained} retained",
-        first.heads.cached_decoded_bytes
-    );
-    assert!(first.heads.rejections >= 1, "{first:?}");
-    assert!(first.heads.cached_decoded_bytes <= BUDGET, "{first:?}");
-    assert!(
-        retained <= BUDGET,
-        "the head cache retains {retained} bytes under a {BUDGET} byte budget"
-    );
-
-    stat_one_path_per_namespace(&shape, reader.clone()).await;
-    let second = reader.metadata_cache().stats();
-    assert!(second.heads.misses > first.heads.misses);
-    assert_eq!(second.heads.hits, first.heads.hits);
-    assert!(second.heads.rejections > first.heads.rejections);
-}
-
 #[tokio::test]
 async fn cache_budgets_charge_the_heap_their_contents_hold() {
     small_entries_charge_cache_bookkeeping();
@@ -820,5 +754,4 @@ async fn cache_budgets_charge_the_heap_their_contents_hold() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
-    a_head_larger_than_the_budget_is_not_kept().await;
 }

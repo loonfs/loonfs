@@ -159,7 +159,8 @@ pub(super) async fn test_app_with_sessions(
 }
 
 /// Builds a request with the test token, `headers`, and a JSON content type
-/// when it has a body.
+/// when it has a body. A request whose `headers` include neither
+/// `Loonfs-Principals` nor `Loonfs-Context` acts in the service context.
 pub(super) fn request(
     method: &str,
     uri: &str,
@@ -175,6 +176,15 @@ pub(super) fn request(
     }
     for (name, value) in headers {
         request = request.header(*name, *value);
+    }
+    if !headers.iter().any(|(name, _)| {
+        name.eq_ignore_ascii_case(loonfs_types::headers::PRINCIPALS)
+            || name.eq_ignore_ascii_case(loonfs_types::headers::CONTEXT)
+    }) {
+        request = request.header(
+            loonfs_types::headers::CONTEXT,
+            loonfs_types::headers::SERVICE_CONTEXT,
+        );
     }
     request
         .body(body.map_or_else(Body::empty, |body| Body::from(body.to_owned())))

@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 
 	loonfs "github.com/loonfs/loonfs-sdk-go"
@@ -31,6 +32,7 @@ func main() {
 		option.WithBaseURL(os.Getenv("LOONFS_URL")),
 		option.WithToken(os.Getenv("LOONFS_AUTH_TOKEN")),
 		option.WithActorID(loonfs.String("example-user")),
+		option.WithHTTPHeader(http.Header{"Loonfs-Context": []string{"service"}}),
 	)
 
 	capabilities, err := loon.Capabilities.Retrieve(context.Background())
@@ -50,6 +52,14 @@ func main() {
 	fmt.Println(commit.CommitID, commit.Events)
 }
 ```
+
+Every request that reads or changes a namespace's contents sends exactly one
+of two headers. `Loonfs-Principals` lists the principals that the request acts
+for, and the server checks their rights. `Loonfs-Context: service` acts on the
+application's own account, and the server checks no rights. A request that
+sends neither or both fails with `invalid_request`. A new namespace has no
+access rows and no administrators, so grant the first ones with a commit whose
+one operation is `update_access` on `/`, sent in the service context.
 
 Publishing helpers return the commit, including its events. Pass `CommitID`
 explicitly if you may retry. Use `option.WithHTTPHeader` with `Loonfs-Actor`
@@ -138,10 +148,13 @@ keeping the LoonFS credential on the server. The proxy forwards
 changes, and grep with the path unchanged, and returns 404 for every other
 route.
 
-Set `Authorize` to check each request and set `Loonfs-Actor` on forwarded
-requests. The proxy always removes the browser's actor header.
+Set `Authorize` to check each request and set `Loonfs-Actor`,
+`Loonfs-Subject` and `Loonfs-Principals` on forwarded requests. The proxy
+always removes the browser's actor, subject and principals headers. It forwards
+`Loonfs-Context` unchanged, so a request that the hook forwards without
+principals has to carry `Loonfs-Context: service` from the client.
 The `Authorize` hook is required. Returning `proxy.Authorization{}` with no
-error forwards as the token holder. Any namespace ID in the path reaches LoonFS,
+error forwards the request without an actor or principals. Any namespace ID in the path reaches LoonFS,
 so the hook checks that the caller may use `route.NamespaceID`.
 Here, `authorizedActor` checks the application's session and namespace access.
 

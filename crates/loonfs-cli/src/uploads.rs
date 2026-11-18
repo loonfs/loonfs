@@ -870,7 +870,6 @@ mod tests {
         let path = dir.path().join("upload.json");
         let options = options();
         let mut subject = loonfs_types::Subject {
-            principal_scope: loonfs_types::PrincipalScope::parse("demo").expect("scope"),
             subject_id: loonfs_types::SubjectId::parse("alice").expect("subject id"),
             principals: loonfs_types::PrincipalSet::new(
                 [loonfs_types::PrincipalId::parse("writers").expect("principal id")]

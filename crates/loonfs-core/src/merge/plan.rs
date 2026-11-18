@@ -11,7 +11,7 @@ use super::replay::Replay;
 use super::size::with_split_hint;
 use super::state::StateReader;
 use super::{through_seq, MergeAllowance, MergeRequest};
-use crate::authorize::{Authorizer, CommitAuthority};
+use crate::authorize::Authorizer;
 use crate::commit::engine::CommitCandidate;
 use crate::commit::wal_size::commit_fields_bytes;
 use crate::engine::NamespaceEngine;
@@ -109,11 +109,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             ),
             before: StateReader::new(fork_view.metadata_view_at(source_after_seq), &memory),
             fork_tail: &fork_view.wal_tail,
-            fork_authorizer: Authorizer::for_request(
-                source_namespace_id,
-                &fork_head.access,
-                CommitAuthority::Subject(fork.subject.as_ref()),
-            )?,
+            fork_authorizer: Authorizer::for_request(fork.subject.as_ref()),
             record: &record,
             fork_point_seq,
             memory: Arc::clone(&memory),

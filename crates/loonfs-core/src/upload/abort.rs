@@ -2,7 +2,7 @@
 //! session that never completed.
 
 use super::records::{create_upload_outcome, OutcomeCreation};
-use super::session::{authorize_upload_subject, ensure_session_subject, upload_mode};
+use super::session::{ensure_session_subject, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -29,7 +29,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let catalog = self.own_catalog(catalog);
         let clock = self.namespace.start_clock();
         let namespace_id = catalog.namespace_id();
-        authorize_upload_subject(namespace_id, catalog.access(), self.subject.as_ref())?;
         let loaded = self
             .namespace
             .load_upload_session_state(catalog, upload_id)

@@ -7,9 +7,8 @@ use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
     ChangesArgs, MaintenanceCommand, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
     MaintenanceMetadataArgs, MaintenancePoolCommand, MaintenancePoolGcArgs,
-    MaintenanceRecoverAdministratorArgs, MaintenanceRetentionAdvanceArgs,
-    MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs, MaintenanceSnapshotCommand,
-    MaintenanceSnapshotListArgs, MaintenanceStoreCommand,
+    MaintenanceRetentionAdvanceArgs, MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs,
+    MaintenanceSnapshotCommand, MaintenanceSnapshotListArgs, MaintenanceStoreCommand,
 };
 use crate::backend::StepBudget;
 use crate::error::Result;
@@ -24,9 +23,6 @@ pub(crate) async fn run_maintenance_command(
     command: MaintenanceCommand,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        MaintenanceCommand::RecoverAdministrator(args) => {
-            run_maintenance_recover_administrator(invocation, args).await
-        }
         MaintenanceCommand::Metadata(args) => run_maintenance_metadata(invocation, args).await,
         MaintenanceCommand::Fold => run_maintenance_fold(invocation).await,
         MaintenanceCommand::Snapshot { command } => match command {
@@ -64,24 +60,6 @@ fn maintenance_ran(
     response: RunMaintenanceJobResponse,
 ) -> CommandOutput {
     context.output(CommandData::MaintenanceRan(MaintenanceRan::new(response)))
-}
-
-async fn run_maintenance_recover_administrator(
-    invocation: &Invocation,
-    args: MaintenanceRecoverAdministratorArgs,
-) -> Result<CommandOutput, CommandFailure> {
-    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
-    let response = context
-        .profile
-        .target
-        .client
-        .recover_administrator(context.namespace(), &args.principal_id, context.actor())
-        .await
-        .map_err(|error| context.fail(error))?;
-    Ok(maintenance_ran(
-        &context,
-        RunMaintenanceJobResponse::RecoverAdministrator(response),
-    ))
 }
 
 async fn run_maintenance_metadata(

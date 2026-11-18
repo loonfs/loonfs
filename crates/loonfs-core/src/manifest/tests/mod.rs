@@ -455,7 +455,7 @@ async fn visible_namespace<S: ObjectStore + ?Sized>(
     stat_current_files_by_inode(
         &view,
         &inode_ids,
-        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
     )
     .await
     .expect("resolve every inode the namespace knows")
@@ -840,7 +840,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         activity: Default::default(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by.clone(),
-        access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: head.fork_basis.clone(),
         pool_id: head.pool_id.clone(),
@@ -954,7 +953,6 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         activity: Default::default(),
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
-        access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,
         pool_id: loonfs_test_support::ids::numbered_pool_id(1),

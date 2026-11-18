@@ -35,6 +35,7 @@ fn post_snapshot(server_url: &str, namespace: &str) -> ApiResult<SnapshotRecord>
                     snapshot.snapshot_id
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call(),
         )
     })
@@ -52,6 +53,7 @@ fn delete_snapshot(
                     "{server_url}/v0/namespaces/{namespace}/snapshots/{snapshot_id}"
                 ))
                 .set("authorization", "Bearer test-token")
+                .set("Loonfs-Context", "service")
                 .call(),
         )
     })
@@ -163,7 +165,8 @@ fn post_maintenance_json<T: serde::de::DeserializeOwned>(
     retry_result_on_macos_teardown_einval(|| {
         let request = raw_agent()
             .post(url)
-            .set("authorization", &format!("Bearer {auth_token}"));
+            .set("authorization", &format!("Bearer {auth_token}"))
+            .set("Loonfs-Context", "service");
         decode_maintenance_response(request.call())
     })
 }
@@ -176,7 +179,8 @@ fn post_maintenance_json_body<T: serde::de::DeserializeOwned>(
     retry_result_on_macos_teardown_einval(|| {
         let request = raw_agent()
             .post(url)
-            .set("authorization", &format!("Bearer {auth_token}"));
+            .set("authorization", &format!("Bearer {auth_token}"))
+            .set("Loonfs-Context", "service");
         decode_maintenance_response(request.send_json(body.clone()))
     })
 }

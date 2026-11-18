@@ -1,32 +1,24 @@
 //! Authorization for embedded content reference reads.
 
 use loonfs::test_support::writer;
-use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore, Writable};
+use loonfs::{LoonFs, PutFileOptions, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::{
-    AccessGrants, AccessRight, ContentRef, ErrorCode, NamespaceAccess, NamespaceId, PrincipalId,
-    PrincipalScope, PrincipalSet, Subject, SubjectId,
+    AccessGrants, AccessRight, ContentRef, ErrorCode, NamespaceId, PrincipalId, PrincipalSet,
+    Subject, SubjectId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
         subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
         ]))
         .expect("principals"),
-    }
-}
-
-fn acl(administrator: &str) -> NamespaceAccess {
-    NamespaceAccess::Acl {
-        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
-        root_grants: administrator_grants(administrator),
     }
 }
 
@@ -53,22 +45,25 @@ async fn open_writer() -> (
     (directory, recording, writer)
 }
 
+/// Creates `namespace_id`, with `administrator` as its administrator when
+/// there is one.
 async fn create_namespace(
     writer: &LoonFs<Writable>,
     namespace_id: &NamespaceId,
-    access: NamespaceAccess,
+    administrator: Option<&str>,
 ) {
     writer
-        .create_namespace_with_options(
-            namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateNamespaceOptions {
-                access,
-                ..Default::default()
-            },
-        )
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
+    if let Some(administrator) = administrator {
+        loonfs::test_support::set_root_access(
+            writer,
+            namespace_id,
+            administrator_grants(administrator),
+        )
+        .await;
+    }
 }
 
 async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -> ContentRef {
@@ -101,9 +96,9 @@ async fn publish_inline(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) -
 async fn by_reference_reads_require_publication_in_the_reading_view() {
     let (_directory, recording, writer) = open_writer().await;
     let source = namespace_id("private");
-    let destination = namespace_id("unrestricted");
-    create_namespace(&writer, &source, acl("administrator")).await;
-    create_namespace(&writer, &destination, NamespaceAccess::unrestricted()).await;
+    let destination = namespace_id("destination");
+    create_namespace(&writer, &source, Some("administrator")).await;
+    create_namespace(&writer, &destination, Some("administrator")).await;
     let private_ref = publish_inline(&writer, &source).await;
     loonfs::LoonFs::builder_with_store(recording.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
@@ -119,7 +114,7 @@ async fn by_reference_reads_require_publication_in_the_reading_view() {
         .await
         .expect("materialize private content");
     let reader = writer.read_only().with_subject(subject("stranger"));
-    let destination_namespace = reader.namespace(&destination);
+    let destination_namespace = writer.read_only().namespace(&destination);
     let source_namespace = reader.namespace(&source);
     assert_eq!(
         source_namespace

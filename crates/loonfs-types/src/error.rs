@@ -137,7 +137,6 @@ error_codes! {
     StaleRevision => "stale_revision",
     StaleAttributes => "stale_attributes",
     StaleAccess => "stale_access",
-    NamespaceUnrestricted => "namespace_unrestricted",
     BindingVersionMismatch => "binding_version_mismatch",
     NotDeleted => "not_deleted",
     WriterFenced => "writer_fenced",
@@ -225,8 +224,6 @@ impl ErrorCode {
             | ErrorCode::StaleAttributes
             // An access update was planned against a different access revision than the one it wrote from.
             | ErrorCode::StaleAccess
-            // The namespace's access mode is unrestricted, so it has no access rows.
-            | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingVersionMismatch
             // A restore's target is not the root of a deletion in the trash: a
             // state conflict, resolved by re-reading namespace state.
@@ -285,7 +282,6 @@ impl ErrorCode {
             | ErrorCode::StaleRevision
             | ErrorCode::StaleAttributes
             | ErrorCode::StaleAccess
-            | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingVersionMismatch
             | ErrorCode::NotDeleted
             | ErrorCode::WriterFenced
@@ -329,7 +325,6 @@ impl ErrorCode {
             | ErrorCode::StaleRevision
             | ErrorCode::StaleAttributes
             | ErrorCode::StaleAccess
-            | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingVersionMismatch
             | ErrorCode::NotDeleted
             | ErrorCode::WouldCycle
@@ -418,7 +413,6 @@ impl ErrorCode {
             | ErrorCode::RevisionNotFound
             | ErrorCode::WrongKind
             | ErrorCode::DirectoryNotEmpty
-            | ErrorCode::NamespaceUnrestricted
             | ErrorCode::WriterFenced
             | ErrorCode::WouldCycle
             | ErrorCode::CommitIdReuseConflict

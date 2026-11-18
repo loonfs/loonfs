@@ -126,8 +126,8 @@ impl RuntimeCore {
         }
     }
 
-    /// Returns the subject this core acts for, or `None` for an unscoped
-    /// service runtime.
+    /// Returns the subject this core acts for, or `None` in the service
+    /// context.
     pub(crate) fn subject(&self) -> Option<&Subject> {
         self.subject.as_ref()
     }

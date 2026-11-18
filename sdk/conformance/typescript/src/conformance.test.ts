@@ -157,7 +157,6 @@ interface InodeAddressingExpected {
     entry_names: string[];
     stale_binding_version: ErrorStatusExpected;
     occupied_name: ErrorStatusExpected;
-    unrestricted_access: ErrorStatusExpected;
     deleted_content: ErrorStatusExpected;
 }
 
@@ -394,7 +393,6 @@ interface ProxyRequest {
 
 interface ProxyACL {
     namespace_id: string;
-    principal_scope: string;
     administrator: string;
     member: string;
     member_subject_id: string;
@@ -551,7 +549,6 @@ const INODE_ADDRESSING_EXPECTED_FIELDS = [
     "entry_names",
     "stale_binding_version",
     "occupied_name",
-    "unrestricted_access",
     "deleted_content",
 ] as const;
 const SNAPSHOTS_REQUEST_FIELDS = [
@@ -937,7 +934,6 @@ function decodeProxy(testCase: ConformanceCase): [ProxyRequest, ProxyExpected] {
         testCase.request.acl,
         [
             "namespace_id",
-            "principal_scope",
             "administrator",
             "member",
             "member_subject_id",
@@ -1408,6 +1404,12 @@ async function fetchThroughProxy(
 ): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set("authorization", "Bearer browser-credential");
+    // A request that claims principals acts for a subject, and sending the
+    // service context with it would be invalid. Every other request acts on
+    // the application's own account, and the proxy forwards the context.
+    if (!headers.has("loonfs-principals")) {
+        headers.set("Loonfs-Context", "service");
+    }
     return fetch(url, { ...init, headers });
 }
 
@@ -1429,39 +1431,26 @@ async function requireSuccessfulResponse(response: Response, label: string): Pro
 }
 
 
+// Sent on every request that acts on the application's own account, so the
+// server checks no rights.
+const SERVICE_CONTEXT = { "Loonfs-Context": "service" };
+
 const baseUrl = process.env.LOONFS_CONFORMANCE_URL;
 const environmentSkip = baseUrl == null || baseUrl === "" ? RUNNER_SKIP : undefined;
 let harness: Harness | undefined;
 let cases: Map<string, ConformanceCase> | undefined;
-
-test("server client rejects a partial subject context", () => {
-    const expected = /principalScope and principals must be configured together/;
-    assert.throws(
-        () =>
-            new LoonFSClient({
-                baseUrl: "http://127.0.0.1",
-                token: "unused-token",
-                principals: "prn_team",
-            }),
-        expected,
-    );
-    assert.throws(
-        () =>
-            new LoonFSClient({
-                baseUrl: "http://127.0.0.1",
-                token: "unused-token",
-                principalScope: "org_demo",
-            }),
-        expected,
-    );
-});
 
 if (environmentSkip === undefined) {
     const configuredBaseUrl = requiredEnvironment("LOONFS_CONFORMANCE_URL");
     const token = requiredEnvironment("LOONFS_CONFORMANCE_TOKEN");
     cases = loadCases(requiredEnvironment("LOONFS_CONFORMANCE_CASES"));
     harness = {
-        client: new LoonFSClient({ baseUrl: configuredBaseUrl, token, actorId: "conformance" }),
+        client: new LoonFSClient({
+            baseUrl: configuredBaseUrl,
+            token,
+            actorId: "conformance",
+            headers: SERVICE_CONTEXT,
+        }),
         unauthenticated: new LoonFSClient({ baseUrl: configuredBaseUrl, token, auth: false }),
         serverBaseUrl: configuredBaseUrl,
         token,
@@ -2210,16 +2199,6 @@ conformanceTest("inode_addressing", async (activeHarness, testCase) => {
     assert.equal(labeled.attributes_revision_no, expected.attributes_revision_no);
     assert.deepEqual(labeled.attributes, { [request.attribute_key]: request.attribute_value });
 
-    await assert.rejects(
-        commit("conf-inode-addressing-access", {
-            kind: "update_access_by_inode",
-            inode_id: "ino_00000000000000000000000000",
-            boundary: false,
-            grants: {},
-        }),
-        assertError(LoonFS.ConflictError, expected.unrestricted_access),
-    );
-
     const deletion = await client.commits.create(
         deleteCommit(namespaceId, "conf-inode-addressing-delete-copy", childPath(request.copy_file_name)),
         actorHeaders,
@@ -2757,27 +2736,44 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     }
 
     const acl = request.acl;
+    const serverHeaders = {
+        "content-type": "application/json",
+        Authorization: `Bearer ${activeHarness.token}`,
+        "Loonfs-Actor": request.actor_id,
+        ...SERVICE_CONTEXT,
+    };
     const createdACL = await fetch(`${activeHarness.serverBaseUrl}/v0/namespaces`, {
         method: "POST",
-        headers: {
-            "content-type": "application/json",
-            Authorization: `Bearer ${activeHarness.token}`,
-            "Loonfs-Actor": request.actor_id,
-        },
-        body: JSON.stringify({
-            namespace_id: acl.namespace_id,
-            access: {
-                kind: "acl",
-                principal_scope: acl.principal_scope,
-                root_grants: {
-                    [acl.administrator]: ["admin"],
-                    [acl.member]: ["create", "read"],
-                },
-            },
-        }),
+        headers: serverHeaders,
+        body: JSON.stringify({ namespace_id: acl.namespace_id }),
     });
     await requireSuccessfulResponse(createdACL, "create ACL namespace");
     await createdACL.arrayBuffer();
+    // A new namespace has no administrators, so the application grants the
+    // first ones in the service context.
+    const administrators = await fetch(
+        `${activeHarness.serverBaseUrl}/v0/namespaces/${encodeURIComponent(acl.namespace_id)}/commits`,
+        {
+            method: "POST",
+            headers: serverHeaders,
+            body: JSON.stringify({
+                commit_id: `${acl.commit_id}-administrators`,
+                operations: [
+                    {
+                        kind: "update_access",
+                        path: "/",
+                        boundary: false,
+                        grants: {
+                            [acl.administrator]: ["admin"],
+                            [acl.member]: ["create", "read"],
+                        },
+                    },
+                ],
+            }),
+        },
+    );
+    await requireSuccessfulResponse(administrators, "grant ACL administrators");
+    await administrators.arrayBuffer();
     const aclProxy = await startProxyServer(
         createProxyHandler({
             serverBaseUrl: activeHarness.serverBaseUrl,
@@ -2785,16 +2781,15 @@ test("proxy", { skip: environmentSkip }, async (context) => {
             authorize: () => ({
                 actorId: request.actor_id,
                 subjectId: acl.member_subject_id,
-                principalScope: acl.principal_scope,
                 principals: [acl.member],
             }),
         }),
     );
     context.after(() => aclProxy.close());
     const aclCommits = `${aclProxy.baseUrl}/v0/namespaces/${encodeURIComponent(acl.namespace_id)}/commits`;
+    // The browser claims principals, which the hook replaces.
     const aclHeaders = {
         "content-type": "application/json",
-        "Loonfs-Principal-Scope": acl.principal_scope,
         "Loonfs-Principals": acl.browser_principals,
     };
     const aclStamped = await proxyJson<LoonFS.Commit>(
@@ -2821,7 +2816,11 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     beginModes.length = 0;
     // A browser uses the ordinary client. The proxy replaces the browser's token
     // with the server token.
-    const browserClient = new LoonFSClient({ baseUrl: proxy.baseUrl, token: "browser-credential" });
+    const browserClient = new LoonFSClient({
+        baseUrl: proxy.baseUrl,
+        token: "browser-credential",
+        headers: SERVICE_CONTEXT,
+    });
     const browserPath = `${request.proxied_path}-browser`;
     await assertBrowserTransfer(
         browserClient,
@@ -2905,6 +2904,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     const refusedClient = new LoonFSClient({
         baseUrl: authorizedProxy.baseUrl,
         token: "browser-credential",
+        headers: SERVICE_CONTEXT,
     });
     await assert.rejects(
         refusedClient.files.upload({
@@ -3185,6 +3185,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         baseUrl: activeHarness.serverBaseUrl,
         token: activeHarness.token,
         actorId: request.actor_id,
+        headers: SERVICE_CONTEXT,
     });
     const helperCommit = await client.files.upload(
         {

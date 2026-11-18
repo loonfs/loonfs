@@ -21,12 +21,21 @@ client = LoonFS(
     base_url=os.environ["LOONFS_URL"],
     token=os.environ["LOONFS_AUTH_TOKEN"],
     actor_id="example-user",
+    headers={"Loonfs-Context": "service"},
 )
 
 capabilities = client.capabilities.retrieve()
 commit = client.files.upload("demo", path="/hello.txt", content=b"hello")
 print(commit.commit_id, commit.events)
 ```
+
+Every request that reads or changes a namespace's contents sends exactly one
+of two headers. `Loonfs-Principals` lists the principals that the request acts
+for, and the server checks their rights. `Loonfs-Context: service` acts on the
+application's own account, and the server checks no rights. A request that
+sends neither or both fails with `invalid_request`. A new namespace has no
+access rows and no administrators, so grant the first ones with a commit whose
+one operation is `update_access` on `/`, sent in the service context.
 
 Publishing helpers return the commit, including its events. Pass `commit_id`
 explicitly if you may retry. Use
@@ -145,10 +154,13 @@ LoonFS credential on the server. The proxy forwards
 changes, and grep with the path unchanged, and returns 404 for every other
 route.
 
-Set `authorize` to check each request and set `Loonfs-Actor` on forwarded
-requests. The proxy always removes the browser's actor header.
-The `authorize` hook is required. Returning `ProxyAuthorization()` forwards as
-the token holder. Any namespace ID in the path reaches LoonFS, so the hook
+Set `authorize` to check each request and set `Loonfs-Actor`,
+`Loonfs-Subject` and `Loonfs-Principals` on forwarded requests. The proxy
+always removes the browser's actor, subject and principals headers. It forwards
+`Loonfs-Context` unchanged, so a request that the hook forwards without
+principals has to carry `Loonfs-Context: service` from the client.
+The `authorize` hook is required. Returning `ProxyAuthorization()` forwards the
+request without an actor or principals. Any namespace ID in the path reaches LoonFS, so the hook
 checks that the caller may use `context.namespace_id`.
 Here, `authorized_actor` checks the application's session and namespace access.
 

@@ -1,15 +1,13 @@
 //! The `maintenance` commands.
 
-use super::flags::{ActorSelectorArgs, PaginationArgs};
+use super::flags::PaginationArgs;
 use super::parse::parse_change_seq;
 use clap::{Args, Subcommand, ValueHint};
-use loonfs_types::{CommitSeq, PoolId, PrincipalId};
+use loonfs_types::{CommitSeq, PoolId};
 use std::num::NonZeroU64;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceCommand {
-    /// Restore a principal's administrator grant on the root.
-    RecoverAdministrator(MaintenanceRecoverAdministratorArgs),
     /// Fold the WAL tail if it's due, and compact metadata until nothing is due.
     ///
     /// A compaction unit can take minutes, so the command can too. It
@@ -47,14 +45,6 @@ pub(crate) enum MaintenanceCommand {
         #[command(subcommand)]
         command: MaintenanceStoreCommand,
     },
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct MaintenanceRecoverAdministratorArgs {
-    #[command(flatten)]
-    pub actor: ActorSelectorArgs,
-    #[arg(value_hint = ValueHint::Other)]
-    pub principal_id: PrincipalId,
 }
 
 #[derive(Debug, Subcommand)]

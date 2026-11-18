@@ -453,7 +453,7 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
     .await
     .expect("span before manifest");
     let first_span = span_key(&pool_id, &early, 0, 5);
-    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let access = ReadAccess::live(Authorizer::Service);
     // The download writes its own span object of the same pieces, because
     // no layout in the view lists the object that the write above stored.
     let downloaded = view
@@ -695,7 +695,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
             .await
             .expect("fold extent");
     }
-    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let access = ReadAccess::live(Authorizer::Service);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace.load_current_metadata_view().await.expect("view");
     let content_writes = crate::test_support::content_writes();
@@ -799,7 +799,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .resolve_path(
             "/file-0",
             AttributeInclusion::Omit,
-            &ReadAccess::live(Authorizer::Unrestricted),
+            &ReadAccess::live(Authorizer::Service),
         )
         .await
         .expect("base entry")
@@ -1012,7 +1012,7 @@ async fn read_revision(
         path,
         revision_no,
         None,
-        &ReadAccess::live(Authorizer::Unrestricted),
+        &ReadAccess::live(Authorizer::Service),
     )
     .await
     .expect("read the revision")
@@ -1203,7 +1203,7 @@ async fn tail_revision_downloads_write_their_own_objects_in_either_order() {
         );
         let namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
         let view = namespace.load_current_metadata_view().await.expect("view");
-        let access = ReadAccess::live(Authorizer::Unrestricted);
+        let access = ReadAccess::live(Authorizer::Service);
         let pool_id = pool_id(&store).await;
         // Each download writes the chain's pieces as a span object of its
         // own, because no layout in the view lists another download's object.
@@ -1365,7 +1365,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let plan = session
         .prepare_commit(
             &candidate,
-            crate::authorize::Authorizer::Unrestricted,
+            crate::authorize::Authorizer::Service,
             candidate.semantic_identity(&namespace_id),
         )
         .await
@@ -1408,7 +1408,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
                 "/target-0",
                 RevisionNo(2),
                 None,
-                &ReadAccess::live(Authorizer::Unrestricted),
+                &ReadAccess::live(Authorizer::Service),
             )
             .await
             .expect("copy bytes");
@@ -1474,7 +1474,7 @@ async fn a_failed_layout_write_names_the_requests_operation() {
     )
     .prepare_commit(
         &candidate,
-        Authorizer::Unrestricted,
+        Authorizer::Service,
         candidate.semantic_identity(&namespace_id),
     )
     .await
@@ -1518,7 +1518,7 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
     denied.fail_all();
     let namespace = crate::test_support::namespace_store(&denied, &namespace_id);
     let view = namespace.load_current_metadata_view().await.expect("view");
-    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let access = ReadAccess::live(Authorizer::Service);
     let content_writes = crate::test_support::content_writes();
     let store = denied.inner();
     store.reset();
@@ -1632,7 +1632,7 @@ async fn a_pending_reference_keeps_its_chain_through_a_floor_advance() {
         let mut plan = session
             .prepare_commit(
                 &candidate,
-                crate::authorize::Authorizer::Unrestricted,
+                crate::authorize::Authorizer::Service,
                 candidate.semantic_identity(&namespace_id),
             )
             .await

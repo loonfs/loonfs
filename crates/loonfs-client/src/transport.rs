@@ -52,7 +52,8 @@ pub(crate) struct WireRequest {
 }
 
 impl Client {
-    /// Starts the request for `operation` at `url`, with the subject headers.
+    /// Starts the request for `operation` at `url`, with the subject headers,
+    /// or with `Loonfs-Context: service` when the client has no subject.
     pub(crate) fn request(&self, operation: Operation, url: &str) -> WireRequest {
         let request = WireRequest {
             method: operation.method,
@@ -63,10 +64,9 @@ impl Client {
             body: None,
         };
         let Some(subject) = &self.subject else {
-            return request;
+            return request.header(headers::CONTEXT, headers::SERVICE_CONTEXT);
         };
         request
-            .header(headers::PRINCIPAL_SCOPE, subject.principal_scope.as_str())
             .header(headers::SUBJECT, subject.subject_id.as_str())
             .header(headers::PRINCIPALS, subject.principals.to_string())
     }

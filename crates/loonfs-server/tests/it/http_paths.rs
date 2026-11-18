@@ -39,6 +39,7 @@ async fn http_stat_omits_the_root_name_and_carries_named_child_names() {
                 harness.server_url
             ))
             .set("authorization", "Bearer test-token")
+            .set("Loonfs-Context", "service")
             .call()
             .expect("stat request");
         serde_json::from_reader::<_, serde_json::Value>(response.into_reader()).expect("stat JSON")

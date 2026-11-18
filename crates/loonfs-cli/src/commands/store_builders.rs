@@ -15,7 +15,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
 use loonfs_types::config::non_blank;
-use loonfs_types::{PrincipalId, PrincipalScope, PrincipalSet, SecretString};
+use loonfs_types::{PrincipalId, PrincipalSet, SecretString};
 use std::path::Path;
 
 const AWS_REGIONS: &[&str] = &[
@@ -384,19 +384,6 @@ pub(crate) fn remote_connection(
         auth_token,
         ca_cert_path,
     })
-}
-
-pub(crate) fn parse_profile_principal_scope(
-    principal_scope: Option<&str>,
-) -> Result<Option<PrincipalScope>> {
-    principal_scope
-        .map(|principal_scope| {
-            PrincipalScope::parse(principal_scope).map_err(|error| {
-                CliError::invalid_request(format!("invalid `--principal-scope`: {error}"))
-                    .with_param("--principal-scope")
-            })
-        })
-        .transpose()
 }
 
 pub(crate) fn parse_profile_principals(

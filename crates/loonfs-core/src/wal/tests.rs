@@ -366,7 +366,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
         view.resolve_path(
             path,
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("committed");
@@ -662,7 +662,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         view.resolve_path(
             path,
             AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("file");
@@ -1085,7 +1085,7 @@ async fn a_writer_resuming_after_a_collection_collides_with_the_kept_fence() {
         .load_current_metadata_view()
         .await
         .expect("current view");
-    let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
+    let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service);
     assert_eq!(view.head().seq, CommitSeq(2));
     view.resolve_path("/takeover", AttributeInclusion::Omit, &access)
         .await

@@ -283,7 +283,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// the file's revision, because another writer can change the file's
     /// content without changing its binding version.
     ///
-    /// In a namespace with ACLs, the plan also plans the merge's commit as
+    /// For a merge with a subject, the plan also plans the merge's commit as
     /// the writer does, against the head that the plan read, and returns the
     /// writer's error. The writer checks the subject's rights on each
     /// operation, and it returns `inode_not_found` for an inode on which the
@@ -326,12 +326,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         })
     }
 
-    /// Plans `candidate` as the writer does, against `main`, in a namespace
-    /// with ACLs, and returns the writer's error. The writer checks the
+    /// Plans `candidate` as the writer does, against `main`, for a merge
+    /// with a subject, and returns the writer's error. The writer checks the
     /// subject's rights on each operation against the state that the
     /// earlier operations leave, so the plan runs the writer's planning
-    /// instead of a copy of its checks. A namespace without ACLs checks no
-    /// rights, so its plan skips this.
+    /// instead of a copy of its checks. A merge in the service context
+    /// checks no rights, so its plan skips this.
     async fn check_merge_rights(
         &self,
         main: &LoadedMetadataView<'_, S>,
@@ -339,9 +339,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         prepared_at_ms: u64,
     ) -> Result<()> {
         let head = main.head();
-        let authorizer =
-            Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
-        if matches!(authorizer, Authorizer::Unrestricted) {
+        let authorizer = candidate.authorizer();
+        if matches!(authorizer, Authorizer::Service) {
             return Ok(());
         }
         PublishPlanningSession::new(

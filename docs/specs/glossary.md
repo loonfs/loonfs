@@ -347,7 +347,7 @@ The role that folds a namespace's WAL, compacts its metadata, publishes an exten
 
 ### Job
 
-One maintenance API request (`POST .../jobs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, a `gc` job runs one [collection](#collection) of the namespace, or of a [pool](#pool) on the pool's route, and a `recover_administrator` job grants a principal `admin` on the root again. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
+One maintenance API request (`POST .../jobs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, and a `gc` job runs one [collection](#collection) of the namespace, or of a [pool](#pool) on the pool's route. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
 
 ### Step
 
@@ -396,3 +396,7 @@ The document a deployment returns from `GET /v0/capabilities`. It lists the depl
 ### Extension
 
 An optional subsystem that keeps state derived from a namespace's committed metadata and content, such as the grep index. An extension's state is an entry in the namespace's manifest, under the extension's name, and the entry lists the extension's segments, which are stored under `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/`. Every manifest publication copies the entry forward (a tombstone copies it with its runs emptied), a fork's first manifest copies its source's entry, a snapshot keeps the segments that its manifest lists, and garbage collection collects the segments that no kept manifest lists. See [Extensions](format.md#124-extensions).
+
+### Service context
+
+The authority of a request that the application makes on its own account, with the whole authority of its deployment token. A request puts itself in the service context with the `Loonfs-Context: service` header, and LoonFS checks no rights for it. Every request that reads or changes a namespace's contents sends either that header or `Loonfs-Principals`, which lists the principals of the user that the request acts for. For example, an indexer that reads every file sends the service context, and so does an application that sets a new namespace's first administrators. See [Subject and principals](api.md#subject-and-principals).

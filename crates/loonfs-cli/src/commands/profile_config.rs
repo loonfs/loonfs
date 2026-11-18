@@ -6,16 +6,14 @@ use crate::args::{
     RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
 };
 use crate::commands::store_builders::{
-    absolute_local_root, gcs_store, local_store, parse_profile_principal_scope,
-    parse_profile_principals, r2_store, remote_connection, s3_store,
+    absolute_local_root, gcs_store, local_store, parse_profile_principals, r2_store,
+    remote_connection, s3_store,
 };
 use crate::config::{
-    absolute_env_path, ensure_subject_pairing, ProfileConfig, ProfileConnection, ProfileIdentity,
-    StoreConfig,
+    absolute_env_path, ProfileConfig, ProfileConnection, ProfileIdentity, StoreConfig,
 };
 use crate::error::{CliError, Result};
 use crate::prompt;
-use crate::resolve::subject_flag_error;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +63,6 @@ impl ProfileProviderCommand {
     pub(super) fn has_update_flags(&self, subject: &SubjectSelectors) -> bool {
         self.actor().actor_id.is_some()
             || subject.subject_id.is_some()
-            || subject.principal_scope.is_some()
             || subject.principals.is_some()
             || match self {
                 Self::S3(args) => args.store.has_update_flags(),
@@ -79,23 +76,17 @@ impl ProfileProviderCommand {
 
 impl ProfileIdentity {
     /// Returns this identity with the fields that the actor flag and the
-    /// subject selectors set, and refuses a principal scope without
-    /// principals or principals without a scope.
+    /// subject selectors set.
     pub(super) fn merge_flags(
         self,
         actor: &ProfileActorArgs,
         subject: &SubjectSelectors,
     ) -> Result<Self> {
-        let principal_scope = parse_profile_principal_scope(subject.principal_scope.as_deref())?
-            .or(self.principal_scope);
         let principals =
             parse_profile_principals(subject.principals.as_deref())?.or(self.principals);
-        ensure_subject_pairing(principal_scope.as_ref(), principals.as_deref())
-            .map_err(subject_flag_error)?;
         Ok(Self {
             actor_id: actor.actor_id.clone().or(self.actor_id),
             subject_id: subject.subject_id.clone().or(self.subject_id),
-            principal_scope,
             principals,
         })
     }
@@ -480,7 +471,6 @@ mod tests {
                 key_prefix: None,
             }),
             &SubjectSelectors {
-                principal_scope: Some("org".to_owned()),
                 principals: Some(principals),
                 ..SubjectSelectors::default()
             },

@@ -200,6 +200,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
                 .method("PUT")
                 .uri(format!("{upload_uri}/content"))
                 .header("authorization", "Bearer test-token")
+                .header("Loonfs-Context", "service")
                 .body(axum::body::Body::from("same"))
                 .expect("upload request"),
         )

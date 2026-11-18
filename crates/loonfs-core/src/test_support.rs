@@ -577,7 +577,7 @@ pub(crate) async fn visible_inode_id<S: loonfs_objectstore::ObjectStore + ?Sized
         .resolve_path(
             absolute_path,
             loonfs_types::options::AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
         )
         .await
         .expect("a visible path")

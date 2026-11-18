@@ -36,9 +36,8 @@ pub use gc::{
 pub use maintenance::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, MetadataMaintenanceOutcome,
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, MetadataSkippedWork,
-    RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceJobRequest,
-    RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest, RunPoolMaintenanceJobResponse,
-    SetRetentionWindowRequest, SetRetentionWindowResponse,
+    RunMaintenanceJobRequest, RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest,
+    RunPoolMaintenanceJobResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
 };
 pub use merges::{
     ForkNamespaceForRebaseRequest, MergeBound, MergeConflict, MergeConflictKind,
@@ -46,8 +45,8 @@ pub use merges::{
     NextMergeRangeResponse, ReplayForkRequest, ReplayForkResponse,
 };
 pub use namespaces::{
-    CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceAccessMode,
-    NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata, NamespaceRebasedFrom,
+    CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceDiagnostics,
+    NamespaceForkBasis, NamespaceMetadata, NamespaceRebasedFrom,
 };
 pub use operations::{DeleteDirectoryBehavior, FileContent, FilesystemOperation};
 pub use preconditions::{DestinationBehavior, DestinationPrecondition};

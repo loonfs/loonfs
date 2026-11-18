@@ -3,7 +3,7 @@
 //! against before planning.
 
 use super::super::CommitFingerprint;
-use crate::authorize::CommitAuthority;
+use crate::authorize::Authorizer;
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::{btree_map_node_bytes, HeapBytes};
 use crate::path::write::{
@@ -25,7 +25,8 @@ use thiserror::Error;
 /// it references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitCandidate {
-    request: CandidateRequest,
+    /// The filesystem operations, authorized against the intent's subject.
+    intent: CommitIntent,
     /// The merge that the commit is, if it's one. The commit's identity is
     /// then its merge record in place of its operations and preconditions.
     merge: Option<MergeIntent>,
@@ -74,29 +75,6 @@ pub(crate) enum TemporaryMove {
     Back { from_parent: InodeId },
 }
 
-/// What a candidate commits, and whose authority it commits under.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CandidateRequest {
-    /// Filesystem operations, authorized against the intent's subject.
-    Intent(CommitIntent),
-    /// Filesystem operations that maintenance commits with no subject check.
-    Maintenance(CommitIntent),
-}
-
-impl CandidateRequest {
-    fn intent(&self) -> &CommitIntent {
-        match self {
-            Self::Intent(intent) | Self::Maintenance(intent) => intent,
-        }
-    }
-
-    fn intent_mut(&mut self) -> &mut CommitIntent {
-        match self {
-            Self::Intent(intent) | Self::Maintenance(intent) => intent,
-        }
-    }
-}
-
 /// The result of preparing external content referenced by a mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContentPreparation {
@@ -130,39 +108,25 @@ fn rejected_token_reasons(rejections: &[(ContentId, ContentTokenError)]) -> Stri
 impl CommitCandidate {
     /// Uses the handle subject to authorize this publication.
     pub fn with_subject(mut self, subject: loonfs_types::Subject) -> Self {
-        let mut intent = match self.request {
-            CandidateRequest::Intent(intent) | CandidateRequest::Maintenance(intent) => intent,
-        };
-        intent.subject = Some(subject);
-        self.request = CandidateRequest::Intent(intent);
+        self.intent.subject = Some(subject);
         self
     }
 
     /// Supplies the subject used to own content staged for this candidate.
     pub fn subject(&self) -> Option<&loonfs_types::Subject> {
-        self.intent().subject.as_ref()
+        self.intent.subject.as_ref()
     }
 
-    /// A commit no subject check applies to. Only maintenance builds one.
-    pub fn maintenance(intent: CommitIntent) -> Self {
-        Self::with_request(CandidateRequest::Maintenance(intent))
-    }
-
-    pub(crate) fn authority(&self) -> CommitAuthority<'_> {
-        match &self.request {
-            CandidateRequest::Intent(intent) => CommitAuthority::Subject(intent.subject.as_ref()),
-            CandidateRequest::Maintenance(_) => CommitAuthority::Maintenance,
-        }
+    /// Returns the authorizer for the candidate's subject, or the service
+    /// context's when the candidate has no subject.
+    pub(crate) fn authorizer(&self) -> Authorizer<'_> {
+        Authorizer::for_request(self.intent.subject.as_ref())
     }
 
     /// Wraps a mutation request with no attached content proofs.
     pub fn new(intent: CommitIntent) -> Self {
-        Self::with_request(CandidateRequest::Intent(intent))
-    }
-
-    fn with_request(request: CandidateRequest) -> Self {
         Self {
-            request,
+            intent,
             merge: None,
             content: ContentPreparation::Ready(Vec::new()),
             inline_content: Vec::new(),
@@ -300,7 +264,7 @@ impl CommitCandidate {
     /// Replaces an inline value with a staged proof without changing its identity form.
     pub fn stage_inline_content(&mut self, content_id: &ContentId, proof: PreparedContent) {
         let reference = proof.content_ref();
-        for operation in &mut self.request.intent_mut().operations {
+        for operation in &mut self.intent.operations {
             match operation {
                 FilesystemOperation::PutFile {
                     content: FileContent::Ref(content_ref),
@@ -395,12 +359,12 @@ impl CommitCandidate {
 
     /// The filesystem request the candidate commits.
     pub(crate) fn intent(&self) -> &CommitIntent {
-        self.request.intent()
+        &self.intent
     }
 
     #[cfg(test)]
     pub(crate) fn intent_mut(&mut self) -> &mut CommitIntent {
-        self.request.intent_mut()
+        &mut self.intent
     }
 
     pub(crate) fn content_preparation(&self) -> &ContentPreparation {

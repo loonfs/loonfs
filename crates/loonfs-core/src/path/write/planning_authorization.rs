@@ -46,7 +46,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         source_inode_id: InodeId,
         replacement: Replacement,
     ) -> Result<()> {
-        if matches!(self.authorizer, Authorizer::Unrestricted) {
+        if matches!(self.authorizer, Authorizer::Service) {
             return Ok(());
         }
         let parent = destination.parent_inode_id;
@@ -87,7 +87,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         destination_parent: InodeId,
         mover: AccessRights,
     ) -> Result<()> {
-        if matches!(self.authorizer, Authorizer::Unrestricted) {
+        if matches!(self.authorizer, Authorizer::Service) {
             return Ok(());
         }
         if source_parent == destination_parent {

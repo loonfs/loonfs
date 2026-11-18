@@ -165,7 +165,6 @@ async fn a_late_ambiguous_put_at_an_emptied_number_is_lost() {
         loonfs_types::PoolId::generate(),
         context.now_ms,
         loonfs_test_support::test_actor(),
-        loonfs_types::NamespaceAccess::Unrestricted {},
     );
     let late_namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
     let clock = context.clock();
