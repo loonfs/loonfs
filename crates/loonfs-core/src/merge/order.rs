@@ -1,7 +1,8 @@
 //! The order of a merge's binding changes. Each change runs after the
-//! changes that free the name it takes, create its parent, or move an inode
-//! out of a directory that the merge deletes. When moves wait on each other
-//! in a cycle, one of them first moves its inode to a temporary name.
+//! creates and restores of the directories it needs, and after the changes
+//! that free the name it takes or move an inode out of a directory that the
+//! merge deletes. When moves wait on each other in a cycle, one of them first
+//! moves its inode to a temporary name.
 
 use super::classify::Classifier;
 use super::operations::{BindingChange, InodePlan};
@@ -33,16 +34,19 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Orders the plans' binding changes, followed by their revision,
     /// attribute, and access updates in inode ID order. `holders` maps each
     /// inode that a create or a move places to the inode that has its name
-    /// in the merged-into namespace.
+    /// in the merged-into namespace, and `depends_on` maps each inode to the
+    /// directories that the merge creates or restores and that its change
+    /// needs.
     ///
     /// Fails with `invalid_request` when no order of the changes works, and
     /// never returns an order that it knows to be invalid.
     pub(super) async fn order(
         &mut self,
         holders: &HashMap<InodeId, InodeId>,
+        depends_on: &HashMap<InodeId, Vec<InodeId>>,
     ) -> Result<MergeOperations> {
         let edges = self.edges().await?;
-        let mut order = Order::new(&self.plans, holders, edges, self.theirs.view());
+        let mut order = Order::new(&self.plans, holders, depends_on, edges, self.theirs.view());
         order.run().await?;
         let mut operations = order.operations;
         operations.extend(
@@ -126,6 +130,7 @@ fn unordered() -> CoreError {
 struct Order<'p, 'v, S: ObjectStore + ?Sized> {
     plans: &'p [InodePlan],
     holders: &'p HashMap<InodeId, InodeId>,
+    depends_on: &'p HashMap<InodeId, Vec<InodeId>>,
     /// The merged-into namespace at its head, where a temporary name has to
     /// be free.
     theirs: MetadataView<'v, 'v, S>,
@@ -168,6 +173,7 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
     fn new(
         plans: &'p [InodePlan],
         holders: &'p HashMap<InodeId, InodeId>,
+        depends_on: &'p HashMap<InodeId, Vec<InodeId>>,
         edges: HashMap<InodeId, Edge>,
         theirs: MetadataView<'v, 'v, S>,
     ) -> Self {
@@ -191,6 +197,7 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
         let mut order = Self {
             plans,
             holders,
+            depends_on,
             theirs,
             edges,
             pending_creates,
@@ -312,6 +319,14 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
 
     fn readiness(&mut self, plan: &InodePlan) -> Readiness {
         let inode_id = plan.inode_id;
+        let pending = self.depends_on.get(&inode_id).and_then(|directories| {
+            directories
+                .iter()
+                .find(|directory| self.pending_creates.contains(*directory))
+        });
+        if let Some(directory) = pending {
+            return Readiness::Waits(*directory);
+        }
         if matches!(plan.binding, Some(BindingChange::Delete { .. })) {
             return self.survivors_out(inode_id);
         }
@@ -319,9 +334,6 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
         else {
             return Readiness::Ready;
         };
-        if self.pending_creates.contains(&parent_inode_id) {
-            return Readiness::Waits(parent_inode_id);
-        }
         if let Some(holder) = self.holders.get(&inode_id) {
             if !self.left.contains(holder) {
                 return Readiness::Waits(*holder);

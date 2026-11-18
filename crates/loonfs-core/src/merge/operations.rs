@@ -1,7 +1,7 @@
 //! What a merge's commit does to each inode, and the operation that makes
 //! each change.
 
-use super::state::InodeState;
+use super::state::{Edge, InodeState};
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use loonfs_types::{
@@ -14,8 +14,8 @@ use loonfs_types::{
 pub(super) struct InodePlan {
     pub(super) inode_id: InodeId,
     pub(super) kind: InodeKind,
-    /// The create, move, or delete, if the merge changes the inode's
-    /// binding.
+    /// The create, move, delete, or restore, if the merge changes the
+    /// inode's binding.
     pub(super) binding: Option<BindingChange>,
     /// The revision, attribute, and access updates, in that order.
     pub(super) updates: Vec<FilesystemOperation>,
@@ -36,9 +36,10 @@ impl InodePlan {
 /// Returns the plan of the create of `inode_id`, with its parent, name,
 /// content, attributes, and access at `ours`, its state in the fork, for a
 /// merge into a namespace that doesn't have the inode, or `None` when the
-/// inode isn't visible in the fork.
+/// inode isn't visible in the fork. An inode that the fork created and then
+/// deleted or hid has nothing to create.
 pub(super) fn create_plan(inode_id: InodeId, ours: &InodeState) -> Result<Option<InodePlan>> {
-    let Some(edge) = ours.edge() else {
+    let Some(edge) = ours.edge().filter(|_| ours.is_visible()) else {
         return Ok(None);
     };
     let binding = BindingChange::Create {
@@ -65,44 +66,60 @@ pub(super) fn create_plan(inode_id: InodeId, ours: &InodeState) -> Result<Option
     }))
 }
 
-/// Returns how a merge changes the binding of an inode that the
-/// merged-into namespace `namespace_id` has, from `theirs`, its state there,
-/// to `ours`, its state in the fork, or `None` when the binding stays.
-///
-/// The merge moves an inode that both states have visible at different
-/// places, and deletes one that only `theirs` has visible. When only `ours`
-/// has the inode visible, the merge undoes the deletion at `deletion_seq`,
-/// which the caller passes when a deletion of the inode itself hides it in
-/// `theirs` and the merge can undo that deletion. Without one, as when only
-/// an ancestor's deletion hides the inode, the binding stays, and undoing
-/// the ancestor's deletion shows the inode again.
-pub(super) fn binding_change(
+/// Returns the move of an inode whose row is bound both in `theirs`, its
+/// state in the merged-into namespace `namespace_id`, and in `ours`, its
+/// state in the fork, to the place where `ours` has it, or `None` when the
+/// rows have the same parent and name or either row is unbound.
+pub(super) fn move_change(
     namespace_id: &NamespaceId,
     ours: &InodeState,
     theirs: &InodeState,
-    deletion_seq: Option<CommitSeq>,
 ) -> Result<Option<BindingChange>> {
+    let (Some(from), Some(to)) = (theirs.edge(), ours.edge()) else {
+        return Ok(None);
+    };
     if ours.same_binding(theirs) {
         return Ok(None);
     }
-    let change = match (theirs.edge(), ours.edge(), deletion_seq) {
-        (Some(from), Some(to), _) => BindingChange::Move {
-            expected_binding_version: crate::binding_version::encode(from.binding, namespace_id),
-            parent_inode_id: to.parent_inode_id,
-            display_name: display_name(&to.display_name)?,
-        },
-        (Some(from), None, _) => BindingChange::Delete {
-            expected_binding_version: crate::binding_version::encode(from.binding, namespace_id),
-            expected_revision_no: theirs.revision.as_ref().map(|row| row.revision_no),
-        },
-        (None, Some(to), Some(deletion_seq)) => BindingChange::RestoreDeleted {
-            deletion_seq,
-            parent_inode_id: to.parent_inode_id,
-            display_name: display_name(&to.display_name)?,
-        },
-        (None, _, _) => return Ok(None),
+    Ok(Some(BindingChange::Move {
+        expected_binding_version: crate::binding_version::encode(from.binding, namespace_id),
+        parent_inode_id: to.parent_inode_id,
+        display_name: display_name(&to.display_name)?,
+    }))
+}
+
+/// Returns the delete of an inode at `from`, the row that binds it in
+/// `theirs`, its state in the merged-into namespace `namespace_id`.
+pub(super) fn delete_change(
+    namespace_id: &NamespaceId,
+    theirs: &InodeState,
+    from: &Edge,
+) -> BindingChange {
+    BindingChange::Delete {
+        expected_binding_version: crate::binding_version::encode(from.binding, namespace_id),
+        expected_revision_no: theirs
+            .revision
+            .as_ref()
+            .filter(|_| theirs.is_visible())
+            .map(|row| row.revision_no),
+    }
+}
+
+/// Returns the restore that undoes the deletion at `deletion_seq` and binds
+/// the inode where `ours`, its state in the fork, has it, or `None` for the
+/// root, which has no binding row.
+pub(super) fn restore_change(
+    deletion_seq: CommitSeq,
+    ours: &InodeState,
+) -> Result<Option<BindingChange>> {
+    let Some(to) = ours.edge() else {
+        return Ok(None);
     };
-    Ok(Some(change))
+    Ok(Some(BindingChange::RestoreDeleted {
+        deletion_seq,
+        parent_inode_id: to.parent_inode_id,
+        display_name: display_name(&to.display_name)?,
+    }))
 }
 
 /// How a merge changes an inode's binding.
@@ -126,7 +143,11 @@ pub(super) enum BindingChange {
         /// expects with a precondition, because another writer can change
         /// the file's content without changing its binding version. A
         /// directory has none, and the subtree check and the head
-        /// precondition cover its delete.
+        /// precondition cover its delete. A file that a deletion hides at
+        /// the head has none either, because the precondition reads the
+        /// state before the commit's restore, and no writer can change a
+        /// hidden file's content without undoing the deletion that the
+        /// commit's restore expects.
         expected_revision_no: Option<RevisionNo>,
     },
     /// The merged-into namespace deleted the inode in an earlier merge of

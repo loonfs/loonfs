@@ -7,6 +7,7 @@
 use super::classify::{Classifier, SubtreeCheck};
 use super::operations::BindingChange;
 use super::state::StateReader;
+use super::targets::Targets;
 use super::{
     ensure_range_start_retained, fork_point, merge_start, range_start, rebase_basis,
     MergeAllowance, MergeRequest,
@@ -280,8 +281,7 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
             let path = snapshot_head
                 .state(check.directory)
                 .await?
-                .and_then(|state| state.visible)
-                .map(|visible| visible.path);
+                .and_then(|state| state.path);
             snapshot_paths.extend(path.map(|path| (index, path)));
         }
         if !snapshot_paths.is_empty() {
@@ -307,9 +307,8 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
     /// conflict for each change that depends on a skipped change, in the
     /// order that it finds them:
     ///
-    /// - a create, a restore, or a move into a directory whose create or
-    ///   restore it skips, as the merge's target check treats a restored
-    ///   directory like a created one,
+    /// - a change whose inode a skipped create or restore of a directory
+    ///   would make reachable (see [`Targets::depends_on`]),
     /// - the delete of a directory that still contains an inode whose move
     ///   out of it was skipped, which the delete would delete in the new
     ///   fork, and
@@ -319,22 +318,7 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
     /// Each pass records at least one conflict, so the loop runs at most
     /// once for each plan. A skipped inode's ancestors are read once, when
     /// it's first skipped, because a later pass only skips more deletes.
-    pub(super) async fn skip_conflicts(
-        &mut self,
-        holders: &HashMap<InodeId, InodeId>,
-    ) -> Result<()> {
-        let created_directories: HashSet<_> = self
-            .plans
-            .iter()
-            .filter(|plan| {
-                plan.kind == InodeKind::Directory
-                    && matches!(
-                        plan.binding,
-                        Some(BindingChange::Create { .. } | BindingChange::RestoreDeleted { .. })
-                    )
-            })
-            .map(|plan| plan.inode_id)
-            .collect();
+    pub(super) async fn skip_conflicts(&mut self, targets: &Targets) -> Result<()> {
         let deleted_directories: HashSet<_> = self
             .plans
             .iter()
@@ -346,9 +330,9 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
             .collect();
         let mut examined = HashSet::new();
         loop {
-            let mut recorded = self.block_takers(holders).await?;
+            let mut recorded = self.block_takers(&targets.holders).await?;
             recorded += self
-                .skip_creates_in_skipped_directories(&created_directories)
+                .skip_changes_in_skipped_directories(&targets.depends_on)
                 .await?;
             recorded += self
                 .skip_deletes_of_skipped_moves(&deleted_directories, &mut examined)
@@ -363,32 +347,31 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
         Ok(())
     }
 
-    /// Records a `dependency` conflict for each create, restore, or move
-    /// into a directory in `created_directories` whose create or restore is
-    /// skipped, and returns how many it recorded. `theirs` is the directory's
-    /// version in the fork.
-    async fn skip_creates_in_skipped_directories(
+    /// Records a `dependency` conflict for each change that needs a
+    /// directory in `depends_on` whose create or restore is skipped, and
+    /// returns how many it recorded. `theirs` is the fork's version of the
+    /// first such directory.
+    async fn skip_changes_in_skipped_directories(
         &mut self,
-        created_directories: &HashSet<InodeId>,
+        depends_on: &HashMap<InodeId, Vec<InodeId>>,
     ) -> Result<usize> {
         let mut recorded = 0;
         for index in 0..self.plans.len() {
-            let plan = &self.plans[index];
-            let inode_id = plan.inode_id;
-            let Some((parent_inode_id, _)) =
-                plan.binding.as_ref().and_then(BindingChange::destination)
-            else {
-                continue;
-            };
-            if self.conflicted.contains(&inode_id)
-                || !created_directories.contains(&parent_inode_id)
-                || !self.conflicted.contains(&parent_inode_id)
-            {
+            let inode_id = self.plans[index].inode_id;
+            if self.conflicted.contains(&inode_id) {
                 continue;
             }
+            let Some(directory) = depends_on.get(&inode_id).and_then(|directories| {
+                directories
+                    .iter()
+                    .find(|directory| self.conflicted.contains(*directory))
+                    .copied()
+            }) else {
+                continue;
+            };
             let theirs = self
                 .ours
-                .state(parent_inode_id)
+                .state(directory)
                 .await?
                 .and_then(|state| state.conflict_version());
             self.target_conflict(inode_id, MergeConflictKind::Dependency, theirs)

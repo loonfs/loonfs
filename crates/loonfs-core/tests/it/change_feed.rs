@@ -15,20 +15,6 @@ fn path(value: &str) -> AbsolutePath {
     AbsolutePath::parse(value).expect("valid absolute path")
 }
 
-fn event_kind(event: &FilesystemEvent) -> &'static str {
-    match event {
-        FilesystemEvent::DirectoryCreated { .. } => "directory_created",
-        FilesystemEvent::FileCreated { .. } => "file_created",
-        FilesystemEvent::ContentChanged { .. } => "content_changed",
-        FilesystemEvent::Moved { .. } => "moved",
-        FilesystemEvent::Deleted { .. } => "deleted",
-        FilesystemEvent::Restored { .. } => "restored",
-        FilesystemEvent::AttributesChanged { .. } => "attributes_changed",
-        FilesystemEvent::AccessChanged { .. } => "access_changed",
-        FilesystemEvent::Unknown => "unknown",
-    }
-}
-
 fn commit_events<'a>(changes: &'a ListChangesResponse, id: &str) -> &'a [FilesystemEvent] {
     &changes
         .changes

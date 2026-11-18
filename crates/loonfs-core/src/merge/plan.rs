@@ -133,7 +133,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             allowance,
         )
         .await?;
-        let holders = with_split_hint(
+        let targets = with_split_hint(
             classifier.check_targets().await,
             fork_view,
             range,
@@ -143,7 +143,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .await?;
         if classifier.replay.is_some() {
             with_split_hint(
-                classifier.skip_conflicts(&holders).await,
+                classifier.skip_conflicts(&targets).await,
                 fork_view,
                 range,
                 fields_bytes,
@@ -156,7 +156,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             created_inode_ids,
             temporary_moves,
             preconditions: file_revisions,
-        } = classifier.order(&holders).await?;
+        } = classifier
+            .order(&targets.holders, &targets.depends_on)
+            .await?;
         let moves_or_deletes_a_directory = classifier.plans.iter().any(|plan| {
             plan.kind == InodeKind::Directory
                 && matches!(

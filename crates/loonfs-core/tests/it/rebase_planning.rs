@@ -495,6 +495,102 @@ async fn a_skipped_move_keeps_its_old_directorys_delete_from_applying() {
     );
 }
 
+/// Replays, in two pieces, a fork that deletes `/docs`, restores it, and
+/// writes `/docs/a.txt`, and returns the directory's inode and the second
+/// piece. The first piece replays the delete, so the deletion is in the new
+/// fork's trash, and the new fork then takes the name `/docs` with a new
+/// directory before the second piece, which skips the restore.
+async fn skip_the_restore_of_docs(family: &Family) -> (InodeId, Replay) {
+    let directory = family.inode(&family.main, "/docs").await;
+    let deleted = family
+        .fixture(&family.fork)
+        .delete_path("/docs", None)
+        .await
+        .expect("delete /docs");
+    family
+        .fixture(&family.fork)
+        .submit_operation(
+            CommitId::generate(),
+            loonfs_core::publish::FilesystemOperation::RestoreDeleted {
+                inode_id: directory,
+                deletion_seq: deleted.committed_seq,
+                destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
+            },
+            Vec::new(),
+        )
+        .await
+        .expect("restore /docs");
+    family.write(&family.fork, "/docs/a.txt", b"ours").await;
+    family.create_rebase().await;
+    family
+        .replay("replay-1", Some(deleted.committed_seq))
+        .await
+        .expect("replay the delete");
+    family
+        .write(&family.rebase, "/docs/new.txt", b"theirs")
+        .await;
+    let replay = family.replay("replay-2", None).await.expect("replay");
+    (directory, replay)
+}
+
+/// Checks that a skipped directory restore skips the changes below the
+/// directory, which only the restore would show, with `dependency` entries
+/// after the restore's own (see [`skip_the_restore_of_docs`]).
+#[tokio::test]
+async fn a_skipped_directory_restore_skips_the_changes_below_it() {
+    let family = Family::new().await;
+    let (directory, replay) = skip_the_restore_of_docs(&family).await;
+    let entries: Vec<_> = replay
+        .conflicts
+        .into_iter()
+        .map(|conflict| (conflict.kind, conflict.inode_id, conflict.theirs))
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            (
+                MergeConflictKind::Name,
+                directory,
+                Some(family.version(&family.rebase, "/docs").await),
+            ),
+            (
+                MergeConflictKind::Dependency,
+                family.inode(&family.fork, "/docs/a.txt").await,
+                Some(family.version(&family.fork, "/docs").await),
+            ),
+        ]
+    );
+    assert!(replay.commit.events.is_empty());
+}
+
+/// Checks that a later replay commit's change below a directory whose
+/// restore an earlier replay commit skipped is a `visibility` entry. After
+/// the second piece of [`skip_the_restore_of_docs`], the fork writes
+/// `/docs/a.txt` again, and the third piece skips the write, because the
+/// directory's deletion still hides the file in the new fork.
+#[tokio::test]
+async fn a_change_below_a_restore_that_an_earlier_replay_skipped_is_a_visibility_entry() {
+    let family = Family::new().await;
+    skip_the_restore_of_docs(&family).await;
+    family.write(&family.fork, "/docs/a.txt", b"again").await;
+
+    let replay = family.replay("replay-3", None).await.expect("replay");
+    let entries: Vec<_> = replay
+        .conflicts
+        .into_iter()
+        .map(|conflict| (conflict.kind, conflict.inode_id, conflict.theirs))
+        .collect();
+    assert_eq!(
+        entries,
+        [(
+            MergeConflictKind::Visibility,
+            family.inode(&family.fork, "/docs/a.txt").await,
+            None,
+        )]
+    );
+    assert!(replay.commit.events.is_empty());
+}
+
 /// Checks that a rebase in two pieces continues into the same new fork,
 /// and that the second piece plans against the rows that the first wrote.
 /// The next-range query on the new fork reports a start at the fork's

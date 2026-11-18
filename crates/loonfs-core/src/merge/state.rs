@@ -26,30 +26,26 @@ use std::sync::Arc;
 /// a hash table that just grew has about twice as many slots as entries.
 const PATH_ENTRY_BYTES: usize = 2 * size_of::<(InodeId, AbsolutePath)>();
 
-/// One inode's rows at one sequence: whether and where it's visible, and its
-/// newest revision, attribute, and access rows.
+/// One inode's rows at one sequence: its own binding row, its path when it's
+/// visible, and its newest revision, attribute, and access rows.
 #[derive(Debug, Clone)]
 pub(super) struct InodeState {
     pub(super) kind: InodeKind,
-    /// The inode's path and binding, or `None` when a deletion hides the
-    /// inode or one of its ancestors.
-    pub(super) visible: Option<Visible>,
+    /// The inode's own binding row: its parent, its name there, and the
+    /// row's position. The root has none, and neither does an inode whose
+    /// own delete unbound its row.
+    pub(super) edge: Option<Edge>,
+    /// The inode's path, when the inode is visible: no tombstone on it or
+    /// on an ancestor hides it.
+    pub(super) path: Option<AbsolutePath>,
     /// A file's newest revision. A directory has none.
     pub(super) revision: Option<RevisionRecord>,
     pub(super) attributes: Option<AttributesRevisionRecord>,
     pub(super) access: Option<AccessRevisionRecord>,
 }
 
-/// Where a visible inode is.
-#[derive(Debug, Clone)]
-pub(super) struct Visible {
-    pub(super) path: AbsolutePath,
-    /// The inode's parent and name, which the root doesn't have.
-    pub(super) edge: Option<Edge>,
-}
-
-/// A visible inode's parent, its name there, and the binding row that bound
-/// it.
+/// An inode's parent, its name there, and the position of the binding row
+/// that bound it.
 #[derive(Debug, Clone)]
 pub(super) struct Edge {
     pub(super) parent_inode_id: InodeId,
@@ -58,27 +54,26 @@ pub(super) struct Edge {
 }
 
 impl InodeState {
-    /// Returns the inode's parent and name, which a move or a create sets,
-    /// or `None` when it's hidden or is the root.
+    /// Returns the inode's own binding row, or `None` for the root and for
+    /// an inode whose own delete unbound the row.
     pub(super) fn edge(&self) -> Option<&Edge> {
-        self.visible
-            .as_ref()
-            .and_then(|visible| visible.edge.as_ref())
+        self.edge.as_ref()
     }
 
-    /// Returns whether the inode has the same parent and name in both
-    /// states, or is hidden in both. A name that changes only its case
-    /// changes the edge.
+    /// Returns whether the inode is visible.
+    pub(super) fn is_visible(&self) -> bool {
+        self.path.is_some()
+    }
+
+    /// Returns whether the inode's own binding row has the same parent and
+    /// name in both states, or is unbound in both. A name that changes only
+    /// its case changes the edge.
     pub(super) fn same_binding(&self, other: &Self) -> bool {
-        match (&self.visible, &other.visible) {
-            (Some(left), Some(right)) => match (&left.edge, &right.edge) {
-                (Some(left), Some(right)) => {
-                    left.parent_inode_id == right.parent_inode_id
-                        && left.display_name == right.display_name
-                }
-                (None, None) => true,
-                _ => false,
-            },
+        match (&self.edge, &other.edge) {
+            (Some(left), Some(right)) => {
+                left.parent_inode_id == right.parent_inode_id
+                    && left.display_name == right.display_name
+            }
             (None, None) => true,
             _ => false,
         }
@@ -120,9 +115,8 @@ impl InodeState {
     /// Returns this state as a version of a merge conflict, or `None` when
     /// the inode is hidden.
     pub(super) fn conflict_version(&self) -> Option<MergeConflictVersion> {
-        let visible = self.visible.as_ref()?;
         Some(MergeConflictVersion {
-            path: visible.path.clone(),
+            path: self.path.clone()?,
             revision: self.revision.as_ref().map(|row| MergeConflictRevision {
                 revision_no: row.revision_no,
                 content_ref: row.content_ref.clone(),
@@ -202,16 +196,35 @@ impl<'a, 'store, S: ObjectStore + ?Sized> StateReader<'a, 'store, S> {
         };
         let resolved = resolve_visible_inode(&mut self.session, &mut self.paths, inode_id).await?;
         self.paths.memory.check_paths()?;
-        let visible = resolved.map(|resolved| Visible {
-            path: resolved.absolute_path,
-            edge: resolved.parent_inode_id.zip(resolved.binding_version).map(
-                |(parent_inode_id, binding)| Edge {
-                    parent_inode_id,
-                    display_name: resolved.display_name,
-                    binding,
-                },
-            ),
-        });
+        // A delete unbinds the inode's own row before it records the
+        // tombstone, so a hidden inode whose row is still bound is hidden by
+        // an ancestor's deletion.
+        let (path, edge) = match resolved {
+            Some(resolved) => {
+                let edge = resolved.parent_inode_id.zip(resolved.binding_version).map(
+                    |(parent_inode_id, binding)| Edge {
+                        parent_inode_id,
+                        display_name: resolved.display_name,
+                        binding,
+                    },
+                );
+                (Some(resolved.absolute_path), edge)
+            }
+            None => {
+                let edge = self
+                    .session
+                    .current_parent_binding_for_child(inode_id)
+                    .await?
+                    .and_then(|binding| {
+                        Some(Edge {
+                            parent_inode_id: binding.parent_inode_id,
+                            display_name: binding.display_name()?.to_string(),
+                            binding: binding.bind_position,
+                        })
+                    });
+                (None, edge)
+            }
+        };
         let refill = BlocksPerRefill::ReadAhead;
         let revision = match inode.inode_kind {
             InodeKind::File => {
@@ -223,7 +236,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> StateReader<'a, 'store, S> {
         };
         Ok(Some(InodeState {
             kind: inode.inode_kind,
-            visible,
+            edge,
+            path,
             revision,
             attributes: self
                 .view
