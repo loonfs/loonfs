@@ -802,17 +802,25 @@ async fn request_head_for(source: PayloadSource) -> String {
         String::from_utf8_lossy(&buffer[..read]).to_lowercase()
     });
 
-    let client = Client::new(ClientConfig {
-        server_url: format!("http://{address}"),
-        auth_token: None,
-        request_timeout_ms: None,
-        disable_transient_retry: true,
-        ca_cert_path: None,
-    })
+    let client = Client::new(
+        ClientConfig {
+            server_url: format!("http://{address}"),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+            ca_cert_path: None,
+        },
+        loonfs_types::Context::Service,
+    )
     .expect("valid client config");
     // The response is not the point; the request head is.
     let _ = client
-        .put_upload_content_stream(&namespace_id(), &upload_id(), source)
+        .put_upload_content_stream(
+            &namespace_id(),
+            &loonfs_test_support::test_actor(),
+            &upload_id(),
+            source,
+        )
         .await;
     served.await.expect("probe task")
 }
@@ -1189,7 +1197,7 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
         let client = client_without_retry(&transport);
         client.get_capabilities().await.expect("capabilities");
         let prepared = client
-            .prepare_content(&namespace_id(), bytes)
+            .prepare_content(&namespace_id(), &loonfs_test_support::test_actor(), bytes)
             .await
             .expect("prepare");
         assert!(prepared.content_ref().is_none());
@@ -1316,7 +1324,11 @@ async fn staging_rejects_a_non_completed_completion_response() {
         let client = client(&transport);
 
         let error = client
-            .complete_staged(&namespace_id, &upload_id)
+            .complete_staged(
+                &namespace_id,
+                &loonfs_test_support::test_actor(),
+                &upload_id,
+            )
             .await
             .expect_err("a completion response must report completed");
         assert_matches!(

@@ -117,6 +117,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
     let completed = block_on(namespace.complete_upload(
         &begin.session.upload_id,
         CompleteUploadBody::DirectPut { content: claim },
+        &loonfs_test_support::test_actor(),
     ))
     .expect("complete direct put");
     assert_eq!(completed.response.mode, UploadMode::DirectPut);
@@ -275,7 +276,10 @@ fn direct_put_completion_reports_a_failed_read_back_as_a_store_failure() {
     );
     let loonfs::uploads::UploadSessionView {
         session: status, ..
-    } = block_on(namespace.get_upload(&begin.session.upload_id)).expect("get upload status");
+    } = block_on(
+        namespace.get_upload(&begin.session.upload_id, &loonfs_test_support::test_actor()),
+    )
+    .expect("get upload status");
     assert_matches!(
         status.status,
         UploadSessionStatus::Open { .. },
@@ -435,15 +439,19 @@ fn concurrent_puts_coalesce_into_one_wal_object() {
         let mut prepared_contents = Vec::new();
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
             let begin = namespace_writer
-                .create_upload()
+                .create_upload(&loonfs_test_support::test_actor())
                 .await
                 .expect("begin upload");
             namespace_writer
-                .put_upload_content(&begin.upload_id, bytes)
+                .put_upload_content(&begin.upload_id, bytes, &loonfs_test_support::test_actor())
                 .await
                 .expect("upload content");
             let completed = namespace_writer
-                .complete_upload(&begin.upload_id, CompleteUploadBody::ServiceProxied {})
+                .complete_upload(
+                    &begin.upload_id,
+                    CompleteUploadBody::ServiceProxied {},
+                    &loonfs_test_support::test_actor(),
+                )
                 .await
                 .expect("complete upload");
             prepared_contents.push(
@@ -758,11 +766,14 @@ async fn a_deleted_namespace_refuses_upload_calls_but_still_aborts() {
         ),
         KeyPredicate::any(),
     ));
-    let writer = loonfs::LoonFs::builder_with_store(recording.clone() as SharedObjectStore)
-        .writer_id(loonfs_test_support::ids::writer_id("deleted-uploads"))
-        .build()
-        .await
-        .expect("writer");
+    let writer = loonfs::LoonFs::builder_with_store(
+        recording.clone() as SharedObjectStore,
+        loonfs::Context::Service,
+    )
+    .writer_id(loonfs_test_support::ids::writer_id("deleted-uploads"))
+    .build()
+    .await
+    .expect("writer");
     let namespace_id = namespace_id("demo");
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -771,35 +782,64 @@ async fn a_deleted_namespace_refuses_upload_calls_but_still_aborts() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    let staged = namespace.create_upload().await.expect("begin upload");
+    let staged = namespace
+        .create_upload(&loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     namespace
-        .put_upload_content(&staged.upload_id, b"staged")
+        .put_upload_content(
+            &staged.upload_id,
+            b"staged",
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("upload content");
-    let completed = namespace.create_upload().await.expect("begin upload");
+    let completed = namespace
+        .create_upload(&loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     namespace
-        .put_upload_content(&completed.upload_id, b"completed")
+        .put_upload_content(
+            &completed.upload_id,
+            b"completed",
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("upload content");
     namespace
-        .complete_upload(&completed.upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(
+            &completed.upload_id,
+            CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("complete upload");
     let multipart = namespace
-        .create_direct_multipart_upload_target()
+        .create_direct_multipart_upload_target(&loonfs_test_support::test_actor())
         .await
         .expect("begin multipart upload");
     namespace.delete().await.expect("delete namespace");
     recording.reset();
 
     let refusals = [
-        namespace.create_upload().await.map(|_| ()),
         namespace
-            .put_upload_content(&staged.upload_id, b"staged")
+            .create_upload(&loonfs_test_support::test_actor())
             .await
             .map(|_| ()),
         namespace
-            .complete_upload(&staged.upload_id, CompleteUploadBody::ServiceProxied {})
+            .put_upload_content(
+                &staged.upload_id,
+                b"staged",
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .map(|_| ()),
+        namespace
+            .complete_upload(
+                &staged.upload_id,
+                CompleteUploadBody::ServiceProxied {},
+                &loonfs_test_support::test_actor(),
+            )
             .await
             .map(|_| ()),
         namespace
@@ -809,10 +849,14 @@ async fn a_deleted_namespace_refuses_upload_calls_but_still_aborts() {
                     part_number: 1,
                     checksum: Checksum::crc64nvme(b"part"),
                 }],
+                &loonfs_test_support::test_actor(),
             )
             .await
             .map(|_| ()),
-        namespace.get_upload(&completed.upload_id).await.map(|_| ()),
+        namespace
+            .get_upload(&completed.upload_id, &loonfs_test_support::test_actor())
+            .await
+            .map(|_| ()),
     ];
     for refusal in refusals {
         assert_eq!(
@@ -824,7 +868,7 @@ async fn a_deleted_namespace_refuses_upload_calls_but_still_aborts() {
     assert_eq!(recording.counts().deletes, 0);
 
     let aborted = namespace
-        .abort_upload(&staged.upload_id)
+        .abort_upload(&staged.upload_id, &loonfs_test_support::test_actor())
         .await
         .expect("abort in a deleted namespace");
     assert_matches!(aborted.status, UploadSessionStatus::Aborted { .. });

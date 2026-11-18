@@ -81,7 +81,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         InjectedError::Transport("recovery reads unavailable".to_owned()),
     ));
     store.fail_all();
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
@@ -247,7 +247,7 @@ async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome()
     store.block_next();
     // The claim's fence and the warmup leave two WAL objects, so the put's
     // object reaches the fold trigger.
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .session_fold_at_wal_objects(NonZeroU64::new(3).expect("three WAL objects"))
         .config(crate::RuntimeConfig {
@@ -427,7 +427,7 @@ async fn writer_with(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .session_fold_at_wal_objects(session_fold_at_wal_objects)
         .config(crate::RuntimeConfig {
@@ -623,7 +623,7 @@ async fn inline_preparation_makes_no_request_and_retained_values_replay() {
     for bytes in [b"".as_slice(), b"same"] {
         store.reset();
         let prepared = namespace_writer
-            .prepare_content(bytes)
+            .prepare_content(bytes, &loonfs_test_support::test_actor())
             .await
             .expect("prepare");
         assert!(store.snapshot().is_empty());
@@ -693,7 +693,7 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
         .boxed();
         store.reset();
         let prepared = namespace_writer
-            .prepare_content_stream(stream)
+            .prepare_content_stream(stream, &loonfs_test_support::test_actor())
             .await
             .expect("prepare stream");
         if expected.len() <= 4 {
@@ -743,7 +743,7 @@ async fn appends_fill_the_wal_object_budget_before_inline_values() {
         })
         .await;
     let prepared = namespace_writer
-        .prepare_content(b"four")
+        .prepare_content(b"four", &loonfs_test_support::test_actor())
         .await
         .expect("prepare");
     let request = CommitIntent {
@@ -819,7 +819,7 @@ async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
         .await
         .expect("fill tail");
     let prepared = namespace_writer
-        .prepare_content(b"next")
+        .prepare_content(b"next", &loonfs_test_support::test_actor())
         .await
         .expect("prepare");
     let request = CommitIntent::single(
@@ -895,7 +895,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             InjectedError::PermissionDenied("content writes refused".to_owned()),
         ));
         let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
-        let writer = crate::LoonFs::builder_with_store(store.clone())
+        let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
             .config(crate::RuntimeConfig {
                 inline_content: InlineContentPolicy {
@@ -917,7 +917,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             .expect("namespace");
         let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
         let prepared = namespace_writer
-            .prepare_content(bytes)
+            .prepare_content(bytes, &loonfs_test_support::test_actor())
             .await
             .expect("prepare");
         let original = namespace_writer
@@ -1071,7 +1071,7 @@ async fn a_commit_whose_values_stay_inline_is_charged_its_own_weight() {
         .await;
     let publisher = namespace_writer.session().publisher.clone();
     let prepared = namespace_writer
-        .prepare_content(b"longer")
+        .prepare_content(b"longer", &loonfs_test_support::test_actor())
         .await
         .expect("prepare");
     let candidate = CommitCandidate::prepared(
@@ -1125,7 +1125,7 @@ async fn a_commit_that_outgrows_its_allowance_when_staged_is_refused() {
     let publisher = namespace_writer.session().publisher.clone();
     let admission = &publisher.context.admission;
     let prepared = namespace_writer
-        .prepare_content(b"longer")
+        .prepare_content(b"longer", &loonfs_test_support::test_actor())
         .await
         .expect("prepare");
     let candidate = CommitCandidate::prepared(
@@ -1195,7 +1195,7 @@ async fn overflow_staging_keeps_bulk_commit_order_and_one_atomic_commit() {
     for bytes in &payloads {
         prepared.push(
             namespace_writer
-                .prepare_content(bytes)
+                .prepare_content(bytes, &loonfs_test_support::test_actor())
                 .await
                 .expect("prepare"),
         );
@@ -1397,7 +1397,7 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
     ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     // Each commit's WAL object reaches the fold trigger.
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .metrics_recorder(recorder.clone())
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .session_fold_at_wal_objects(NonZeroU64::MIN)
@@ -1503,11 +1503,11 @@ async fn commit_two_values(
     let namespace_writer = writer.open_namespace(namespace).expect("open namespace");
     let prepared = vec![
         namespace_writer
-            .prepare_content(b"more")
+            .prepare_content(b"more", &loonfs_test_support::test_actor())
             .await
             .expect("prepare first value"),
         namespace_writer
-            .prepare_content(b"last")
+            .prepare_content(b"last", &loonfs_test_support::test_actor())
             .await
             .expect("prepare second value"),
     ];
@@ -1670,7 +1670,7 @@ async fn a_metadata_step_without_a_current_position_counts_the_wal_bytes_that_it
         InjectedError::Transport("injected fold failure".to_owned()),
     ));
     let timer = Arc::new(ManualClock::new(0));
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .config(crate::RuntimeConfig {
             inline_content: large_file_policy(),
@@ -1754,7 +1754,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             ..policy()
         },
     ] {
-        let error = crate::LoonFs::builder_with_store(store.clone())
+        let error = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("writer"))
             .config(crate::RuntimeConfig {
                 inline_content: options,
@@ -1767,7 +1767,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         assert_matches!(error, Error::Config(_));
         assert!(store.snapshot().is_empty());
     }
-    crate::LoonFs::builder_with_store(store)
+    crate::LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
@@ -1790,7 +1790,7 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
     let store = Arc::new(HeldFoldAnswer::new(directory.path(), &namespace));
     // The commits stay far below the session's fold triggers, so nothing but
     // the explicit fold runs.
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
@@ -1869,11 +1869,11 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
     );
     let prepared = vec![
         namespace_writer
-            .prepare_content(b"more")
+            .prepare_content(b"more", &loonfs_test_support::test_actor())
             .await
             .expect("prepare"),
         namespace_writer
-            .prepare_content(b"last")
+            .prepare_content(b"last", &loonfs_test_support::test_actor())
             .await
             .expect("prepare"),
     ];

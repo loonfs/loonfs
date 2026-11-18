@@ -28,7 +28,7 @@ fn actor() -> ActorId {
 async fn a_replay_and_its_retry_fold_nothing() {
     let directory = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let runtime = LoonFs::builder_with_store(store)
+    let runtime = LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(writer_id("rebase-writer"))
         .build()
         .await
@@ -93,7 +93,7 @@ async fn a_replay_and_its_retry_fold_nothing() {
 
 /// Builds a runtime on `store` with the writer `writer`.
 async fn runtime_on(store: Arc<LocalFsStore>, writer: &str) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(writer_id(writer))
         .build()
         .await
@@ -203,7 +203,7 @@ async fn a_fresh_runtime_returns_a_committed_replay_commits_conflict_report() {
 async fn a_rebase_of_a_fork_below_its_own_floor_creates_nothing() {
     let directory = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let runtime = LoonFs::builder_with_store(store.clone())
+    let runtime = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(writer_id("rebase-writer"))
         .build()
         .await
@@ -282,7 +282,7 @@ async fn manifest_nos(
 async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_changes() {
     let directory = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let runtime = LoonFs::builder_with_store(store)
+    let runtime = LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(writer_id("rebase-writer"))
         .build()
         .await

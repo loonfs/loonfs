@@ -368,10 +368,6 @@ fn an_invalid_id_flag_exits_2_with_invalid_usage_before_any_lookup() {
             "--namespace",
         ),
         (
-            vec!["--json", "ls", "--subject-id", "a,b", "/"],
-            "--subject-id",
-        ),
-        (
             vec!["--json", "put", "local.txt", "/x", "--actor-id", " bad"],
             "--actor-id",
         ),

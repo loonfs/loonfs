@@ -8,12 +8,12 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::options::{ListOptions, StatOptions};
-use loonfs_types::FilesystemEvent;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
     CommitPrecondition, DestinationBehavior, DisplayName, ErrorCode, InodeId, NamespaceId,
     PrincipalId, ROOT_INODE_ID,
 };
+use loonfs_types::{ActorId, FilesystemEvent};
 use loonfs_types::{
     CommitSeq, ContentRef, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
@@ -91,7 +91,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         create_directory("/docs"),
     )
     .await
@@ -142,7 +142,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         create_directory("/batch"),
     )
     .await
@@ -157,7 +157,7 @@ async fn an_update_replaces_the_row_and_advances_the_revision() {
         CommitIntent {
             commit_id: CommitId::parse("batch-access").expect("commit id"),
             actor_id: loonfs_test_support::test_actor(),
-            subject: Some(subject("root", &["prn_root"])),
+            subject: Some(subject(&["prn_root"])),
             message: None,
             preconditions: Vec::new(),
             operations: vec![
@@ -253,9 +253,8 @@ async fn access_rows_survive_a_fold_and_the_counter_keeps_going() {
     );
 }
 
-fn subject(id: &str, principals: &[&str]) -> loonfs_types::Subject {
+fn subject(principals: &[&str]) -> loonfs_types::Subject {
     loonfs_types::Subject {
-        subject_id: loonfs_types::SubjectId::parse(id).expect("subject id"),
         principals: loonfs_types::PrincipalSet::new(
             principals
                 .iter()
@@ -351,7 +350,7 @@ async fn seed(
             store,
             namespace_id,
             context,
-            subject("root", &["prn_root"]),
+            subject(&["prn_root"]),
             operation,
         )
         .await
@@ -389,7 +388,7 @@ async fn principals_have_no_right_in_a_namespace_without_access_rows() {
         &store,
         &namespace_id,
         &context,
-        subject("any", &["any"]),
+        subject(&["any"]),
         create_directory("/docs/child"),
     )
     .await
@@ -519,7 +518,7 @@ async fn rights_gate_operations_and_absence_hides_the_inode() {
             &store,
             &namespace_id,
             &context,
-            subject(principal, &[principal]),
+            subject(&[principal]),
             operation,
         )
         .await;
@@ -594,7 +593,7 @@ async fn moves_are_authorized_as_the_equivalent_grant() {
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         delete("/secret/recover"),
     )
     .await
@@ -651,7 +650,7 @@ async fn moves_are_authorized_as_the_equivalent_grant() {
             &store,
             &namespace_id,
             &context,
-            subject(principal, &[principal]),
+            subject(&[principal]),
             operation,
         )
         .await;
@@ -728,7 +727,7 @@ async fn moves_require_read_on_the_moved_item() {
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         delete("/work/trashed"),
     )
     .await
@@ -737,7 +736,7 @@ async fn moves_require_read_on_the_moved_item() {
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         delete("/work/returned"),
     )
     .await
@@ -829,7 +828,7 @@ async fn moves_require_read_on_the_moved_item() {
             &store,
             &namespace_id,
             &context,
-            subject(principal, &[principal]),
+            subject(&[principal]),
             operation,
         )
         .await;
@@ -903,7 +902,7 @@ async fn access_updates_are_authorized_by_what_they_change() {
             &store,
             &namespace_id,
             &context,
-            subject(principal, &[principal]),
+            subject(&[principal]),
             operation,
         )
         .await;
@@ -916,7 +915,7 @@ async fn access_updates_are_authorized_by_what_they_change() {
 }
 
 #[tokio::test]
-async fn a_retry_by_another_subject_is_a_reuse_conflict() {
+async fn a_retry_by_another_actor_is_a_reuse_conflict() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     seed(
         &store,
@@ -930,18 +929,21 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
     .await;
     let request = CommitIntent::single(
         CommitId::generate(),
-        loonfs_test_support::test_actor(),
+        ActorId::parse("usr_ada").expect("actor"),
         None,
         create_directory("/docs/child"),
     )
-    .with_subject(subject("ada", &["creator"]));
+    .with_subject(subject(&["creator"]));
     let receipt = submit_commit(&store, &namespace_id, request.clone(), &context)
         .await
         .expect("commit");
     let error = submit_commit(
         &store,
         &namespace_id,
-        request.clone().with_subject(subject("bob", &["creator"])),
+        CommitIntent {
+            actor_id: ActorId::parse("usr_bob").expect("actor"),
+            ..request.clone()
+        },
         &context,
     )
     .await
@@ -957,47 +959,39 @@ async fn a_retry_by_another_subject_is_a_reuse_conflict() {
     assert_eq!(
         submit_commit(&store, &namespace_id, request, &context)
             .await
-            .expect("original receipt"),
+            .expect("the same actor gets the original receipt without its rights"),
         receipt
     );
 }
 
 #[tokio::test]
-async fn upload_sessions_belong_to_their_subject() {
+async fn upload_sessions_belong_to_the_actor_that_opened_them() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
     let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
+    let ada = ActorId::parse("usr_ada").expect("actor");
+    let bob = ActorId::parse("usr_bob").expect("actor");
     let service = namespace_engine(&store, &namespace_id, &context);
-    let service_session = service.begin_upload(&catalog).await.expect("begin");
-    service
-        .get_upload(&catalog, &service_session.upload_id)
-        .await
-        .expect("the service context's session");
-    let ada = subject("usr_ada", &[]);
-    let bob = subject("usr_bob", &[]);
-    let as_ada = namespace_engine(&store, &namespace_id, &context).with_subject(ada.clone());
-    let session = as_ada.begin_upload(&catalog).await.expect("begin");
-    assert_eq!(
-        namespace_engine(&store, &namespace_id, &context)
-            .with_subject(bob)
-            .get_upload(&catalog, &session.upload_id)
+    let with_principals =
+        namespace_engine(&store, &namespace_id, &context).with_subject(subject(&["team"]));
+    for engine in [&service, &with_principals] {
+        let session = engine.begin_upload(&catalog, &ada).await.expect("begin");
+        engine
+            .get_upload(&catalog, &session.upload_id, &ada)
             .await
-            .expect_err("hidden session")
-            .code(),
-        ErrorCode::UploadNotFound
-    );
-    as_ada
-        .get_upload(&catalog, &session.upload_id)
-        .await
-        .expect("owner session");
-    for (engine, upload_id) in [
-        (&service, &session.upload_id),
-        (&as_ada, &service_session.upload_id),
-    ] {
+            .expect("the actor's own session");
         assert_eq!(
             engine
-                .get_upload(&catalog, upload_id)
+                .get_upload(&catalog, &session.upload_id, &bob)
                 .await
-                .expect_err("another owner's session")
+                .expect_err("another actor's session")
+                .code(),
+            ErrorCode::UploadNotFound
+        );
+        assert_eq!(
+            engine
+                .abort_upload(&catalog, &session.upload_id, &bob)
+                .await
+                .expect_err("another actor's session")
                 .code(),
             ErrorCode::UploadNotFound
         );
@@ -1020,7 +1014,7 @@ async fn submit_operation(
             None,
             operation,
         )
-        .with_subject(subject("root", &["prn_root"])),
+        .with_subject(subject(&["prn_root"])),
         context,
     )
     .await
@@ -1032,7 +1026,7 @@ fn read_engine<'a>(
     principal: &str,
 ) -> loonfs_core::NamespaceReaderEngine<&'a LocalFsStore> {
     loonfs_core::NamespaceReaderEngine::reader(namespace_store(store, namespace_id))
-        .with_subject(subject(principal, &[principal]))
+        .with_subject(subject(&[principal]))
 }
 
 async fn resolve_path(
@@ -1606,7 +1600,7 @@ async fn unreadable_access_targets_are_hidden_before_structural_errors() {
             &store,
             &namespace_id,
             &context,
-            subject("viewer", &["viewer"]),
+            subject(&["viewer"]),
             update_access(path, true, AccessGrants::default()),
         )
         .await
@@ -1618,7 +1612,7 @@ async fn unreadable_access_targets_are_hidden_before_structural_errors() {
             &store,
             &namespace_id,
             &context,
-            subject("viewer", &["viewer"]),
+            subject(&["viewer"]),
             update_access(path, true, AccessGrants::default()),
         )
         .await
@@ -1630,7 +1624,7 @@ async fn unreadable_access_targets_are_hidden_before_structural_errors() {
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         update_access("/team/secret/file", true, AccessGrants::default()),
     )
     .await
@@ -1651,7 +1645,7 @@ async fn directory_creation_hides_an_unreadable_parent_kind() {
                 &store,
                 &namespace_id,
                 &context,
-                subject("team", &["team"]),
+                subject(&["team"]),
                 FilesystemOperation::CreateDirectory {
                     path: AbsolutePath::parse(path).expect("path"),
                     parents,
@@ -1672,7 +1666,7 @@ async fn path_put_hides_an_unreadable_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             put(path, &content),
         )
         .await
@@ -1695,7 +1689,7 @@ async fn inode_creation_hides_an_unreadable_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             FilesystemOperation::CreateDirectoryByInode {
                 parent_inode_id,
                 display_name: DisplayName::parse("child").expect("display name"),
@@ -1715,7 +1709,7 @@ async fn path_move_hides_an_unreadable_destination_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             move_path("/team/file", destination),
         )
         .await
@@ -1730,7 +1724,7 @@ async fn path_move_hides_an_unreadable_destination_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             move_path(source, destination),
         )
         .await
@@ -1768,7 +1762,7 @@ async fn inode_move_authorizes_the_destination_before_state_errors() {
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             FilesystemOperation::MoveByInode {
                 inode_id: source.inode_id,
                 expected_binding_version,
@@ -1795,7 +1789,7 @@ async fn path_copy_hides_an_unreadable_destination_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("viewer", &["viewer"]),
+            subject(&["viewer"]),
             FilesystemOperation::CopyPath {
                 source_path: AbsolutePath::parse("/team/file").expect("source path"),
                 destination_path: AbsolutePath::parse(destination).expect("destination path"),
@@ -1814,7 +1808,7 @@ async fn path_copy_hides_an_unreadable_destination_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("viewer", &["viewer"]),
+            subject(&["viewer"]),
             FilesystemOperation::CopyPath {
                 source_path: AbsolutePath::parse(source).expect("source path"),
                 destination_path: AbsolutePath::parse(destination).expect("destination path"),
@@ -1835,7 +1829,7 @@ async fn path_delete_hides_an_unreadable_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             delete(path),
         )
         .await
@@ -1852,7 +1846,7 @@ async fn attribute_updates_hide_an_unreadable_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             FilesystemOperation::UpdateAttributes {
                 path: AbsolutePath::parse(path).expect("path"),
                 set: std::collections::BTreeMap::from([(
@@ -1878,7 +1872,7 @@ async fn revision_restores_hide_an_unreadable_parent_kind() {
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             FilesystemOperation::RestoreRevision {
                 path: AbsolutePath::parse(path).expect("path"),
                 source_revision_no: RevisionNo(1),
@@ -1906,7 +1900,7 @@ async fn a_restore_of_a_deleted_item_authorizes_state_and_destination_before_err
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         delete("/team/secret/file"),
     )
     .await
@@ -1915,7 +1909,7 @@ async fn a_restore_of_a_deleted_item_authorizes_state_and_destination_before_err
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         delete("/team/kept"),
     )
     .await
@@ -1929,7 +1923,7 @@ async fn a_restore_of_a_deleted_item_authorizes_state_and_destination_before_err
             &store,
             &namespace_id,
             &context,
-            subject("stranger", &["stranger"]),
+            subject(&["stranger"]),
             FilesystemOperation::RestoreDeleted {
                 inode_id,
                 deletion_seq,
@@ -1946,7 +1940,7 @@ async fn a_restore_of_a_deleted_item_authorizes_state_and_destination_before_err
             &store,
             &namespace_id,
             &context,
-            subject("team", &["team"]),
+            subject(&["team"]),
             FilesystemOperation::RestoreDeleted {
                 inode_id: visible_file.inode_id,
                 deletion_seq: visible_deletion.committed_seq,
@@ -1974,7 +1968,7 @@ async fn path_absence_preconditions_hide_an_unreadable_parent_kind() {
             None,
             create_directory(output_path),
         )
-        .with_subject(subject("team", &["team"]))
+        .with_subject(subject(&["team"]))
         .preconditions(vec![CommitPrecondition::PathAbsence {
             path: AbsolutePath::parse(precondition_path).expect("precondition path"),
         }]);
@@ -2002,7 +1996,7 @@ async fn inode_forms_require_the_rights_of_their_path_forms() {
         &store,
         &namespace_id,
         &context,
-        subject("root", &["prn_root"]),
+        subject(&["prn_root"]),
         delete("/team/kept"),
     )
     .await
@@ -2074,7 +2068,7 @@ async fn inode_forms_require_the_rights_of_their_path_forms() {
             &store,
             &namespace_id,
             &context,
-            subject(principal, &[principal]),
+            subject(&[principal]),
             operation,
         )
         .await;
@@ -2107,7 +2101,7 @@ async fn inode_forms_require_the_rights_of_their_path_forms() {
                 None,
                 create_directory("/team/guarded"),
             )
-            .with_subject(subject(principal, &[principal]))
+            .with_subject(subject(&[principal]))
             .preconditions(vec![precondition]),
             &context,
         )

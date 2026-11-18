@@ -4,7 +4,6 @@
 //! or a public audience. LoonFS stores principal ids as opaque strings and
 //! never resolves them.
 
-use crate::headers;
 use crate::id_macros::{numeric_id, string_id, validation_error};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,151 +22,51 @@ validation_error!(
     "invalid principal_id {value:?}: {reason}"
 );
 
-validation_error!(
-    SubjectIdValidationError,
-    "invalid subject_id {value:?}: {reason}"
-);
-
-string_id! {
-    /// The stable identity a request acts as, used for upload ownership
-    /// and commit replay.
-    ///
-    /// Subject IDs contain 1 to 256 visible ASCII characters (0x21 through 0x7E)
-    /// other than the comma, which separates ids on the wire.
-    SubjectId,
-    error = SubjectIdValidationError,
-    validate = validate_subject_id,
-    schema(
-        description = "Stable opaque subject id containing 1 to 256 visible ASCII characters other than the comma.",
-        pattern = r"^[\x21-\x2B\x2D-\x7E]{1,256}$",
-        example = "usr_8f3c"
-    )
-}
-
-/// Who a request acts as: a stable id and the applicable principals.
+/// Who a request with principals acts for: the principals whose grants
+/// apply to it.
 ///
 /// A request without a subject acts in the service context, with every right.
+/// The actor, not the subject, identifies the request for attribution, the
+/// commit fingerprint, and upload ownership.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subject {
-    /// Stable identity for upload ownership and commit replay.
-    pub subject_id: SubjectId,
     /// Principals whose grants apply to the request.
     pub principals: PrincipalSet,
 }
 
-impl Subject {
-    /// Builds the subject a request acts as from its three parts, or returns
-    /// `None` when no part is present.
-    ///
-    /// Principals are required with a subject id. The subject id defaults to
-    /// the actor id, which must then also be a valid subject id. The parts
-    /// are checked in that order, so every surface reports the same first
-    /// failure under its own name for the part.
-    pub fn from_parts(
-        subject_id: Option<&str>,
-        actor_id: Option<&str>,
-        principals: Option<&str>,
-    ) -> Result<Option<Self>, SubjectPartsError> {
-        let Some(principals) = principals else {
-            return match subject_id {
-                Some(_) => Err(SubjectPartsError::Missing {
-                    part: SubjectPart::Principals,
-                    required_by: SubjectPart::SubjectId,
-                }),
-                None => Ok(None),
-            };
-        };
-        let principals = principals
-            .parse::<PrincipalSet>()
-            .map_err(|error| SubjectPartsError::invalid(SubjectPart::Principals, &error))?;
-        let subject_id = match (subject_id, actor_id) {
-            (Some(subject_id), _) => SubjectId::parse(subject_id)
-                .map_err(|error| SubjectPartsError::invalid(SubjectPart::SubjectId, &error))?,
-            (None, Some(actor_id)) => SubjectId::parse(actor_id)
-                .map_err(|error| SubjectPartsError::invalid(SubjectPart::ActorId, &error))?,
-            (None, None) => {
-                return Err(SubjectPartsError::Missing {
-                    part: SubjectPart::SubjectId,
-                    required_by: SubjectPart::Principals,
-                })
-            }
-        };
-        Ok(Some(Self {
-            subject_id,
-            principals,
-        }))
-    }
-}
-
-/// One part of the subject a request acts as.
+/// Whose authority a request uses, which the application chooses when it
+/// builds a client or a runtime handle.
 ///
-/// Each surface names a part after its own input: a header, a flag, or an
-/// environment variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubjectPart {
-    /// The comma-separated principal ids.
-    Principals,
-    /// The stable subject id.
-    SubjectId,
-    /// The actor id, which stands in for an absent subject id.
-    ActorId,
+/// The two variants match the two headers a request sends: `Loonfs-Context:
+/// service` and `Loonfs-Principals`. There's no default, so a handle that
+/// should act for a user can't act in the service context by mistake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Context {
+    /// The service context: the application acts on its own account, and
+    /// LoonFS checks no rights.
+    Service,
+    /// The request acts for the subject with these principals, and LoonFS
+    /// checks its rights.
+    Principals(PrincipalSet),
 }
 
-impl SubjectPart {
-    /// Returns the part's field name.
-    pub const fn as_str(self) -> &'static str {
+impl Context {
+    /// Returns the subject that the context acts for, or `None` in the
+    /// service context.
+    pub fn subject(&self) -> Option<Subject> {
         match self {
-            Self::Principals => "principals",
-            Self::SubjectId => "subject_id",
-            Self::ActorId => "actor_id",
-        }
-    }
-
-    /// Returns the name of the HTTP request header that includes the part.
-    pub const fn header_name(self) -> &'static str {
-        match self {
-            Self::Principals => headers::PRINCIPALS,
-            Self::SubjectId => headers::SUBJECT,
-            Self::ActorId => headers::ACTOR,
+            Self::Service => None,
+            Self::Principals(principals) => Some(Subject {
+                principals: principals.clone(),
+            }),
         }
     }
 }
 
-impl fmt::Display for SubjectPart {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Why the parts of a request do not form a subject.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[non_exhaustive]
-pub enum SubjectPartsError {
-    /// A part is absent, and another present part requires it.
-    #[error("`{part}` is required with `{required_by}`")]
-    Missing {
-        /// The absent part.
-        part: SubjectPart,
-        /// The present part that requires it.
-        required_by: SubjectPart,
-    },
-    /// A part is present but does not parse.
-    #[error("invalid `{part}`: {message}")]
-    Invalid {
-        /// The part that does not parse.
-        part: SubjectPart,
-        /// The parse failure for the part's value.
-        message: String,
-    },
-}
-
-impl SubjectPartsError {
-    fn invalid(part: SubjectPart, error: &dyn std::error::Error) -> Self {
-        Self::Invalid {
-            part,
-            message: error.to_string(),
-        }
+impl From<Subject> for Context {
+    fn from(subject: Subject) -> Self {
+        Self::Principals(subject.principals)
     }
 }
 
@@ -212,12 +111,6 @@ fn visible_ascii_reason(value: &str) -> Option<&'static str> {
 fn validate_principal_id(value: &str) -> Result<(), PrincipalIdValidationError> {
     visible_ascii_reason(value).map_or(Ok(()), |reason| {
         Err(PrincipalIdValidationError::new(value, reason))
-    })
-}
-
-fn validate_subject_id(value: &str) -> Result<(), SubjectIdValidationError> {
-    visible_ascii_reason(value).map_or(Ok(()), |reason| {
-        Err(SubjectIdValidationError::new(value, reason))
     })
 }
 
@@ -656,8 +549,6 @@ mod tests {
     fn ids_never_contain_the_wire_separator() {
         PrincipalId::parse("visitor,prn_root")
             .expect_err("a principal ID with a comma should be rejected");
-        super::SubjectId::parse("usr,ada")
-            .expect_err("a subject ID with a comma should be rejected");
         assert!(PrincipalId::parse("visitor").is_ok());
     }
     use std::collections::BTreeMap;

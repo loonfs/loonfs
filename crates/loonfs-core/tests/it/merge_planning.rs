@@ -70,7 +70,7 @@ impl Family {
     /// `prn_root` administers the root, `prn_team` can read, write, create,
     /// and remove there, and writes and merges act as `prn_root`.
     async fn acl() -> Self {
-        let family = Self::empty(Some(subject("root", &["prn_root"])));
+        let family = Self::empty(Some(subject(&["prn_root"])));
         family.main().create().await.expect("create main");
         family
             .main()
@@ -303,9 +303,8 @@ impl Family {
     }
 }
 
-fn subject(id: &str, principals: &[&str]) -> Subject {
+fn subject(principals: &[&str]) -> Subject {
     Subject {
-        subject_id: loonfs_types::SubjectId::parse(id).expect("subject id"),
         principals: loonfs_types::PrincipalSet::new(
             principals
                 .iter()
@@ -797,7 +796,7 @@ async fn the_merges_subject_has_to_read_the_forks_change() {
     let error = family
         .merge_as(
             &family.request("unreadable", None),
-            Some(&subject("team", &["prn_team"])),
+            Some(&subject(&["prn_team"])),
         )
         .await
         .expect_err("the subject can't read the change");
@@ -834,7 +833,7 @@ async fn the_plan_returns_the_writers_error_for_the_subjects_missing_rights() {
         .await
         .expect("fork");
 
-    let team = subject("team", &["prn_team"]);
+    let team = subject(&["prn_team"]);
     let main = family.engine(&family.main, Some(&team));
     let fork = family.engine(&family.fork, Some(&team));
     fork.fold_wal().await.expect("fold the fork");

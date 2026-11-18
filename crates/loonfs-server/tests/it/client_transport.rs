@@ -42,6 +42,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
             ca_cert_path: None,
         },
         service,
+        loonfs_types::Context::Service,
     )
     .expect("client");
     let target = NamespacePath::parse("demo", "/stream.bin").expect("path");

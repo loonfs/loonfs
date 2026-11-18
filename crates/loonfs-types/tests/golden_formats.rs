@@ -1132,7 +1132,7 @@ fn control_objects_match_golden_bytes() {
             namespace_id: namespace_id(),
             upload_id: UploadId::parse("upl_014d2pf2dbsqqg28t5cy4tqkff").expect("valid upload id"),
             content_id: content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
-            subject_id: None,
+            actor_id: actor(),
             mode: UploadSessionMode::ServiceProxied {},
             expires_at_ms: 87_400_000,
         },
@@ -1144,7 +1144,7 @@ fn control_objects_match_golden_bytes() {
             namespace_id: namespace_id(),
             upload_id: UploadId::parse("upl_5bsqqg28t5cy4tqkff04hmasw9").expect("valid upload id"),
             content_id: content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
-            subject_id: None,
+            actor_id: actor(),
             mode: UploadSessionMode::DirectPut {
                 checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
@@ -1162,24 +1162,12 @@ fn control_objects_match_golden_bytes() {
             namespace_id: namespace_id(),
             upload_id: UploadId::parse("upl_1248h248h248h248h248h248h2").expect("valid upload id"),
             content_id: content_id("con_1248h248h248h248h248h248h2"),
-            subject_id: None,
+            actor_id: actor(),
             mode: UploadSessionMode::DirectMultipart {
                 provider_upload_id: "provider-upload-id".to_owned(),
                 part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
                 checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             },
-            expires_at_ms: 87_400_000,
-        },
-    );
-    check_control_golden(
-        "control_upload_session_subject.v1.json",
-        ControlObjectKind::UploadSession,
-        UploadSessionPayload {
-            namespace_id: namespace_id(),
-            upload_id: UploadId::parse("upl_1k6csk6csk6csk6csk6csk6csk").expect("valid upload id"),
-            content_id: content_id("con_014d2pf2dbsqqg28t5cy4tqkff"),
-            subject_id: Some(loonfs_types::SubjectId::parse("usr_ada").expect("subject id")),
-            mode: UploadSessionMode::ServiceProxied {},
             expires_at_ms: 87_400_000,
         },
     );

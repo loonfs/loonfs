@@ -150,7 +150,7 @@ async fn build_initialized_writer(
     namespace_id: &NamespaceId,
     writer_id: &str,
 ) -> LoonFs<Writable> {
-    let writer = LoonFs::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(writer_id))
         .config(loonfs::RuntimeConfig {
             inline_content: loonfs::InlineContentPolicy {
@@ -242,7 +242,7 @@ async fn prepare_content_performs_one_content_put_and_no_reads() {
     harness.recording.reset();
 
     let prepared = namespace
-        .prepare_content(bytes)
+        .prepare_content(bytes, &loonfs_test_support::test_actor())
         .await
         .expect("prepare file bytes");
 
@@ -275,7 +275,7 @@ async fn independent_namespaces_sharing_a_store_reject_each_others_prepared_cont
         .await
         .expect("warm shared target catalog");
     let prepared = source_writer
-        .prepare_content(b"independently shared")
+        .prepare_content(b"independently shared", &loonfs_test_support::test_actor())
         .await
         .expect("prepare through source namespace");
     recording.reset();
@@ -300,7 +300,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
     let writer = build_initialized_writer(store, &source, "fork-sharing-writer").await;
     let source_writer = writer.open_namespace(&source).expect("open namespace");
     let prepared_for_fork = source_writer
-        .prepare_content(b"prepared before fork")
+        .prepare_content(b"prepared before fork", &loonfs_test_support::test_actor())
         .await
         .expect("prepare through source namespace");
     writer
@@ -327,7 +327,7 @@ async fn fork_and_source_reject_each_others_prepared_content() {
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 
     let prepared_for_source = fork_writer
-        .prepare_content(b"prepared through fork")
+        .prepare_content(b"prepared through fork", &loonfs_test_support::test_actor())
         .await
         .expect("prepare through fork namespace");
     recording.reset();
@@ -352,11 +352,14 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .open_namespace(&harness.namespace_id)
         .expect("open namespace");
     let bytes = b"service proxied upload";
-    let begin = namespace.create_upload().await.expect("begin upload");
+    let begin = namespace
+        .create_upload(&loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     harness.recording.reset();
 
     namespace
-        .put_upload_content(&begin.upload_id, bytes)
+        .put_upload_content(&begin.upload_id, bytes, &loonfs_test_support::test_actor())
         .await
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
@@ -371,7 +374,11 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
     harness.recording.reset();
 
     let completed = namespace
-        .complete_upload(&begin.upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(
+            &begin.upload_id,
+            CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("complete upload with proof");
     let prepared = completed.prepared;
@@ -436,7 +443,10 @@ async fn proxied_upload_calls_take_the_catalog_from_the_writer_position() {
     harness.recording.reset();
 
     // The session record's create.
-    let begin = namespace.create_upload().await.expect("begin upload");
+    let begin = namespace
+        .create_upload(&loonfs_test_support::test_actor())
+        .await
+        .expect("begin upload");
     assert_call(
         OperationCounts::default(),
         OperationCounts {
@@ -448,7 +458,11 @@ async fn proxied_upload_calls_take_the_catalog_from_the_writer_position() {
 
     // The two records' reads before and after the content put.
     namespace
-        .put_upload_content(&begin.upload_id, b"service proxied upload")
+        .put_upload_content(
+            &begin.upload_id,
+            b"service proxied upload",
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("upload content");
     assert_call(
@@ -467,7 +481,11 @@ async fn proxied_upload_calls_take_the_catalog_from_the_writer_position() {
     // The two records' reads, the content HEAD, the outcome's create, and the
     // session record's HEAD after it.
     namespace
-        .complete_upload(&begin.upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(
+            &begin.upload_id,
+            CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("complete upload");
     assert_call(
@@ -493,7 +511,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .expect("open namespace");
     let bytes = b"direct provider upload";
     let begin = namespace
-        .create_direct_put_upload_target()
+        .create_direct_put_upload_target(&loonfs_test_support::test_actor())
         .await
         .expect("begin direct put");
     harness.recording.reset();
@@ -515,6 +533,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
                     checksum: loonfs_types::Checksum::crc64nvme(bytes),
                 },
             },
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("complete direct put with proof");
@@ -620,7 +639,11 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     .into_iter()
     .map(|bytes| {
         let namespace = namespace.clone();
-        tokio::spawn(async move { namespace.prepare_content(bytes).await })
+        tokio::spawn(async move {
+            namespace
+                .prepare_content(bytes, &loonfs_test_support::test_actor())
+                .await
+        })
     });
     let mut prepared = Vec::new();
     for preparation in preparations {

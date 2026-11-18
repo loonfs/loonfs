@@ -82,7 +82,7 @@ impl Client {
         actor: &ActorId,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        let prepared = self.prepare_content(spec.namespace(), bytes).await?;
+        let prepared = self.prepare_content(spec.namespace(), actor, bytes).await?;
         self.put_file_prepared_with_options(spec, prepared, actor, options)
             .await
     }
@@ -163,7 +163,7 @@ impl Client {
         continuity: UploadContinuity<'_>,
     ) -> Result<Commit> {
         let prepared_content = self
-            .prepare_file_source(spec.namespace(), source, continuity)
+            .prepare_file_source(spec.namespace(), actor, source, continuity)
             .await?;
         self.commit_prepared_file(spec, prepared_content, actor, options, continuity.journal)
             .await
@@ -178,6 +178,7 @@ impl Client {
     pub async fn prepare_content(
         &self,
         namespace_id: &NamespaceId,
+        actor: &ActorId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         if self
@@ -189,7 +190,8 @@ impl Client {
                 kind: PreparedContentKind::Inline(bytes.to_vec()),
             });
         }
-        self.stage_bytes_as_content_ref(namespace_id, bytes).await
+        self.stage_bytes_as_content_ref(namespace_id, actor, bytes)
+            .await
     }
 
     /// Prepares a stream, buffering up to the advertised inline limit plus one byte.
@@ -198,9 +200,10 @@ impl Client {
     pub async fn prepare_content_stream(
         &self,
         namespace_id: &NamespaceId,
+        actor: &ActorId,
         source: PayloadSource,
     ) -> Result<PreparedContent> {
-        self.prepare_file_source(namespace_id, source, UploadContinuity::default())
+        self.prepare_file_source(namespace_id, actor, source, UploadContinuity::default())
             .await
     }
 

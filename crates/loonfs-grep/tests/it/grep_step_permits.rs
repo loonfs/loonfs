@@ -45,7 +45,7 @@ fn content_namespace(key: &str) -> Option<String> {
 /// A writer that stores every file as a content object, so a step's content
 /// reads reach the store.
 async fn content_object_writer(store: &SharedObjectStore) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store.clone())
+    LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "grep-step-permits-writer",
         ))

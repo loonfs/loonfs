@@ -10273,6 +10273,7 @@
           "uploads"
         ],
         "x-fern-sdk-method-name": "create",
+        "x-loonfs-actor": "required",
         "x-loonfs-retry": "not_idempotent"
       }
     },
@@ -10364,6 +10365,7 @@
           "uploads"
         ],
         "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-actor": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -10465,6 +10467,7 @@
           "uploads"
         ],
         "x-fern-sdk-method-name": "abort",
+        "x-loonfs-actor": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -10587,6 +10590,7 @@
           "uploads"
         ],
         "x-fern-sdk-method-name": "complete",
+        "x-loonfs-actor": "required",
         "x-loonfs-retry": "replayable"
       }
     },
@@ -10712,6 +10716,7 @@
           "uploads"
         ],
         "x-fern-sdk-method-name": "putContent",
+        "x-loonfs-actor": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -10842,6 +10847,7 @@
           "uploads"
         ],
         "x-fern-sdk-method-name": "signParts",
+        "x-loonfs-actor": "required",
         "x-loonfs-retry": "idempotent"
       }
     }
@@ -10885,11 +10891,6 @@
     {
       "header": "Loonfs-Actor",
       "name": "actorId",
-      "optional": true
-    },
-    {
-      "header": "Loonfs-Subject",
-      "name": "subjectId",
       "optional": true
     },
     {

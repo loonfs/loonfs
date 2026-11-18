@@ -57,7 +57,10 @@ async fn a_cold_diff_reads_a_revisions_segment_in_a_few_data_gets() {
     let mut from_seq = None;
     for round in 0..4 {
         let prepared = namespace_writer
-            .prepare_content(format!("round {round}").as_bytes())
+            .prepare_content(
+                format!("round {round}").as_bytes(),
+                &loonfs_test_support::test_actor(),
+            )
             .await
             .expect("prepare file content");
         for (batch, paths) in paths.chunks(500).enumerate() {
@@ -130,7 +133,7 @@ async fn a_cold_diff_reads_a_revisions_segment_in_a_few_data_gets() {
     );
 
     let recording = Arc::new(RecordingStore::metadata_segments(store));
-    let reader = LoonFs::builder_with_store(recording.clone())
+    let reader = LoonFs::builder_with_store(recording.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await

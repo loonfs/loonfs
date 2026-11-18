@@ -17,7 +17,7 @@ use loonfs_test_support::stores::{
 };
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, ActorId, ChecksumAlgorithm, NamespaceId, PrincipalId,
-    PrincipalSet, Subject, SubjectId,
+    PrincipalSet, Subject,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
         ]))
@@ -100,7 +99,7 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
     let clock = Arc::new(ManualClock::new(1_000_000));
     let wall_clock = Arc::new(ManualClock::at_system_time());
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = LoonFs::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(writer_id(name))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -131,13 +130,13 @@ async fn fixture(name: &str, claim_compactor: bool) -> Fixture {
         admin: writer
             .open_namespace(&namespace_id)
             .expect("open namespace")
-            .with_subject(subject("prn_admin")),
+            .with_context(subject("prn_admin").into()),
         service: writer
             .open_namespace(&namespace_id)
             .expect("open namespace"),
         user: writer
             .read_only()
-            .with_subject(subject("prn_user"))
+            .with_context(subject("prn_user").into())
             .namespace(&namespace_id),
         maintenance: writer.maintenance(writer_id(name)),
         writer,
@@ -385,7 +384,7 @@ async fn eventual_reads_past_the_staleness_reload_nothing_after_a_compaction() {
 async fn reads_move_onto_another_runtimes_compaction_without_a_reload() {
     let fixture = fixture("other-compaction", false).await;
     let other_store: SharedObjectStore = fixture.recording.clone();
-    let other = LoonFs::builder_with_store(other_store)
+    let other = LoonFs::builder_with_store(other_store, loonfs::Context::Service)
         .writer_id(writer_id("other-compaction-maintenance"))
         .monotonic_timer(fixture.clock.clone())
         .build()

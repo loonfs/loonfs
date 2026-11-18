@@ -136,6 +136,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
         ))
         .set("authorization", "Bearer test-token")
         .set("Loonfs-Context", "service")
+        .set("Loonfs-Actor", "test-actor")
         .set("content-type", "application/json")
         .send_string("{\"mode\": \"direkt_put\"}")
     {

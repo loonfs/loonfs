@@ -377,7 +377,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
 async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let temp_dir = tempdir().expect("store tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("restart-seed"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -765,7 +765,7 @@ async fn seed_namespace(
     name: &str,
 ) -> (SharedObjectStore, LoonFs<Writable>, NamespaceId) {
     let store = Arc::new(LocalFsStore::new(root).expect("store")) as SharedObjectStore;
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(&format!(
             "grep-mode-seed-{name}"
         )))
@@ -1001,12 +1001,12 @@ const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spe
 
 /// A grep worker over the same handles the server composes.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
         .expect("build reader");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(actor))
         .build()
         .await

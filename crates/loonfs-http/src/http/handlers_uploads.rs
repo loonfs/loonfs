@@ -2,7 +2,7 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::extractors::SubjectHeaders;
+use super::extractors::{ActorHeader, ContextHeaders};
 use super::{
     AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoBody, NoQuery, UploadBodyStream,
     MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
@@ -22,7 +22,7 @@ use loonfs_types::ErrorCode;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    options::DirectMultipartUploadOptions, CompleteUploadBody, ContentId, ContentRef,
+    options::DirectMultipartUploadOptions, ActorId, CompleteUploadBody, ContentId, ContentRef,
     CreateUploadBody, SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadId,
     UploadSession, UploadSessionStatus, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
@@ -54,6 +54,7 @@ pub(super) struct UploadPathParams {
         post,
         operation_id = "create_upload",
         extensions(
+            ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("create")),
@@ -79,25 +80,26 @@ pub(super) struct UploadPathParams {
 )]
 pub(super) async fn create_upload(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ActorHeader(actor_id): ActorHeader,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateUploadBody, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     // Decoding the body settled which transport this is and that it includes
     // that transport's fields and no other's, so there is nothing left here
     // to check before dispatching on it.
     match request {
         CreateUploadBody::DirectPut { size_bytes } => {
-            begin_direct_put_upload(&state, &namespace, size_bytes).await
+            begin_direct_put_upload(&state, &namespace, &actor_id, size_bytes).await
         }
         CreateUploadBody::DirectMultipart { part_size_bytes } => {
-            begin_direct_multipart_upload(&state, &namespace, part_size_bytes).await
+            begin_direct_multipart_upload(&state, &namespace, &actor_id, part_size_bytes).await
         }
         CreateUploadBody::ServiceProxied {} => {
             let response = namespace
-                .create_upload()
+                .create_upload(&actor_id)
                 .await
                 .map_err(ApiResponseError::runtime)?;
             Ok(Json(response))
@@ -108,6 +110,7 @@ pub(super) async fn create_upload(
 async fn begin_direct_put_upload(
     state: &HttpState,
     namespace: &Namespace<Writable>,
+    actor_id: &ActorId,
     size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     let Some(issuer) = direct_put_issuer(state) else {
@@ -134,7 +137,7 @@ async fn begin_direct_put_upload(
     }
 
     let mut prepared = namespace
-        .create_direct_put_upload_target()
+        .create_direct_put_upload_target(actor_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     fill_direct_put_access(issuer, &prepared.object_key, &mut prepared.session).await?;
@@ -176,6 +179,7 @@ async fn fill_direct_put_access(
 async fn begin_direct_multipart_upload(
     state: &HttpState,
     namespace: &Namespace<Writable>,
+    actor_id: &ActorId,
     part_size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
     if direct_multipart_issuer(state).is_none() {
@@ -187,9 +191,10 @@ async fn begin_direct_multipart_upload(
         ));
     }
     let prepared = namespace
-        .create_direct_multipart_upload_target_with_options(&DirectMultipartUploadOptions {
-            part_size_bytes,
-        })
+        .create_direct_multipart_upload_target_with_options(
+            actor_id,
+            &DirectMultipartUploadOptions { part_size_bytes },
+        )
         .await
         .map_err(|error| {
             ApiResponseError::runtime(error).with_invalid_request_param("/part_size_bytes")
@@ -204,6 +209,7 @@ async fn begin_direct_multipart_upload(
         post,
         operation_id = "sign_upload_parts",
         extensions(
+            ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("signParts")),
@@ -232,7 +238,8 @@ async fn begin_direct_multipart_upload(
 )]
 pub(super) async fn sign_upload_parts(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ActorHeader(actor_id): ActorHeader,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
@@ -245,9 +252,9 @@ pub(super) async fn sign_upload_parts(
         ));
     };
 
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     let targets = namespace
-        .sign_upload_parts(&upload_id, &request.parts)
+        .sign_upload_parts(&upload_id, &request.parts, &actor_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     let parts = sign_parts(issuer, &targets).await?;
@@ -409,6 +416,7 @@ fn with_content_token(
         put,
         operation_id = "put_upload_content",
         extensions(
+            ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("putContent")),
@@ -436,16 +444,17 @@ fn with_content_token(
 )]
 pub(super) async fn put_upload_content(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ActorHeader(actor_id): ActorHeader,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     body: UploadBodyStream,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     let (stream, outcome) = body.into_stream();
     match namespace
-        .put_upload_content_stream(&upload_id, stream)
+        .put_upload_content_stream(&upload_id, stream, &actor_id)
         .await
     {
         Ok(response) => Ok(Json(response)),
@@ -461,6 +470,7 @@ pub(super) async fn put_upload_content(
         post,
         operation_id = "complete_upload",
         extensions(
+            ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("complete")),
@@ -492,15 +502,16 @@ pub(super) async fn put_upload_content(
 )]
 pub(super) async fn complete_upload(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ActorHeader(actor_id): ActorHeader,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(completion): AppJson<CompleteUploadBody, MAX_COMPLETION_BODY_BYTES>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     let completed = namespace
-        .complete_upload(&upload_id, completion)
+        .complete_upload(&upload_id, completion, &actor_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(with_content_token(
@@ -517,6 +528,7 @@ pub(super) async fn complete_upload(
         get,
         operation_id = "get_upload",
         extensions(
+            ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
@@ -542,14 +554,15 @@ pub(super) async fn complete_upload(
 )]
 pub(super) async fn get_upload(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ActorHeader(actor_id): ActorHeader,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     let mut view = namespace
-        .get_upload(&upload_id)
+        .get_upload(&upload_id, &actor_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     if let Some(object_key) = &view.direct_put_object_key {
@@ -575,6 +588,7 @@ pub(super) async fn get_upload(
         post,
         operation_id = "abort_upload",
         extensions(
+            ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("abort")),
@@ -601,15 +615,16 @@ pub(super) async fn get_upload(
 )]
 pub(super) async fn abort_upload(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ActorHeader(actor_id): ActorHeader,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     let response = namespace
-        .abort_upload(&upload_id)
+        .abort_upload(&upload_id, &actor_id)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(response))
@@ -633,11 +648,12 @@ mod completion_body_tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let store =
             loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
-        let writer = LoonFs::builder_with_store(std::sync::Arc::new(store))
-            .writer_id(loonfs_test_support::ids::writer_id("writer"))
-            .build()
-            .await
-            .expect("writer");
+        let writer =
+            LoonFs::builder_with_store(std::sync::Arc::new(store), loonfs::Context::Service)
+                .writer_id(loonfs_test_support::ids::writer_id("writer"))
+                .build()
+                .await
+                .expect("writer");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         writer
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -646,13 +662,18 @@ mod completion_body_tests {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let upload = namespace.create_upload().await.expect("upload");
+        let actor = loonfs_test_support::test_actor();
+        let upload = namespace.create_upload(&actor).await.expect("upload");
         namespace
-            .put_upload_content(&upload.upload_id, b"content")
+            .put_upload_content(&upload.upload_id, b"content", &actor)
             .await
             .expect("content");
         let completed = namespace
-            .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
+            .complete_upload(
+                &upload.upload_id,
+                CompleteUploadBody::ServiceProxied {},
+                &actor,
+            )
             .await
             .expect("complete");
         let loonfs::uploads::UploadSessionView {
@@ -660,7 +681,7 @@ mod completion_body_tests {
             evidence,
             ..
         } = namespace
-            .get_upload(&upload.upload_id)
+            .get_upload(&upload.upload_id, &actor)
             .await
             .expect("eligible status");
         let evidence = evidence.expect("evidence eligible at status read");

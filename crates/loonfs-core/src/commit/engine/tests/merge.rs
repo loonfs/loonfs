@@ -919,7 +919,6 @@ async fn a_merge_whose_inode_ids_dont_match_its_creates_is_refused() {
 /// A subject with `principals`.
 fn acl_subject(principals: &[&str]) -> loonfs_types::Subject {
     loonfs_types::Subject {
-        subject_id: loonfs_types::SubjectId::parse("subject").expect("subject id"),
         principals: loonfs_types::PrincipalSet::new(
             principals
                 .iter()

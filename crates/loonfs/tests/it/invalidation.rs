@@ -28,7 +28,7 @@ async fn writer_with_cache(
     cache: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> LoonFs<Writable> {
     cache(
-        LoonFs::builder_with_store(store.clone())
+        LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(writer_id))
             .config(loonfs::RuntimeConfig {
                 min_publish_interval_ms: 0,
@@ -227,7 +227,7 @@ async fn a_cached_view_at_the_boundary_loads_the_newest_manifest() {
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("collected-successor").expect("namespace");
     let timer = Arc::new(ManualClock::new(0));
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .monotonic_timer(timer.clone())
         .build()
@@ -322,7 +322,7 @@ async fn a_refresh_probes_the_wal_before_the_manifest() {
     let recording = Arc::new(RecordingStore::new(blocking, KeyPredicate::any()));
     let store: SharedObjectStore = recording.clone();
     let timer = Arc::new(ManualClock::new(0));
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .monotonic_timer(timer.clone())
         .config(loonfs::RuntimeConfig {
@@ -403,7 +403,7 @@ async fn a_warm_read_rediscovers_when_its_wal_probe_finds_a_collected_gap() {
     // The reader's clock doesn't move, so its manifest check doesn't fall due,
     // and with a maximum staleness of 0 each warm read starts with the WAL
     // probe.
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .config(loonfs::RuntimeConfig {
@@ -493,7 +493,7 @@ async fn other_wal_tail_bytes(other_id: &NamespaceId) -> usize {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     fill_other(&store, other_id).await;
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -692,7 +692,7 @@ async fn read_pressure_leaves_an_idle_writer_tail_and_its_next_publish_replays_n
     }
     let replays = tail_replays(&recorder);
 
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .metadata_cache(cache.clone())
         .build()

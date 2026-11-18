@@ -20,7 +20,7 @@ const LINE_BYTES: u64 = 256;
 #[tokio::test]
 async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
     let memory: SharedObjectStore = Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme));
-    let writer = LoonFs::builder_with_store(memory.clone())
+    let writer = LoonFs::builder_with_store(memory.clone(), loonfs::Context::Service)
         .writer_id(writer_id("append-read"))
         .build()
         .await
@@ -60,7 +60,7 @@ async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
     ));
     // A maximum staleness of 0 confirms the head on every read, so the warm
     // read sends its WAL probe.
-    let reader = LoonFs::builder_with_store(recording.clone())
+    let reader = LoonFs::builder_with_store(recording.clone(), loonfs::Context::Service)
         .read_only()
         .config(loonfs::RuntimeConfig {
             max_staleness_ms: 0,

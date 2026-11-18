@@ -119,7 +119,7 @@ async fn fixture_with_cache(name: &str, parked: Parked, metadata_cache: Metadata
     let store: SharedObjectStore = recording.clone();
     let clock = Arc::new(ManualClock::new(1_000_000));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = LoonFs::builder_with_store(store)
+    let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(writer_id(name))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,

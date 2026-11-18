@@ -11,7 +11,7 @@ use crate::test_support::kept_inodes::{
 };
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, DeleteDirectoryBehavior,
-    InodeKind, PrincipalId, PrincipalSet, Subject, SubjectId, ROOT_INODE_ID,
+    InodeKind, PrincipalId, PrincipalSet, Subject, ROOT_INODE_ID,
 };
 use plan::CompactionPlacement;
 use std::assert_matches;
@@ -20,7 +20,6 @@ use std::assert_matches;
 /// rows.
 fn administrator() -> Subject {
     Subject {
-        subject_id: SubjectId::parse("root").expect("subject id"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse("prn_root").expect("principal id")
         ]))

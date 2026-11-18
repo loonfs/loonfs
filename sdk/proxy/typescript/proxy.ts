@@ -14,7 +14,6 @@ export interface ProxyRouteContext {
 export interface ProxyAuthorization {
     /** Sent upstream in `Loonfs-Actor`. */
     actorId?: string;
-    subjectId?: string;
     principals?: string[];
     /** Sent upstream as `Loonfs-Context: service` when true. */
     service?: boolean;
@@ -130,9 +129,6 @@ export function createProxyHandler(config: ProxyConfig): (request: Request) => P
         if (authorization.actorId !== undefined) {
             headers.set("Loonfs-Actor", authorization.actorId);
         }
-        if (authorization.subjectId !== undefined) {
-            headers.set("Loonfs-Subject", authorization.subjectId);
-        }
         if (authorization.principals !== undefined) {
             headers.set("Loonfs-Principals", authorization.principals.join(","));
         }
@@ -203,7 +199,6 @@ const REQUEST_STRIPPED_HEADERS = [
     "host",
     "cookie",
     "loonfs-actor",
-    "loonfs-subject",
     "loonfs-principals",
     "loonfs-context",
 ] as const;

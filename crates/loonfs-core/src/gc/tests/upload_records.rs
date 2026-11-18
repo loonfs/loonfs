@@ -56,7 +56,12 @@ async fn complete_proxied<S: ObjectStore + ?Sized>(
     let catalog = crate::test_support::load_catalog(store, namespace_id).await;
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context(now_ms))
         .engine()
-        .complete_upload(&catalog, upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(
+            &catalog,
+            upload_id,
+            CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
+        )
         .await
 }
 
@@ -72,7 +77,7 @@ async fn abort<S: ObjectStore + ?Sized>(
         .expect("catalog");
     crate::test_support::NamespaceFixture::new(store, catalog.namespace_id(), &context(now_ms))
         .engine()
-        .abort_upload(&catalog, upload_id)
+        .abort_upload(&catalog, upload_id, &loonfs_test_support::test_actor())
         .await
 }
 
@@ -271,7 +276,7 @@ async fn a_completion_stalled_across_a_collection_that_deleted_an_aborted_sessio
             &crate::test_support::writer_at("test-writer", 4_000),
         )
         .engine()
-        .get_upload(&catalog, &upload_id)
+        .get_upload(&catalog, &upload_id, &loonfs_test_support::test_actor())
         .await
         .map(drop),
     ] {
@@ -425,6 +430,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
                 &catalog,
                 &upload_id,
                 loonfs_types::CompleteUploadBody::ServiceProxied {},
+                &loonfs_test_support::test_actor(),
             )
             .await;
         store.release();
@@ -463,10 +469,12 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
     let engine =
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside).engine();
+    let actor = loonfs_test_support::test_actor();
     let completion = engine.complete_upload(
         &catalog,
         &upload_id,
         loonfs_types::CompleteUploadBody::ServiceProxied {},
+        &actor,
     );
     let abort = async {
         store.wait_until_blocked().await;

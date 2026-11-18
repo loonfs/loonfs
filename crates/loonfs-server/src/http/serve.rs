@@ -186,7 +186,7 @@ pub(super) async fn build_handles(
         })
     };
 
-    let mut builder = LoonFs::builder_with_store(store.clone())
+    let mut builder = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(config.writer_id.clone())
         .config(config.runtime_config())
         .execution_budget(config.execution_budget(memory, metrics.recorder()))

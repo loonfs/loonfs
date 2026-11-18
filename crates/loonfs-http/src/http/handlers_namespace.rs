@@ -1,7 +1,7 @@
 //! Namespace lifecycle, status, and capability discovery handlers.
 
 use super::error::ApiResponseError;
-use super::extractors::{ActorHeader, SubjectHeaders};
+use super::extractors::{ActorHeader, ContextHeaders};
 use super::handlers_uploads::{direct_multipart_issuer, direct_put_issuer};
 use super::query_params::{live_consistency, required_query_param};
 
@@ -374,14 +374,14 @@ pub(super) async fn get_namespace_diagnostics(
 )]
 pub(super) async fn delete_namespace(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
 ) -> Result<Json<loonfs_types::DeleteNamespaceResponse>, ApiResponseError> {
     let options = DeleteNamespaceOptions {
         expected_head_seq: query.expected_head_seq,
     };
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     let response = namespace
         .delete_with_options(&options)
         .await
@@ -421,13 +421,13 @@ pub(super) async fn delete_namespace(
 )]
 pub(super) async fn fork_namespace(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     ActorHeader(actor_id): ActorHeader,
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let namespace = runtime
         .fork_namespace_with_options(
             &source_namespace_id,
@@ -481,7 +481,7 @@ pub(super) async fn fork_namespace(
 pub(super) async fn merge_fork(
     State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<MergeForkRequest>,
@@ -493,7 +493,7 @@ pub(super) async fn merge_fork(
         message,
     } = request;
     let namespace = state
-        .open_writer(&namespace_id, subject)
+        .open_writer(&namespace_id, context)
         .await
         .map_err(|error| error.with_commit_id(&commit_id))?;
     let options = MergeForkOptions {
@@ -549,7 +549,7 @@ pub(super) async fn merge_fork(
 )]
 pub(super) async fn get_next_merge_range(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<NextMergeRangeQuery>,
 ) -> Result<Json<NextMergeRangeResponse>, ApiResponseError> {
@@ -559,7 +559,7 @@ pub(super) async fn get_next_merge_range(
         consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
     };
     let response = state
-        .runtime_for(subject)
+        .runtime_for(context)
         .namespace(&namespace_id)
         .next_merge_range_with_options(&source_namespace_id, &options)
         .await
@@ -607,13 +607,13 @@ pub(super) async fn get_next_merge_range(
 pub(super) async fn fork_namespace_for_rebase(
     State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ForkNamespaceForRebaseRequest>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
     let namespace = state
-        .runtime_for(subject)
+        .runtime_for(context)
         .fork_namespace_for_rebase(
             &namespace_id,
             &request.source_namespace_id,
@@ -668,7 +668,7 @@ pub(super) async fn fork_namespace_for_rebase(
 pub(super) async fn replay_fork(
     State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ReplayForkRequest>,
@@ -680,7 +680,7 @@ pub(super) async fn replay_fork(
         message,
     } = request;
     let new_fork = state
-        .open_writer(&namespace_id, subject)
+        .open_writer(&namespace_id, context)
         .await
         .map_err(|error| error.with_commit_id(&commit_id))?;
     let options = MergeForkOptions {

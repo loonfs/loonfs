@@ -39,7 +39,7 @@ pub async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Main
         now_ms: SystemWallClock.now_ms() + GC_GRACE_WINDOW_MS,
     };
     let writer_id = test_writer_id("retention-maintenance");
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(writer_id.clone())
         .wall_clock(Arc::new(clock))
         .build()
@@ -51,7 +51,7 @@ pub async fn maintenance_past_the_grace_window(store: SharedObjectStore) -> Main
 /// Builds a writer on `store` as `writer_id`, with no minimum interval
 /// between its publications.
 pub async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writable> {
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(test_writer_id(writer_id))
         .config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -66,14 +66,14 @@ pub async fn writer(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writabl
 /// `update_access` commit in the service context.
 ///
 /// An application sets a new namespace's first administrators this way.
-/// `writer` acts in the service context, as a runtime without a subject does.
+/// `writer` acts in the service context.
 pub async fn set_root_access(
     writer: &LoonFs<Writable>,
     namespace_id: &loonfs_types::NamespaceId,
     grants: loonfs_types::AccessGrants,
 ) {
     assert!(
-        writer.subject().is_none(),
+        writer.context() == loonfs_types::Context::Service,
         "the root access row is set in the service context"
     );
     writer
@@ -108,7 +108,7 @@ pub async fn drop_namespace_view(
 /// Builds a reader with nothing cached, so its first read loads the current
 /// manifest.
 pub async fn fresh_reader(store: SharedObjectStore) -> LoonFs<ReadOnly> {
-    LoonFs::builder_with_store(store)
+    LoonFs::builder_with_store(store, crate::Context::Service)
         .read_only()
         .build()
         .await

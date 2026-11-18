@@ -20,7 +20,7 @@ pub(crate) async fn run_merge(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = ProfileContext::resolve(invocation).await?;
     let actor_id = context.actor(args.actor.actor_id.as_ref())?;
-    let context = context.act_as_subject(&invocation.selectors, &actor_id)?;
+    let context = context.act_as_subject(&invocation.selectors)?;
     let record = MergeRecordFile::open(
         args.record.as_deref(),
         &context.profile_name,
@@ -30,7 +30,6 @@ pub(crate) async fn run_merge(
     )
     .map_err(|error| context.fail(error))?;
     let attempt = MergeAttempt {
-        subject: context.target.client.subject().cloned(),
         through_seq: args.through_seq,
     };
     let (attempt, mut session) = open_session(

@@ -161,7 +161,8 @@ async fn request_error_with(
     if let Some(authorization) = authorization {
         request = request
             .header("authorization", authorization)
-            .header("Loonfs-Context", "service");
+            .header("Loonfs-Context", "service")
+            .header("Loonfs-Actor", "test-actor");
     }
     let response = router
         .clone()
@@ -284,7 +285,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         .expect("create namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     let upload = namespace_writer
-        .create_upload()
+        .create_upload(&loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
 
@@ -343,6 +344,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
         .uri(&upload_uri)
         .header("authorization", "Bearer test-token")
         .header("Loonfs-Context", "service")
+        .header("Loonfs-Actor", "test-actor")
         .body(stalled_body)
         .expect("stalled upload request");
     let stalled_upload = tokio::spawn(router.clone().oneshot(stalled_request));
@@ -398,7 +400,7 @@ async fn store_fault_has_one_error_from_the_boundary() {
         InjectedError::Transport("injected WAL-head read failure".to_owned()),
     ));
     let store: SharedObjectStore = failing.clone();
-    let bootstrap = LoonFs::builder_with_store(store.clone())
+    let bootstrap = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "logging-store-fault-bootstrap",
         ))

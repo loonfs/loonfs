@@ -1,7 +1,7 @@
 //! Snapshot and snapshot inventory handlers.
 
 use super::error::ApiResponseError;
-use super::extractors::SubjectHeaders;
+use super::extractors::ContextHeaders;
 use super::handlers_filesystem::PageQuery;
 
 use super::query_params::effective_page_limit;
@@ -46,12 +46,12 @@ use std::sync::Arc;
 )]
 pub(super) async fn create_snapshot(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     let snapshot = namespace
         .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {
             name: request.name,
@@ -93,11 +93,11 @@ pub(super) async fn create_snapshot(
 )]
 pub(super) async fn list_snapshots(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let namespace = runtime.namespace(&namespace_id);
     let response = namespace
         .list_snapshots()
@@ -140,13 +140,13 @@ pub(super) async fn list_snapshots(
 )]
 pub(super) async fn extend_snapshot(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<ExtendSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    let namespace = state.open_writer(&namespace_id, context).await?;
     let response = namespace
         .extend_snapshot(&snapshot_id, request.ttl_ms)
         .await
@@ -185,12 +185,12 @@ pub(super) async fn extend_snapshot(
 )]
 pub(super) async fn get_snapshot(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let snapshot = runtime
         .namespace(&namespace_id)
         .get_snapshot(&snapshot_id)
@@ -229,7 +229,7 @@ pub(super) async fn get_snapshot(
 )]
 pub(super) async fn delete_snapshot(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
@@ -245,8 +245,7 @@ pub(super) async fn delete_snapshot(
             .map_err(ApiResponseError::runtime)?,
         opened => opened.map_err(ApiResponseError::runtime)?,
     };
-    let scoped_namespace = subject.map(|subject| namespace.with_subject(subject));
-    let namespace = scoped_namespace.as_ref().unwrap_or(&namespace);
+    let namespace = namespace.with_context(context);
     let response = namespace
         .delete_snapshot(&snapshot_id)
         .await

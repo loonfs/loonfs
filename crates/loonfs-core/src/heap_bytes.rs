@@ -32,7 +32,7 @@ use loonfs_types::{
     Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
     MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PoolId, PrincipalId,
-    SnapshotId, SpanObjectId, Subject, SubjectId, UploadId, WriterId,
+    SnapshotId, SpanObjectId, Subject, UploadId, WriterId,
 };
 use loonfs_types::{DiffEntry, FilesystemEvent, MergeConflict, MergeConflictVersion};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -178,7 +178,6 @@ text_heap_bytes!(
     PoolId,
     PrincipalId,
     SpanObjectId,
-    SubjectId,
     UploadId,
     WriterId,
 );
@@ -254,8 +253,7 @@ impl HeapBytes for CommitIntent {
 impl HeapBytes for Subject {
     fn heap_bytes(&self) -> usize {
         self.principals.iter().map(HeapBytes::heap_bytes).fold(
-            self.subject_id.heap_bytes()
-                + btree_node_bytes::<PrincipalId, ()>(self.principals.len()),
+            btree_node_bytes::<PrincipalId, ()>(self.principals.len()),
             usize::saturating_add,
         )
     }

@@ -52,10 +52,13 @@ pub(crate) fn take_log(captured: &Arc<Mutex<Vec<u8>>>) -> String {
 
 /// Builds a writer as `writer_id` on a local store at `root`.
 pub(crate) async fn writer(root: &Path, writer_id: &str) -> LoonFs<Writable> {
-    LoonFs::builder(StoreConfig::LocalFs(LocalFsStoreConfig {
-        root: root.to_string_lossy().into_owned(),
-        key_prefix: None,
-    }))
+    LoonFs::builder(
+        StoreConfig::LocalFs(LocalFsStoreConfig {
+            root: root.to_string_lossy().into_owned(),
+            key_prefix: None,
+        }),
+        loonfs::Context::Service,
+    )
     .writer_id(loonfs_test_support::ids::writer_id(writer_id))
     .build()
     .await

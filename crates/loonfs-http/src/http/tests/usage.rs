@@ -358,6 +358,7 @@ async fn a_request_canceled_before_its_response_still_produces_a_report() {
         ))
         .header("authorization", "Bearer test-token")
         .header("Loonfs-Context", "service")
+        .header("Loonfs-Actor", "usage-test")
         .body(Body::from_stream(body))
         .expect("upload request");
     let task = tokio::spawn(fixture.router.clone().oneshot(upload_request));

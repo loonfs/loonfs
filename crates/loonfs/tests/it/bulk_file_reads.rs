@@ -1015,7 +1015,7 @@ async fn a_standalone_reader_serves_every_operation() {
 
     // No writer identity anywhere on this path: the reader opens its own
     // store client from configuration.
-    let reader = LoonFs::builder(store_config(temp_dir.path()))
+    let reader = LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
         .read_only()
         .build()
         .await

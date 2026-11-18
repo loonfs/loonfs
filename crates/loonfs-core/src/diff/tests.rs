@@ -9,7 +9,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::RecordingStore;
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, Commit, CommitId,
-    EffectiveLimit, EntryInodeKind, FilesystemEvent, PrincipalId, PrincipalSet, Subject, SubjectId,
+    EffectiveLimit, EntryInodeKind, FilesystemEvent, PrincipalId, PrincipalSet, Subject,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -240,7 +240,6 @@ async fn a_one_commit_file_creation_yields_one_entry() {
 
 fn administrator() -> Subject {
     Subject {
-        subject_id: SubjectId::parse("root").expect("subject id"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse("prn_root").expect("principal id")
         ]))

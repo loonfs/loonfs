@@ -213,8 +213,7 @@ Namespace management
     The command saves the session in a record file after every step, under
     $XDG_STATE_HOME/loonfs/merges (or ~/.local/state/loonfs/merges when
     XDG_STATE_HOME is unset) unless --record points to another file. A rerun
-    resumes the session, and it has to use the same actor, subject, and
-    --through. The command removes the record once the session is merged
+    resumes the session, and it has to use the same actor and --through. The command removes the record once the session is merged
     or abandoned. Without a record, it recovers the session's new forks
     from the namespace's fork snapshots. --abandon abandons a failed session and
     deletes the new forks that its rebases created
@@ -296,12 +295,11 @@ Writing
   defaults to loonfs-cli, which identifies the tool, not the person
   running it.
 
-  Every command that reaches a namespace accepts --subject-id <id> and
-  --principals <a,b>. The flags override LOONFS_SUBJECT_ID and
-  LOONFS_PRINCIPALS, which override the matching profile fields. With
-  principals, LoonFS checks each request against the namespace's access
-  rows, and the subject ID defaults to the actor ID. Without principals,
-  the CLI sends `Loonfs-Context: service`, and LoonFS checks no rights.
+  Every command that reaches a namespace accepts --principals <a,b>. The
+  flag overrides LOONFS_PRINCIPALS, which overrides the profile's
+  principals field. With principals, LoonFS checks each request against
+  the namespace's access rows. Without principals, the CLI sends
+  `Loonfs-Context: service`, and LoonFS checks no rights.
 
   loonfs put <local-path|-> [remote-path] [-r] [--force]
              [--expected-inode-id <id>] [--expected-revision <n>]
@@ -618,8 +616,9 @@ Interrupted transfers
   was lost, the rerun commits what's already stored and sends nothing. If
   the source changed since the record was written, the command stops and
   prints the record's path, because the parts already stored came from
-  bytes that no longer exist. Pass a new --commit-id or remove the record
-  to start another attempt.
+  bytes that no longer exist. An upload session belongs to the actor that
+  opened it, so a rerun with a different actor also stops. Pass a new
+  --commit-id or remove the record to start another attempt.
 
   Every file upload, including embedded and proxied uploads, also records
   its prepared commit request before it submits the commit, and a rerun

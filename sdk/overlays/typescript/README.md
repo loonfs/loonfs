@@ -147,8 +147,8 @@ An application without per-user permissions returns
 `{ actorId: user.id, service: true }` instead.
 
 The proxy forwards bodies without rewriting JSON. It strips browser credentials,
-cookies, `Host`, the `Loonfs-Actor`, `Loonfs-Subject`, `Loonfs-Principals`, and
-`Loonfs-Context` headers, and hop-by-hop headers, so the browser can't choose
+cookies, `Host`, the `Loonfs-Actor`, `Loonfs-Principals`, and `Loonfs-Context`
+headers, and hop-by-hop headers, so the browser can't choose
 its own authority. It supplies the configured token and the identity returned
 by `authorize`.
 

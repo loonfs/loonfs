@@ -39,16 +39,10 @@ pub(crate) struct UploadAttempt {
     behavior: DestinationBehavior,
     expected_inode_id: Option<InodeId>,
     expected_revision_no: Option<RevisionNo>,
-    subject: Option<loonfs_types::Subject>,
 }
 
 impl UploadAttempt {
-    pub(crate) fn new(
-        source: SourceIdentity,
-        actor_id: ActorId,
-        options: &PutFileOptions,
-        subject: Option<loonfs_types::Subject>,
-    ) -> Self {
+    pub(crate) fn new(source: SourceIdentity, actor_id: ActorId, options: &PutFileOptions) -> Self {
         Self {
             source,
             actor_id,
@@ -58,7 +52,6 @@ impl UploadAttempt {
             behavior: options.behavior,
             expected_inode_id: options.expected_inode_id,
             expected_revision_no: options.expected_revision_no,
-            subject,
         }
     }
 
@@ -162,7 +155,9 @@ impl UploadJournal {
         let Some(upload_id) = upload_id else {
             return Err(error.into());
         };
-        let session = client.get_upload(namespace_id, &upload_id).await?;
+        let session = client
+            .get_upload(namespace_id, &actor_id, &upload_id)
+            .await?;
         let loonfs_types::UploadSessionStatus::Completed {
             content_token: Some(token),
             ..
@@ -552,12 +547,7 @@ mod tests {
     fn open(path: &Path) -> UploadJournal {
         UploadJournal::open_at(
             path.to_owned(),
-            UploadAttempt::new(
-                source(1024),
-                loonfs_test_support::test_actor(),
-                &options(),
-                None,
-            ),
+            UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &options()),
         )
         .expect("open journal")
     }
@@ -655,12 +645,7 @@ mod tests {
             }
             let journal = UploadJournal::open_at(
                 path.clone(),
-                UploadAttempt::new(
-                    source(1024),
-                    loonfs_test_support::test_actor(),
-                    &options,
-                    None,
-                ),
+                UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &options),
             )
             .expect("journal");
             begin(&journal);
@@ -731,12 +716,7 @@ mod tests {
         options.commit.commit_id = Some(CommitId::generate());
         let journal = UploadJournal::open_at(
             path.clone(),
-            UploadAttempt::new(
-                source(1024),
-                loonfs_test_support::test_actor(),
-                &options,
-                None,
-            ),
+            UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &options),
         )
         .expect("journal");
         let expected = request(&journal);
@@ -751,12 +731,7 @@ mod tests {
         assert_eq!(
             UploadJournal::open_at(
                 path,
-                UploadAttempt::new(
-                    source(1024),
-                    loonfs_test_support::test_actor(),
-                    &options,
-                    None
-                ),
+                UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &options,),
             )
             .expect("reopen")
             .prepared_request(),
@@ -777,12 +752,7 @@ mod tests {
             }
             assert!(UploadJournal::open_at(
                 path.clone(),
-                UploadAttempt::new(
-                    source(1024),
-                    loonfs_test_support::test_actor(),
-                    &options(),
-                    None
-                ),
+                UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &options(),),
             )
             .expect_err("owned")
             .to_string()
@@ -800,12 +770,7 @@ mod tests {
         std::fs::write(&path, b"{").expect("corrupt record");
         UploadJournal::open_at(
             path.clone(),
-            UploadAttempt::new(
-                source(1024),
-                loonfs_test_support::test_actor(),
-                &options(),
-                None,
-            ),
+            UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &options()),
         )
         .expect_err("a corrupt journal record should be refused");
         assert_eq!(std::fs::read(&path).expect("preserved"), b"{");
@@ -813,24 +778,14 @@ mod tests {
         std::fs::create_dir(&path).expect("unreadable record");
         UploadJournal::open_at(
             path.clone(),
-            UploadAttempt::new(
-                source(1024),
-                loonfs_test_support::test_actor(),
-                &options(),
-                None,
-            ),
+            UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &options()),
         )
         .expect_err("an unreadable journal record should be refused");
         std::fs::remove_dir(&path).expect("remove fixture");
         let original = open(&path).options();
         assert!(UploadJournal::open_at(
             path.clone(),
-            UploadAttempt::new(
-                source(2048),
-                loonfs_test_support::test_actor(),
-                &options(),
-                None
-            ),
+            UploadAttempt::new(source(2048), loonfs_test_support::test_actor(), &options(),),
         )
         .expect_err("changed file")
         .to_string()
@@ -839,12 +794,7 @@ mod tests {
         changed.commit.message = Some("different".to_owned());
         assert!(UploadJournal::open_at(
             path.clone(),
-            UploadAttempt::new(
-                source(1024),
-                loonfs_test_support::test_actor(),
-                &changed,
-                None
-            ),
+            UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &changed,),
         )
         .expect_err("changed options")
         .to_string()
@@ -853,73 +803,40 @@ mod tests {
         changed.commit.commit_id = Some(CommitId::generate());
         UploadJournal::open_at(
             path.clone(),
-            UploadAttempt::new(
-                source(1024),
-                loonfs_test_support::test_actor(),
-                &changed,
-                None,
-            ),
+            UploadAttempt::new(source(1024), loonfs_test_support::test_actor(), &changed),
         )
         .expect_err("a changed commit ID should be refused");
         assert_eq!(open(&path).options(), original);
     }
 
     #[test]
-    fn a_journal_resumes_with_the_same_subject_and_refuses_a_different_subject() {
+    fn a_journal_resumes_with_the_same_actor_and_refuses_a_different_actor() {
         let dir = tempfile::tempdir().expect("directory");
         let path = dir.path().join("upload.json");
         let options = options();
-        let mut subject = loonfs_types::Subject {
-            subject_id: loonfs_types::SubjectId::parse("alice").expect("subject id"),
-            principals: loonfs_types::PrincipalSet::new(
-                [loonfs_types::PrincipalId::parse("writers").expect("principal id")]
-                    .into_iter()
-                    .collect(),
-            )
-            .expect("principal set"),
-        };
-        let first = UploadJournal::open_at(
-            path.clone(),
+        let attempt = |actor: &str| {
             UploadAttempt::new(
                 source(1024),
-                loonfs_test_support::test_actor(),
+                ActorId::parse(actor).expect("actor id"),
                 &options,
-                Some(subject.clone()),
-            ),
-        )
-        .expect("open with subject");
+            )
+        };
+        let first = UploadJournal::open_at(path.clone(), attempt("usr_ada")).expect("open");
         let recorded = first.options();
         begin(&first);
         drop(first);
 
-        let resumed = UploadJournal::open_at(
-            path.clone(),
-            UploadAttempt::new(
-                source(1024),
-                loonfs_test_support::test_actor(),
-                &options,
-                Some(subject.clone()),
-            ),
-        )
-        .expect("resume with same subject");
+        let resumed =
+            UploadJournal::open_at(path.clone(), attempt("usr_ada")).expect("resume as the actor");
         assert_eq!(resumed.options(), recorded);
         assert!(resumed.resume().is_some());
         drop(resumed);
 
-        subject.subject_id = loonfs_types::SubjectId::parse("bob").expect("different subject id");
         let saved = std::fs::read(&path).expect("saved record");
-        assert!(UploadJournal::open_at(
-            path.clone(),
-            UploadAttempt::new(
-                source(1024),
-                loonfs_test_support::test_actor(),
-                &options,
-                Some(subject.clone())
-            ),
-        )
-        .expect_err("changed subject")
-        .to_string()
-        .contains("PUT options changed"));
+        assert!(UploadJournal::open_at(path.clone(), attempt("usr_bob"))
+            .expect_err("another actor")
+            .to_string()
+            .contains("PUT options changed"));
         assert_eq!(std::fs::read(&path).expect("preserved record"), saved);
     }
 

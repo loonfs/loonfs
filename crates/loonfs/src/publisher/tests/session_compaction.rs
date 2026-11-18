@@ -143,7 +143,7 @@ async fn park_a_session_compaction() -> ParkedCompaction {
         OperationSelector::Put,
     ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .metrics_recorder(recorder.clone())
@@ -246,7 +246,7 @@ async fn a_session_compaction_reads_no_wal_objects() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::prefix(wal_prefix(&namespace_id)),
     ));
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .build()
@@ -378,7 +378,7 @@ async fn shutdown_drains_session_compactions() {
 async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .build()
@@ -467,7 +467,7 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
 async fn a_runtime_runs_no_more_compactions_at_once_than_its_compaction_limit() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(segment_write_watch(temp_dir.path()));
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .execution_budget(one_compaction_at_a_time())
@@ -528,7 +528,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_compaction() {
         KeyPredicate::metadata_segment(),
         OperationSelector::Put,
     ));
-    let writer = crate::LoonFs::builder_with_store(store.clone())
+    let writer = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .execution_budget(one_compaction_at_a_time())

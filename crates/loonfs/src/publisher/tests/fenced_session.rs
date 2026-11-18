@@ -4,7 +4,7 @@ use super::*;
 use crate::{ExecutionBudgetStats, LoonFs, Namespace, Writable};
 
 async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<Writable>) {
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
         .config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -30,7 +30,7 @@ async fn superseded_session(store: SharedStore) -> (LoonFs<Writable>, Namespace<
         .await
         .expect("first writer");
     writer.drain().await.expect("first publication ends");
-    let rival = LoonFs::builder_with_store(store)
+    let rival = LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer-b"))
         .build()
         .await

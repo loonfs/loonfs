@@ -61,7 +61,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
         KeyPredicate::content_blob(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .metadata_cache(
             loonfs::MetadataCache::builder()
@@ -72,7 +72,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
         .build()
         .await
         .expect("writer");
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -136,7 +136,7 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
 async fn an_append_in_a_fork_starts_a_chain_the_fork_creates() {
     let directory = tempfile::tempdir().expect("directory");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("runtime-writer"))
         .build()
         .await

@@ -16,7 +16,7 @@ fn manifest_gets(gets: &[String]) -> Vec<String> {
 
 async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) {
     let writer = writer(store.clone(), "seed-writer").await;
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let maintenance = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
         .build()
         .await
@@ -59,7 +59,7 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
     let namespace_id = NamespaceId::parse("snapshots").expect("valid namespace id");
     build_namespace(&store, &namespace_id).await;
 
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await

@@ -459,13 +459,15 @@ async fn an_idle_close_rechecks_the_seq_and_counts_subject_scoped_handles() {
         .put_file("/second", b"second", &loonfs_test_support::test_actor())
         .await
         .expect("publish again");
-    let scoped = handle.with_subject(loonfs_types::Subject {
-        subject_id: loonfs_types::SubjectId::parse("reader").expect("subject"),
-        principals: loonfs_types::PrincipalSet::new(std::collections::BTreeSet::from([
-            loonfs_types::PrincipalId::parse("reader").expect("principal"),
-        ]))
-        .expect("principals"),
-    });
+    let scoped = handle.with_context(
+        loonfs_types::Subject {
+            principals: loonfs_types::PrincipalSet::new(std::collections::BTreeSet::from([
+                loonfs_types::PrincipalId::parse("reader").expect("principal"),
+            ]))
+            .expect("principals"),
+        }
+        .into(),
+    );
     drop(handle);
     timer.advance_ms(2);
     assert!(namespaces

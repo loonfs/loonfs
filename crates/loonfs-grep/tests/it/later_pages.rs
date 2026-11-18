@@ -11,7 +11,7 @@ use loonfs_grep::NamespaceReads;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, CommitId, GrepRequest, GrepResponse,
-    GrepScope, PrincipalId, PrincipalSet, Subject, SubjectId,
+    GrepScope, PrincipalId, PrincipalSet, Subject,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -19,7 +19,6 @@ use tempfile::TempDir;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
         ]))
@@ -78,7 +77,7 @@ impl AclPages {
         let directory = tempfile::tempdir().expect("tempdir");
         let store: SharedObjectStore =
             Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-        let writer = LoonFs::builder_with_store(store.clone())
+        let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(name))
             .config(loonfs::RuntimeConfig {
                 min_publish_interval_ms: 0,
@@ -101,7 +100,7 @@ impl AclPages {
         let admin = writer
             .open_namespace(&namespace_id)
             .expect("open namespace")
-            .with_subject(subject("prn_root"));
+            .with_context(subject("prn_root").into());
         let pages = Self {
             _directory: directory,
             host: GrepHost::new(&store, name).await,

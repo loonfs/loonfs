@@ -14,7 +14,6 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		path        string
 		contentType string
 		actor       string
-		subject     string
 		principals  string
 		context     string
 	}
@@ -24,7 +23,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		if err != nil {
 			t.Errorf("read forwarded body: %v", err)
 		}
-		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor"), r.Header.Get("Loonfs-Subject"), r.Header.Get("Loonfs-Principals"), r.Header.Get("Loonfs-Context")}
+		forwarded <- forwardedRequest{body, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Loonfs-Actor"), r.Header.Get("Loonfs-Principals"), r.Header.Get("Loonfs-Context")}
 		w.WriteHeader(http.StatusAccepted)
 	})}
 	refusal := &Refusal{Status: http.StatusForbidden, ContentType: "application/json", Body: []byte(`{"code":"unauthorized","message":"refused"}`)}
@@ -39,7 +38,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 			if r.Header.Get("X-Refuse") != "" {
 				return Authorization{}, refusal
 			}
-			return Authorization{ActorID: "proxy-actor", SubjectID: "proxy-subject", Principals: []string{"prn_ada", "prn_team"}}, nil
+			return Authorization{ActorID: "proxy-actor", Principals: []string{"prn_ada", "prn_team"}}, nil
 		},
 	})
 	if err != nil {
@@ -60,7 +59,6 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/v0/namespaces/namespace-id/commits", strings.NewReader(testCase.body))
 			request.Header.Set("Content-Type", "text/plain")
 			request.Header.Set("Loonfs-Actor", "browser-actor")
-			request.Header.Set("Loonfs-Subject", "browser-subject")
 			request.Header.Set("Loonfs-Principals", "prn_browser")
 			request.Header.Set("Loonfs-Context", "service")
 			if testCase.refuse {
@@ -80,7 +78,7 @@ func TestAuthorizeRefusesOrSetsActorHeader(t *testing.T) {
 		t.Fatalf("forwarded request count = %d, want 1", len(forwarded))
 	}
 	actual := <-forwarded
-	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" || actual.subject != "proxy-subject" || actual.principals != "prn_ada,prn_team" || actual.context != "" {
+	if actual.path != "/v0/namespaces/namespace-id/commits" || actual.contentType != "text/plain" || actual.actor != "proxy-actor" || actual.principals != "prn_ada,prn_team" || actual.context != "" {
 		t.Errorf("forwarded request = %#v", actual)
 	}
 	if string(actual.body) != `{"expected_head_seq":9007199254740993}` {

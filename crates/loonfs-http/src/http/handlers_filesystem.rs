@@ -4,7 +4,7 @@
 
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
-use super::extractors::{ActorHeader, SubjectHeaders};
+use super::extractors::{ActorHeader, ContextHeaders};
 use super::handlers_uploads::content_preparation_for_puts;
 use super::query_params::{effective_page_limit, live_consistency, read_at, required_query_param};
 use super::{acquire_download_permit, AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
@@ -298,11 +298,11 @@ pub(super) struct DiffQuery {
 )]
 pub(super) async fn list_path_entries(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ListPathPageQuery>,
 ) -> Result<Response, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let path = required_query_param(query.path, "path")?;
     // An absent parameter leaves the option type's own default in place, so
     // the HTTP surface and the in-process one cannot return different results.
@@ -357,11 +357,11 @@ pub(super) async fn list_path_entries(
 )]
 pub(super) async fn get_path_entry(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathQuery>,
 ) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let path = required_query_param(query.path, "path")?;
     let mut options = StatOptions {
         at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
@@ -413,12 +413,12 @@ pub(super) async fn get_path_entry(
 )]
 pub(super) async fn get_file_content(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ContentQuery>,
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let path = required_query_param(query.path, "path")?;
     reject_snapshot_with_revision(query.snapshot_id.as_ref(), query.revision_no, "revision_no")?;
     let options = ReadFileStreamOptions {
@@ -475,11 +475,11 @@ pub(super) async fn get_file_content(
 )]
 pub(super) async fn list_trash(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<LivePageQuery>,
 ) -> Result<Json<ListTrashResponse>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let namespace = runtime.namespace(&namespace_id);
     let options = ListTrashOptions {
         consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
@@ -525,11 +525,11 @@ pub(super) async fn list_trash(
 )]
 pub(super) async fn list_file_revisions(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathPageQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
     let options = ListFileRevisionsOptions {
@@ -579,7 +579,7 @@ pub(super) async fn list_file_revisions(
 pub(super) async fn create_commit(
     State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CommitRequest>,
@@ -631,7 +631,7 @@ pub(super) async fn create_commit(
         preconditions,
         commit_id,
         actor_id,
-        subject,
+        subject: context.subject(),
         message,
         operations,
     };
@@ -693,11 +693,11 @@ pub(super) async fn create_commit(
 )]
 pub(super) async fn list_changes(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ChangesQuery>,
 ) -> Result<Json<ListChangesResponse>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let after_seq = required_query_param(query.after_seq, "after_seq")?;
     let limit = effective_page_limit(query.limit)?;
     let options = ListChangesOptions {
@@ -747,11 +747,11 @@ pub(super) async fn list_changes(
 )]
 pub(super) async fn list_diff(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DiffQuery>,
 ) -> Result<Json<DiffResponse>, ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let from_seq = required_query_param(query.from_seq, "from_seq")?;
     let options = DiffOptions {
         path: query.path.unwrap_or_else(AbsolutePath::root),

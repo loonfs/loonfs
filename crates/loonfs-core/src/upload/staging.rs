@@ -13,7 +13,7 @@ use crate::storage::content_staging::{
 use crate::time::OperationClock;
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use loonfs_types::format::control::UploadSessionPayload;
-use loonfs_types::{ContentRef, SubjectId};
+use loonfs_types::{ActorId, ContentRef};
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Stores in-process bytes as prepared content and completes the associated
@@ -27,14 +27,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn stage_owned_bytes(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&SubjectId>,
+        actor_id: &ActorId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
         let catalog = self.own_catalog(catalog);
         let clock = self.namespace.start_clock();
         let session =
-            open_owned_staging_session(&self.namespace.store, catalog, subject_id, &clock).await?;
+            open_owned_staging_session(&self.namespace.store, catalog, actor_id, &clock).await?;
         let stored = stage_bytes_under_content_id(
             &self.namespace.store,
             catalog.pool_id(),
@@ -56,14 +56,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn stage_owned_stream(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&SubjectId>,
+        actor_id: &ActorId,
         body: ByteStream,
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
         self.namespace
             .stage_owned_stream(
                 self.own_catalog(catalog),
-                subject_id,
+                actor_id,
                 body,
                 &self.namespace.start_clock(),
             )
@@ -80,11 +80,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn stage_owned_stream(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&SubjectId>,
+        actor_id: &ActorId,
         body: ByteStream,
         clock: &OperationClock,
     ) -> Result<PreparedContent> {
-        let session = open_owned_staging_session(&self.store, catalog, subject_id, clock).await?;
+        let session = open_owned_staging_session(&self.store, catalog, actor_id, clock).await?;
         let content_ref = stage_streamed_under_content_id(
             &self.store,
             catalog.pool_id(),
@@ -104,7 +104,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
-    subject_id: Option<&SubjectId>,
+    actor_id: &ActorId,
     clock: &OperationClock,
 ) -> Result<UploadSessionPayload> {
     // Do not recheck namespace availability here. The catalog came from the
@@ -114,7 +114,7 @@ async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     create_upload_session_record(
         store,
         catalog,
-        subject_id.cloned(),
+        actor_id.clone(),
         NewUploadSession::service_proxied(),
         clock,
     )

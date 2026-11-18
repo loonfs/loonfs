@@ -34,7 +34,6 @@ pub(crate) fn commit_fingerprint(
     CommitFingerprintInput {
         namespace_id,
         actor_id: &request.actor_id,
-        subject_id: request.subject.as_ref().map(|subject| &subject.subject_id),
         message: request.message.as_deref(),
         operations: &request.operations,
         preconditions: &request.preconditions,
@@ -53,7 +52,6 @@ pub(crate) fn merge_fingerprint(
     MergeFingerprintInput {
         namespace_id,
         actor_id: &request.actor_id,
-        subject_id: request.subject.as_ref().map(|subject| &subject.subject_id),
         merge,
         message: request.message.as_deref(),
     }

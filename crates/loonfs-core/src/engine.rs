@@ -126,7 +126,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .await
     }
 
-    /// Sets the subject for this engine's reads and uploads.
+    /// Sets the subject for this engine's reads.
     pub fn with_subject(mut self, subject: Subject) -> Self {
         self.subject = Some(subject);
         self
@@ -739,7 +739,7 @@ mod tests {
         let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
         let begun = writer
             .engine()
-            .begin_upload(&catalog)
+            .begin_upload(&catalog, &loonfs_test_support::test_actor())
             .await
             .expect("begin upload");
 
@@ -749,7 +749,11 @@ mod tests {
             evidence,
             ..
         } = reader
-            .get_upload(&catalog, &begun.upload_id)
+            .get_upload(
+                &catalog,
+                &begun.upload_id,
+                &loonfs_test_support::test_actor(),
+            )
             .await
             .expect("reader engine reads upload status");
 

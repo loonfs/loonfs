@@ -37,7 +37,7 @@ use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::{CoreError, NamespaceWriterEngine, Phase};
 use loonfs_types::{
-    u64_from_usize, CompactorEpoch, Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
+    u64_from_usize, CompactorEpoch, Context, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
     FEATURE_MERGES, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
 use std::collections::BTreeMap;
@@ -142,20 +142,20 @@ impl<M> LoonFs<M> {
         self.core.execution_budget()
     }
 
-    /// Returns the subject this runtime acts for, or `None` when it acts in
-    /// the service context, which checks no rights.
-    pub fn subject(&self) -> Option<&Subject> {
-        self.core.subject()
+    /// Returns the context this runtime's handles act in: the service
+    /// context, which checks no rights, or a subject's principals.
+    pub fn context(&self) -> Context {
+        self.core.context()
     }
 
-    /// Clones this runtime with the subject used for its reads and, in the
-    /// writable mode, its commits and uploads.
-    pub fn with_subject(&self, subject: Subject) -> Self
+    /// Clones this runtime with the context that its reads and, in the
+    /// writable mode, its commits act in.
+    pub fn with_context(&self, context: Context) -> Self
     where
         M: Clone,
     {
         Self {
-            core: self.core.with_subject(subject),
+            core: self.core.with_context(&context),
             mode: self.mode.clone(),
         }
     }
@@ -250,8 +250,12 @@ impl LoonFs<Writable> {
 
     /// Starts a writable runtime builder that constructs its object-store
     /// client from configuration inside this runtime's ownership domain.
-    pub fn builder(store_config: StoreConfig) -> LoonFsBuilder<Writable> {
-        LoonFsBuilder::from_config(store_config)
+    ///
+    /// `context` is the context that the runtime's handles act in. A host
+    /// that serves many users builds the runtime in the service context and
+    /// clones it with [`Self::with_context`] for each request.
+    pub fn builder(store_config: StoreConfig, context: Context) -> LoonFsBuilder<Writable> {
+        LoonFsBuilder::from_config(store_config, context)
     }
 
     /// Starts a writable runtime builder over a caller-supplied store.
@@ -259,8 +263,11 @@ impl LoonFs<Writable> {
     /// For callers who are sure the store is safe in this runtime's ownership
     /// domain. Do not use it to share one provider client across unrelated
     /// runtimes; build another runtime from [`StoreConfig`] instead.
-    pub fn builder_with_store(store: SharedObjectStore) -> LoonFsBuilder<Writable> {
-        LoonFsBuilder::from_store(store)
+    pub fn builder_with_store(
+        store: SharedObjectStore,
+        context: Context,
+    ) -> LoonFsBuilder<Writable> {
+        LoonFsBuilder::from_store(store, context)
     }
 
     /// Opens the writer session for `namespace_id` and returns a handle to it.
@@ -593,9 +600,10 @@ mod tests {
     #[tokio::test]
     async fn a_fork_into_an_existing_namespace_folds_nothing() {
         let temp_dir = tempdir().expect("tempdir");
-        let runtime = LoonFs::builder_with_store(Arc::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        ))
+        let runtime = LoonFs::builder_with_store(
+            Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store")),
+            crate::Context::Service,
+        )
         .writer_id(loonfs_test_support::ids::writer_id("fork-writer"))
         .build()
         .await
@@ -810,9 +818,10 @@ mod tests {
     async fn converting_a_builder_to_read_only_keeps_the_shared_settings() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = namespace_id("converted");
-        let writer = LoonFs::builder_with_store(Arc::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        ))
+        let writer = LoonFs::builder_with_store(
+            Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store")),
+            crate::Context::Service,
+        )
         .writer_id(loonfs_test_support::ids::writer_id(
             "converted-builder-writer",
         ))
@@ -835,7 +844,7 @@ mod tests {
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::any(),
         ));
-        let reader = LoonFs::builder_with_store(recording.clone())
+        let reader = LoonFs::builder_with_store(recording.clone(), crate::Context::Service)
             .metadata_cache(cache.clone())
             .config(crate::RuntimeConfig {
                 manifest_revalidation_interval_ms: 0,
@@ -874,7 +883,7 @@ mod tests {
             KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(namespace_id)),
             OperationSelector::PutCreateIfAbsent,
         ));
-        let runtime = LoonFs::builder_with_store(blocking.clone())
+        let runtime = LoonFs::builder_with_store(blocking.clone(), crate::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(writer_id))
             .build()
             .await

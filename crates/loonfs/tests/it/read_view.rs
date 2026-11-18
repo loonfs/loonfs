@@ -99,7 +99,7 @@ async fn read_during_compaction_and_collection(
     } else {
         None
     };
-    let reader = loonfs::LoonFs::builder_with_store(store.clone())
+    let reader = loonfs::LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -182,7 +182,7 @@ async fn read_during_compaction_and_collection(
         store.release();
     };
     let (result, ()) = tokio::join!(read, maintenance);
-    let fresh = loonfs::LoonFs::builder_with_store(store)
+    let fresh = loonfs::LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -282,7 +282,7 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
         .create_snapshot(&namespace_id)
         .await
         .expect("snapshot without an expiry");
-    let reader = loonfs::LoonFs::builder_with_store(store.clone())
+    let reader = loonfs::LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -371,7 +371,7 @@ async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_snapshot
         .create_snapshot(&namespace_id)
         .await
         .expect("snapshot without an expiry");
-    let reader = loonfs::LoonFs::builder_with_store(store.clone())
+    let reader = loonfs::LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -883,7 +883,7 @@ async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passe
         .advance_retention_floor(&namespace_id)
         .await
         .expect("advance the retention floor");
-    let reader = LoonFs::builder_with_store(store)
+    let reader = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -1173,13 +1173,13 @@ async fn a_reader_judges_snapshot_expiry_on_its_own_wall_clock() {
     const EXPIRES_AT_MS: u64 = 1_750_000_060_000;
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(ManualClock::new(1_750_000_000_000));
-    let writer = LoonFs::builder_with_store(store(temp_dir.path()))
+    let writer = LoonFs::builder_with_store(store(temp_dir.path()), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("snapshot-clock-writer"))
         .wall_clock(clock.clone())
         .build()
         .await
         .expect("build writer");
-    let reader = LoonFs::builder_with_store(store(temp_dir.path()))
+    let reader = LoonFs::builder_with_store(store(temp_dir.path()), loonfs::Context::Service)
         .read_only()
         .wall_clock(clock.clone())
         .build()
@@ -1368,7 +1368,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
     runtime.writer.drain().await.expect("drain");
     // The reader keeps no manifest, so the captured view reads its manifest
     // from the store again, and the injected failure reaches that read.
-    let reader = loonfs::LoonFs::builder_with_store(store.clone())
+    let reader = loonfs::LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .metadata_cache(
             loonfs::MetadataCache::builder()
                 .max_manifest_bytes(0)

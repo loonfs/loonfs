@@ -128,7 +128,7 @@ async fn runtime_at(
     writer: &str,
     clock: &Arc<ManualClock>,
 ) -> crate::LoonFs<crate::Writable> {
-    crate::LoonFs::builder_with_store(store)
+    crate::LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(writer))
         .config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,

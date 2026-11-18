@@ -17,7 +17,7 @@ use crate::{
     AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey, AttributeValue,
     AttributesRevisionNo, CommitPrecondition, CommitSeq, ContentId, ContentRef, ContentRefKind,
     DeleteDirectoryBehavior, DestinationBehavior, FileContent, FilesystemOperation, InodeId,
-    NamespaceId, RevisionNo, SubjectId,
+    NamespaceId, RevisionNo,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -675,8 +675,6 @@ pub struct CommitFingerprintInput<'a> {
     pub namespace_id: &'a NamespaceId,
     /// The actor responsible for the request.
     pub actor_id: &'a ActorId,
-    /// The subject whose rights authorize the request, if any.
-    pub subject_id: Option<&'a SubjectId>,
     /// The request's commit message.
     pub message: Option<&'a str>,
     /// The request's operations, in order.
@@ -700,7 +698,6 @@ impl CommitFingerprintInput<'_> {
             domain: &'static str,
             namespace_id: &'a str,
             actor_id: &'a str,
-            subject_id: Option<&'a str>,
             operations: Vec<OperationFingerprintInput<'a>>,
             message: Option<&'a str>,
             preconditions: Vec<PreconditionFingerprintInput<'a>>,
@@ -710,7 +707,6 @@ impl CommitFingerprintInput<'_> {
             domain: COMMIT_FINGERPRINT_DOMAIN,
             namespace_id: self.namespace_id.as_str(),
             actor_id: self.actor_id.as_str(),
-            subject_id: self.subject_id.map(SubjectId::as_str),
             operations: self
                 .operations
                 .iter()
@@ -742,8 +738,6 @@ pub struct MergeFingerprintInput<'a> {
     pub namespace_id: &'a NamespaceId,
     /// The actor responsible for the merge.
     pub actor_id: &'a ActorId,
-    /// The subject whose rights authorize the merge, if any.
-    pub subject_id: Option<&'a SubjectId>,
     /// The fork and the range of its commits that the merge applies.
     pub merge: &'a MergeRecord,
     /// The merge's commit message.
@@ -763,7 +757,6 @@ impl MergeFingerprintInput<'_> {
             domain: &'static str,
             namespace_id: &'a str,
             actor_id: &'a str,
-            subject_id: Option<&'a str>,
             merge: CanonicalMergeRange<'a>,
             message: Option<&'a str>,
         }
@@ -780,7 +773,6 @@ impl MergeFingerprintInput<'_> {
             domain: MERGE_FINGERPRINT_DOMAIN,
             namespace_id: self.namespace_id.as_str(),
             actor_id: self.actor_id.as_str(),
-            subject_id: self.subject_id.map(SubjectId::as_str),
             merge: CanonicalMergeRange {
                 source_namespace_id: self.merge.source_namespace_id.as_str(),
                 source_after_seq: self.merge.source_after_seq.0,
@@ -803,8 +795,6 @@ mod tests {
         #[derive(Serialize, serde::Deserialize)]
         struct Vector {
             name: String,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            subject_id: Option<SubjectId>,
             operation: FilesystemOperation,
             #[serde(default)]
             preconditions: Vec<crate::CommitPrecondition>,
@@ -836,7 +826,6 @@ mod tests {
             let bytes = CommitFingerprintInput {
                 namespace_id: &namespace,
                 actor_id: &test_actor(),
-                subject_id: vector.subject_id.as_ref(),
                 message: None,
                 operations: &operations,
                 preconditions: &vector.preconditions,
@@ -856,7 +845,6 @@ mod tests {
             let fingerprint = CommitFingerprintInput {
                 namespace_id: &namespace,
                 actor_id: &test_actor(),
-                subject_id: vector.subject_id.as_ref(),
                 message: None,
                 operations: &operations,
                 preconditions: &vector.preconditions,
@@ -892,18 +880,17 @@ mod tests {
         let input = MergeFingerprintInput {
             namespace_id: &namespace_id,
             actor_id: &actor_id,
-            subject_id: None,
             merge: &merge,
             message: None,
         };
         assert_eq!(
             String::from_utf8(input.canonical_bytes()).expect("canonical UTF-8"),
-            r#"{"domain":"loonfs.commit.merge.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"merge":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}"#
+            r#"{"domain":"loonfs.commit.merge.v1","namespace_id":"demo","actor_id":"usr_8f3c","merge":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}"#
         );
         let fingerprint = input.fingerprint();
         assert_eq!(
             fingerprint.as_str(),
-            "v1:sha256:fd69abed548f0d6929753492171d2e653d08541ea84dd11fefe202124437b5e5"
+            "v1:sha256:004b16fd5b647a8003f24e3b558b5f93ff5e6bc836ca42322f93ddff1ffaa365"
         );
         let other_source = MergeRecord {
             source_namespace_id: NamespaceId::parse("demo-other").expect("namespace"),
@@ -956,7 +943,6 @@ mod tests {
             MergeFingerprintInput {
                 namespace_id: &namespace_id,
                 actor_id: &actor_id,
-                subject_id: None,
                 merge,
                 message: None,
             }
@@ -972,7 +958,6 @@ mod tests {
             CommitFingerprintInput {
                 namespace_id: &namespace_id,
                 actor_id: &test_actor(),
-                subject_id: None,
                 message: None,
                 operations: &[operation],
                 preconditions: &[],
@@ -989,7 +974,7 @@ mod tests {
         };
         assert_eq!(
             fingerprint(inline, &BTreeMap::new()).as_str(),
-            "v1:sha256:bb5384d4f60948393e7cf5cb321de1d659157a2d83807a3c4c6ce8b96ff2d9d9"
+            "v1:sha256:6a8f41b4a71d127a3b9b6b9a5175c66df1128522bfdc48ed7b8bc47be794a22c"
         );
         for algorithm in [
             crate::ChecksumAlgorithm::Crc64nvme,
@@ -1001,7 +986,7 @@ mod tests {
                 BTreeMap::from([(content_id, InlineContentIdentity::from_bytes(b"hello"))]);
             assert_eq!(
                 fingerprint(put("/file", reference), &identities).as_str(),
-                "v1:sha256:bb5384d4f60948393e7cf5cb321de1d659157a2d83807a3c4c6ce8b96ff2d9d9"
+                "v1:sha256:6a8f41b4a71d127a3b9b6b9a5175c66df1128522bfdc48ed7b8bc47be794a22c"
             );
         }
     }
@@ -1026,7 +1011,6 @@ mod tests {
         CommitFingerprintInput {
             namespace_id: &NamespaceId::parse("demo").expect("valid namespace id"),
             actor_id: &test_actor(),
-            subject_id: None,
             message: None,
             operations,
             preconditions: &[],
@@ -1308,7 +1292,6 @@ mod tests {
             CommitFingerprintInput {
                 namespace_id: &namespace_id,
                 actor_id: actor,
-                subject_id: None,
                 message: None,
                 operations: std::slice::from_ref(&operation),
                 preconditions: &[],
@@ -1317,28 +1300,6 @@ mod tests {
             .fingerprint()
         };
         assert_ne!(fingerprint(&actor_x), fingerprint(&actor_y));
-    }
-
-    #[test]
-    fn changed_subject_id_changes_the_fingerprint() {
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let operation = create_dir("/docs");
-        let subject_x = SubjectId::parse("x").expect("subject id");
-        let subject_y = SubjectId::parse("y").expect("subject id");
-        let fingerprint = |subject_id| {
-            CommitFingerprintInput {
-                namespace_id: &namespace_id,
-                actor_id: &test_actor(),
-                subject_id,
-                message: None,
-                operations: std::slice::from_ref(&operation),
-                preconditions: &[],
-                inline_content_identities: &BTreeMap::new(),
-            }
-            .fingerprint()
-        };
-        assert_ne!(fingerprint(Some(&subject_x)), fingerprint(Some(&subject_y)));
-        assert_ne!(fingerprint(None), fingerprint(Some(&subject_x)));
     }
 
     fn assert_destination_preconditions_change_fingerprint(
@@ -1450,7 +1411,6 @@ mod tests {
                 CommitFingerprintInput {
                     namespace_id,
                     actor_id: &test_actor(),
-                    subject_id: None,
                     message: options.commit.message.as_deref(),
                     operations: &[FilesystemOperation::PutFile {
                         path: path.clone(),

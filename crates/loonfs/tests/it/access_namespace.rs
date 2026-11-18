@@ -7,15 +7,14 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_types::FilesystemEvent;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId, CommitSeq,
-    ErrorCode, NamespaceId, PrincipalId, PrincipalSet, Subject, SubjectId, ROOT_INODE_ID,
+    ErrorCode, NamespaceId, PrincipalId, PrincipalSet, Subject, ROOT_INODE_ID,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-fn subject(name: &str, principal: &str) -> Subject {
+fn subject(principal: &str) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(name).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
         ]))
@@ -48,16 +47,18 @@ async fn create_namespace_with(
     config: loonfs::RuntimeConfig,
 ) -> (tempfile::TempDir, LoonFs<Writable>, NamespaceId) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let writer =
-        LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
-            .writer_id(loonfs_test_support::ids::writer_id("access-namespace"))
-            .config(loonfs::RuntimeConfig {
-                min_publish_interval_ms: 0,
-                ..config
-            })
-            .build()
-            .await
-            .expect("writer");
+    let writer = LoonFs::builder_with_store(
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")),
+        loonfs::Context::Service,
+    )
+    .writer_id(loonfs_test_support::ids::writer_id("access-namespace"))
+    .config(loonfs::RuntimeConfig {
+        min_publish_interval_ms: 0,
+        ..config
+    })
+    .build()
+    .await
+    .expect("writer");
     let namespace_id = namespace_id("access-namespace");
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -70,8 +71,8 @@ async fn create_namespace_with(
 #[tokio::test]
 async fn namespace_operations_need_an_administrator_or_the_service_context() {
     let (_temp_dir, writer, namespace) = create_namespace().await;
-    let root = writer.with_subject(subject("root", "prn_root"));
-    let member = writer.with_subject(subject("member", "team"));
+    let root = writer.with_context(subject("prn_root").into());
+    let member = writer.with_context(subject("team").into());
     let fork = namespace_id("fork");
     let member_fork_namespace = member.namespace(&fork);
     assert_eq!(
@@ -170,7 +171,7 @@ async fn the_service_context_sets_the_administrators() {
     commit_as(
         &writer,
         &namespace,
-        subject("root", "prn_root"),
+        subject("prn_root"),
         FilesystemOperation::UpdateAccess {
             path: AbsolutePath::root(),
             boundary: false,
@@ -185,7 +186,7 @@ async fn the_service_context_sets_the_administrators() {
         commit_as(
             &writer,
             &namespace,
-            subject("root", "prn_root"),
+            subject("prn_root"),
             create_directory("/docs")
         )
         .await
@@ -208,13 +209,13 @@ async fn the_service_context_sets_the_administrators() {
     commit_as(
         &writer,
         &namespace,
-        subject("root", "prn_root"),
+        subject("prn_root"),
         create_directory("/docs"),
     )
     .await
     .expect("administrator again");
     writer
-        .with_subject(subject("root", "prn_root"))
+        .with_context(subject("prn_root").into())
         .namespace(&namespace)
         .list_changes(CommitSeq(0))
         .page()
@@ -265,7 +266,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         ..loonfs::RuntimeConfig::default()
     })
     .await;
-    let root = writer.with_subject(subject("root", "prn_root"));
+    let root = writer.with_context(subject("prn_root").into());
     let namespace_writer = root.open_namespace(&namespace).expect("open namespace");
     let snapshot = namespace_writer
         .create_snapshot_with_options(&CreateSnapshotOptions {
@@ -285,7 +286,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
         )
         .await
         .expect("publish after snapshot creation");
-    let peer = LoonFs::builder_with_store(writer.object_store())
+    let peer = LoonFs::builder_with_store(writer.object_store(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("peer"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -297,7 +298,7 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
     commit_as(
         &peer,
         &namespace,
-        subject("root", "prn_root"),
+        subject("prn_root"),
         FilesystemOperation::UpdateAccess {
             path: AbsolutePath::root(),
             boundary: false,
@@ -320,11 +321,12 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
             .code(),
         ErrorCode::Forbidden
     );
-    let reader = loonfs::LoonFs::builder_with_store(writer.object_store())
-        .read_only()
-        .build()
-        .await
-        .expect("fresh reader");
+    let reader =
+        loonfs::LoonFs::builder_with_store(writer.object_store(), loonfs::Context::Service)
+            .read_only()
+            .build()
+            .await
+            .expect("fresh reader");
     let namespace_reader = reader.namespace(&namespace);
     let _view = namespace_reader
         .read_view_at_snapshot(&snapshot_id)
@@ -335,37 +337,41 @@ async fn a_revoked_administrator_cannot_delete_a_snapshot_through_the_former_wri
 }
 
 #[tokio::test]
-async fn a_scoped_writer_uses_its_subject_for_commits_and_upload_ownership() {
+async fn a_scoped_writer_uses_its_subject_for_commits_and_the_actor_owns_its_uploads() {
     let (_directory, writer, namespace) = create_namespace().await;
-    let scoped = writer.with_subject(subject("root", "prn_root"));
+    let scoped = writer.with_context(subject("prn_root").into());
     let scoped_namespace_writer = scoped.open_namespace(&namespace).expect("open namespace");
     scoped_namespace_writer
         .put_file("/scoped", b"bytes", &loonfs_test_support::test_actor())
         .await
         .expect("scoped commit");
     let upload = scoped_namespace_writer
-        .create_upload()
+        .create_upload(&loonfs_test_support::test_actor())
         .await
         .expect("scoped upload");
     scoped_namespace_writer
-        .get_upload(&upload.upload_id)
+        .get_upload(&upload.upload_id, &loonfs_test_support::test_actor())
         .await
-        .expect("same subject");
+        .expect("same actor");
     let staged = scoped_namespace_writer
-        .prepare_content(&vec![0; 128 * 1024])
+        .prepare_content(&vec![0; 128 * 1024], &loonfs_test_support::test_actor())
         .await
         .expect("stage scoped content");
     scoped_namespace_writer
-        .get_upload(staged.upload_id().expect("staged upload"))
+        .get_upload(
+            staged.upload_id().expect("staged upload"),
+            &loonfs_test_support::test_actor(),
+        )
         .await
-        .expect("staged upload belongs to the scoped subject");
-    let other = writer.with_subject(subject("other", "prn_root"));
-    let other_namespace_writer = other.open_namespace(&namespace).expect("open namespace");
+        .expect("staged upload belongs to the actor");
     assert_eq!(
-        other_namespace_writer
-            .get_upload(&upload.upload_id)
+        scoped_namespace_writer
+            .get_upload(
+                &upload.upload_id,
+                &loonfs_types::ActorId::parse("usr_other").expect("actor id"),
+            )
             .await
-            .expect_err("another subject cannot read the session")
+            .expect_err("another actor cannot read the session")
             .code(),
         ErrorCode::UploadNotFound
     );
@@ -379,7 +385,7 @@ async fn snapshot_after_administrator_change() -> (
     loonfs_types::ContentRef,
 ) {
     let (directory, writer, namespace) = create_namespace().await;
-    let root = writer.with_subject(subject("root", "prn_root"));
+    let root = writer.with_context(subject("prn_root").into());
     let namespace_reader = root.namespace(&namespace);
     let namespace_writer = root.open_namespace(&namespace).expect("open namespace");
     namespace_writer
@@ -407,7 +413,7 @@ async fn snapshot_after_administrator_change() -> (
     commit_as(
         &writer,
         &namespace,
-        subject("root", "prn_root"),
+        subject("prn_root"),
         FilesystemOperation::UpdateAccess {
             path: AbsolutePath::root(),
             boundary: false,
@@ -424,11 +430,12 @@ async fn snapshot_after_administrator_change() -> (
     .expect("replace administrator");
     // A new runtime rules out stale-cache permission checks. The old ACL is
     // available only through the deliberately historical snapshot context.
-    let reader = loonfs::LoonFs::builder_with_store(writer.object_store())
-        .read_only()
-        .build()
-        .await
-        .expect("fresh reader");
+    let reader =
+        loonfs::LoonFs::builder_with_store(writer.object_store(), loonfs::Context::Service)
+            .read_only()
+            .build()
+            .await
+            .expect("fresh reader");
     writer.shutdown().await.expect("shutdown writer");
     (directory, reader, namespace, snapshot.snapshot_id, content)
 }
@@ -437,7 +444,7 @@ async fn snapshot_after_administrator_change() -> (
 async fn snapshot_admin_reads_reject_a_revoked_administrator() {
     let (_directory, reader, namespace, snapshot_id, content) =
         snapshot_after_administrator_change().await;
-    let revoked = reader.with_subject(subject("root", "prn_root"));
+    let revoked = reader.with_context(subject("prn_root").into());
     let namespace_reader = revoked.namespace(&namespace);
     assert_eq!(
         namespace_reader
@@ -484,7 +491,7 @@ async fn snapshot_admin_reads_accept_the_current_administrator() {
     let (_directory, reader, namespace, snapshot_id, content) =
         snapshot_after_administrator_change().await;
     let namespace_reader = reader
-        .with_subject(subject("new-root", "prn_new_root"))
+        .with_context(subject("prn_new_root").into())
         .namespace(&namespace);
     let view = namespace_reader
         .read_view_at_snapshot(&snapshot_id)

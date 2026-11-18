@@ -43,7 +43,7 @@ async fn new_query_page(
     grep_request: &GrepRequest,
     page: PageRequest<String>,
 ) -> loonfs_grep::Result<GrepResponse> {
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await
@@ -824,7 +824,7 @@ async fn grep_entry_lifecycle_pins_not_materialized_error_surface() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("error-surface").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("error-writer"))
         .build()
         .await
@@ -876,7 +876,7 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("disable-invalid-entry").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("invalid-entry-writer"))
         .build()
         .await
@@ -955,7 +955,7 @@ async fn enable_and_disable_refuse_an_entry_of_another_version_and_leave_it() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("another-version").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "another-version-writer",
         ))
@@ -1122,7 +1122,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
     }
     assert!(directory_path.len() > MAX_PATH_BYTES);
     let content = namespace
-        .prepare_content(b"a tree\n")
+        .prepare_content(b"a tree\n", &loonfs_test_support::test_actor())
         .await
         .expect("prepare content");
     namespace
@@ -1393,7 +1393,7 @@ async fn snapshot_backfill_matches_incremental_worker_results() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let backfill_namespace = NamespaceId::parse("equiv-backfill").expect("namespace id");
     let incremental_namespace = NamespaceId::parse("equiv-incremental").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("equiv-writer"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -1558,7 +1558,7 @@ async fn enable_disable_and_warm_queries_read_and_write_no_grep_object() {
         )),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("entry-query-tests"))
         .build()
         .await
@@ -1609,10 +1609,8 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     use loonfs::publish::{CommitIntent, FilesystemOperation};
     use loonfs_types::{
         AccessGrants, AccessRight, AccessRights, CommitId, PrincipalId, PrincipalSet, Subject,
-        SubjectId,
     };
     let subject = |principal: &str| Subject {
-        subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(std::collections::BTreeSet::from([PrincipalId::parse(
             principal,
         )
@@ -1628,7 +1626,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     };
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("grep-access"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -1691,7 +1689,7 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
     }
     for path in ["/team/file", "/team/secret/file"] {
         let content = namespace
-            .prepare_content(b"needle\n")
+            .prepare_content(b"needle\n", &loonfs_test_support::test_actor())
             .await
             .expect("content");
         namespace
@@ -1758,10 +1756,8 @@ async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
     use loonfs::publish::{CommitIntent, FilesystemOperation};
     use loonfs_types::{
         AccessGrants, AccessRight, AccessRights, CommitId, PrincipalId, PrincipalSet, Subject,
-        SubjectId,
     };
     let subject = |principal: &str| Subject {
-        subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
         ]))
@@ -1776,7 +1772,7 @@ async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
     };
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("grep-pages-access"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -1827,7 +1823,10 @@ async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
     .expect("grant read");
     let namespace = &namespace;
     let put = |path: &'static str, bytes: &'static [u8]| async move {
-        let content = namespace.prepare_content(bytes).await.expect("content");
+        let content = namespace
+            .prepare_content(bytes, &loonfs_test_support::test_actor())
+            .await
+            .expect("content");
         namespace
             .commit_prepared(
                 CommitIntent::single(

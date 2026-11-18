@@ -5,7 +5,7 @@ use crate::args::{SubjectSelectors, TransientRetry};
 use crate::backend::MaintenanceHost;
 use crate::config::{
     non_empty_env, remote_client_config, ProfileConfig, ProfileConnection, ProfileMode,
-    StoreConfig, ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV, SUBJECT_ID_ENV,
+    StoreConfig, ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV,
 };
 use crate::error::{CliError, Result};
 use loonfs::engine::DecodedBlockCacheConfig;
@@ -14,10 +14,7 @@ use loonfs_client::Client;
 use loonfs_grep::{
     GrepBlockCache, GrepService, GrepStepBudget, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
-use loonfs_types::{
-    ActorId, NamespaceId, PrincipalId, SecretString, Subject, SubjectId, SubjectPart,
-    SubjectPartsError,
-};
+use loonfs_types::{ActorId, Context, NamespaceId, PrincipalId, PrincipalSet, SecretString};
 use std::sync::Arc;
 
 pub(crate) fn resolve_namespace(
@@ -57,107 +54,37 @@ pub(crate) fn resolve_actor(
         .unwrap_or_else(|| ActorId::parse("loonfs-cli").expect("the CLI actor id should be valid")))
 }
 
-/// The subject the command acts as. Principals come from the flag, the
-/// environment, or the profile; the subject id defaults to the actor id
-/// the same way the server's header does. No principals means the service
-/// context.
-pub(crate) fn resolve_subject(
+/// The context the command acts in. Principals come from the flag, the
+/// environment, or the profile, in that order. No principals means the
+/// service context.
+pub(crate) fn resolve_context(
     profile: &ProfileConfig,
-    actor_id: &ActorId,
     selectors: &SubjectSelectors,
-) -> Result<Option<Subject>> {
-    let environment_principals = non_empty_env(PRINCIPALS_ENV);
-    let profile_principals = profile
-        .identity
-        .principals
-        .as_ref()
-        .filter(|principals| !principals.is_empty())
-        .map(|principals| {
-            principals
-                .iter()
-                .map(PrincipalId::as_str)
-                .collect::<Vec<_>>()
-                .join(",")
-        });
-    let (principals_source, principals) = first_subject_part(
-        selectors.principals.as_deref(),
-        environment_principals.as_deref(),
-        profile_principals.as_deref(),
-    );
-    let environment_subject_id = non_empty_env(SUBJECT_ID_ENV);
-    let profile_subject_id_with_principals = profile
-        .identity
-        .subject_id
-        .as_ref()
-        .filter(|_| principals.is_some());
-    let (subject_id_source, subject_id) = first_subject_part(
-        selectors.subject_id.as_ref().map(SubjectId::as_str),
-        environment_subject_id.as_deref(),
-        profile_subject_id_with_principals.map(SubjectId::as_str),
-    );
-    let source = |part| match part {
-        SubjectPart::Principals => principals_source,
-        SubjectPart::SubjectId => subject_id_source,
-        SubjectPart::ActorId => SubjectSource::Profile,
+) -> Result<Context> {
+    let (name, principals) = if let Some(principals) = selectors.principals.clone() {
+        ("--principals", principals)
+    } else if let Some(principals) = non_empty_env(PRINCIPALS_ENV) {
+        (PRINCIPALS_ENV, principals)
+    } else {
+        let Some(principals) = profile
+            .identity
+            .principals
+            .as_ref()
+            .filter(|principals| !principals.is_empty())
+        else {
+            return Ok(Context::Service);
+        };
+        let principals = principals
+            .iter()
+            .map(PrincipalId::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        ("principals", principals)
     };
-    Subject::from_parts(subject_id, Some(actor_id.as_str()), principals)
-        .map_err(|error| subject_parts_error(error, source))
-}
-
-/// Reports `error` under the name each part had where it came from.
-fn subject_parts_error(
-    error: SubjectPartsError,
-    source: impl Fn(SubjectPart) -> SubjectSource,
-) -> CliError {
-    match error {
-        SubjectPartsError::Missing { part, required_by } => {
-            let required = subject_part_name(part, source(required_by));
-            let present = subject_part_name(required_by, source(required_by));
-            named_cli_input_error(
-                required,
-                format!("`{required}` is required with `{present}`"),
-            )
-        }
-        SubjectPartsError::Invalid { part, message } => {
-            let name = subject_part_name(part, source(part));
-            named_cli_input_error(name, format!("invalid `{name}`: {message}"))
-        }
-        other => CliError::invalid_request(other.to_string()),
-    }
-}
-
-/// Where one part of the subject came from, which determines the name an
-/// error gives it.
-#[derive(Debug, Clone, Copy)]
-enum SubjectSource {
-    Flag,
-    Environment,
-    Profile,
-}
-
-/// Returns the first present value among the flag, the environment, and the
-/// profile, with where it came from.
-fn first_subject_part<'a>(
-    flag: Option<&'a str>,
-    environment: Option<&'a str>,
-    profile: Option<&'a str>,
-) -> (SubjectSource, Option<&'a str>) {
-    match (flag, environment) {
-        (Some(value), _) => (SubjectSource::Flag, Some(value)),
-        (None, Some(value)) => (SubjectSource::Environment, Some(value)),
-        (None, None) => (SubjectSource::Profile, profile),
-    }
-}
-
-fn subject_part_name(part: SubjectPart, source: SubjectSource) -> &'static str {
-    match (part, source) {
-        (SubjectPart::Principals, SubjectSource::Flag) => "--principals",
-        (SubjectPart::Principals, SubjectSource::Environment) => PRINCIPALS_ENV,
-        (SubjectPart::SubjectId, SubjectSource::Flag) => "--subject-id",
-        (SubjectPart::SubjectId, SubjectSource::Environment) => SUBJECT_ID_ENV,
-        (SubjectPart::ActorId, _) => SubjectPart::SubjectId.as_str(),
-        (_, SubjectSource::Profile) => part.as_str(),
-    }
+    let principals = principals
+        .parse::<PrincipalSet>()
+        .map_err(|error| named_cli_input_error(name, format!("invalid `{name}`: {error}")))?;
+    Ok(Context::Principals(principals))
 }
 
 fn named_cli_input_error(name: &str, message: String) -> CliError {
@@ -240,8 +167,8 @@ impl ResolvedTarget {
         }
     }
 
-    pub(crate) fn scope_to_subject(&mut self, subject: &Subject) {
-        self.client = self.client.with_subject(subject.clone());
+    pub(crate) fn scope_to_context(&mut self, context: Context) {
+        self.client = self.client.with_context(context);
     }
 }
 
@@ -290,7 +217,7 @@ impl ResolvedTarget {
             .unwrap_or_else(default_writer_id);
         let writer = WriterId::parse(writer_id.as_str())
             .map_err(|error| CliError::invalid_config(error.to_string()))?;
-        let runtime = LoonFs::builder_with_store(store.clone())
+        let runtime = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(writer)
             .config(loonfs::RuntimeConfig {
                 inline_content: inline_content.clone(),
@@ -340,12 +267,10 @@ impl ResolvedTarget {
         ca_cert_path: Option<&str>,
         transient_retry: TransientRetry,
     ) -> Result<Self> {
-        let client = Client::new(remote_client_config(
-            server_url,
-            auth_token,
-            ca_cert_path,
-            transient_retry,
-        ))
+        let client = Client::new(
+            remote_client_config(server_url, auth_token, ca_cert_path, transient_retry),
+            Context::Service,
+        )
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
         Ok(Self {
             backend: Backend::Remote {

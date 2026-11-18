@@ -54,7 +54,8 @@ async fn family_on(
     wall_clock: Option<Arc<ManualClock>>,
 ) -> Family {
     let main_id = namespace_id("main");
-    let builder = LoonFs::builder_with_store(store.clone()).writer_id(writer_id("merge-writer"));
+    let builder = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
+        .writer_id(writer_id("merge-writer"));
     let builder = match wall_clock {
         Some(clock) => builder.wall_clock(clock),
         None => builder,
@@ -257,7 +258,7 @@ impl Family {
 async fn a_zero_allowance_answers_every_merge_route_with_not_supported() {
     let family = family().await;
     let store = Arc::new(LocalFsStore::new(family._directory.path()).expect("store"));
-    let runtime = LoonFs::builder_with_store(store)
+    let runtime = LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(writer_id("merges-off"))
         .execution_budget(ExecutionBudget::builder().max_merge_bytes(0).build())
         .build()
@@ -647,7 +648,7 @@ async fn a_retry_of_a_merge_that_another_runtime_committed_finds_the_receipt_aft
         Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let family = family_on(directory, store.clone(), None).await;
     family.write_main("/later.txt").await;
-    let other = LoonFs::builder_with_store(store)
+    let other = LoonFs::builder_with_store(store, crate::Context::Service)
         .writer_id(writer_id("other-merge-writer"))
         .build()
         .await

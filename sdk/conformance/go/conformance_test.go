@@ -2718,7 +2718,7 @@ type proxyACL struct {
 	NamespaceID       string `json:"namespace_id"`
 	Administrator     string `json:"administrator"`
 	Member            string `json:"member"`
-	MemberSubjectID   string `json:"member_subject_id"`
+	MemberActorID     string `json:"member_actor_id"`
 	BrowserPrincipals string `json:"browser_principals"`
 	CommitID          string `json:"commit_id"`
 	Directory         string `json:"directory"`
@@ -3013,8 +3013,7 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 		Token:         h.serverToken,
 		Authorize: func(_ *http.Request, _ loonfsproxy.RouteContext) (loonfsproxy.Authorization, error) {
 			return loonfsproxy.Authorization{
-				ActorID:    string(request.ActorID),
-				SubjectID:  acl.MemberSubjectID,
+				ActorID:    acl.MemberActorID,
 				Principals: []string{acl.Member},
 			}, nil
 		},

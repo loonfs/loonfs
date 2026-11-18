@@ -934,11 +934,14 @@ async fn a_recursive_put_finishes_the_folds_it_started_before_returning() {
         ]);
         assert_success(&put);
         assert_eq!(json_data(&put)["files"], FILES);
-        let reader = loonfs::LoonFs::builder_with_store(std::sync::Arc::new(store))
-            .writer_id(loonfs_test_support::ids::writer_id("tail-reader"))
-            .build()
-            .await
-            .expect("build runtime");
+        let reader = loonfs::LoonFs::builder_with_store(
+            std::sync::Arc::new(store),
+            loonfs::Context::Service,
+        )
+        .writer_id(loonfs_test_support::ids::writer_id("tail-reader"))
+        .build()
+        .await
+        .expect("build runtime");
         let tail = reader
             .maintenance(loonfs_test_support::ids::writer_id(
                 "tail-reader-maintenance",

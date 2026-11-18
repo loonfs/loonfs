@@ -29,13 +29,16 @@ impl Fixture {
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any(),
         ));
-        let builder = crate::LoonFs::builder_with_store(store.clone() as SharedStore)
-            .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-            .config(crate::RuntimeConfig {
-                min_publish_interval_ms: 0,
-                ..crate::RuntimeConfig::default()
-            })
-            .monotonic_timer(Arc::new(ManualClock::new(0)));
+        let builder = crate::LoonFs::builder_with_store(
+            store.clone() as SharedStore,
+            crate::Context::Service,
+        )
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
+        .monotonic_timer(Arc::new(ManualClock::new(0)));
         let writer = configure(builder).build().await.expect("build writer");
         writer
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())

@@ -201,6 +201,7 @@ async fn default_inline_commits_write_only_wal_and_replay_by_bytes() {
                 .uri(format!("{upload_uri}/content"))
                 .header("authorization", "Bearer test-token")
                 .header("Loonfs-Context", "service")
+                .header("Loonfs-Actor", "inline-test")
                 .body(axum::body::Body::from("same"))
                 .expect("upload request"),
         )
@@ -426,13 +427,16 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
         let address = listener.local_addr().expect("address");
         let server =
             tokio::spawn(async move { axum::serve(listener, router).await.expect("serve") });
-        let client = Client::new(ClientConfig {
-            server_url: format!("http://{address}"),
-            auth_token: Some("test-token".into()),
-            request_timeout_ms: None,
-            disable_transient_retry: true,
-            ca_cert_path: None,
-        })
+        let client = Client::new(
+            ClientConfig {
+                server_url: format!("http://{address}"),
+                auth_token: Some("test-token".into()),
+                request_timeout_ms: None,
+                disable_transient_retry: true,
+                ca_cert_path: None,
+            },
+            loonfs_types::Context::Service,
+        )
         .expect("client");
         client.get_capabilities().await.expect("capabilities");
         requests.store(0, Ordering::SeqCst);

@@ -36,7 +36,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     let catalog = crate::test_support::load_catalog(store, namespace_id).await;
     let upload = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .begin_upload(&catalog)
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
         .await
         .expect("begin upload");
     crate::test_support::NamespaceFixture::new(
@@ -45,7 +45,12 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
         &crate::test_support::writer_at("test-writer", context.now_ms),
     )
     .engine()
-    .upload_content(&catalog, &upload.upload_id, b"completed content")
+    .upload_content(
+        &catalog,
+        &upload.upload_id,
+        b"completed content",
+        &loonfs_test_support::test_actor(),
+    )
     .await
     .expect("stage upload");
     let completed = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
@@ -54,6 +59,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
             &catalog,
             &upload.upload_id,
             CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
         )
         .await
         .expect("complete upload");

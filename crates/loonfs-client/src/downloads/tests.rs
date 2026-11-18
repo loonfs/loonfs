@@ -391,6 +391,7 @@ async fn a_held_next_range_does_not_time_out_while_the_current_one_is_read() {
             ca_cert_path: None,
         },
         service,
+        loonfs_types::Context::Service,
     )
     .expect("valid client config");
     client.timer = clock.clone();

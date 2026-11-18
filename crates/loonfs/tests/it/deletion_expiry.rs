@@ -81,7 +81,7 @@ async fn commits_after(
 async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_without_a_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(ManualClock::at_system_time());
-    let writer = LoonFs::builder_with_store(store(temp_dir.path()))
+    let writer = LoonFs::builder_with_store(store(temp_dir.path()), loonfs::Context::Service)
         .writer_id(writer_id("expiry-writer"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,

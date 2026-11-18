@@ -170,7 +170,7 @@ async fn folds_for(shape: Shape) -> Folds {
     ));
     let store: SharedObjectStore = intercepted.clone();
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer: LoonFs<Writable> = LoonFs::builder_with_store(store)
+    let writer: LoonFs<Writable> = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("concurrent-folds"))
         .monotonic_timer(Arc::new(PausedClock::start()))
         .metrics_recorder(recorder.clone())

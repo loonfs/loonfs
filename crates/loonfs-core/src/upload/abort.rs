@@ -2,7 +2,7 @@
 //! session that never completed.
 
 use super::records::{create_upload_outcome, OutcomeCreation};
-use super::session::{ensure_session_subject, upload_mode};
+use super::session::{ensure_session_actor, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -11,7 +11,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{
     UploadAlreadyCompletedError, UploadOutcome, UploadSessionMode, UploadSessionPayload,
 };
-use loonfs_types::{ContentId, PoolId, UploadId, UploadSession, UploadSessionStatus};
+use loonfs_types::{ActorId, ContentId, PoolId, UploadId, UploadSession, UploadSessionStatus};
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Aborts an upload session, then deletes the content object it owned
@@ -25,6 +25,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
+        actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let catalog = self.own_catalog(catalog);
         let clock = self.namespace.start_clock();
@@ -33,7 +34,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .namespace
             .load_upload_session_state(catalog, upload_id)
             .await?;
-        ensure_session_subject(&loaded.session, self.subject.as_ref())?;
+        ensure_session_actor(&loaded.session, actor_id)?;
         let aborted_at_ms = match &loaded.outcome {
             Some(outcome) => repeated_abort(outcome, upload_id)?,
             None => {

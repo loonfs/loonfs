@@ -744,7 +744,7 @@ Every uploaded content object is tied to an upload session before a commit can r
 
 A session is stored as two records, each created once with put-if-absent and never changed:
 
-- The "session record" is written when the session starts. It contains `namespace_id`, `upload_id`, `content_id`, an optional `subject_id`, a tagged `mode`, and `expires_at_ms`.
+- The "session record" is written when the session starts. It contains `namespace_id`, `upload_id`, `content_id`, the `actor_id` of the actor that opened the session, a tagged `mode`, and `expires_at_ms`. Only that actor can use the session.
 - The "outcome record" is written when the session ends. It records whether the session completed or was aborted, and when.
 
 A session's status follows from which records exist:
@@ -997,9 +997,9 @@ A publication batch isn't an all-or-nothing transaction, so some requests can fa
 
 ### 6.5 Commit identity and retries
 
-Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic_commit_fingerprint`) of the logical request: the `namespace_id`, the `actor_id`, the optional `subject_id`, the ordered operations with their inline preconditions, the request-level preconditions, and the optional message. It doesn't include publication details, such as the writer epoch and the timestamp. [Semantic commit fingerprints](#appendix-b-semantic-commit-fingerprints) specifies the exact canonical bytes.
+Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic_commit_fingerprint`) of the logical request: the `namespace_id`, the `actor_id`, the ordered operations with their inline preconditions, the request-level preconditions, and the optional message. It doesn't include publication details, such as the writer epoch and the timestamp. [Semantic commit fingerprints](#appendix-b-semantic-commit-fingerprints) specifies the exact canonical bytes.
 
-A [merge](glossary.md#merge) into another namespace of the fork's [pool](glossary.md#pool) (the namespace that the fork was forked from, or a new fork of that namespace that a [rebase](glossary.md#rebase) created) includes a merge record that identifies the fork and the range of the fork's commits that it applied (see [WAL records](#a5-wal-records)). LoonFS plans a merge's operations itself, so a merge's fingerprint covers its merge record in place of its operations and preconditions, and a change in how LoonFS plans merges doesn't change a merge's identity. A retry with the same commit ID and merge record (and the same actor, subject, and message) is a replay, even if LoonFS planned different operations for it, and a request that reuses the commit ID for a different range returns `commit_id_reuse_conflict`. [Merge commits](#b5-merge-commits) specifies the canonical bytes.
+A [merge](glossary.md#merge) into another namespace of the fork's [pool](glossary.md#pool) (the namespace that the fork was forked from, or a new fork of that namespace that a [rebase](glossary.md#rebase) created) includes a merge record that identifies the fork and the range of the fork's commits that it applied (see [WAL records](#a5-wal-records)). LoonFS plans a merge's operations itself, so a merge's fingerprint covers its merge record in place of its operations and preconditions, and a change in how LoonFS plans merges doesn't change a merge's identity. A retry with the same commit ID and merge record (and the same actor and message) is a replay, even if LoonFS planned different operations for it, and a request that reuses the commit ID for a different range returns `commit_id_reuse_conflict`. [Merge commits](#b5-merge-commits) specifies the canonical bytes.
 
 The manifest's runs also store each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's. A replay rebuilds its response from that row. The `commits`, `commit_receipts`, and `merges` families are one family group with one retention rule, so a commit row is kept for as long as its receipt, and a merge's index row for as long as its commit row.
 
@@ -1008,7 +1008,7 @@ While the receipt is kept:
 - An equal fingerprint under the same `commit_id` is a replay of the original commit. A replay doesn't run the mutation again, and it doesn't evaluate the original preconditions again against the current state.
 - A different fingerprint returns `commit_id_reuse_conflict`.
 
-Inline content is identified by its bytes. While the receipt is kept, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes, or a different subject, return `commit_id_reuse_conflict`. The bytes an append adds are identified the same way.
+Inline content is identified by its bytes. While the receipt is kept, retrying the same request with the same inline bytes returns the original commit, even if a new content ID was assigned. Changed bytes, or a different actor, return `commit_id_reuse_conflict`. The bytes an append adds are identified the same way.
 
 Receipt lookup uses the publisher's current projection. The publisher refreshes that projection after its put collides, or when its basis manifest has a successor (see [Publication and group commit](#63-publication-and-group-commit)). A fold that the publisher published itself moves the projection's basis to the new manifest and keeps the commits published since, without a refresh.
 
@@ -2165,7 +2165,7 @@ A content reference's checksum covers the prefix it identifies, and a multipart 
 | Rebased from | `source_namespace_id`, `resume_after_seq` |
 | Manifest reference | `owner_namespace_id`, `manifest_no`, `head_seq`, `payload_checksum` |
 | Snapshot record | `namespace_id`, `snapshot_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
-| Upload session record | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `expires_at_ms` |
+| Upload session record | `namespace_id`, `upload_id`, `content_id`, `actor_id`, `mode`, `expires_at_ms` |
 | Upload outcome record | `namespace_id`, `upload_id`, `outcome` |
 | Member entry | `pool_id`, `namespace_id` |
 | Manifest boundary | `namespace_id`, `boundary` |
@@ -2548,14 +2548,13 @@ A commit fingerprint is stored as `v1:sha256:<64 lowercase hex>`, where `v1` ide
   "domain": "loonfs.commit.semantic.v1",
   "namespace_id": <namespace string>,
   "actor_id": <actor ID string>,
-  "subject_id": <subject ID string or null>,
   "operations": <ordered canonical operations>,
   "message": <string or null>,
   "preconditions": <ordered canonical preconditions>
 }
 ```
 
-The hashed bytes have no formatting whitespace. Every member is always present: `preconditions` is `[]` when empty, and `message` and `subject_id` are `null` when absent. A merge uses a different preimage (see [Merge commits](#b5-merge-commits)).
+The hashed bytes have no formatting whitespace. Every member is always present: `preconditions` is `[]` when empty, and `message` is `null` when absent. A merge uses a different preimage (see [Merge commits](#b5-merge-commits)).
 
 A changed `actor_id` is a different request, even from a process retrying for the same application. The preimage leaves out the commit ID, writer epoch, and commit timestamp.
 
@@ -2640,13 +2639,13 @@ Non-ASCII characters are written directly as UTF-8. JSON quotes, backslashes, an
 For example, the complete preimage of one directory-creation request, with no trailing newline, is:
 
 ```json
-{"domain":"loonfs.commit.semantic.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
+{"domain":"loonfs.commit.semantic.v1","namespace_id":"demo","actor_id":"usr_8f3c","operations":[{"kind":"create_directory","path":"/reports","parents":false}],"message":null,"preconditions":[]}
 ```
 
 Its fingerprint is:
 
 ```text
-v1:sha256:2d44c045a1d4eaaf3e808abbe1088b581fa51292cd410bc34dfd8e63f67140d3
+v1:sha256:a64ec097a98f4c881c3770868ad31e77efd8ec9fedb6101672de2091311666ba
 ```
 
 A one-operation convenience call and a one-element commit request use the same canonical input. The raw request JSON isn't the preimage, because it can leave out defaults that the canonical operation writes.
@@ -2662,7 +2661,6 @@ A [merge's](glossary.md#merge) fingerprint covers its merge record in place of i
   "domain": "loonfs.commit.merge.v1",
   "namespace_id": <namespace string>,
   "actor_id": <actor ID string>,
-  "subject_id": <subject ID string or null>,
   "merge": {
     "source_namespace_id": <namespace string>,
     "source_after_seq": <integer>,
@@ -2672,18 +2670,18 @@ A [merge's](glossary.md#merge) fingerprint covers its merge record in place of i
 }
 ```
 
-Every member is always present, with `null` for an absent `subject_id` or `message`. Strings and integers follow [Strings, integers, and example bytes](#b4-strings-integers-and-example-bytes), and the stored form is an ordinary commit's.
+Every member is always present, with `null` for an absent `message`. Strings and integers follow [Strings, integers, and example bytes](#b4-strings-integers-and-example-bytes), and the stored form is an ordinary commit's.
 
 For example, the complete preimage of a merge into `demo` of the fork `demo-fork`'s commits above sequence 418, through sequence 425, with no trailing newline, is:
 
 ```json
-{"domain":"loonfs.commit.merge.v1","namespace_id":"demo","actor_id":"usr_8f3c","subject_id":null,"merge":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}
+{"domain":"loonfs.commit.merge.v1","namespace_id":"demo","actor_id":"usr_8f3c","merge":{"source_namespace_id":"demo-fork","source_after_seq":418,"source_through_seq":425},"message":null}
 ```
 
 Its fingerprint is:
 
 ```text
-v1:sha256:fd69abed548f0d6929753492171d2e653d08541ea84dd11fefe202124437b5e5
+v1:sha256:004b16fd5b647a8003f24e3b558b5f93ff5e6bc836ca42322f93ddff1ffaa365
 ```
 
 ## Appendix C. Timing and size reference

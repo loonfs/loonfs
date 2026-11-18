@@ -1,7 +1,7 @@
 //! Signed part targets for a direct multipart upload, and the part checksum
 //! rule that completion checks again.
 
-use super::session::{ensure_session_open, ensure_session_subject};
+use super::session::{ensure_session_actor, ensure_session_open};
 use crate::engine::NamespaceEngine;
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
@@ -9,7 +9,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{UploadSessionMode, UploadSessionPayload};
-use loonfs_types::{Checksum, ChecksumAlgorithm, UploadId, UploadPartChecksumClaim};
+use loonfs_types::{ActorId, Checksum, ChecksumAlgorithm, UploadId, UploadPartChecksumClaim};
 
 /// One part a server integration is about to sign.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +36,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         requested: &[UploadPartChecksumClaim],
+        actor_id: &ActorId,
     ) -> Result<MultipartPartTargets> {
         let now_ms = self.now_ms();
         let catalog = self.own_catalog(catalog);
@@ -53,7 +54,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .namespace
             .load_upload_session_state(catalog, upload_id)
             .await?;
-        ensure_session_subject(&state.session, self.subject.as_ref())?;
+        ensure_session_actor(&state.session, actor_id)?;
         ensure_session_open(&state, now_ms)?;
         let session = &state.session;
         let (provider_upload_id, checksum_algorithm) = multipart_session_upload(session)?;

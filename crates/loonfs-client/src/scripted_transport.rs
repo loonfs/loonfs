@@ -98,6 +98,7 @@ pub(crate) fn client(transport: &ScriptedTransport) -> Client {
             ca_cert_path: None,
         },
         transport.clone(),
+        loonfs_types::Context::Service,
     )
     .expect("valid client config")
 }

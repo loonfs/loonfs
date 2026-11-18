@@ -152,11 +152,7 @@ impl NamespacePublisher {
             .writer_engine(&writer.writer_id, namespace_id);
         for value in values {
             let proof = engine
-                .stage_owned_bytes(
-                    &catalog,
-                    candidate.subject().map(|subject| &subject.subject_id),
-                    value.bytes(),
-                )
+                .stage_owned_bytes(&catalog, candidate.actor_id(), value.bytes())
                 .await?;
             candidate.stage_inline_content(&value.content_ref().content_id, proof);
         }

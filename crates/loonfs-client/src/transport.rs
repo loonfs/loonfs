@@ -9,7 +9,7 @@ use futures::StreamExt as _;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
 use loonfs_types::{
-    headers, ErrorCode, ErrorResponse, NamespaceId, OperationDeadline, PageRequest,
+    headers, Context, ErrorCode, ErrorResponse, NamespaceId, OperationDeadline, PageRequest,
     TransportRetryOutcome,
 };
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
@@ -52,8 +52,8 @@ pub(crate) struct WireRequest {
 }
 
 impl Client {
-    /// Starts the request for `operation` at `url`, with the subject headers,
-    /// or with `Loonfs-Context: service` when the client has no subject.
+    /// Starts the request for `operation` at `url`, with the header of the
+    /// client's context.
     pub(crate) fn request(&self, operation: Operation, url: &str) -> WireRequest {
         let request = WireRequest {
             method: operation.method,
@@ -63,12 +63,12 @@ impl Client {
             policy: operation.policy,
             body: None,
         };
-        let Some(subject) = &self.subject else {
-            return request.header(headers::CONTEXT, headers::SERVICE_CONTEXT);
-        };
-        request
-            .header(headers::SUBJECT, subject.subject_id.as_str())
-            .header(headers::PRINCIPALS, subject.principals.to_string())
+        match &self.context {
+            Context::Service => request.header(headers::CONTEXT, headers::SERVICE_CONTEXT),
+            Context::Principals(principals) => {
+                request.header(headers::PRINCIPALS, principals.to_string())
+            }
+        }
     }
 
     /// Returns the URL of `suffix` under a namespace, where `suffix` is empty

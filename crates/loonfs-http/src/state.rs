@@ -11,7 +11,7 @@ use loonfs::{
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
-use loonfs_types::{MonotonicTimer, NamespaceId, SecretString, Subject};
+use loonfs_types::{Context, MonotonicTimer, NamespaceId, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -171,31 +171,24 @@ impl HttpState {
         self.request_limit.as_ref()
     }
 
-    /// Returns the runtime scoped to `subject`, or the runtime that acts in
-    /// the service context when `subject` is `None`.
-    pub(crate) fn runtime_for(&self, subject: Option<Subject>) -> LoonFs<Writable> {
-        match subject {
-            Some(subject) => self.runtime.with_subject(subject),
-            None => self.runtime.clone(),
-        }
+    /// Returns the runtime that acts in the request's `context`.
+    pub(crate) fn runtime_for(&self, context: Context) -> LoonFs<Writable> {
+        self.runtime.with_context(context)
     }
 
-    /// Opens the host's writable handle for `namespace_id`, scoped to
-    /// `subject`, or acting in the service context when `subject` is `None`.
+    /// Opens the host's writable handle for `namespace_id`, acting in the
+    /// request's `context`.
     pub(crate) async fn open_writer(
         &self,
         namespace_id: &NamespaceId,
-        subject: Option<Subject>,
+        context: Context,
     ) -> Result<Namespace<Writable>, ApiResponseError> {
-        let namespace = self
+        Ok(self
             .namespaces
             .open(namespace_id)
             .await
-            .map_err(ApiResponseError::runtime)?;
-        Ok(match subject {
-            Some(subject) => namespace.with_subject(subject),
-            None => namespace,
-        })
+            .map_err(ApiResponseError::runtime)?
+            .with_context(context))
     }
 }
 

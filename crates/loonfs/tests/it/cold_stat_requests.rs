@@ -88,7 +88,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
     let writer = writer(store.clone(), "coldstat-writer").await;
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let maintenance = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("coldstat-maintenance"))
         .build()
         .await
@@ -250,7 +250,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     let mut gets_per_stat = Vec::new();
     let mut inode_ids = Vec::new();
     for (name, revision_no) in [("file-000000042.txt", 1), ("hot.txt", RUNS as u64)] {
-        let reader = LoonFs::builder_with_store(store.clone())
+        let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .read_only()
             .build()
             .await
@@ -321,7 +321,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     // are random, so a newer run's inline filter can admit a key by a false
     // positive, and the newest-first lookup then reads that run's segment too.
     // The batch runs are the newest `RUNS` delta runs, oldest first.
-    let directory = LoonFs::builder_with_store(store.clone())
+    let directory = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await

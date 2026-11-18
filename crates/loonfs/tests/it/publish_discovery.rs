@@ -21,7 +21,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let creator = LoonFs::builder_with_store(store.clone())
+    let creator = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .build()
         .await
@@ -35,7 +35,7 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
     // its claim searches for the newest manifest first. The writer's timer
     // doesn't move, so no check for a newer manifest starts while the test
     // counts requests.
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -141,7 +141,7 @@ async fn the_first_commit_after_a_create_claims_on_the_created_manifest() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()
@@ -182,7 +182,7 @@ async fn the_first_read_after_a_create_sends_no_request() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()
@@ -221,7 +221,7 @@ async fn the_first_commit_after_a_fork_claims_on_the_forked_manifest() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()
@@ -268,7 +268,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         ),
         KeyPredicate::any(),
     ));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -378,7 +378,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
             .all(|number| number >= during_wal_no),
         "{requests:?}"
     );
-    let reader = LoonFs::builder_with_store(store.clone())
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .read_only()
         .build()
         .await

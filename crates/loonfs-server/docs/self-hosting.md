@@ -537,7 +537,7 @@ The tail limit uses the tail size from the session's position. A session has no 
 
 Inline pieces are WAL bytes, so the fold trigger of 8 MiB of unfolded WAL bytes or 256 unfolded WAL objects covers them, and it isn't a setting. Explicit metadata maintenance and the maintenance scheduler fold at the same trigger as the writer session. Without the server's session for the namespace, they count the WAL bytes of the tail that they load. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
-If a commit already succeeded, retrying the same request returns the original result without uploading the file again, as long as the commit receipt is still available. This also works after a restart, or on another server. A retry with changed bytes or a different subject returns `commit_id_reuse_conflict`.
+If a commit already succeeded, retrying the same request returns the original result without uploading the file again, as long as the commit receipt is still available. This also works after a restart, or on another server. A retry with changed bytes or a different actor returns `commit_id_reuse_conflict`.
 
 ## Keeping metadata blocks on local SSD
 

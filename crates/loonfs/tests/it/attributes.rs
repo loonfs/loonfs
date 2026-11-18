@@ -168,7 +168,6 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
     let explicit_fingerprint = loonfs_types::CommitFingerprintInput {
         namespace_id: &namespace_id,
         actor_id: &explicit.actor_id,
-        subject_id: None,
         message: explicit.message.as_deref(),
         operations: &explicit.operations,
         preconditions: &[],
@@ -212,7 +211,6 @@ fn the_write_convenience_matches_a_hand_built_one_operation_commit() {
         loonfs_types::CommitFingerprintInput {
             namespace_id: &namespace_id,
             actor_id: &different.actor_id,
-            subject_id: None,
             message: different.message.as_deref(),
             operations: &different.operations,
             preconditions: &[],

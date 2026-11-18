@@ -136,7 +136,15 @@ async fn every_contract_route_requires_a_token() {
 }
 
 async fn post(router: &axum::Router, uri: &str, body: Body) -> (StatusCode, serde_json::Value) {
-    let mut request = fixtures::request("POST", uri, None, &[("content-type", "application/json")]);
+    let mut request = fixtures::request(
+        "POST",
+        uri,
+        None,
+        &[
+            ("content-type", "application/json"),
+            ("Loonfs-Actor", "test-actor"),
+        ],
+    );
     *request.body_mut() = body;
     let (status, _, body) = fixtures::send(router, request).await;
     (status, serde_json::from_slice(&body).expect("JSON body"))

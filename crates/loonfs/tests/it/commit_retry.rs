@@ -326,7 +326,7 @@ async fn a_single_put_does_not_replay_a_multi_operation_commit() {
     let commit_id = CommitId::parse("pinned-batch").expect("valid commit id");
 
     let prepared = namespace_writer
-        .prepare_content(b"stable bytes\n")
+        .prepare_content(b"stable bytes\n", &loonfs_test_support::test_actor())
         .await
         .expect("prepare content");
     let content_ref = prepared.content_ref().clone();
@@ -389,7 +389,10 @@ async fn prepared_content_replays_after_restart_with_the_same_message() {
     let options = || options_with_message(&commit_id, Some("import batch"));
 
     let prepared = namespace_writer
-        .prepare_content_stream(streamed(b"stable bytes\n", 3))
+        .prepare_content_stream(
+            streamed(b"stable bytes\n", 3),
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .expect("prepare content once");
     let first = namespace_writer
@@ -615,7 +618,7 @@ async fn concurrent_retries_past_the_receipt_horizon_commit_once() {
         .expect("open namespace");
 
     let prepared = namespace_writer
-        .prepare_content(b"stable bytes\n")
+        .prepare_content(b"stable bytes\n", &loonfs_test_support::test_actor())
         .await
         .expect("prepare the new attempt once");
     let actor = loonfs_test_support::test_actor();

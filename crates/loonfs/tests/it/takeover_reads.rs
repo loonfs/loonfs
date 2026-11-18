@@ -91,7 +91,7 @@ async fn takeover(
     ));
     let recording = Arc::new(RecordingStore::new(gate.clone(), KeyPredicate::any()));
     let recorded: SharedObjectStore = recording.clone();
-    let builder = LoonFs::builder_with_store(recorded)
+    let builder = LoonFs::builder_with_store(recorded, loonfs::Context::Service)
         .writer_id(writer_id(name))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -146,7 +146,7 @@ impl Takeover {
             Some(gate) => gate,
             None => self.store.clone(),
         };
-        LoonFs::builder_with_store(store)
+        LoonFs::builder_with_store(store, loonfs::Context::Service)
             .writer_id(writer_id("takeover-peer"))
             .config(loonfs::RuntimeConfig {
                 min_publish_interval_ms: 0,

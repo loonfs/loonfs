@@ -49,7 +49,7 @@ impl GrepHost {
         configure: impl FnOnce(loonfs::LoonFsBuilder<ReadOnly>) -> loonfs::LoonFsBuilder<ReadOnly>,
     ) -> Self {
         let reader = configure(
-            LoonFs::builder_with_store(store.clone())
+            LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
                 .read_only()
                 .config(loonfs::RuntimeConfig {
                     manifest_revalidation_interval_ms: 0,
@@ -59,7 +59,7 @@ impl GrepHost {
         .build()
         .await
         .expect("build reader");
-        let writer = LoonFs::builder_with_store(store.clone())
+        let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id(actor))
             .build()
             .await
@@ -271,7 +271,7 @@ pub(crate) async fn writable_namespace(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> (LoonFs<Writable>, Namespace<Writable>) {
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(&format!(
             "{namespace_id}-writer"
         )))
@@ -453,7 +453,7 @@ pub(crate) async fn publish_same_content_files(
     content: &[u8],
 ) {
     let prepared = namespace
-        .prepare_content(content)
+        .prepare_content(content, &loonfs_test_support::test_actor())
         .await
         .expect("prepare shared content");
     let content_ref = prepared.content_ref().clone();

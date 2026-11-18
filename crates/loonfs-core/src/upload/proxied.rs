@@ -2,7 +2,7 @@
 //! session's content ID.
 
 use super::records::UploadSessionState;
-use super::session::{ensure_session_open, ensure_session_subject, session_response, upload_mode};
+use super::session::{ensure_session_actor, ensure_session_open, session_response, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -14,7 +14,7 @@ use crate::time::OperationClock;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use loonfs_types::format::control::{UploadSessionMode, UploadSessionPayload};
-use loonfs_types::{ContentRef, ContentRefKind, PoolId, Subject, UploadId, UploadSession};
+use loonfs_types::{ActorId, ContentRef, ContentRefKind, PoolId, UploadId, UploadSession};
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Uploads whole-file content into an upload session.
@@ -27,13 +27,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         bytes: &[u8],
+        actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let _permit = self.namespace.content_writes.acquire().await;
         self.namespace
             .upload_proxied_content(
                 self.own_catalog(catalog),
                 upload_id,
-                self.subject.as_ref(),
+                actor_id,
                 ProxiedPayload::Bytes(bytes),
                 &self.namespace.start_clock(),
             )
@@ -47,13 +48,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         body: ByteStream,
+        actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let _permit = self.namespace.content_writes.acquire().await;
         self.namespace
             .upload_proxied_content(
                 self.own_catalog(catalog),
                 upload_id,
-                self.subject.as_ref(),
+                actor_id,
                 ProxiedPayload::Stream(body),
                 &self.namespace.start_clock(),
             )
@@ -75,13 +77,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
-        subject: Option<&Subject>,
+        actor_id: &ActorId,
         payload: ProxiedPayload<'_>,
         clock: &OperationClock,
     ) -> Result<UploadSession> {
         let pool_id = catalog.pool_id();
         let loaded = self
-            .load_open_proxied_session(catalog, upload_id, subject, clock)
+            .load_open_proxied_session(catalog, upload_id, actor_id, clock)
             .await?;
         let content_id = loaded.session.content_id.clone();
         let owner = ContentKeyOwner::ProxiedSession(upload_id);
@@ -118,11 +120,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
-        subject: Option<&Subject>,
+        actor_id: &ActorId,
         clock: &OperationClock,
     ) -> Result<UploadSessionState> {
         let state = self.load_upload_session_state(catalog, upload_id).await?;
-        ensure_session_subject(&state.session, subject)?;
+        ensure_session_actor(&state.session, actor_id)?;
         ensure_session_open(&state, clock.request_at_ms())?;
         if !matches!(state.session.mode, UploadSessionMode::ServiceProxied {}) {
             return Err(CoreError::InvalidUploadContent(format!(

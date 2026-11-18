@@ -339,7 +339,7 @@ The namespace handle's `metadata` corresponds to the client's `get_namespace`. T
 The runtime and the client also follow these rules:
 
 - They stay aligned by sharing one definition of every option struct they both take, not by a trait that either one implements. (`PutFileOptions`, `CreateDirectoryOptions`, and `DeleteOptions` are defined in `loonfs-types` and re-exported by both.) There's no transport abstraction to program against, so a host picks the embedded runtime or the HTTP client directly.
-- A mutation takes the actor as an argument, and the remote client sends it in the `Loonfs-Actor` header. An option struct contains only optional settings and has a default, so each mutation has a plain form and a form that takes options.
+- A mutation and every upload operation take the actor as an argument, and the remote client sends it in the `Loonfs-Actor` header. An option struct contains only optional settings and has a default, so each mutation has a plain form and a form that takes options.
 - Unsupported operations and features are typed. An individual operation returns the `not_supported` error with its `feature` name, so the gating logic (check the capability document, and fall back on `not_supported`) is the same with either backend.
 
 Generated SDKs group operations by resource, not by API group. `capabilities`, `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`, and `uploads` are at the client root. The `maintenance` API group keeps its prefix as a nested group, as in `maintenance.snapshots.list`, because a hosted deployment can hide the whole API group. Methods follow these naming rules:
@@ -510,7 +510,7 @@ A failed precondition reserves no sequence or inode, and it leaves the planning 
 
 ### Actor attribution
 
-Every commit, namespace creation, and namespace fork requires an actor in the `Loonfs-Actor` header (see [Identity headers](#identity-headers)). The application supplies the actor as a stable, opaque identifier of 1 to 256 visible ASCII characters (0x21 through 0x7E), with the identity scope that it needs. LoonFS records the actor on the commit and on the metadata created by that commit. Namespace creation and forking record it as `created_by` on the namespace.
+Every commit, every upload operation, namespace creation, and namespace fork requires an actor in the `Loonfs-Actor` header (see [Identity headers](#identity-headers)). The actor is the identity of a request. The application supplies the actor as a stable, opaque identifier of 1 to 256 visible ASCII characters (0x21 through 0x7E), with the identity scope that it needs. LoonFS records the actor on the commit and on the metadata created by that commit, and on each upload session that the actor opens. Namespace creation and forking record it as `created_by` on the namespace.
 
 LoonFS doesn't authenticate the actor or resolve profile information. The application MUST authenticate the user and authorize the operation before it sends the request. The application should use a stable internal ID, not an email address or display name.
 
@@ -535,19 +535,19 @@ Every request that reads or changes a namespace's contents says whose authority 
 - `Loonfs-Principals` contains comma-separated principal IDs, without whitespace. The request acts as a "subject", whose rights are the union of the grants to those principals, and LoonFS checks the request against the namespace's access rows (see [Authorization](#authorization)). The advertised `access.max_principals_per_request` limit caps the number of principals.
 - `Loonfs-Context: service` puts the request in the "service context". The application makes the request on its own account, with the whole authority of its deployment token, and LoonFS checks no rights. For example, an indexer or a migration sends the service context, and so does an application that has no per-user permissions.
 
-A request with principals also has a subject ID, which identifies the subject that the request acts as. `Loonfs-Subject` sets it, and the [identity header table](#identity-headers) describes how it falls back to `Loonfs-Actor`. Principal and subject IDs never contain a comma, so the list is unambiguous.
+Principal IDs never contain a comma, so the list is unambiguous. Principal IDs are opaque, and like the actor ID, they appear in access logs. The application should use internal IDs, never email addresses or display names.
 
-These IDs are opaque, and like the actor ID, they appear in access logs. The application should use internal IDs, never email addresses or display names.
+The principals are a request's rights, and the actor is its identity. LoonFS includes the actor in a commit's semantic identity and records the actor as the owner of an upload session, and the principals are part of neither. So a retry of a commit ID from another actor returns `commit_id_reuse_conflict`, and while the commit's receipt is kept, a retry from the same actor returns the original commit without checking the actor's current rights.
 
-The subject ID is part of a commit's semantic identity. A retry of a commit ID from another subject returns `commit_id_reuse_conflict`. A commit in the service context has no subject ID, so its retry also has to be in the service context.
+An embedded caller chooses the context when it builds the runtime, and a Rust client caller when it builds the client: the service context, or a set of principals. There's no default, so a handle that acts for a user can't act in the service context by mistake. A host that serves many users builds its runtime in the service context and clones it into each request's context. Every read and commit through a handle acts in the handle's context, and the commit and upload methods take the actor as an argument. The CLI records the actor in its upload journal next to the request, and it refuses to resume the upload under a different actor.
 
-An embedded caller sets the subject once, on the handle that it uses. Every read, commit, and upload through that handle acts as that subject, and the commit and upload methods don't take a separate subject. A handle without a subject acts in the service context. The CLI records the handle's subject in its upload journal next to the request, and it refuses to resume the upload under a different subject.
+Why is a receipt returned without checking the actor's current rights? The write has already been committed, and the original commit reveals nothing that the actor didn't author.
 
 Why must a request state its context, instead of acting in the service context when it sends no principals? The application's backend uses one deployment token for all of its users, so the token can't say whom a request is for. If a request without principals had every right, a client that left out the principals by mistake would read and change everything, and nothing would report the mistake. With two explicit headers, the same mistake returns `invalid_request`.
 
 ### Identity headers
 
-Four request headers contain identity information. `Loonfs-Actor` is for attribution, and its value is an actor ID of 1 to 256 visible ASCII characters (0x21 through 0x7E). `Loonfs-Principals` and `Loonfs-Context` say whose authority a request uses, and `Loonfs-Subject` sets the subject ID of a request with principals (see [Subject and principals](#subject-and-principals)). All four headers are optional in the transport schema. The server enforces each operation's own requirements while it handles the request:
+Three request headers contain identity information, and a request sends at most two of them. `Loonfs-Actor` is the identity of the request, and its value is an actor ID of 1 to 256 visible ASCII characters (0x21 through 0x7E). `Loonfs-Principals` and `Loonfs-Context` say whose authority a request uses, and a request sends one of them (see [Subject and principals](#subject-and-principals)). All three headers are optional in the transport schema. The server enforces each operation's own requirements while it handles the request:
 
 | Operations | `Loonfs-Actor` | `Loonfs-Principals` or `Loonfs-Context` |
 | --- | --- | --- |
@@ -555,7 +555,8 @@ Four request headers contain identity information. `Loonfs-Actor` is for attribu
 | `create_namespace` | Required. Recorded as `created_by`. | Not read. |
 | `fork_namespace`, `fork_namespace_for_rebase` | Required. Recorded as `created_by`. | Required. A request with principals needs an administrator of the source. |
 | `delete_namespace`, `create_snapshot`, `list_snapshots`, `get_snapshot`, `extend_snapshot`, `delete_snapshot`, `list_changes`, `list_diff`, `get_next_merge_range` | Not required. | Required, with the same administrator rule as `fork_namespace`. |
-| Path and inode reads, downloads, `list_trash`, `grep`, and upload-session operations | Not required. | Required. |
+| `create_upload`, `put_upload_content`, `sign_upload_parts`, `complete_upload`, `get_upload`, `abort_upload` | Required. Recorded as the owner of the session. | Required. |
+| Path and inode reads, downloads, `list_trash`, and `grep` | Not required. | Required. |
 | `run_maintenance_job` | Not recorded, but a malformed value is rejected. | Not read. |
 | `get_capabilities`, `get_namespace`, the other maintenance operations, and the health, readiness, and metrics routes | Not read. | Not read. |
 
@@ -563,13 +564,10 @@ Where an operation reads these headers:
 
 - The request sends exactly one of `Loonfs-Principals` and `Loonfs-Context`. A request with neither returns `invalid_request` with `param` `Loonfs-Principals` and the message `send Loonfs-Principals or Loonfs-Context: service`. A request with both returns `invalid_request` with `param` `Loonfs-Context`.
 - `service` is the one value of `Loonfs-Context`, in lowercase. Any other value returns `invalid_request` with `param` `Loonfs-Context`.
-- `Loonfs-Subject` is sent only with principals. A request with `Loonfs-Subject` but without principals returns `invalid_request` with `param` `Loonfs-Principals`.
-- The subject ID of a request with principals is `Loonfs-Subject` when it's present, and `Loonfs-Actor` otherwise. A request with neither returns `invalid_request` with `param` `Loonfs-Subject`. An actor used as the subject ID MUST also be a valid subject ID, which can't contain a comma. If it isn't, the `param` is `Loonfs-Actor`.
-- An operation that doesn't require an actor accepts principals with an explicit `Loonfs-Subject` and no actor.
 
 A missing required `Loonfs-Actor` returns `invalid_request` with `param` `Loonfs-Actor` and the message `missing required header Loonfs-Actor`. A malformed actor returns `invalid_request` with the same `param` and the validator's reason. Authorization is checked first.
 
-Header names are case-insensitive, and HTTP/2 sends them in lowercase. Retries and replayed requests MUST include the same header values, so saved requests MUST keep the actor, the principals or the service context, and the subject ID next to the body. Request headers appear in access logs, so every value MUST be an opaque identifier, never an email address or a display name.
+Header names are case-insensitive, and HTTP/2 sends them in lowercase. Retries and replayed requests MUST include the same header values, so saved requests MUST keep the actor and the principals or the service context next to the body. Request headers appear in access logs, so every value MUST be an opaque identifier, never an email address or a display name.
 
 ### 5.2 Commit responses and safe retry
 
@@ -610,7 +608,7 @@ A commit can refer to an upload, or it can include the file's bytes directly (in
 
 The inline retry rules still apply if the bytes are written to a separate content object to stay within WAL limits. Switching between inline bytes and an uploaded reference changes the request's identity, even for identical content.
 
-If the original commit succeeded and its receipt is still available, retrying the same request returns the original result without uploading the file again. This also works after a restart or on another server. Changed bytes or a different subject still return `commit_id_reuse_conflict`.
+If the original commit succeeded and its receipt is still available, retrying the same request returns the original result without uploading the file again. This also works after a restart or on another server. Changed bytes or a different actor still return `commit_id_reuse_conflict`.
 
 With prepared content, a client prepares the content once, keeps the result, and reuses it with the same explicit commit ID, path, actor, and options on each attempt. This works for both inline content and completed uploads.
 
@@ -700,7 +698,7 @@ Why check authorization first? A validation error could reveal information to a 
 
 Two routes, `GET /health` and `GET /readiness`, don't require the token and always respond to unauthenticated requests, because load balancers probe them. Every other route requires the token, including `GET /v0/capabilities`. The generated `openapi.json` describes this as a global `bearer_auth` requirement, which those two operations override.
 
-The identity headers `Loonfs-Actor`, `Loonfs-Subject`, `Loonfs-Principals`, and `Loonfs-Context` are optional in the transport schema. The [identity header table](#identity-headers) lists which headers each operation requires.
+The identity headers `Loonfs-Actor`, `Loonfs-Principals`, and `Loonfs-Context` are optional in the transport schema. The [identity header table](#identity-headers) lists which headers each operation requires.
 
 The server rejects a request body that contains an unknown field, at any level of nesting, with 400 `invalid_request`. Most request fields are optional, and several of them are preconditions, so the server can't ignore a field it doesn't recognize. If it did, a misspelled precondition would decode to its default, and the server would perform a different request than the one the caller asked for.
 
@@ -2156,7 +2154,7 @@ The upload routes stage a file's content in an upload session, so that a commit 
 
 An upload is the only operation that spans more than one request. Its upload session is the server-side state that connects the steps, and every other operation completes in one request. (A paged listing or a change-feed read resumes from a cursor that the client stores, and the server stores nothing between pages.) A recursive command is a sequence of these requests that the client drives. For example, the CLI's `put -r` uploads each file and publishes it in its own commit, `cp -r` copies each file in its own commit, and `get -r` lists the tree and reads each file. The server stores no state for the recursive command as a whole.
 
-An upload session belongs to the subject that opened it, or to the service context when a request in the service context opened it. Every upload operation sends principals or the service context (see [Subject and principals](#subject-and-principals)), and a request from any other subject, or from the service context for a subject's session, returns `upload_not_found`. A session that the service context opened records no subject, and a request with principals gets `upload_not_found` for it.
+An upload session belongs to the actor that opened it. Every upload operation sends `Loonfs-Actor`, and the session record stores the actor of the request that opened the session, whether that request sent principals or the service context (see [Identity headers](#identity-headers)). A request from any other actor returns `upload_not_found`. For example, if one actor opens a session, a request from another actor to complete it returns `upload_not_found`, even if both requests send the same principals.
 
 Each upload step has a defined effect:
 

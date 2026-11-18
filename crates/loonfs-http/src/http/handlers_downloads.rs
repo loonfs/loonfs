@@ -1,7 +1,7 @@
 //! Direct-download handlers.
 
 use super::error::ApiResponseError;
-use super::extractors::SubjectHeaders;
+use super::extractors::ContextHeaders;
 use super::handlers_filesystem::reject_snapshot_with_revision;
 use super::handlers_inodes::{InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
@@ -63,12 +63,12 @@ const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/max_staleness_ms", "/s
 )]
 pub(super) async fn create_download(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateDownloadRequest>,
 ) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadResponse>), ApiResponseError> {
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     reject_snapshot_with_revision(
         request.snapshot_id.as_ref(),
         request.revision_no,
@@ -148,14 +148,14 @@ pub(super) async fn create_download(
 )]
 pub(super) async fn create_download_by_inode(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<CreateDownloadByInodeRequest>,
 ) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let request = request.unwrap_or_default();
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
     let at = read_at(
         request.snapshot_id,
@@ -214,14 +214,14 @@ pub(super) async fn create_download_by_inode(
 )]
 pub(super) async fn create_revision_download_by_inode(
     State(state): State<Arc<HttpState>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<CreateRevisionDownloadByInodeRequest>,
 ) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let request = request.unwrap_or_default();
-    let runtime = state.runtime_for(subject);
+    let runtime = state.runtime_for(context);
     let inode_id = path.inode_id;
     let revision_no = path.revision_no;
     let at = read_at(

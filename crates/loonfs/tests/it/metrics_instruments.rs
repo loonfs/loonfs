@@ -132,7 +132,7 @@ fn reads_record_their_head_sources_and_the_cache_stats_record_retained_bytes() {
                 .await
                 .expect("create namespace");
         }
-        let reader = LoonFs::builder_with_store(store(temp_dir.path()))
+        let reader = LoonFs::builder_with_store(store(temp_dir.path()), loonfs::Context::Service)
             .read_only()
             .metrics_recorder(recorder.clone())
             .build()

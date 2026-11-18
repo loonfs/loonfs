@@ -77,7 +77,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_types::UploadSession, CoreError> {
     let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
     namespace_engine(store, namespace_id, context)
-        .begin_upload(&catalog)
+        .begin_upload(&catalog, &loonfs_test_support::test_actor())
         .await
 }
 
@@ -88,7 +88,7 @@ async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
 ) -> Result<DirectPutUploadTarget, CoreError> {
     let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
     namespace_engine(store, namespace_id, context)
-        .begin_direct_put_upload_target(&catalog)
+        .begin_direct_put_upload_target(&catalog, &loonfs_test_support::test_actor())
         .await
 }
 
@@ -101,7 +101,12 @@ async fn upload_content<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_types::UploadSession, CoreError> {
     let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
     namespace_engine(store, namespace_id, context)
-        .upload_content(&catalog, upload_id, bytes)
+        .upload_content(
+            &catalog,
+            upload_id,
+            bytes,
+            &loonfs_test_support::test_actor(),
+        )
         .await
 }
 
@@ -113,7 +118,12 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_types::UploadSession, CoreError> {
     let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
     namespace_engine(store, namespace_id, context)
-        .complete_upload(&catalog, upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(
+            &catalog,
+            upload_id,
+            CompleteUploadBody::ServiceProxied {},
+            &loonfs_test_support::test_actor(),
+        )
         .await
         .map(|completed| completed.response)
 }
@@ -143,7 +153,10 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
         for streamed in [false, true] {
             let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
             let engine = namespace_engine(&store, &namespace_id, &context);
-            let begin = engine.begin_upload(&catalog).await.expect("begin");
+            let begin = engine
+                .begin_upload(&catalog, &loonfs_test_support::test_actor())
+                .await
+                .expect("begin");
             assert_matches!(
                 begin.status,
                 loonfs_types::UploadSessionStatus::Open {
@@ -158,12 +171,22 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
                 ])
                 .boxed();
                 engine
-                    .upload_content_stream(&catalog, &begin.upload_id, body)
+                    .upload_content_stream(
+                        &catalog,
+                        &begin.upload_id,
+                        body,
+                        &loonfs_test_support::test_actor(),
+                    )
                     .await
                     .expect("stream");
             } else {
                 engine
-                    .upload_content(&catalog, &begin.upload_id, b"hello")
+                    .upload_content(
+                        &catalog,
+                        &begin.upload_id,
+                        b"hello",
+                        &loonfs_test_support::test_actor(),
+                    )
                     .await
                     .expect("bytes");
             }
@@ -415,11 +438,16 @@ mod streamed_content {
         .boxed();
         let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
         let engine = namespace_engine(&store, &namespace_id, &context);
-        let uploading = engine.upload_content_stream(&catalog, &begin.upload_id, stream);
+        let actor = loonfs_test_support::test_actor();
+        let uploading = engine.upload_content_stream(&catalog, &begin.upload_id, stream, &actor);
         let collecting = async {
             started_rx.await.expect("upload waiting for its body");
             let aborted = engine
-                .abort_upload(&catalog, &begin.upload_id)
+                .abort_upload(
+                    &catalog,
+                    &begin.upload_id,
+                    &loonfs_test_support::test_actor(),
+                )
                 .await
                 .expect("abort");
             let UploadSessionStatus::Aborted { aborted_at_ms } = aborted.status else {
@@ -490,7 +518,8 @@ mod streamed_content {
         })
         .boxed();
         let engine = namespace_engine(&store, &namespace_id, &context);
-        let staging = engine.stage_owned_stream(&catalog, None, body);
+        let actor = loonfs_test_support::test_actor();
+        let staging = engine.stage_owned_stream(&catalog, &actor, body);
         let collecting = async {
             started_rx.await.expect("owned staging waiting for input");
             let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
@@ -581,7 +610,12 @@ mod streamed_content {
     ) -> Result<loonfs_types::UploadSession, CoreError> {
         let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
         namespace_engine(store, namespace_id, context)
-            .upload_content_stream(&catalog, upload_id, body(bytes))
+            .upload_content_stream(
+                &catalog,
+                upload_id,
+                body(bytes),
+                &loonfs_test_support::test_actor(),
+            )
             .await
     }
 
@@ -825,7 +859,11 @@ mod direct_multipart {
         let payload = PART.repeat(3);
         let catalog = loonfs_core::test_support::load_catalog(store, &namespace_id).await;
         let begin = namespace_engine(store, &namespace_id, context)
-            .begin_direct_multipart_upload_target(&catalog, DirectMultipartUploadOptions::default())
+            .begin_direct_multipart_upload_target(
+                &catalog,
+                &loonfs_test_support::test_actor(),
+                DirectMultipartUploadOptions::default(),
+            )
             .await
             .expect("begin direct multipart");
         let state = session_state(store, &namespace_id, &begin.session.upload_id).await;
@@ -913,7 +951,12 @@ mod direct_multipart {
     ) -> Result<loonfs_types::UploadSession, CoreError> {
         let catalog = loonfs_core::test_support::load_catalog(store, namespace_id).await;
         namespace_engine(store, namespace_id, context)
-            .complete_upload(&catalog, upload_id, request.clone())
+            .complete_upload(
+                &catalog,
+                upload_id,
+                request.clone(),
+                &loonfs_test_support::test_actor(),
+            )
             .await
             .map(|completed| completed.response)
     }
@@ -1386,6 +1429,7 @@ mod direct_multipart {
         let chosen = namespace_engine(&store, &namespace_id, &context)
             .begin_direct_multipart_upload_target(
                 &catalog,
+                &loonfs_test_support::test_actor(),
                 DirectMultipartUploadOptions {
                     part_size_bytes: Some(16 * 1024 * 1024),
                 },
@@ -1398,6 +1442,7 @@ mod direct_multipart {
             let error = namespace_engine(&store, &namespace_id, &context)
                 .begin_direct_multipart_upload_target(
                     &catalog,
+                    &loonfs_test_support::test_actor(),
                     DirectMultipartUploadOptions {
                         part_size_bytes: Some(out_of_bounds),
                     },

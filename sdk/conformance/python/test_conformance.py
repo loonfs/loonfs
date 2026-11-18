@@ -451,7 +451,7 @@ class ProxyACL:
     namespace_id: str
     administrator: str
     member: str
-    member_subject_id: str
+    member_actor_id: str
     browser_principals: str
     commit_id: str
     directory: str
@@ -1953,8 +1953,7 @@ def _proxy_acl(request: ProxyRequest, expected: ProxyExpected) -> None:
         _scope: dict[str, Any], _context: ProxyRouteContext
     ) -> ProxyAuthorization:
         return ProxyAuthorization(
-            actor_id=request.actor_id,
-            subject_id=acl.member_subject_id,
+            actor_id=acl.member_actor_id,
             principals=[acl.member],
         )
 

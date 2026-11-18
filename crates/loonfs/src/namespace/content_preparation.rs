@@ -7,15 +7,16 @@ use crate::ByteStream;
 use crate::Result;
 use crate::{Namespace, Writable};
 use futures::StreamExt;
-use loonfs_types::u64_from_usize;
+use loonfs_types::{u64_from_usize, ActorId};
 
 impl Namespace<Writable> {
     /// Prepares content for publication.
     ///
     /// Content at or under the configured inline threshold needs no store
-    /// request and has no expiry. Larger content writes an upload session and
-    /// object. Its proof expires at the completed upload's receipt horizon.
-    pub async fn prepare_content(&self, bytes: &[u8]) -> Result<PreparedContent> {
+    /// request and has no expiry. Larger content writes an upload session,
+    /// which belongs to `actor`, and an object. Its proof expires at the
+    /// completed upload's receipt horizon.
+    pub async fn prepare_content(&self, bytes: &[u8], actor: &ActorId) -> Result<PreparedContent> {
         trace::in_operation(
             operation_span!(
                 self.core,
@@ -23,12 +24,16 @@ impl Namespace<Writable> {
                 self.namespace_id,
                 payload_class = trace::payload_class(u64_from_usize(bytes.len()))
             ),
-            self.prepare_content_inner(bytes),
+            self.prepare_content_inner(bytes, actor),
         )
         .await
     }
 
-    pub(super) async fn prepare_content_inner(&self, bytes: &[u8]) -> Result<PreparedContent> {
+    pub(super) async fn prepare_content_inner(
+        &self,
+        bytes: &[u8],
+        actor: &ActorId,
+    ) -> Result<PreparedContent> {
         if self
             .core
             .config()
@@ -47,17 +52,17 @@ impl Namespace<Writable> {
             .await?;
         Ok(self
             .engine()
-            .stage_owned_bytes(
-                &catalog,
-                self.core.subject().map(|subject| &subject.subject_id),
-                bytes,
-            )
+            .stage_owned_bytes(&catalog, actor, bytes)
             .await?)
     }
 
     /// Prepares a stream, buffering at most the inline threshold plus one byte
     /// before choosing inline content or forwarding the stream to storage.
-    pub async fn prepare_content_stream(&self, body: ByteStream) -> Result<PreparedContent> {
+    pub async fn prepare_content_stream(
+        &self,
+        body: ByteStream,
+        actor: &ActorId,
+    ) -> Result<PreparedContent> {
         trace::in_operation(
             operation_span!(
                 self.core,
@@ -65,7 +70,7 @@ impl Namespace<Writable> {
                 self.namespace_id,
                 payload_class = "streamed"
             ),
-            self.prepare_content_stream_inner(body),
+            self.prepare_content_stream_inner(body, actor),
         )
         .await
     }
@@ -73,6 +78,7 @@ impl Namespace<Writable> {
     pub(super) async fn prepare_content_stream_inner(
         &self,
         mut body: ByteStream,
+        actor: &ActorId,
     ) -> Result<PreparedContent> {
         if let Some(threshold) = self
             .core
@@ -109,11 +115,7 @@ impl Namespace<Writable> {
             .await?;
         Ok(self
             .engine()
-            .stage_owned_stream(
-                &catalog,
-                self.core.subject().map(|subject| &subject.subject_id),
-                body,
-            )
+            .stage_owned_stream(&catalog, actor, body)
             .await?)
     }
 

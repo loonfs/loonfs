@@ -7,7 +7,6 @@ use loonfs::PutFileOptions;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     AccessGrants, AccessRight, ErrorCode, ErrorResponse, PrincipalId, PrincipalSet, Subject,
-    SubjectId,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +15,6 @@ use tower::ServiceExt as _;
 
 fn subject(principal: &str) -> Subject {
     Subject {
-        subject_id: SubjectId::parse(principal).expect("subject"),
         principals: PrincipalSet::new(BTreeSet::from([
             PrincipalId::parse(principal).expect("principal")
         ]))
@@ -38,7 +36,6 @@ fn request(method: &str, uri: &str, body: Option<String>) -> Request<Body> {
         .uri(uri)
         .header("authorization", "Bearer test-token")
         .header("Loonfs-Actor", "hosted-test")
-        .header("Loonfs-Subject", "stranger")
         .header("Loonfs-Principals", "stranger");
     if body.is_some() {
         request = request.header("content-type", "application/json");
@@ -61,7 +58,7 @@ async fn hosted_subject_cannot_commit_a_foreign_bare_content_reference() {
     let source_namespace = state
         .runtime
         .read_only()
-        .with_subject(subject("administrator"))
+        .with_context(subject("administrator").into())
         .namespace(&source);
     let destination = namespace_id("destination");
     let destination_namespace = state.runtime.namespace(&destination);
@@ -93,7 +90,7 @@ async fn hosted_subject_cannot_commit_a_foreign_bare_content_reference() {
     .await;
     let options = PutFileOptions::default();
     namespace
-        .with_subject(subject("administrator"))
+        .with_context(subject("administrator").into())
         .put_file_with_options(
             "/private",
             b"private bytes",

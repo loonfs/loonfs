@@ -32,12 +32,12 @@ async fn manual_deployment(
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let writer = LoonFs::builder_with_store(Arc::clone(&store))
+    let writer = LoonFs::builder_with_store(Arc::clone(&store), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("manual-writer"))
         .build()
         .await
         .expect("build the writer");
-    let standalone = LoonFs::builder_with_store(Arc::clone(&store))
+    let standalone = LoonFs::builder_with_store(Arc::clone(&store), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id(
             "standalone-maintenance",
         ))
@@ -242,7 +242,7 @@ async fn the_compaction_loop_compacts_a_tier_of_deltas_without_reading_a_larger_
     let store = Arc::new(RecordingStore::metadata_segments(
         LocalFsStore::new(directory.path()).expect("store"),
     ));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
@@ -325,7 +325,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         )),
     ));
     let shared: SharedObjectStore = store.clone();
-    let writer = LoonFs::builder_with_store(shared.clone())
+    let writer = LoonFs::builder_with_store(shared.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
@@ -334,7 +334,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .create_namespace(&namespace, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
-    let maintenance_runtime = LoonFs::builder_with_store(shared.clone())
+    let maintenance_runtime = LoonFs::builder_with_store(shared.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .build()
         .await
@@ -379,7 +379,7 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         current_manifest_payload(store.as_ref(), &namespace).await,
         expected
     );
-    let other = LoonFs::builder_with_store(shared)
+    let other = LoonFs::builder_with_store(shared, crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
@@ -485,7 +485,7 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
             races_run: 0.into(),
         },
     ));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
@@ -549,15 +549,18 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
     );
 
     store.interceptor().races_left.store(0, SeqCst);
-    LoonFs::builder_with_store(Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")))
-        .writer_id(loonfs_test_support::ids::writer_id("other"))
-        .build()
-        .await
-        .expect("another process")
-        .maintenance(loonfs_test_support::ids::writer_id("other"))
-        .compactor_epoch(&namespace, None)
-        .await
-        .expect("another process claims the namespace");
+    LoonFs::builder_with_store(
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")),
+        crate::Context::Service,
+    )
+    .writer_id(loonfs_test_support::ids::writer_id("other"))
+    .build()
+    .await
+    .expect("another process")
+    .maintenance(loonfs_test_support::ids::writer_id("other"))
+    .compactor_epoch(&namespace, None)
+    .await
+    .expect("another process claims the namespace");
     let fenced = current_manifest_payload(store.as_ref(), &namespace).await;
     assert_eq!(
         maintenance
@@ -623,7 +626,7 @@ async fn a_compaction_without_a_session_finds_the_newest_manifest_once() {
         write_and_fold(&writer, &folds, &namespace, &format!("/file-{index}")).await;
     }
     writer.shutdown().await.expect("shut down the writer");
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let maintenance = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .build()
         .await
@@ -745,7 +748,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     let actor = loonfs_test_support::test_actor();
     let [idle, claimed, retired, missing] =
         ["idle", "claimed", "retired", "missing"].map(namespace_id);
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
@@ -773,7 +776,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     // A week ahead, a collection finds everything the test wrote past
     // every grace window.
     let week_ahead_ms = loonfs_core::time::SystemWallClock.now_ms() + 7 * 24 * 60 * 60 * 1000;
-    let maintenance = LoonFs::builder_with_store(store.clone())
+    let maintenance = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .wall_clock(Arc::new(ManualClock::new(week_ahead_ms)))
         .monotonic_timer(Arc::new(ManualClock::new(0)))
@@ -878,7 +881,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         }
     }
 
-    let other = LoonFs::builder_with_store(store.clone())
+    let other = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()
         .await
@@ -913,7 +916,7 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
     ));
     let actor = loonfs_test_support::test_actor();
     let namespace = namespace_id("idle");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
@@ -1048,7 +1051,7 @@ async fn an_advance_past_the_manifests_floor_finds_a_floor_object_in_the_tail_wh
         ));
         let actor = loonfs_test_support::test_actor();
         let namespace = namespace_id("tail");
-        let writer = LoonFs::builder_with_store(store.clone())
+        let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("writer"))
             .build()
             .await
@@ -1130,7 +1133,7 @@ async fn a_repeated_collection_of_an_emptied_pool_lists_once_and_returns_pool_no
         KeyPredicate::new(|key| key.starts_with("pools/") && key.contains("/content/")),
     ));
     let namespace_id = namespace_id("retired");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("retirement-test"))
         .build()
         .await
@@ -1216,7 +1219,7 @@ async fn write_a_large_batch_and_fold<S: ObjectStore + ?Sized>(
         for index in commit * 4096..(commit + 1) * 4096 {
             let path = format!("/large/f-{index:05}.txt");
             let content = namespace
-                .prepare_content(path.as_bytes())
+                .prepare_content(path.as_bytes(), &loonfs_test_support::test_actor())
                 .await
                 .expect("prepare the content");
             operations.push(FilesystemOperation::PutFile {
@@ -1274,7 +1277,7 @@ async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .run_policy(loonfs_core::test_support::one_delta_run_policy())
         .build()
@@ -1363,7 +1366,7 @@ async fn a_restarted_runtime_reads_a_folded_file_from_the_ssd_tier() {
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(store_directory.path()).expect("store"));
     let cache = ssd_cache().await;
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .metadata_cache(cache.clone())
         .build()
@@ -1386,7 +1389,7 @@ async fn a_restarted_runtime_reads_a_folded_file_from_the_ssd_tier() {
         KeyPredicate::any(),
     ));
     let cache = ssd_cache().await;
-    let reader = LoonFs::builder_with_store(recording.clone())
+    let reader = LoonFs::builder_with_store(recording.clone(), crate::Context::Service)
         .metadata_cache(cache.clone())
         .read_only()
         .build()
@@ -1428,7 +1431,7 @@ async fn a_read_after_an_extension_publication_sends_no_request() {
     ));
     let actor = loonfs_test_support::test_actor();
     let namespace = namespace_id("extension");
-    let writer = LoonFs::builder_with_store(store.clone())
+    let writer = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
         .build()
         .await
@@ -1446,7 +1449,7 @@ async fn a_read_after_an_extension_publication_sends_no_request() {
     writer.shutdown().await.expect("shut down the writer");
     // The runtime's timer doesn't move, so its cached head stays within an
     // eventual read's maximum staleness.
-    let runtime = LoonFs::builder_with_store(store.clone())
+    let runtime = LoonFs::builder_with_store(store.clone(), crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
         .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()

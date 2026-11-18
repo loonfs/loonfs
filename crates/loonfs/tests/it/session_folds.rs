@@ -65,7 +65,7 @@ async fn family() -> Family {
         OperationSelector::Put,
     ));
     let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
-    let runtime = LoonFs::builder_with_store(store.clone())
+    let runtime = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
         .writer_id(writer_id("session-folds"))
         .session_fold_at_wal_objects(FOLD_AT_WAL_OBJECTS)
         .config(RuntimeConfig {

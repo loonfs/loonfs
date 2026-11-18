@@ -7,7 +7,7 @@ use crate::{Client, ClientError, PayloadStream, Result};
 use bytes::Bytes;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt as _;
-use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, NamespaceId, UploadId};
+use loonfs_types::{ActorId, Checksum, ChecksumAlgorithm, ChecksumDigest, NamespaceId, UploadId};
 use loonfs_types::{
     CompleteUploadBody, CompletedUploadPart, ObjectTransfer, SignedUploadPart, UploadContentClaim,
     UploadMode, UploadPartChecksumClaim, UploadSessionStatus,
@@ -121,6 +121,7 @@ impl Client {
     pub(super) async fn stage_via_multipart(
         &self,
         namespace_id: &NamespaceId,
+        actor: &ActorId,
         payload: MultipartPayload<'_>,
         continuity: UploadContinuity<'_>,
     ) -> Result<PreparedContent> {
@@ -134,7 +135,7 @@ impl Client {
             ),
             None => {
                 let begin = self
-                    .create_direct_multipart_upload_target(namespace_id)
+                    .create_direct_multipart_upload_target(namespace_id, actor)
                     .await?;
                 if begin.mode != UploadMode::DirectMultipart {
                     return Err(negotiated_a_different_upload_mode());
@@ -162,6 +163,7 @@ impl Client {
             let uploaded = self
                 .upload_every_part(
                     namespace_id,
+                    actor,
                     &upload_id,
                     payload,
                     part_size_bytes,
@@ -172,12 +174,13 @@ impl Client {
             if uploaded.parts.is_empty() {
                 // Providers cannot assemble zero parts, so use the proxied empty
                 // upload path instead.
-                let _ = self.abort_upload(namespace_id, &upload_id).await;
-                return self.stage_bytes_via_server(namespace_id, &[]).await;
+                let _ = self.abort_upload(namespace_id, actor, &upload_id).await;
+                return self.stage_bytes_via_server(namespace_id, actor, &[]).await;
             }
             let response = self
                 .complete_upload(
                     namespace_id,
+                    actor,
                     &upload_id,
                     &CompleteUploadBody::DirectMultipart {
                         content: UploadContentClaim {
@@ -194,7 +197,8 @@ impl Client {
         if continuity.journal.is_some() {
             return staged;
         }
-        self.abort_if_failed(namespace_id, &upload_id, staged).await
+        self.abort_if_failed(namespace_id, actor, &upload_id, staged)
+            .await
     }
 
     /// Cuts the payload into parts and uploads them, keeping at most
@@ -205,9 +209,14 @@ impl Client {
     /// in-flight part owns one buffer, which bounds memory use. A resumed
     /// upload still reads every byte to compute the final checksum, but it
     /// skips network transfer for completed parts.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each request names the session's namespace, actor, and upload ID, and the parts need the session's geometry"
+    )]
     async fn upload_every_part(
         &self,
         namespace_id: &NamespaceId,
+        actor: &ActorId,
         upload_id: &UploadId,
         payload: MultipartPayload<'_>,
         part_size_bytes: u64,
@@ -257,8 +266,17 @@ impl Client {
                 });
             }
             if !unsigned.is_empty() {
-                for (part, access) in self.sign_parts(namespace_id, upload_id, unsigned).await? {
-                    in_flight.push(self.upload_one_part(namespace_id, upload_id, part, access));
+                for (part, access) in self
+                    .sign_parts(namespace_id, actor, upload_id, unsigned)
+                    .await?
+                {
+                    in_flight.push(self.upload_one_part(
+                        namespace_id,
+                        actor,
+                        upload_id,
+                        part,
+                        access,
+                    ));
                 }
             }
             let Some(uploaded) = in_flight.next().await else {
@@ -286,12 +304,13 @@ impl Client {
     async fn sign_parts(
         &self,
         namespace_id: &NamespaceId,
+        actor: &ActorId,
         upload_id: &UploadId,
         unsigned: Vec<PendingPart>,
     ) -> Result<Vec<(PendingPart, ObjectTransfer)>> {
         let claims = unsigned.iter().map(|part| part.claim.clone()).collect();
         let signed = self
-            .sign_upload_parts(namespace_id, upload_id, claims)
+            .sign_upload_parts(namespace_id, actor, upload_id, claims)
             .await?;
         unsigned
             .into_iter()
@@ -313,6 +332,7 @@ impl Client {
     async fn upload_one_part(
         &self,
         namespace_id: &NamespaceId,
+        actor: &ActorId,
         upload_id: &UploadId,
         part: PendingPart,
         mut access: ObjectTransfer,
@@ -337,7 +357,7 @@ impl Client {
                         "provider refused the part's signature; refreshing authorization before retry"
                     );
                     let signed = self
-                        .sign_upload_parts(namespace_id, upload_id, vec![part.claim.clone()])
+                        .sign_upload_parts(namespace_id, actor, upload_id, vec![part.claim.clone()])
                         .await?;
                     access = signed_access(&signed.parts, part_number)?;
                 }

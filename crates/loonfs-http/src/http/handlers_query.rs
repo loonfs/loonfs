@@ -1,6 +1,6 @@
 //! The `query/v0` API group: derived-index reads.
 
-use super::extractors::SubjectHeaders;
+use super::extractors::ContextHeaders;
 use super::query_params::{effective_page_limit, live_consistency, required_query_param};
 use super::{AppQuery, HttpState, NamespaceIdPath, NoBody, NoQuery};
 use crate::http::error::ApiResponseError;
@@ -15,7 +15,7 @@ use loonfs_types::options::ReadConsistency;
 use loonfs_types::ErrorResponse;
 use loonfs_types::GrepIndex;
 use loonfs_types::{
-    AbsolutePath, GrepRequest, GrepResponse, GrepScope, InodeId, NamespaceId, PageRequest,
+    AbsolutePath, Context, GrepRequest, GrepResponse, GrepScope, InodeId, NamespaceId, PageRequest,
     FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
 };
 use std::sync::Arc;
@@ -110,7 +110,7 @@ pub(super) struct GrepQuery {
 pub(super) async fn grep(
     State(state): State<Arc<HttpState>>,
     Extension(service): Extension<Arc<GrepService>>,
-    SubjectHeaders(subject): SubjectHeaders,
+    ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(mut query): AppQuery<GrepQuery>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
@@ -124,7 +124,7 @@ pub(super) async fn grep(
     // through the same runtime the core API groups serve from.
     let store = state.runtime.object_store();
     let reads = NamespaceReads::new(state.runtime.read_only(), &namespace_id);
-    let reads = match subject {
+    let reads = match context.subject() {
         Some(subject) => reads.with_subject(subject),
         None => reads,
     };
@@ -213,7 +213,7 @@ pub(super) async fn enable_grep_index(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    let _handle = state.open_writer(&namespace_id, None).await?;
+    let _handle = state.open_writer(&namespace_id, Context::Service).await?;
     let outcome = worker.enable(&namespace_id).await.map_err(map_grep_error)?;
     state.namespaces.mark_index_dirty(&namespace_id);
     match outcome {
@@ -307,7 +307,7 @@ pub(super) async fn disable_grep_index(
     AppQuery(_): AppQuery<NoQuery>,
     NoBody: NoBody,
 ) -> Result<Json<GrepIndex>, ApiResponseError> {
-    let _handle = state.open_writer(&namespace_id, None).await?;
+    let _handle = state.open_writer(&namespace_id, Context::Service).await?;
     let outcome = worker
         .disable(&namespace_id)
         .await

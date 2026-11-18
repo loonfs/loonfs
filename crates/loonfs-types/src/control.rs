@@ -5,8 +5,8 @@
 use crate::envelope::EnvelopeCodecError;
 use crate::WriterId;
 use crate::{
-    ChecksumAlgorithm, CommitId, CommitSeq, ContentId, ContentRef, ManifestNo, NamespaceId,
-    PayloadChecksum, PoolId, SnapshotId, SubjectId, UploadId,
+    ActorId, ChecksumAlgorithm, CommitId, CommitSeq, ContentId, ContentRef, ManifestNo,
+    NamespaceId, PayloadChecksum, PoolId, SnapshotId, UploadId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -389,10 +389,9 @@ pub struct UploadSessionPayload {
     /// The identity exists before any byte is read, so the final object key
     /// is known up front and belongs to exactly this session.
     pub content_id: ContentId,
-    /// The subject that opened the session, absent for a session opened in
-    /// the service context.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subject_id: Option<SubjectId>,
+    /// The actor that opened the session, the only actor whose requests can
+    /// use it.
+    pub actor_id: ActorId,
     /// How the bytes reach object storage, settled when the session opened.
     pub mode: UploadSessionMode,
     /// Unix-millisecond instant at which an open session stops accepting

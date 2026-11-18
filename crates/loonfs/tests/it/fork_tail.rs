@@ -295,7 +295,7 @@ async fn a_fork_of_a_user_snapshot_keeps_its_fork_point_snapshot_on_manifest_1()
 async fn a_fork_folds_a_source_whose_tail_has_a_commit_older_than_the_max_age() {
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(ManualClock::at_system_time());
-    let runtime = LoonFs::builder_with_store(store(temp_dir.path()))
+    let runtime = LoonFs::builder_with_store(store(temp_dir.path()), loonfs::Context::Service)
         .writer_id(writer_id("fork-age"))
         .wall_clock(clock.clone())
         .build()
@@ -370,7 +370,7 @@ async fn a_fork_from_a_stale_position_checks_the_tail_that_it_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let clock = Arc::new(ManualClock::at_system_time());
     let runtime = |writer| {
-        LoonFs::builder_with_store(store(temp_dir.path()))
+        LoonFs::builder_with_store(store(temp_dir.path()), loonfs::Context::Service)
             .writer_id(writer_id(writer))
             .wall_clock(clock.clone())
             .build()

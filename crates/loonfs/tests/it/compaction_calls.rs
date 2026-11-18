@@ -40,7 +40,7 @@ async fn backlog(name: &str) -> Backlog {
         OperationSelector::Read,
     ));
     let recording = Arc::new(RecordingStore::new(store.clone(), KeyPredicate::any()));
-    let runtime = LoonFs::builder_with_store(recording.clone())
+    let runtime = LoonFs::builder_with_store(recording.clone(), loonfs::Context::Service)
         .writer_id(writer_id("compaction-calls"))
         .session_fold_at_wal_objects(FOLD_AT_WAL_OBJECTS)
         .config(RuntimeConfig {
