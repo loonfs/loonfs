@@ -215,7 +215,7 @@ mod cursor_tests {
         let token = |extra: Option<(&str, serde_json::Value)>| {
             let mut cursor = serde_json::json!({
                 "namespace_id": "demo",
-                "last_key": "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json",
+                "last_key": "namespaces/demo/snapshots/snp_0000000000000g000000000001.json",
             });
             if let Some((name, value)) = extra {
                 cursor[name] = value;
@@ -234,7 +234,7 @@ mod cursor_tests {
             decode_cursor::<SnapshotRecordPageCursor>(&token(None)).expect("decode cursor");
         assert_eq!(
             cursor.last_key,
-            "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json"
+            "namespaces/demo/snapshots/snp_0000000000000g000000000001.json"
         );
         decode_cursor::<SnapshotRecordPageCursor>(&token(Some((
             "future_field",
@@ -253,9 +253,7 @@ mod cursor_tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let snapshot = SnapshotRecordPageCursor {
             namespace_id: namespace_id.clone(),
-            last_key:
-                "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json"
-                    .to_owned(),
+            last_key: "namespaces/demo/snapshots/snp_0000000000000g000000000001.json".to_owned(),
         };
         let cursors = [
             (

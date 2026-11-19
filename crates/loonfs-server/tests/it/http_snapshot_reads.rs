@@ -725,7 +725,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
     .expect("a snapshot without an expiry is readable");
     assert_eq!(entry.path.as_str(), "/keep.txt");
 
-    let unknown = "snp_00000000000000000001-0000000000ffffffffffffffff";
+    let unknown = "snp_0000000000000zffffffffffff";
     let (status, error) = get_json::<PathEntry>(&stat_url(
         &harness.server_url,
         namespace.as_str(),

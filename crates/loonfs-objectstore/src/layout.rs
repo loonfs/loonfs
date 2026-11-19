@@ -473,8 +473,7 @@ mod tests {
         let manifest_object_id = ManifestNo(400);
         let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000001")
             .expect("metadata segment id");
-        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
-            .expect("snapshot id");
+        let snapshot_id = SnapshotId::parse("snp_0000000000000g000000000001").expect("snapshot id");
         let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
         let content_id = ContentId::parse("con_5bsqqg28t5cy4tqkff04hmasw9").expect("content id");
         let index_segment_id =

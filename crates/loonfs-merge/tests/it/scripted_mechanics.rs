@@ -11,9 +11,10 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::test_actor;
 use loonfs_types::options::MergeForkOptions;
 use loonfs_types::{
-    ActorId, Commit, CommitSeq, DeleteNamespaceResponse, ErrorCode, ErrorDetails, ErrorResponse,
-    ListSnapshotRecordsResponse, Merge, MergeConflict, NamespaceId, NamespaceMetadata,
-    NextMergeRangeOutcome, NextMergeRangeResponse, Pager, ReplayForkResponse,
+    u64_from_usize, ActorId, Commit, CommitSeq, DeleteNamespaceResponse, ErrorCode, ErrorDetails,
+    ErrorResponse, ListSnapshotRecordsResponse, ManifestNo, Merge, MergeConflict, NamespaceId,
+    NamespaceMetadata, NextMergeRangeOutcome, NextMergeRangeResponse, Pager, ReplayForkResponse,
+    SnapshotId,
 };
 use serde_json::json;
 use std::collections::VecDeque;
@@ -302,7 +303,7 @@ impl Mechanics for ScriptedMechanics {
             "namespace_id": namespace_id,
             "snapshots": targets.iter().enumerate().map(|(index, target)| json!({
                 "namespace_id": namespace_id,
-                "snapshot_id": format!("snp_{:020}-{index:026x}", index + 1),
+                "snapshot_id": SnapshotId::generate(ManifestNo(u64_from_usize(index + 1))),
                 "owner": {"kind": "fork", "target_namespace_id": target},
                 "created_at_ms": 0,
                 "captured_seq": 10,
@@ -438,7 +439,7 @@ fn namespace(
     let mut basis = json!({
         "source_namespace_id": source_namespace_id,
         "fork_point_seq": 10,
-        "fork_point_snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
+        "fork_point_snapshot_id": "snp_0000000000000g000000000001",
     });
     if let Some(rebased_from) = rebased_from {
         basis["rebased_from"] =

@@ -553,8 +553,7 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
         content_ref: path_grant.content_ref.clone(),
         ranges: path_grant.ranges.clone(),
     };
-    let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
-        .expect("snapshot ID");
+    let snapshot_id = SnapshotId::parse("snp_0000000000000g000000000002").expect("snapshot ID");
     let cases = [
         (ReadAt::Live(None), serde_json::json!({})),
         (
