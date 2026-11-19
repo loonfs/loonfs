@@ -23,6 +23,7 @@ use std::sync::Arc;
         post,
         operation_id = "create_snapshot",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("create")),
@@ -68,6 +69,7 @@ pub(super) async fn create_snapshot(
         get,
         operation_id = "list_snapshots",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("list")),
@@ -115,6 +117,7 @@ pub(super) async fn list_snapshots(
         post,
         operation_id = "extend_snapshot",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("extend")),
@@ -160,6 +163,7 @@ pub(super) async fn extend_snapshot(
         get,
         operation_id = "get_snapshot",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
@@ -205,6 +209,7 @@ pub(super) async fn get_snapshot(
         delete,
         operation_id = "delete_snapshot",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("delete")),
