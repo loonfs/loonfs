@@ -353,6 +353,7 @@ fn profile_field_error(profile_name: &str, error: &ConfigFieldError) -> CliError
 const SECRET_CONFIG_KEYS: &[&str] = &[
     "access_key",
     "access_key_id",
+    "account_key",
     "auth_token",
     "secret_access_key",
     "session_token",
@@ -967,6 +968,19 @@ kind = "static"
 access_key_id = "degraded-access-key-id"
 secret_access_key = "degraded-secret-access-key"
 session_token = "degraded-session-token"
+access_key = "degraded-access-key"
+
+[profiles.blob]
+mode = "embedded"
+
+[profiles.blob.store]
+kind = "azure_blob"
+account_name = "account"
+container = "documents"
+
+[profiles.blob.store.credentials]
+kind = "account_key"
+account_key = "degraded-account-key"
 
 [profiles.ok]
 mode = "embedded"
@@ -993,6 +1007,8 @@ root = "/tmp/store"
             "{redacted}"
         );
         assert!(!redacted.contains("degraded-session-token"), "{redacted}");
+        assert!(!redacted.contains("degraded-access-key"), "{redacted}");
+        assert!(!redacted.contains("degraded-account-key"), "{redacted}");
         assert!(redacted.contains("<redacted>"), "{redacted}");
         assert!(redacted.contains("unknown_knob"), "{redacted}");
 
