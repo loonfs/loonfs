@@ -801,9 +801,12 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
 }
 
 /// The content key a streamed-write exercise writes to and cleans up.
+/// The streamed-write test's key, in a pool of its own: the test checks that
+/// the key's content prefix is empty afterwards, and the other live tests
+/// write to pool 1 at the same time.
 fn streamed_write_key() -> String {
     content_blob(
-        &loonfs_test_support::ids::numbered_pool_id(1),
+        &loonfs_test_support::ids::numbered_pool_id(2),
         &ContentId::parse("con_2q4fn9t72b93ra3mq3yjjvdhyr").expect("valid content id"),
     )
 }
