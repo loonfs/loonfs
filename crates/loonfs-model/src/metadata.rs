@@ -427,7 +427,12 @@ mod tests {
                     child_created_at_ms: 4_200,
                     revision: Some(loonfs_types::format::manifest::RevisionSummary {
                         revision_no: RevisionNo(1),
-                        size_bytes: 0,
+                        content_ref: loonfs_types::ContentRef::blob_v1(
+                            loonfs_types::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
+                                .expect("valid content id"),
+                            b"",
+                            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+                        ),
                         revision_committed_by: loonfs_types::ActorId::loonfs(),
                         revision_committed_at_ms: 4_200,
                     }),

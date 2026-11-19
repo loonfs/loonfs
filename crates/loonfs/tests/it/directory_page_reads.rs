@@ -1,9 +1,7 @@
 //! Store reads and entry metadata for a directory page across folded batches.
 
 use loonfs::test_support::writer;
-use loonfs::{
-    DestinationBehavior, LoonFs, PathEntryKind, PutFileOptions, SharedObjectStore, StatOptions,
-};
+use loonfs::{DestinationBehavior, LoonFs, PutFileOptions, SharedObjectStore, StatOptions};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
@@ -162,12 +160,11 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
         assert_eq!(entry.created_by, stat.created_by);
         assert_eq!(entry.created_at_ms, stat.created_at_ms);
         assert_eq!(entry.binding_version, stat.binding_version);
-        let mut stat_kind = stat.kind.clone();
-        let PathEntryKind::File { content_ref, .. } = &mut stat_kind else {
-            panic!("expected a file, got {:?}", stat.kind);
-        };
-        assert!(content_ref.take().is_some(), "a stat reports the reference");
-        assert_eq!(entry.kind, stat_kind, "a listing reports no reference");
+        assert!(
+            stat.content_ref().is_some(),
+            "a stat of a file reports its reference"
+        );
+        assert_eq!(entry.kind, stat.kind);
     }
 }
 

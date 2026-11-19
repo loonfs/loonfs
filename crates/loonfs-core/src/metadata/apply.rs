@@ -191,7 +191,7 @@ impl MetadataState {
                         display_name: display_name.clone(),
                         revision: Some(RevisionSummary {
                             revision_no: *revision_no,
-                            size_bytes: content_ref.size_bytes,
+                            content_ref: content_ref.clone(),
                             revision_committed_by: actor.clone(),
                             revision_committed_at_ms: committed_at_ms,
                         }),

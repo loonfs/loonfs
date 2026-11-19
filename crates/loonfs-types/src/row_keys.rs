@@ -653,7 +653,12 @@ mod tests {
                 display_name: crate::DisplayName::parse(display_name).expect("valid display name"),
                 revision: Some(crate::metadata_rows::RevisionSummary {
                     revision_no: crate::RevisionNo(1),
-                    size_bytes: 5,
+                    content_ref: crate::ContentRef::blob_v1(
+                        crate::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff")
+                            .expect("valid content id"),
+                        b"hello",
+                        crate::ChecksumAlgorithm::Crc64nvme,
+                    ),
                     revision_committed_by: crate::ActorId::loonfs(),
                     revision_committed_at_ms: 4_200,
                 }),

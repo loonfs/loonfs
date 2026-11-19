@@ -1359,7 +1359,7 @@ async fn history_needs_the_history_right() {
 
 #[tokio::test]
 async fn snapshot_reads_authorize_the_historical_inode_at_head() {
-    let (_temp_dir, store, namespace_id, mutation, _) = read_fixture().await;
+    let (_temp_dir, store, namespace_id, mutation, content) = read_fixture().await;
     let snapshot = read_context(&store, &namespace_id).await;
     seed(
         &store,
@@ -1402,6 +1402,15 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
         .await
         .expect("historical names");
     assert_eq!(listing.items.len(), 3);
+    for (path, content_ref) in [("/team/file", None), ("/team/kept", Some(&content))] {
+        let entry = listing
+            .items
+            .iter()
+            .find(|entry| entry.path.as_str() == path)
+            .expect("listed file");
+        assert_eq!(entry.size_bytes(), Some(content.size_bytes), "{path}");
+        assert_eq!(entry.content_ref(), content_ref, "{path}");
+    }
 }
 
 async fn trash_page(

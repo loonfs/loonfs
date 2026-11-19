@@ -320,9 +320,9 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     for entry in entries {
         assert_eq!(entry.inode_kind(), EntryInodeKind::File);
         assert_eq!(entry.size_bytes(), Some("file-0-bytes".len() as u64));
-        assert!(
-            entry.content_ref().is_none(),
-            "a listing reports no reference"
+        assert_eq!(
+            entry.content_ref().map(|content| content.size_bytes),
+            entry.size_bytes()
         );
     }
     assert_eq!(store.count(OperationSelector::Read), 0);
@@ -795,9 +795,9 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         assert_eq!(entry.inode_kind(), EntryInodeKind::File);
         assert_eq!(entry.revision_no(), Some(RevisionNo(1)));
         assert_eq!(entry.size_bytes(), Some(size));
-        assert!(
-            entry.content_ref().is_none(),
-            "a listing reports no reference"
+        assert_eq!(
+            entry.content_ref().map(|content| content.size_bytes),
+            entry.size_bytes()
         );
     }
 }
@@ -2437,9 +2437,9 @@ async fn move_by_inode_precondition_matrix_checks_the_destination_state() {
     .expect("matching inode and revision preconditions allow an inode move");
 }
 
-/// Requires every file entry of a listing of `directory` to report what a
-/// stat of the entry's path reports, apart from the content reference, which
-/// only the stat reports, and returns the listing.
+/// Requires every entry of a listing of `directory` to report what a stat of
+/// the entry's path reports, the content reference included, and returns the
+/// listing.
 async fn listing_matching_stats<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -2449,12 +2449,9 @@ async fn listing_matching_stats<S: ObjectStore + ?Sized>(
         .await
         .expect("list directory");
     for entry in &entries {
-        let mut stat = resolve_path(store, namespace_id, entry.path.as_str())
+        let stat = resolve_path(store, namespace_id, entry.path.as_str())
             .await
             .expect("stat listed entry");
-        if let loonfs_types::PathEntryKind::File { content_ref, .. } = &mut stat.kind {
-            assert!(content_ref.take().is_some(), "a stat reports the reference");
-        }
         assert_eq!(entry.kind, stat.kind, "{}", entry.path);
         assert_eq!(
             entry.binding_version, stat.binding_version,
@@ -2538,7 +2535,7 @@ async fn listed_revisions_follow_moves_writes_and_restores_across_a_fold() {
             .collect::<Vec<_>>(),
         [("/b/final.txt", Some(RevisionNo(3)), Some(6))]
     );
-    assert!(unfolded[0].content_ref().is_none());
+    assert!(unfolded[0].content_ref().is_some());
 
     create_snapshot(&store, &namespace_id, &context)
         .await

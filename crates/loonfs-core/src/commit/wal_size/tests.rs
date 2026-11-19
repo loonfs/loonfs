@@ -96,7 +96,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 child_created_at_ms: 0,
                 revision: Some(RevisionSummary {
                     revision_no: RevisionNo(MAX_PUBLIC_INTEGER - 1),
-                    size_bytes: content_ref.size_bytes,
+                    content_ref: content_ref.clone(),
                     revision_committed_by: actor.clone(),
                     revision_committed_at_ms: 0,
                 }),
@@ -166,7 +166,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 child_created_at_ms: 0,
                 revision: Some(RevisionSummary {
                     revision_no: RevisionNo(MAX_PUBLIC_INTEGER - MAX_COMMIT_OPERATIONS as u64),
-                    size_bytes: log_ref.size_bytes,
+                    content_ref: log_ref.clone(),
                     revision_committed_by: actor.clone(),
                     revision_committed_at_ms: 0,
                 }),

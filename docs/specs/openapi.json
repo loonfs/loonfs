@@ -3753,7 +3753,7 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "The file's current content. It's present on entry reads (a stat by\npath or by inode) and absent from directory listings."
+            "description": "The file's current content. It's present on entry reads (a stat by\npath or by inode) and on directory listings, and a listing leaves\nit out for a file that the subject can't read."
           },
           "created_at_ms": {
             "description": "The time the inode was created, in Unix milliseconds.",

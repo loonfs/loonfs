@@ -363,7 +363,8 @@ fn human_path_entry_details(entry: &PathEntry) -> String {
             "modified: {}",
             format_utc_ms(*revision_committed_at_ms)
         ));
-        // A listed entry has no content reference; a stat's entry has one.
+        // A listing leaves out the content reference of a file that the
+        // subject can't read.
         if let Some(content_ref) = content_ref {
             lines.push(format!("content_id: {}", content_ref.content_id));
             lines.push(format!("content_kind: {}", content_ref.kind));

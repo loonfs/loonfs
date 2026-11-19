@@ -236,7 +236,7 @@ fn sample_grants() -> AccessGrants {
 fn sample_revision_summary() -> loonfs_types::format::manifest::RevisionSummary {
     loonfs_types::format::manifest::RevisionSummary {
         revision_no: RevisionNo(2),
-        size_bytes: sample_content_ref().size_bytes,
+        content_ref: sample_content_ref(),
         revision_committed_by: actor(),
         revision_committed_at_ms: 4_000,
     }
