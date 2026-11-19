@@ -1,0 +1,45 @@
+bind = "127.0.0.1:9400"
+content_token_secret = "dev-content-token-secret"
+writer_id = "loonfs-server-azure"
+# Derive memory budgets from 4 GiB. Omit this to use the Linux cgroup limit.
+memory_limit_bytes = 4294967296
+#manifest_revalidation_interval_ms = 1000
+#max_staleness_ms = 1000
+#consistency = "eventual"
+# Record a 30-day retention window in each namespace that the server creates
+# without a window of its own. Each maintenance sweep advances a namespace's
+# retention floor past the history older than the namespace's window. Omit it
+# to create such namespaces without a window.
+#retention_window_ms = 2592000000
+
+# Requests authenticate with this bearer token. The token may instead come
+# from LOONFS_AUTH_TOKEN.
+[auth]
+kind = "bearer_token"
+token = "dev-token"
+
+# Serving beyond loopback requires TLS. Either terminate it here with the PEM
+# chain (leaf first) and its private key, read once at startup, or set
+# `kind = "plaintext_behind_proxy"` when a proxy in front of LoonFS
+# terminates it.
+#[transport]
+#kind = "tls"
+#cert_path = "/etc/loonfs/tls/server.crt"
+#key_path = "/etc/loonfs/tls/server.key"
+
+[store]
+kind = "azure_blob"
+account_name = "yourstorageaccount"
+container = "your-container"
+# The blob service endpoint. Omit it for the account's endpoint on
+# blob.core.windows.net. Set it for a sovereign cloud, or for Azurite:
+#endpoint_url = "http://127.0.0.1:10000/devstoreaccount1"
+key_prefix = "loonfs-demo"
+
+# Every request is signed with this account key. Azure offers no direct
+# transfers: a shared access signature can't require the checksum header that
+# every LoonFS write includes, so clients upload and download through the
+# server.
+[store.credentials]
+kind = "account_key"
+account_key = "YOUR_ACCOUNT_KEY"

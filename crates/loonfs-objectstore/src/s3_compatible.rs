@@ -6,7 +6,7 @@
 
 mod assembly;
 
-use crate::assembly::ResolvedSource;
+use crate::assembly::{ResolvedSource, SourceReader};
 use crate::aws_credentials::{
     aws_credentials_source, cloudflare_r2_credentials_source, ObjectStoreAwsCredentialProvider,
     SharedAwsCredentialsSource,
@@ -572,30 +572,6 @@ impl S3RequestSigner {
         })
     }
 
-    async fn get_range(&self, key: &str, range: ByteRange, etag: &str) -> Result<Bytes> {
-        self.retry
-            .run(key, "get_range", 0, || async {
-                let mut signed = self
-                    .request_signer
-                    .presign_get(
-                        PresignedGetRequest {
-                            object_key: key,
-                            range: range.clone(),
-                            ttl: INTERNAL_REQUEST_TTL,
-                        },
-                        wall_now(),
-                    )
-                    .await?;
-                signed
-                    .headers
-                    .insert(S3_IF_MATCH_HEADER.to_owned(), etag.to_owned());
-                let response =
-                    send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
-                checked_data(key, response).map(|response| response.body)
-            })
-            .await
-    }
-
     /// Sends one signed request and fails on any provider error, including
     /// one reported in the body of a success response.
     async fn send_checked(
@@ -669,6 +645,33 @@ impl S3RequestSigner {
                 .await
         };
         AbortUploadOnDrop::new(key, self.io_runtime.clone(), abort.boxed())
+    }
+}
+
+#[async_trait]
+impl SourceReader for S3RequestSigner {
+    async fn get_range(&self, key: &str, range: ByteRange, etag: &str) -> Result<Bytes> {
+        self.retry
+            .run(key, "get_range", 0, || async {
+                let mut signed = self
+                    .request_signer
+                    .presign_get(
+                        PresignedGetRequest {
+                            object_key: key,
+                            range: range.clone(),
+                            ttl: INTERNAL_REQUEST_TTL,
+                        },
+                        wall_now(),
+                    )
+                    .await?;
+                signed
+                    .headers
+                    .insert(S3_IF_MATCH_HEADER.to_owned(), etag.to_owned());
+                let response =
+                    send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+                checked_data(key, response).map(|response| response.body)
+            })
+            .await
     }
 }
 

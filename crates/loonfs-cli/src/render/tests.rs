@@ -379,6 +379,14 @@ fn profile_updates_show_store_locations_without_credentials() {
             }),
             "gcp_gcs, bucket files, key prefix team",
         ),
+        (
+            serde_json::json!({
+                "kind": "azure_blob", "account_name": "account", "container": "files",
+                "key_prefix": "team",
+                "credentials": { "kind": "account_key", "account_key": "a2V5" }
+            }),
+            "azure_blob, container files, key prefix team",
+        ),
     ] {
         let profile = serde_json::json!({ "mode": "embedded", "store": store });
         let output = CommandOutput {

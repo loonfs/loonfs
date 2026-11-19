@@ -13,6 +13,7 @@ use crate::profiles::resolve_profile;
 use crate::render::{store_probe_run_outcome, store_probe_summary_line, StoreProbeRunOutcome};
 use crate::resolve::{resolve_namespace, Backend, ResolvedTarget};
 use futures::TryStreamExt;
+use loonfs_objectstore::azure_blob::AzureBlobStoreConfig;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::keys::probe_runs_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -351,7 +352,8 @@ async fn embedded_health_check(
                 StoreConfig::LocalFs(LocalFsStoreConfig { key_prefix, .. })
                 | StoreConfig::AwsS3(AwsS3StoreConfig { key_prefix, .. })
                 | StoreConfig::CloudflareR2(CloudflareR2StoreConfig { key_prefix, .. })
-                | StoreConfig::GcpGcs(GcpGcsStoreConfig { key_prefix, .. }) => key_prefix,
+                | StoreConfig::GcpGcs(GcpGcsStoreConfig { key_prefix, .. })
+                | StoreConfig::AzureBlob(AzureBlobStoreConfig { key_prefix, .. }) => key_prefix,
             };
             let message = match key_prefix
                 .as_deref()

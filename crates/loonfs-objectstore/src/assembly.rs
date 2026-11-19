@@ -2,9 +2,10 @@
 
 use crate::object_store::Result;
 use crate::{
-    AssemblySource, ByteRange, ObjectStore, ObjectStoreError, PROVIDER_MAX_MULTIPART_PART_BYTES,
-    PROVIDER_MIN_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_THRESHOLD_BYTES,
+    AssemblySource, ByteRange, ObjectStore, ObjectStoreError, PROVIDER_MIN_MULTIPART_PART_BYTES,
+    PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, Stream, StreamExt, TryStreamExt};
 use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest};
@@ -172,6 +173,64 @@ where
     )
 }
 
+/// A signer that reads a byte range of a source object at the version its
+/// caller observed.
+#[async_trait]
+pub(crate) trait SourceReader: Sync {
+    /// Reads `range` of `key`, and fails when the object's version is no
+    /// longer `etag`.
+    async fn get_range(&self, key: &str, range: ByteRange, etag: &str) -> Result<Bytes>;
+}
+
+/// Reads the bytes of the assembly that `part` selects, from the sources
+/// and the tail it overlaps. A source that the part covers whole is
+/// checked against its checksum.
+pub(crate) async fn read_assembly_part<R: SourceReader>(
+    reader: &R,
+    sources: &[ResolvedSource<'_>],
+    tail: &[Bytes],
+    part: &ByteRange,
+) -> Result<Bytes> {
+    let mut bytes = Vec::with_capacity(loonfs_types::usize_from_u64(part.len_bytes()));
+    let mut start = 0;
+    for source in sources {
+        let end = start + source.range.len_bytes();
+        let first = start.max(part.start_inclusive);
+        let last = end.min(part.end_exclusive);
+        let key = source.source.key.as_str();
+        let etag = source.etag()?;
+        let read = |range| reader.get_range(key, range, &etag);
+        let mut chunks = if part.start_inclusive <= start && part.end_exclusive >= end {
+            read_verified(source, read).boxed()
+        } else if first < last {
+            let range = ByteRange {
+                start_inclusive: source.range.start_inclusive + first - start,
+                end_exclusive: source.range.start_inclusive + last - start,
+            };
+            read_chunks(key, range, read).boxed()
+        } else {
+            start = end;
+            continue;
+        };
+        while let Some(chunk) = chunks.next().await {
+            bytes.extend_from_slice(&chunk?);
+        }
+        start = end;
+    }
+    for piece in tail {
+        let end = start + piece.len() as u64;
+        let first = start.max(part.start_inclusive);
+        let last = end.min(part.end_exclusive);
+        if first < last {
+            let first = loonfs_types::usize_from_u64(first - start);
+            let last = loonfs_types::usize_from_u64(last - start);
+            bytes.extend_from_slice(&piece[first..last]);
+        }
+        start = end;
+    }
+    Ok(bytes.into())
+}
+
 pub(crate) fn validate_algorithms(
     algorithm: ChecksumAlgorithm,
     key: &str,
@@ -286,7 +345,10 @@ pub(crate) enum PartSizing {
     /// Every part but the last is the same size, as Cloudflare R2 requires.
     Equal,
     /// Parts can differ in size within the provider's minimum and maximum.
-    Varied,
+    Varied {
+        /// The most bytes one part, and so one copied source range, can hold.
+        max_part_bytes: u64,
+    },
 }
 
 pub(crate) fn plan_parts(
@@ -306,19 +368,25 @@ pub(crate) fn plan_parts(
         let remaining = lengths
             .get(source)
             .map_or(0, |length| source_start + length - offset);
-        let (length, copied) = if sizing == PartSizing::Equal {
-            let length = R2_PART_BYTES.min(total - offset);
-            (length, remaining >= length)
-        } else if remaining >= PROVIDER_MIN_MULTIPART_PART_BYTES {
-            let length = remaining.div_ceil(remaining.div_ceil(PROVIDER_MAX_MULTIPART_PART_BYTES));
-            (length, true)
-        } else {
-            let length = if offset >= source_length {
-                READ_BYTES
-            } else {
-                PROVIDER_MIN_MULTIPART_PART_BYTES
-            };
-            (length.min(total - offset), false)
+        let (length, copied) = match sizing {
+            PartSizing::Equal => {
+                let length = R2_PART_BYTES.min(total - offset);
+                (length, remaining >= length)
+            }
+            PartSizing::Varied { max_part_bytes }
+                if remaining >= PROVIDER_MIN_MULTIPART_PART_BYTES =>
+            {
+                let length = remaining.div_ceil(remaining.div_ceil(max_part_bytes));
+                (length, true)
+            }
+            PartSizing::Varied { .. } => {
+                let length = if offset >= source_length {
+                    READ_BYTES
+                } else {
+                    PROVIDER_MIN_MULTIPART_PART_BYTES
+                };
+                (length.min(total - offset), false)
+            }
         };
         parts.push(AssemblyPart {
             range: ByteRange {
@@ -403,7 +471,10 @@ mod tests {
     #[test]
     fn multipart_plans_pad_small_runs_and_copy_only_contained_r2_chunks() {
         let mib = 1024 * 1024;
-        let aws = plan_parts(&[mib, 10 * mib], 1, PartSizing::Varied);
+        let varied = PartSizing::Varied {
+            max_part_bytes: crate::PROVIDER_MAX_MULTIPART_PART_BYTES,
+        };
+        let aws = plan_parts(&[mib, 10 * mib], 1, varied);
         assert_eq!(
             aws,
             vec![
@@ -457,9 +528,19 @@ mod tests {
                 },
             ]
         );
-        let large = plan_parts(&[12 * 1024 * mib], 0, PartSizing::Varied);
+        let large = plan_parts(&[12 * 1024 * mib], 0, varied);
         assert_eq!(large.len(), 3);
         assert!(large.iter().all(|part| part.source == Some(0)
             && part.range.end_exclusive - part.range.start_inclusive == 4 * 1024 * mib));
+        let azure = plan_parts(
+            &[12 * 1024 * mib],
+            0,
+            PartSizing::Varied {
+                max_part_bytes: crate::azure_blob::MAX_BLOCK_BYTES,
+            },
+        );
+        assert_eq!(azure.len(), 4);
+        assert!(azure.iter().all(|part| part.source == Some(0)
+            && part.range.end_exclusive - part.range.start_inclusive == 3 * 1024 * mib));
     }
 }

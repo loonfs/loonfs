@@ -5,6 +5,7 @@ use super::*;
 use crate::commands::{TrashListing, TreeTransferFailures};
 use crate::config::{CliConfig, ProfileConfig, ProfileConnection, ProfileMode};
 use crate::profiles::ProfileSummary;
+use loonfs_objectstore::azure_blob::AzureBlobStoreConfig;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
@@ -220,6 +221,11 @@ fn profile_location(profile: &ProfileConfig) -> String {
         | StoreConfig::GcpGcs(GcpGcsStoreConfig {
             bucket, key_prefix, ..
         }) => (format!("bucket {bucket}"), key_prefix),
+        StoreConfig::AzureBlob(AzureBlobStoreConfig {
+            container,
+            key_prefix,
+            ..
+        }) => (format!("container {container}"), key_prefix),
     };
     let prefix = key_prefix
         .as_deref()
