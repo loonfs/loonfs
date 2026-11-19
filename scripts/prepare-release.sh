@@ -85,9 +85,13 @@ sed "/^\[workspace\.package\]$/,/^\[/ s/^version = \"$current\"\$/version = \"$v
     Cargo.toml > Cargo.toml.tmp
 mv Cargo.toml.tmp Cargo.toml
 
-bumped=$(grep -c "version = \"$version\"" Cargo.toml) || true
-if [ "$bumped" -ne 8 ]; then
-    die "expected 8 versions in Cargo.toml to read $version (workspace.package plus 7 pinned crates), found $bumped"
+# The command above skips a pinned version that didn't read $current or that
+# isn't written in that form, so fail if any pinned version reads something else.
+stale=$(grep "^loonfs[a-z-]* = {.*version = \"" Cargo.toml \
+    | grep -v -F "version = \"$version\"") || true
+if [ -n "$stale" ]; then
+    die "these pinned crate versions in Cargo.toml don't read $version:
+$stale"
 fi
 
 sed "s/^version: .*\$/version: $version/
