@@ -273,6 +273,7 @@ pub(super) struct DiffQuery {
         get,
         operation_id = "list_path_entries",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("list")),
@@ -332,6 +333,7 @@ pub(super) async fn list_path_entries(
         get,
         operation_id = "get_path_entry",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
@@ -384,6 +386,7 @@ pub(super) async fn get_path_entry(
         get,
         operation_id = "get_file_content",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("content")),
@@ -450,6 +453,7 @@ pub(super) async fn get_file_content(
         get,
         operation_id = "list_trash",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["trash"])),
             ("x-fern-sdk-method-name" = json!("list")),
@@ -500,6 +504,7 @@ pub(super) async fn list_trash(
         get,
         operation_id = "list_file_revisions",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("listRevisions")),
@@ -553,6 +558,7 @@ pub(super) async fn list_file_revisions(
         operation_id = "create_commit",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
             ("x-fern-sdk-group-name" = json!(["commits"])),
             ("x-fern-sdk-method-name" = json!("create")),
@@ -667,6 +673,7 @@ pub(super) async fn create_commit(
         get,
         operation_id = "list_changes",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["changes"])),
             ("x-fern-sdk-method-name" = json!("list")),
@@ -721,6 +728,7 @@ pub(super) async fn list_changes(
         get,
         operation_id = "list_diff",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["diff"])),
             ("x-fern-sdk-method-name" = json!("list")),

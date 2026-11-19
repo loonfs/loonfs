@@ -8,8 +8,10 @@
 //! provider's constructor takes. Each binary ships the examples that document
 //! it, in the `config/` directory of its own crate.
 
+use crate::azure_blob::AzureBlobStoreConfig;
 use crate::configured::{
-    endpoint_host_is_proven, AWS_S3_PROVEN_DOMAINS, CLOUDFLARE_R2_PROVEN_DOMAINS,
+    endpoint_host_is_proven, AWS_S3_PROVEN_DOMAINS, AZURE_BLOB_DOMAINS,
+    CLOUDFLARE_R2_PROVEN_DOMAINS,
 };
 use crate::gcs::GcpGcsStoreConfig;
 use crate::local_fs_store::LocalFsStoreConfig;
@@ -71,6 +73,17 @@ pub enum GcpGcsCredentials {
     },
 }
 
+/// Azure Blob Storage credential source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AzureBlobCredentials {
+    /// Signs every request with one of the storage account's keys.
+    AccountKey {
+        /// The account key, base64 as the portal shows it.
+        account_key: SecretString,
+    },
+}
+
 /// Provider selection, settings, and an explicit credential source, as written in config files.
 ///
 /// Serialization is transparent for secret fields and therefore writes the
@@ -87,6 +100,8 @@ pub enum StoreConfig {
     CloudflareR2(CloudflareR2StoreConfig),
     /// Connects to Google Cloud Storage through its native generation-aware API.
     GcpGcs(GcpGcsStoreConfig),
+    /// Connects to Azure Blob Storage through its native block-blob API.
+    AzureBlob(AzureBlobStoreConfig),
 }
 
 impl StoreConfig {
@@ -97,6 +112,7 @@ impl StoreConfig {
             StoreConfig::AwsS3 { .. } => ConfiguredObjectStoreKind::AwsS3,
             StoreConfig::CloudflareR2 { .. } => ConfiguredObjectStoreKind::CloudflareR2,
             StoreConfig::GcpGcs { .. } => ConfiguredObjectStoreKind::GcpGcs,
+            StoreConfig::AzureBlob { .. } => ConfiguredObjectStoreKind::AzureBlob,
         }
     }
 
@@ -114,6 +130,7 @@ impl StoreConfig {
                 CloudflareR2Credentials::Static { .. } => "static",
             }),
             StoreConfig::GcpGcs { .. } => Some("service_account_file"),
+            StoreConfig::AzureBlob { .. } => Some("account_key"),
         }
     }
 
@@ -132,6 +149,7 @@ impl StoreConfig {
                 ConfiguredObjectStore::cloudflare_r2(config.clone())
             }
             StoreConfig::GcpGcs(config) => ConfiguredObjectStore::gcp_gcs(config.clone()),
+            StoreConfig::AzureBlob(config) => ConfiguredObjectStore::azure_blob(config.clone()),
         }
     }
 
@@ -186,6 +204,21 @@ impl StoreConfig {
                 validate_non_empty("store.bucket", bucket)?;
                 validate_non_empty("store.credentials.path", path)?;
             }
+            StoreConfig::AzureBlob(AzureBlobStoreConfig {
+                account_name,
+                container,
+                endpoint_url,
+                credentials: AzureBlobCredentials::AccountKey { account_key },
+                ..
+            }) => {
+                validate_non_empty("store.account_name", account_name)?;
+                validate_non_empty("store.container", container)?;
+                validate_non_empty("store.credentials.account_key", account_key.expose())?;
+                if let Some(url) = endpoint_url {
+                    validate_absolute_http_url("store.endpoint_url", url)?;
+                    validate_tls_on_proven_domains("store.endpoint_url", url, AZURE_BLOB_DOMAINS)?;
+                }
+            }
         }
         Ok(())
     }
@@ -217,6 +250,12 @@ impl StoreConfig {
                     *access_key_id = access_key_id.masked();
                     *secret_access_key = secret_access_key.masked();
                 }
+            }
+            StoreConfig::AzureBlob(AzureBlobStoreConfig {
+                credentials: AzureBlobCredentials::AccountKey { account_key },
+                ..
+            }) => {
+                *account_key = account_key.masked();
             }
         }
         redacted
@@ -299,7 +338,7 @@ mod tests {
 
     #[test]
     fn parses_all_provider_kinds_and_reports_their_kind() {
-        let cases: [(&str, ConfiguredObjectStoreKind); 4] = [
+        let cases: [(&str, ConfiguredObjectStoreKind); 5] = [
             (
                 "kind = \"local_fs\"\nroot = \"/tmp/store\"",
                 ConfiguredObjectStoreKind::LocalFs,
@@ -342,6 +381,18 @@ path = "/tmp/service-account.json"
 "#,
                 ConfiguredObjectStoreKind::GcpGcs,
             ),
+            (
+                r#"
+kind = "azure_blob"
+account_name = "account"
+container = "container"
+
+[credentials]
+kind = "account_key"
+account_key = "a2V5"
+"#,
+                ConfiguredObjectStoreKind::AzureBlob,
+            ),
         ];
 
         for (contents, kind) in cases {
@@ -358,7 +409,13 @@ path = "/tmp/service-account.json"
 
     #[test]
     fn a_hyphenated_store_kind_does_not_load() {
-        for kind in ["local-fs", "aws-s3", "cloudflare-r2", "gcp-gcs"] {
+        for kind in [
+            "local-fs",
+            "aws-s3",
+            "cloudflare-r2",
+            "gcp-gcs",
+            "azure-blob",
+        ] {
             let contents = format!("kind = \"{kind}\"\nroot = \"/tmp/store\"");
             toml::from_str::<StoreConfig>(&contents).expect_err(&format!("`{kind}` must not load"));
         }
@@ -395,6 +452,19 @@ secret_access_key = "secret"
 "#,
                 "account.r2.cloudflarestorage.com",
             ),
+            (
+                r#"
+kind = "azure_blob"
+account_name = "account"
+container = "container"
+endpoint_url = "http://account.blob.core.windows.net"
+
+[credentials]
+kind = "account_key"
+account_key = "a2V5"
+"#,
+                "account.blob.core.windows.net",
+            ),
         ] {
             match parse(contents).validate() {
                 Err(ConfigFieldError::Invalid { field, reason }) => {
@@ -422,6 +492,20 @@ secret_access_key = "secret"
         )
         .validate()
         .expect("a private http gateway is a valid configuration");
+        parse(
+            r#"
+kind = "azure_blob"
+account_name = "devstoreaccount1"
+container = "container"
+endpoint_url = "http://127.0.0.1:10000/devstoreaccount1"
+
+[credentials]
+kind = "account_key"
+account_key = "a2V5"
+"#,
+        )
+        .validate()
+        .expect("an Azurite endpoint is a valid configuration");
     }
 
     #[test]
@@ -618,6 +702,22 @@ secret_access_key = "plain-secret-access-key"
         assert!(!rendered.contains("plain-secret-access-key"));
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("account"));
+
+        let azure = parse(
+            r#"
+kind = "azure_blob"
+account_name = "account"
+container = "container"
+
+[credentials]
+kind = "account_key"
+account_key = "cGxhaW4tYWNjb3VudC1rZXk="
+"#,
+        );
+        let rendered = toml::to_string_pretty(&azure.redacted()).expect("serialize redacted");
+        assert!(!rendered.contains("cGxhaW4tYWNjb3VudC1rZXk="));
+        assert!(rendered.contains("<redacted>"));
+        assert!(!format!("{azure:?}").contains("cGxhaW4tYWNjb3VudC1rZXk="));
     }
 
     /// Checks that each provider's store table, with every key set, serializes
@@ -683,6 +783,17 @@ key_prefix = "demo"
 [credentials]
 kind = "service_account_file"
 path = "/tmp/service-account.json"
+"#,
+            r#"
+kind = "azure_blob"
+account_name = "account"
+container = "container"
+endpoint_url = "https://account.blob.core.usgovcloudapi.net"
+key_prefix = "demo"
+
+[credentials]
+kind = "account_key"
+account_key = "a2V5"
 "#,
         ];
 

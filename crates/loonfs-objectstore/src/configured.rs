@@ -3,6 +3,7 @@
 
 use crate::assembly::PartSizing;
 use crate::aws_credentials::{aws_credentials_source, cloudflare_r2_credentials_source};
+use crate::azure_blob::AzureBlobStoreConfig;
 use crate::gcs::{gcp_gcs_with_issuers, GcpGcsStoreConfig};
 use crate::local_fs_store::{LocalFsStore, LocalFsStoreConfig};
 use crate::object_store::{Result, SharedObjectStore};
@@ -19,6 +20,13 @@ use std::sync::Arc;
 /// Provider domains covered by live direct-transfer tests.
 pub(crate) const AWS_S3_PROVEN_DOMAINS: &[&str] = &["amazonaws.com", "amazonaws.com.cn"];
 pub(crate) const CLOUDFLARE_R2_PROVEN_DOMAINS: &[&str] = &["r2.cloudflarestorage.com"];
+/// Microsoft's own blob endpoints. Azure offers no direct transfers, so
+/// these only tell configuration which endpoints must be reached over TLS.
+pub(crate) const AZURE_BLOB_DOMAINS: &[&str] = &[
+    "blob.core.windows.net",
+    "blob.core.chinacloudapi.cn",
+    "blob.core.usgovcloudapi.net",
+];
 
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +39,8 @@ pub enum ConfiguredObjectStoreKind {
     CloudflareR2,
     /// Uses Google Cloud Storage's native generation-aware API.
     GcpGcs,
+    /// Uses Azure Blob Storage through its native block-blob API.
+    AzureBlob,
 }
 
 impl ConfiguredObjectStoreKind {
@@ -42,6 +52,7 @@ impl ConfiguredObjectStoreKind {
             Self::AwsS3 => "aws_s3",
             Self::CloudflareR2 => "cloudflare_r2",
             Self::GcpGcs => "gcp_gcs",
+            Self::AzureBlob => "azure_blob",
         }
     }
 
@@ -51,7 +62,7 @@ impl ConfiguredObjectStoreKind {
     pub const fn max_assembly_buffer_bytes(self) -> u64 {
         let part_bytes = match self.part_sizing() {
             PartSizing::Equal => crate::assembly::R2_PART_BYTES,
-            PartSizing::Varied => crate::assembly::READ_BYTES,
+            PartSizing::Varied { .. } => crate::assembly::READ_BYTES,
         };
         part_bytes + crate::assembly::READ_BYTES
     }
@@ -61,7 +72,9 @@ impl ConfiguredObjectStoreKind {
     pub(crate) const fn checksum_algorithm(self) -> ChecksumAlgorithm {
         match self {
             Self::GcpGcs => ChecksumAlgorithm::Crc32c,
-            Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 => ChecksumAlgorithm::Crc64nvme,
+            Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 | Self::AzureBlob => {
+                ChecksumAlgorithm::Crc64nvme
+            }
         }
     }
 
@@ -69,14 +82,16 @@ impl ConfiguredObjectStoreKind {
     pub(crate) const fn compare_token(self) -> CompareToken {
         match self {
             Self::GcpGcs => CompareToken::Generation,
-            Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 => CompareToken::Etag,
+            Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 | Self::AzureBlob => {
+                CompareToken::Etag
+            }
         }
     }
 
     /// Returns which requests create an object while its key is absent.
     pub(crate) const fn create_path(self) -> CreatePath {
         match self {
-            Self::GcpGcs => CreatePath::Signer,
+            Self::GcpGcs | Self::AzureBlob => CreatePath::Signer,
             Self::LocalFs | Self::AwsS3 | Self::CloudflareR2 => CreatePath::ProviderClient,
         }
     }
@@ -85,14 +100,19 @@ impl ConfiguredObjectStoreKind {
     pub(crate) const fn part_sizing(self) -> PartSizing {
         match self {
             Self::CloudflareR2 => PartSizing::Equal,
-            Self::LocalFs | Self::AwsS3 | Self::GcpGcs => PartSizing::Varied,
+            Self::AzureBlob => PartSizing::Varied {
+                max_part_bytes: crate::azure_blob::MAX_BLOCK_BYTES,
+            },
+            Self::LocalFs | Self::AwsS3 | Self::GcpGcs => PartSizing::Varied {
+                max_part_bytes: crate::PROVIDER_MAX_MULTIPART_PART_BYTES,
+            },
         }
     }
 
     /// Returns the precondition that a part copy puts on its source object.
     pub(crate) const fn copy_source_precondition(self) -> CopySourcePrecondition {
         match self {
-            Self::CloudflareR2 => CopySourcePrecondition::Unconditional,
+            Self::CloudflareR2 | Self::AzureBlob => CopySourcePrecondition::Unconditional,
             Self::LocalFs | Self::AwsS3 | Self::GcpGcs => CopySourcePrecondition::IfMatch,
         }
     }
@@ -190,6 +210,18 @@ impl ConfiguredObjectStore {
         })
     }
 
+    /// Builds a native Azure Blob Storage store. It offers no direct
+    /// transfers: a shared access signature can't require the checksum
+    /// header that every LoonFS write includes.
+    ///
+    /// Construction fails when the provider, runtime, or key prefix is invalid.
+    pub fn azure_blob(config: AzureBlobStoreConfig) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(crate::azure_blob::azure_blob(config)?),
+            direct_transfers: None,
+        })
+    }
+
     /// Returns the direct transfers this deployment can authorize, or `None`
     /// when every transfer has to be proxied.
     ///
@@ -244,6 +276,7 @@ pub(crate) fn endpoint_host_is_proven(uri: &Uri, domain_families: &[&str]) -> bo
 #[cfg(test)]
 mod tests {
     use super::ConfiguredObjectStore;
+    use crate::azure_blob::AzureBlobStoreConfig;
     use crate::gcs::GcpGcsStoreConfig;
     use crate::keys::boundary;
     use crate::local_fs_store::{LocalFsStore, LocalFsStoreConfig};
@@ -255,13 +288,19 @@ mod tests {
     use crate::test_support::gcs_fixture_service_account_key_file;
     use crate::ObjectStoreError;
     use crate::ObjectStoreExtension;
-    use crate::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore};
+    use crate::{
+        AwsS3Credentials, AzureBlobCredentials, CloudflareR2Credentials, GcpGcsCredentials,
+        ObjectStore,
+    };
     use bytes::Bytes;
     use std::assert_matches;
     use std::time::{Duration, UNIX_EPOCH};
 
     const FIXTURE_ACCESS_KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
     const FIXTURE_SECRET_ACCESS_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    /// Azurite's published development account key.
+    const FIXTURE_AZURE_ACCOUNT_KEY: &str =
+        "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 
     #[tokio::test]
     async fn configured_local_fs_scopes_optional_key_prefix() {
@@ -354,6 +393,22 @@ mod tests {
         assert!(r2_store("https://account.r2.cloudflarestorage.com")
             .direct_transfers()
             .is_some());
+    }
+
+    #[test]
+    fn an_azure_store_offers_no_direct_transfers() {
+        let store = ConfiguredObjectStore::azure_blob(AzureBlobStoreConfig {
+            account_name: "account".to_owned(),
+            container: "container".to_owned(),
+            endpoint_url: None,
+            credentials: AzureBlobCredentials::AccountKey {
+                account_key: FIXTURE_AZURE_ACCOUNT_KEY.into(),
+            },
+            key_prefix: Some("tenant-a".to_owned()),
+        })
+        .expect("construct azure store");
+        assert!(store.direct_transfers().is_none());
+        assert!(!format!("{store:?}").contains(FIXTURE_AZURE_ACCOUNT_KEY));
     }
 
     #[test]

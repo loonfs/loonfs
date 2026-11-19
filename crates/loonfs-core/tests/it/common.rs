@@ -9,7 +9,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::page_limit;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
-use loonfs_types::{AbsolutePath, CommitId, CommitSeq, ContentRef, NamespaceId};
+use loonfs_types::{AbsolutePath, CommitId, CommitSeq, ContentRef, FilesystemEvent, NamespaceId};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -237,4 +237,19 @@ pub(crate) fn content_blob_counting_store(root: impl AsRef<Path>) -> RecordingSt
         LocalFsStore::new(root.as_ref()).expect("store"),
         KeyPredicate::content_blob(),
     )
+}
+
+/// Returns the kind of a commit's event, as its JSON `kind` spells it.
+pub(crate) fn event_kind(event: &FilesystemEvent) -> &'static str {
+    match event {
+        FilesystemEvent::DirectoryCreated { .. } => "directory_created",
+        FilesystemEvent::FileCreated { .. } => "file_created",
+        FilesystemEvent::ContentChanged { .. } => "content_changed",
+        FilesystemEvent::Moved { .. } => "moved",
+        FilesystemEvent::Deleted { .. } => "deleted",
+        FilesystemEvent::Restored { .. } => "restored",
+        FilesystemEvent::AttributesChanged { .. } => "attributes_changed",
+        FilesystemEvent::AccessChanged { .. } => "access_changed",
+        FilesystemEvent::Unknown => "unknown",
+    }
 }

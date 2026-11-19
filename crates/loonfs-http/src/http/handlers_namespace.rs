@@ -348,6 +348,7 @@ pub(super) async fn get_namespace_diagnostics(
         delete,
         operation_id = "delete_namespace",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("delete")),
@@ -397,6 +398,7 @@ pub(super) async fn delete_namespace(
         operation_id = "fork_namespace",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("fork")),
@@ -454,6 +456,7 @@ pub(super) async fn fork_namespace(
         operation_id = "merge_fork",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("merge")),
@@ -522,6 +525,7 @@ pub(super) async fn merge_fork(
         get,
         operation_id = "get_next_merge_range",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("nextMergeRange")),
@@ -580,6 +584,7 @@ pub(super) async fn get_next_merge_range(
         operation_id = "fork_namespace_for_rebase",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("forkForRebase")),
@@ -641,6 +646,7 @@ pub(super) async fn fork_namespace_for_rebase(
         operation_id = "replay_fork",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("replay")),

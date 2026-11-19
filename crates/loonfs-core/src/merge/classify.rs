@@ -6,11 +6,11 @@
 use super::memory::PlanningMemory;
 use super::net_change::{fork_layout_extents, inode_change, touched_inodes, Changed, InodeChange};
 use super::operations::{
-    access_update, attributes_update, binding_change, create_plan, revision_update, BindingChange,
-    InodePlan,
+    access_update, attributes_update, create_plan, delete_change, move_change, restore_change,
+    revision_update, BindingChange, InodePlan,
 };
 use super::replay::Replay;
-use super::state::{Edge, InodeState, StateReader};
+use super::state::{InodeState, StateReader};
 use crate::authorize::{require, Absence, Authorizer};
 use crate::commit::wal_size::{conflict_bytes, merge_operation_bytes};
 use crate::error::{CoreError, Result};
@@ -21,8 +21,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::options::DiffOptions;
 use loonfs_types::{
-    AbsolutePath, AccessRight, CommitSeq, ContentRef, DisplayName, InodeId, InodeKind,
-    MergeConflict, MergeConflictKind, MergeConflictVersion, NameKey, MAX_PATH_DEPTH, ROOT_INODE_ID,
+    AbsolutePath, AccessRight, CommitSeq, ContentRef, InodeId, InodeKind, MergeConflict,
+    MergeConflictKind, MergeConflictVersion, NameKey,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -107,7 +107,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         else {
             return Ok(());
         };
-        if ours.visible.is_some() {
+        if ours.is_visible() {
             require(
                 &self.fork_authorizer,
                 self.ours.session(),
@@ -135,6 +135,11 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Plans the change of an inode that the merged-into namespace has, and
     /// records a conflict when a row that the change replaces isn't the
     /// fork's own (see [`Self::is_own`]).
+    ///
+    /// The plan applies the inode's state at the range's end in the fork.
+    /// Whether the inode and its destination are reachable after the merge
+    /// is checked once all the plans are known (see
+    /// [`Self::check_targets`]).
     async fn plan_change(
         &mut self,
         inode_id: InodeId,
@@ -142,6 +147,8 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         theirs: &InodeState,
         changed: &Changed,
     ) -> Result<()> {
+        let main = self.main;
+        let namespace_id = &main.head().namespace_id;
         let mut plan = InodePlan {
             inode_id,
             kind: ours.kind,
@@ -149,30 +156,47 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             updates: Vec::new(),
         };
         let mut conflict = None;
-        if theirs.visible.is_none() {
-            let Some(edge) = ours.edge() else {
-                return Ok(());
-            };
-            // A deletion that an earlier merge of this fork made, and that
-            // the fork has since undone, is undone by this merge too, while
-            // the deletion is in the trash here. Any other deletion conflicts.
-            let deletion_seq = self.restored_deletion(inode_id).await?;
-            if deletion_seq.is_none() && !self.hidden_by_restored_ancestor(inode_id, edge).await? {
-                self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
-                    .await?;
-                return Ok(());
-            }
-            plan.binding =
-                binding_change(&self.main.head().namespace_id, ours, theirs, deletion_seq)?;
-        } else if changed.binding {
-            plan.binding = binding_change(&self.main.head().namespace_id, ours, theirs, None)?;
-            if let Some(binding) = &plan.binding {
+        if !ours.is_visible() {
+            // The fork shows nothing of the inode at the range's end, so the
+            // merge deletes it where the merged-into namespace has it bound.
+            // The target check drops the delete when a deletion that the
+            // merge doesn't undo hides the inode there (see
+            // [`Self::check_targets`]), and the commit's order leaves out a
+            // delete that a directory's recursive delete covers there.
+            plan.binding = theirs
+                .edge()
+                .map(|from| delete_change(namespace_id, theirs, from));
+            // A delete of an inode that a deletion hides in the merged-into
+            // namespace runs only when the merge restores a directory above
+            // the inode, so the target check checks the rows that the delete
+            // replaces once it knows that the delete runs, and drops the
+            // delete otherwise (see [`Self::check_targets`]).
+            if let (Some(binding), true) = (&plan.binding, theirs.is_visible()) {
                 conflict = self
                     .binding_conflict(inode_id, ours, theirs, binding)
                     .await?;
             }
-        }
-        if ours.visible.is_some() {
+        } else if ours.edge().is_some() && theirs.edge().is_none() {
+            // The merged-into namespace deleted the inode itself. A deletion
+            // that an earlier merge of this fork made, and that the fork has
+            // since undone, is undone by this merge too, while the deletion
+            // is in the trash here. Any other deletion conflicts.
+            let Some(deletion_seq) = self.restored_deletion(inode_id).await? else {
+                self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
+                    .await?;
+                return Ok(());
+            };
+            plan.binding = restore_change(deletion_seq, ours)?;
+            conflict = self.plan_updates(&mut plan, ours, theirs, changed).await?;
+        } else {
+            if changed.binding {
+                plan.binding = move_change(namespace_id, ours, theirs)?;
+                if let Some(binding) = &plan.binding {
+                    conflict = self
+                        .binding_conflict(inode_id, ours, theirs, binding)
+                        .await?;
+                }
+            }
             conflict = conflict.or(self.plan_updates(&mut plan, ours, theirs, changed).await?);
         }
         if let Some(kind) = conflict {
@@ -182,71 +206,25 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         self.add_plan(plan).await
     }
 
-    /// Returns the sequence of the deletion that hides `inode_id` in the
-    /// merged-into namespace, when the merge undoes the deletion. That's a
-    /// deletion of the inode itself that's the fork's own (see
-    /// [`Self::is_own`]), which an earlier merge of the fork made, that's
-    /// still in the trash there, and that the fork undid, so the inode is
-    /// visible in the fork.
+    /// Returns the sequence of the deletion of `inode_id` itself in the
+    /// merged-into namespace, when the merge can undo it: the deletion is
+    /// the fork's own (see [`Self::is_own`]), which an earlier merge of the
+    /// fork made, and it's still in the trash there.
     async fn restored_deletion(&mut self, inode_id: InodeId) -> Result<Option<CommitSeq>> {
         let Some(deletion) = self.theirs.view().tombstone_in_trash(inode_id).await? else {
             return Ok(None);
         };
-        if !self.is_own(deletion.committed_seq).await? {
-            return Ok(None);
-        }
-        let visible_in_fork = self
-            .ours
-            .state(inode_id)
+        Ok(self
+            .is_own(deletion.committed_seq)
             .await?
-            .is_some_and(|state| state.visible.is_some());
-        Ok(visible_in_fork.then_some(deletion.committed_seq))
-    }
-
-    /// Returns whether `inode_id` is hidden in the merged-into namespace
-    /// only by deletions of its ancestors that the merge undoes (see
-    /// [`Self::restored_deletion`]), and keeps there the parent and the name that
-    /// `edge` gives it in the fork. Undoing those deletions shows the inode
-    /// again without a change of its own.
-    async fn hidden_by_restored_ancestor(
-        &mut self,
-        inode_id: InodeId,
-        edge: &Edge,
-    ) -> Result<bool> {
-        let view = self.theirs.view();
-        let Some(binding) = view.current_parent_binding_for_child(inode_id).await? else {
-            return Ok(false);
-        };
-        if binding.parent_inode_id != edge.parent_inode_id
-            || binding.display_name().map(DisplayName::as_str) != Some(edge.display_name.as_str())
-        {
-            return Ok(false);
-        }
-        let mut restored = false;
-        let mut ancestor = binding.parent_inode_id;
-        // A binding cycle would be corrupt, and the bound ends the walk.
-        for _ in 0..=MAX_PATH_DEPTH {
-            if view.hiding_subtree_tombstone(ancestor).await?.is_some() {
-                if self.restored_deletion(ancestor).await?.is_none() {
-                    return Ok(false);
-                }
-                restored = true;
-            }
-            if ancestor == ROOT_INODE_ID {
-                return Ok(restored);
-            }
-            let Some(binding) = view.current_parent_binding_for_child(ancestor).await? else {
-                return Ok(false);
-            };
-            ancestor = binding.parent_inode_id;
-        }
-        Ok(false)
+            .then_some(deletion.committed_seq))
     }
 
     /// Returns the kind of conflict of `binding`, the move or the delete of
-    /// a visible inode, when the binding or the revision that it replaces
-    /// isn't the fork's own (see [`Self::is_own`]), and adds a directory
-    /// with no such conflict to the subtree checks.
+    /// an inode whose own row is bound in the merged-into namespace, when the
+    /// row or the revision that it replaces isn't the fork's own (see
+    /// [`Self::replaced_rows_conflict`]), and adds a directory with no such
+    /// conflict to the subtree checks.
     async fn binding_conflict(
         &mut self,
         inode_id: InodeId,
@@ -254,33 +232,44 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         theirs: &InodeState,
         binding: &BindingChange,
     ) -> Result<Option<MergeConflictKind>> {
-        let their_edge = theirs
-            .edge()
-            .expect("an inode whose binding differs from a visible one's isn't the root");
-        let mut conflict = None;
-        if !self.is_own(their_edge.binding.seq).await? {
-            conflict = Some(MergeConflictKind::Binding);
-        }
-        if let (BindingChange::Delete { .. }, Some(revision)) = (binding, &theirs.revision) {
-            if conflict.is_none() && !self.is_own(revision.committed_seq).await? {
-                conflict = Some(MergeConflictKind::Content);
-            }
-        }
-        if conflict.is_none() && theirs.kind == InodeKind::Directory {
-            let path = theirs
-                .visible
-                .as_ref()
-                .expect("a visible inode has a path")
-                .path
-                .clone();
+        let deletes = matches!(binding, BindingChange::Delete { .. });
+        let conflict = self.replaced_rows_conflict(theirs, deletes).await?;
+        // The subtree check reads the directory's path at the head. A
+        // directory that a deletion hides there has none, and nothing below
+        // it can change while it's hidden, so it needs no check.
+        if let (None, InodeKind::Directory, Some(path)) = (conflict, theirs.kind, &theirs.path) {
             self.subtree_checks.push(SubtreeCheck {
                 directory: inode_id,
-                path,
+                path: path.clone(),
                 ours: ours.clone(),
                 theirs: theirs.conflict_version(),
             });
         }
         Ok(conflict)
+    }
+
+    /// Returns the kind of conflict of the move or the delete of an inode
+    /// whose state in the merged-into namespace is `theirs`, when the binding
+    /// row that the change replaces isn't the fork's own (see
+    /// [`Self::is_own`]), or, for a delete, when the revision that it
+    /// replaces isn't.
+    pub(super) async fn replaced_rows_conflict(
+        &mut self,
+        theirs: &InodeState,
+        deletes: bool,
+    ) -> Result<Option<MergeConflictKind>> {
+        let their_edge = theirs
+            .edge()
+            .expect("a move or a delete replaces a bound row");
+        if !self.is_own(their_edge.binding.seq).await? {
+            return Ok(Some(MergeConflictKind::Binding));
+        }
+        if let (true, Some(revision)) = (deletes, &theirs.revision) {
+            if !self.is_own(revision.committed_seq).await? {
+                return Ok(Some(MergeConflictKind::Content));
+            }
+        }
+        Ok(None)
     }
 
     /// Plans the revision, attribute, and access updates of a visible inode

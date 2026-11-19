@@ -56,7 +56,7 @@ loonfs ls /
 loonfs cat /notes.txt
 ```
 
-The CLI also works with Cloudflare R2 (`profile create r2`), Google Cloud Storage (`gcs`), and a LoonFS server (`remote`). The [CLI reference](crates/loonfs-cli/README.md) lists every command.
+The CLI also works with Cloudflare R2 (`profile create r2`), Google Cloud Storage (`gcs`), Azure Blob Storage (`abs`), and a LoonFS server (`remote`). The [CLI reference](crates/loonfs-cli/README.md) lists every command.
 
 ## SDKs and libraries
 

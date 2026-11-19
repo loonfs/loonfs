@@ -98,6 +98,7 @@ pub(super) struct StatInodeQuery {
         get,
         operation_id = "get_inode",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
@@ -188,6 +189,7 @@ pub(super) struct ListInodeChildrenQuery {
         get,
         operation_id = "list_inode_children",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("listChildren")),
@@ -248,6 +250,7 @@ pub(super) async fn list_inode_children(
         get,
         operation_id = "list_file_revisions_by_inode",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("listRevisions")),
@@ -302,6 +305,7 @@ pub(super) async fn list_file_revisions_by_inode(
         get,
         operation_id = "get_file_content_by_inode",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("content")),
@@ -361,6 +365,7 @@ pub(super) async fn get_file_content_by_inode(
         get,
         operation_id = "get_file_revision_content_by_inode",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("revisionContent")),

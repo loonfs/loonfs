@@ -44,6 +44,8 @@ pub(crate) enum ProfileProviderCommand {
     R2(ProfileR2Args),
     /// A Google Cloud Storage-backed embedded profile.
     Gcs(ProfileGcsArgs),
+    /// An Azure Blob Storage-backed embedded profile.
+    Abs(ProfileAbsArgs),
     /// A local-filesystem-backed embedded profile.
     Local(ProfileLocalArgs),
     /// A remote-server profile.
@@ -188,6 +190,35 @@ impl GcsStoreArgs {
 }
 
 #[derive(Debug, Clone, Default, Args)]
+pub(crate) struct AbsStoreArgs {
+    /// Azure storage account name.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub account_name: Option<String>,
+    /// Blob container name.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub container: Option<String>,
+    /// Storage account key.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub account_key: Option<String>,
+    /// Custom Blob Storage endpoint URL.
+    #[arg(long, value_hint = ValueHint::Url)]
+    pub endpoint_url: Option<String>,
+    /// Optional object-key prefix.
+    #[arg(long, value_hint = ValueHint::Other)]
+    pub key_prefix: Option<String>,
+}
+
+impl AbsStoreArgs {
+    pub(crate) fn has_update_flags(&self) -> bool {
+        self.account_name.is_some()
+            || self.container.is_some()
+            || self.account_key.is_some()
+            || self.endpoint_url.is_some()
+            || self.key_prefix.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default, Args)]
 pub(crate) struct LocalStoreArgs {
     /// Local filesystem store root.
     #[arg(long, value_hint = ValueHint::DirPath)]
@@ -250,6 +281,16 @@ pub(crate) struct ProfileGcsArgs {
     pub name: String,
     #[command(flatten)]
     pub store: GcsStoreArgs,
+    #[command(flatten)]
+    pub actor: ProfileActorArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileAbsArgs {
+    #[arg(value_hint = ValueHint::Other)]
+    pub name: String,
+    #[command(flatten)]
+    pub store: AbsStoreArgs,
     #[command(flatten)]
     pub actor: ProfileActorArgs,
 }

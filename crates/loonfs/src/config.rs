@@ -252,7 +252,8 @@ pub struct RuntimeConfig {
     /// first manifest of each namespace that it creates without a window in
     /// the request. Defaults to `None`, so such a namespace has no window. A
     /// fork copies its source's window instead. A window shorter than the
-    /// grace window ([`GC_GRACE_WINDOW_MS`]) fails the build.
+    /// grace window ([`GC_GRACE_WINDOW_MS`]) fails the build. The capability
+    /// document advertises the window as `namespace.default_retention_window_ms`.
     pub default_retention_window_ms: Option<NonZeroU64>,
 }
 

@@ -5,7 +5,8 @@
 use super::memory::PlanningMemory;
 use super::net_change::{fork_layout_extents, inode_change, touched_inodes, InodeChange};
 use super::operations::{
-    access_update, attributes_update, binding_change, create_plan, revision_update, InodePlan,
+    access_update, attributes_update, create_plan, delete_change, move_change, restore_change,
+    revision_update, InodePlan,
 };
 use super::state::StateReader;
 use super::MergeAllowance;
@@ -208,10 +209,12 @@ async fn measure_net_change<S: ObjectStore + ?Sized>(
 /// Returns the plan of a merge of the fork's change to one inode into a
 /// namespace whose rows are the fork's own at the range's start, which
 /// `start` reads: the create of an inode that the fork created in the range,
-/// or the inode's move, delete, or restore, which the planner's
-/// [`binding_change`] chooses, then its revision, attribute, and access
-/// updates. The plan's preconditions are the rows of `fork` at the range's
-/// start.
+/// or the inode's move, delete, or restore, as the planner chooses them, then
+/// its revision, attribute, and access updates. A hidden end state plans the
+/// inode's delete where the start has it bound, and an end state that's
+/// visible where the start had the inode's own row unbound plans the restore
+/// of the deletion that unbound it. The plan's preconditions are the rows of
+/// `fork` at the range's start.
 async fn net_change_plan<S: ObjectStore + ?Sized>(
     start: MetadataView<'_, '_, S>,
     fork: &NamespaceId,
@@ -226,19 +229,18 @@ async fn net_change_plan<S: ObjectStore + ?Sized>(
     let Some(before) = before else {
         return create_plan(inode_id, ours);
     };
-    // A restore reverses a deletion of the inode itself that hid it at the
-    // start. An inode that only an ancestor's deletion hid comes back with
-    // the ancestor's restore, with no change of its own.
-    let deletion_seq = match (&before.visible, ours.edge()) {
-        (None, Some(_)) => start
-            .hiding_subtree_tombstone(inode_id)
-            .await?
-            .map(|deletion| deletion.committed_seq),
-        _ => None,
+    let binding = if !ours.is_visible() {
+        before.edge().map(|from| delete_change(fork, before, from))
+    } else if ours.edge().is_some() && before.edge().is_none() {
+        match start.hiding_subtree_tombstone(inode_id).await? {
+            Some(deletion) => restore_change(deletion.committed_seq, ours)?,
+            None => None,
+        }
+    } else {
+        move_change(fork, ours, before)?
     };
-    let binding = binding_change(fork, ours, before, deletion_seq)?;
     let mut updates = Vec::new();
-    if ours.visible.is_some() {
+    if ours.is_visible() {
         if let (true, Some(row), Some(start_row)) =
             (changed.content, &ours.revision, &before.revision)
         {

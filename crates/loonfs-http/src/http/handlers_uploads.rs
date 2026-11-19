@@ -55,6 +55,7 @@ pub(super) struct UploadPathParams {
         operation_id = "create_upload",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("create")),
@@ -210,6 +211,7 @@ async fn begin_direct_multipart_upload(
         operation_id = "sign_upload_parts",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("signParts")),
@@ -417,6 +419,7 @@ fn with_content_token(
         operation_id = "put_upload_content",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("putContent")),
@@ -471,6 +474,7 @@ pub(super) async fn put_upload_content(
         operation_id = "complete_upload",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("complete")),
@@ -529,6 +533,7 @@ pub(super) async fn complete_upload(
         operation_id = "get_upload",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
@@ -589,6 +594,7 @@ pub(super) async fn get_upload(
         operation_id = "abort_upload",
         extensions(
             ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["uploads"])),
             ("x-fern-sdk-method-name" = json!("abort")),

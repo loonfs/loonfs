@@ -640,15 +640,21 @@ async fn restore_deleted_in_the_fork(family: &Family, inode_id: InodeId, deleted
         .fork()
         .submit_operation(
             CommitId::generate(),
-            FilesystemOperation::RestoreDeleted {
-                inode_id,
-                deletion_seq: deleted.committed_seq,
-                destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
-            },
+            restore_deleted(inode_id, deleted),
             Vec::new(),
         )
         .await
         .expect("restore in the fork");
+}
+
+/// Builds the restore of `inode_id` from its deletion in `deleted`, to the
+/// place where it was.
+fn restore_deleted(inode_id: InodeId, deleted: &Commit) -> FilesystemOperation {
+    FilesystemOperation::RestoreDeleted {
+        inode_id,
+        deletion_seq: deleted.committed_seq,
+        destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
+    }
 }
 
 /// Checks that a deletion that an earlier merge of the fork made, and that
@@ -707,6 +713,395 @@ async fn a_directory_that_the_fork_restored_after_a_merge_merges() {
         family.main_bytes("/old/x.txt").await.as_deref(),
         Some(&b"/old/x.txt"[..])
     );
+}
+
+/// Commits, in the fork, the restore of `directory` from its deletion in
+/// `deleted`, then `operations`, then new content `bytes` at `path`, in one
+/// commit.
+async fn restore_and_write_in_the_fork(
+    family: &Family,
+    (directory, deleted): (InodeId, &Commit),
+    operations: Vec<FilesystemOperation>,
+    (path, bytes): (&str, &[u8]),
+) {
+    let store = loonfs_core::test_support::namespace_store(&family.store, &family.fork);
+    let stored = store
+        .store_bytes_as_content(bytes)
+        .await
+        .expect("stage the content");
+    let content_ref = stored.content_ref().clone();
+    let catalog = store.load_catalog_entry().await.expect("catalog");
+    let prepared = loonfs_core::content::prepare_stored_content(&catalog, stored);
+    let write = FilesystemOperation::PutFile {
+        path: AbsolutePath::parse(path).expect("path"),
+        content: loonfs_types::FileContent::Ref(content_ref),
+        behavior: loonfs_types::DestinationBehavior::Replace,
+        expected_inode_id: None,
+        expected_revision_no: None,
+    };
+    let intent = CommitIntent {
+        commit_id: CommitId::generate(),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        operations: std::iter::once(restore_deleted(directory, deleted))
+            .chain(operations)
+            .chain([write])
+            .collect(),
+        preconditions: Vec::new(),
+    };
+    family
+        .fork()
+        .publish_candidates(vec![loonfs_core::publish::CommitCandidate::prepared(
+            intent,
+            vec![prepared],
+        )])
+        .await
+        .pop()
+        .expect("one result")
+        .expect("restore and write in the fork");
+}
+
+/// Checks that the fork's change to a file below a directory that it
+/// restored merges with the restore. The fork deletes `/docs`, the merge
+/// deletes it in `main`, and the fork restores `/docs` and writes
+/// `/docs/a.txt` in one commit. The next merge restores `/docs` in `main`
+/// with the new content, and the file keeps its inode ID.
+#[tokio::test]
+async fn a_change_below_a_directory_that_the_fork_restored_merges_with_the_restore() {
+    let family = Family::new().await;
+    let directory = family.inode(&family.main, "/docs").await;
+    let file = family.inode(&family.main, "/docs/a.txt").await;
+    let deleted = family
+        .fork()
+        .delete_path("/docs", None)
+        .await
+        .expect("delete");
+    family
+        .merge("delete", None)
+        .await
+        .expect("merge the delete");
+    restore_and_write_in_the_fork(
+        &family,
+        (directory, &deleted),
+        Vec::new(),
+        ("/docs/a.txt", b"ours"),
+    )
+    .await;
+
+    family
+        .merge("restore_and_write", None)
+        .await
+        .expect("merge the restore and the write");
+    assert_eq!(
+        family.main_bytes("/docs/a.txt").await.as_deref(),
+        Some(&b"ours"[..])
+    );
+    assert_eq!(family.inode(&family.main, "/docs/a.txt").await, file);
+}
+
+/// Checks that a change two levels below a restored directory merges, past
+/// the directory between them, which has no change of its own.
+#[tokio::test]
+async fn a_change_two_levels_below_a_restored_directory_merges() {
+    let family = Family::new().await;
+    let directory = family.inode(&family.main, "/p").await;
+    let deleted = family.fork().delete_path("/p", None).await.expect("delete");
+    family
+        .merge("delete", None)
+        .await
+        .expect("merge the delete");
+    restore_deleted_in_the_fork(&family, directory, &deleted).await;
+    family
+        .fork()
+        .write_file_bytes("/p/q/f.txt", b"ours", None)
+        .await
+        .expect("write below the restored directory");
+
+    family
+        .merge("restore_and_write", None)
+        .await
+        .expect("merge the restore and the write");
+    assert_eq!(
+        family.main_bytes("/p/q/f.txt").await.as_deref(),
+        Some(&b"ours"[..])
+    );
+}
+
+/// Checks that a change below a directory that `main` deleted itself still
+/// conflicts, because the merge can't undo a deletion that isn't the fork's
+/// own.
+#[tokio::test]
+async fn a_change_below_a_directory_that_main_deleted_conflicts() {
+    let family = Family::new().await;
+    let file = family.inode(&family.main, "/docs/a.txt").await;
+    family
+        .main()
+        .delete_path("/docs", None)
+        .await
+        .expect("main");
+    family
+        .fork()
+        .write_file_bytes("/docs/a.txt", b"ours", None)
+        .await
+        .expect("fork");
+
+    let error = family.merge("foreign", None).await.expect_err("conflict");
+    let conflict = error
+        .details()
+        .and_then(|details| details.conflict)
+        .expect("the first conflict");
+    assert_eq!(
+        (conflict.kind, conflict.inode_id),
+        (MergeConflictKind::Visibility, file)
+    );
+}
+
+/// Checks that the fork's delete of a file below a directory that `main`
+/// deleted has nothing to do. The deletion in `main` hides the file, and the
+/// merge doesn't undo that deletion, so the file stays hidden there without
+/// a delete of its own.
+#[tokio::test]
+async fn a_delete_below_a_directory_that_main_deleted_has_nothing_to_do() {
+    let family = Family::new().await;
+    family
+        .main()
+        .delete_path("/docs", None)
+        .await
+        .expect("main");
+    family
+        .fork()
+        .delete_path("/docs/a.txt", None)
+        .await
+        .expect("fork");
+
+    let commit = family.merge("both", None).await.expect("merge");
+    assert!(commit.events.is_empty());
+    assert!(family.entry(&family.main, "/docs").await.is_none());
+}
+
+/// Checks that the fork's change to a file below a directory that both
+/// namespaces deleted has nothing to do. `main` writes `/docs/a.txt`, renames
+/// it, and deletes `/docs`, and the fork writes `/docs/a.txt` and deletes
+/// `/docs`. Both namespaces show nothing of the file at the end, so the merge
+/// neither applies the fork's write nor deletes the file, and the file's
+/// binding and revision rows in `main`, which are both foreign, don't
+/// conflict, because no change replaces them.
+#[tokio::test]
+async fn a_change_below_a_directory_that_both_deleted_has_nothing_to_do() {
+    let family = Family::new().await;
+    family
+        .main()
+        .write_file_bytes("/docs/a.txt", b"theirs", None)
+        .await
+        .expect("write in main");
+    family
+        .main()
+        .move_path("/docs/a.txt", "/docs/c.txt", None)
+        .await
+        .expect("rename in main");
+    family
+        .main()
+        .delete_path("/docs", None)
+        .await
+        .expect("main");
+    family
+        .fork()
+        .write_file_bytes("/docs/a.txt", b"ours", None)
+        .await
+        .expect("write in the fork");
+    family
+        .fork()
+        .delete_path("/docs", None)
+        .await
+        .expect("delete in the fork");
+
+    let commit = family.merge("both", None).await.expect("merge");
+    assert!(commit.events.is_empty());
+    assert!(family.entry(&family.main, "/docs").await.is_none());
+}
+
+/// Deletes `/docs` in the fork, merges the delete, and returns the
+/// directory's inode and the fork's commit of the delete.
+async fn delete_docs_and_merge(family: &Family) -> (InodeId, Commit) {
+    let directory = family.inode(&family.main, "/docs").await;
+    let deleted = family
+        .fork()
+        .delete_path("/docs", None)
+        .await
+        .expect("delete");
+    family
+        .merge("delete", None)
+        .await
+        .expect("merge the delete");
+    (directory, deleted)
+}
+
+fn delete_path(path: &str) -> FilesystemOperation {
+    FilesystemOperation::DeletePath {
+        path: AbsolutePath::parse(path).expect("path"),
+        behavior: loonfs_types::DeleteDirectoryBehavior::Recursive,
+        expected_inode_id: None,
+    }
+}
+
+/// Returns the kind of each of the commit's events, with its inode, in the
+/// order of the commit's operations.
+fn events(commit: &Commit) -> Vec<(&'static str, InodeId)> {
+    commit
+        .events
+        .iter()
+        .map(|event| {
+            let inode_id = match event {
+                loonfs_types::FilesystemEvent::FileCreated { inode_id, .. }
+                | loonfs_types::FilesystemEvent::ContentChanged { inode_id, .. }
+                | loonfs_types::FilesystemEvent::Moved { inode_id, .. }
+                | loonfs_types::FilesystemEvent::Deleted { inode_id, .. }
+                | loonfs_types::FilesystemEvent::Restored { inode_id, .. } => *inode_id,
+                other => panic!("an event that these tests don't expect: {other:?}"),
+            };
+            (crate::common::event_kind(event), inode_id)
+        })
+        .collect()
+}
+
+/// Checks that the fork's delete of an item below a directory that it
+/// restored merges. The fork deletes `/docs`, the merge deletes it in
+/// `main`, and the fork then restores `/docs`, writes `/docs/a.txt`, and
+/// deletes `/docs/b.txt` in one commit. The merge restores `/docs` before it
+/// deletes `b.txt`, and `b.txt` stays deleted in `main`.
+#[tokio::test]
+async fn a_delete_below_a_directory_that_the_fork_restored_merges() {
+    let family = Family::new().await;
+    let a = family.inode(&family.main, "/docs/a.txt").await;
+    let b = family.inode(&family.main, "/docs/b.txt").await;
+    let (directory, deleted) = delete_docs_and_merge(&family).await;
+    restore_and_write_in_the_fork(
+        &family,
+        (directory, &deleted),
+        vec![delete_path("/docs/b.txt")],
+        ("/docs/a.txt", b"ours"),
+    )
+    .await;
+
+    let commit = merges_to(
+        &family,
+        &[("/docs/a.txt", Some(b"ours")), ("/docs/b.txt", None)],
+    )
+    .await;
+    assert_eq!(
+        events(&commit),
+        [
+            ("restored", directory),
+            ("deleted", b),
+            ("content_changed", a)
+        ]
+    );
+}
+
+/// Checks that the fork's create below a directory that its restored
+/// directory contains merges. `main` has `/docs/sub/x.txt`. The fork deletes
+/// `/docs`, the merge deletes it in `main`, and the fork then restores
+/// `/docs` and creates `/docs/sub/new.txt`, whose parent only the restore
+/// shows again.
+#[tokio::test]
+async fn a_create_below_a_directory_inside_a_restored_directory_merges() {
+    let family = Family::new().await;
+    family
+        .fork()
+        .write_file_bytes("/docs/sub/x.txt", b"x", None)
+        .await
+        .expect("create /docs/sub");
+    family.merge("seed", None).await.expect("merge /docs/sub");
+    let (directory, deleted) = delete_docs_and_merge(&family).await;
+    restore_and_write_in_the_fork(
+        &family,
+        (directory, &deleted),
+        Vec::new(),
+        ("/docs/sub/new.txt", b"new"),
+    )
+    .await;
+
+    let commit = merges_to(
+        &family,
+        &[
+            ("/docs/sub/new.txt", Some(b"new")),
+            ("/docs/sub/x.txt", Some(b"x")),
+        ],
+    )
+    .await;
+    let new = family.inode(&family.fork, "/docs/sub/new.txt").await;
+    assert_eq!(
+        events(&commit),
+        [("restored", directory), ("file_created", new)]
+    );
+}
+
+/// Checks that a name that an item below a restored directory has is taken
+/// until the merge frees it. The fork deletes `/docs`, the merge deletes it
+/// in `main`, and the fork then restores `/docs`, deletes `/docs/a.txt`, and
+/// creates a new `/docs/a.txt` in one commit. The merge restores `/docs`,
+/// deletes the old file, and then creates the new one.
+#[tokio::test]
+async fn a_name_below_a_restored_directory_is_free_after_its_delete() {
+    let family = Family::new().await;
+    let old = family.inode(&family.main, "/docs/a.txt").await;
+    let (directory, deleted) = delete_docs_and_merge(&family).await;
+    restore_and_write_in_the_fork(
+        &family,
+        (directory, &deleted),
+        vec![delete_path("/docs/a.txt")],
+        ("/docs/a.txt", b"new"),
+    )
+    .await;
+    let new = family.inode(&family.fork, "/docs/a.txt").await;
+    assert_ne!(new, old);
+
+    let commit = merges_to(&family, &[("/docs/a.txt", Some(b"new"))]).await;
+    assert_eq!(family.inode(&family.main, "/docs/a.txt").await, new);
+    assert_eq!(
+        events(&commit),
+        [
+            ("restored", directory),
+            ("deleted", old),
+            ("file_created", new)
+        ]
+    );
+}
+
+/// Checks that a move out of a restored directory merges after the restore.
+/// The fork deletes `/docs`, the merge deletes it in `main`, and the fork
+/// then restores `/docs` and moves `/docs/a.txt` to `/b.txt` in one commit.
+#[tokio::test]
+async fn a_move_out_of_a_restored_directory_merges_after_the_restore() {
+    let family = Family::new().await;
+    let file = family.inode(&family.main, "/docs/a.txt").await;
+    let (directory, deleted) = delete_docs_and_merge(&family).await;
+    family
+        .commit_all(
+            &family.fork,
+            vec![
+                restore_deleted(directory, &deleted),
+                FilesystemOperation::MovePath {
+                    source_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    destination_path: AbsolutePath::parse("/b.txt").expect("path"),
+                    precondition: loonfs_types::DestinationPrecondition::default(),
+                },
+            ],
+        )
+        .await
+        .expect("restore and move in the fork");
+
+    let commit = merges_to(
+        &family,
+        &[
+            ("/b.txt", Some(b"/docs/a.txt")),
+            ("/docs/a.txt", None),
+            ("/docs/b.txt", Some(b"/docs/b.txt")),
+        ],
+    )
+    .await;
+    assert_eq!(events(&commit), [("restored", directory), ("moved", file)]);
 }
 
 /// Checks that a deletion that isn't the fork's own still conflicts. `main`
@@ -1221,7 +1616,8 @@ async fn a_name_that_the_merge_frees_is_free_for_its_create() {
 
 /// Checks that a directory's delete covers the inodes below the directory.
 /// The fork renames a directory below `/p` and then deletes `/p`, and the
-/// merge deletes `/p` alone, which deletes the renamed directory too.
+/// merge deletes `/p` alone, which deletes the renamed directory too, with
+/// no operation of its own.
 #[tokio::test]
 async fn a_directory_delete_covers_the_changes_below_it() {
     let family = Family::new().await;
@@ -1232,10 +1628,95 @@ async fn a_directory_delete_covers_the_changes_below_it() {
         .expect("rename");
     family.fork().delete_path("/p", None).await.expect("delete");
 
+    let directory = family.inode(&family.main, "/p").await;
+
     let commit = family.merge("nested", None).await.expect("merge");
-    assert_eq!(commit.events.len(), 1, "{:?}", commit.events);
+    assert_eq!(events(&commit), [("deleted", directory)]);
     assert!(family.entry(&family.main, "/p").await.is_none());
     assert!(family.entry(&family.main, "/p/q/f.txt").await.is_none());
+}
+
+/// Checks that an inode that the fork hides at the range's end is deleted
+/// where `main` has it. `main` has `/keep` and an empty `/bin`, and the fork
+/// moves `/keep` to `/bin/keep` and then deletes `/bin`. `/keep` isn't below
+/// `/bin` in `main`, so the merge deletes it as well as `/bin`.
+#[tokio::test]
+async fn a_file_moved_into_a_directory_that_the_fork_deleted_is_deleted() {
+    let family = Family::empty(None);
+    family.main().create().await.expect("create main");
+    family
+        .main()
+        .write_file_bytes("/keep", b"keep", None)
+        .await
+        .expect("seed");
+    family
+        .commit(&family.main, create_directory("/bin"))
+        .await
+        .expect("seed");
+    family.fork_main().await;
+    let keep = family.inode(&family.main, "/keep").await;
+    let bin = family.inode(&family.main, "/bin").await;
+    family
+        .fork()
+        .move_path("/keep", "/bin/keep", None)
+        .await
+        .expect("move");
+    family
+        .fork()
+        .delete_path("/bin", None)
+        .await
+        .expect("delete");
+
+    let commit = merges_to(&family, &[("/keep", None), ("/bin", None)]).await;
+    let mut deleted = events(&commit);
+    deleted.sort();
+    let mut expected = [("deleted", keep), ("deleted", bin)];
+    expected.sort();
+    assert_eq!(deleted, expected);
+}
+
+/// Checks that a file that the fork renames inside a directory that it then
+/// deletes adds no operation of its own. The file is below the directory in
+/// `main` too, so the directory's recursive delete covers it.
+#[tokio::test]
+async fn a_file_renamed_inside_a_deleted_directory_adds_no_delete() {
+    let family = Family::new().await;
+    let directory = family.inode(&family.main, "/docs").await;
+    family
+        .fork()
+        .move_path("/docs/a.txt", "/docs/renamed.txt", None)
+        .await
+        .expect("rename");
+    family
+        .fork()
+        .delete_path("/docs", None)
+        .await
+        .expect("delete");
+
+    let commit = merges_to(&family, &[("/docs", None), ("/docs/a.txt", None)]).await;
+    assert_eq!(events(&commit), [("deleted", directory)]);
+}
+
+/// Checks that an inode that the fork created and then hid in the same
+/// range has nothing to create. The fork creates `/tmp/item` and deletes
+/// `/tmp` in one commit, and the merge commits its record alone.
+#[tokio::test]
+async fn an_item_that_the_fork_created_and_hid_has_nothing_to_merge() {
+    let family = Family::new().await;
+    family
+        .commit_all(
+            &family.fork,
+            vec![create_directory("/tmp/item"), delete_path("/tmp")],
+        )
+        .await
+        .expect("create and delete in the fork");
+
+    let commit = merges_to(
+        &family,
+        &[("/tmp", None), ("/docs/a.txt", Some(b"/docs/a.txt"))],
+    )
+    .await;
+    assert!(commit.events.is_empty(), "{:?}", commit.events);
 }
 
 /// Merges the fork and checks the bytes at each path in `main`, where

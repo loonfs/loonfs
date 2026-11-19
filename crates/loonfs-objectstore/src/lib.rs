@@ -3,7 +3,7 @@
 //! LoonFS assumes only the narrow provider contract the format spec names —
 //! create-if-absent, compare-and-swap, read-after-write visibility, prefix
 //! listing — and this crate owns that boundary: the [`ObjectStore`] trait,
-//! provider adapters for S3, Cloudflare R2, Google Cloud Storage, and the local filesystem, the durable key layout in [`keys`] and
+//! provider adapters for S3, Cloudflare R2, Google Cloud Storage, Azure Blob Storage, and the local filesystem, the durable key layout in [`keys`] and
 //! [`layout`], and the contract probe in [`probe`] that proves a configured
 //! store honours that contract — the same checks the conformance suite runs
 //! against real providers.
@@ -16,6 +16,7 @@
 mod assembly;
 mod attempts;
 mod aws_credentials;
+pub mod azure_blob;
 pub mod buffered;
 mod checksum_header;
 mod clock;
@@ -60,6 +61,6 @@ pub use provider_limits::{
 };
 pub use provider_object_store::ProviderObjectStore;
 pub use store_config::{
-    AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials, StoreConfig, ACCESS_KEY_ID_ENV,
-    SECRET_ACCESS_KEY_ENV,
+    AwsS3Credentials, AzureBlobCredentials, CloudflareR2Credentials, GcpGcsCredentials,
+    StoreConfig, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
 };

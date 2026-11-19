@@ -37,6 +37,15 @@ pub(crate) const GCP_GCS_REQUIRED_VARS: &[&str] = &[
 
 pub(crate) const GCP_GCS_OPTIONAL_VARS: &[&str] = &["LOONFS_TEST_GCS_PREFIX"];
 
+pub(crate) const AZURE_BLOB_REQUIRED_VARS: &[&str] = &[
+    "LOONFS_TEST_ABS_ACCOUNT_NAME",
+    "LOONFS_TEST_ABS_CONTAINER_NAME",
+    "LOONFS_TEST_ABS_ACCESS_KEY",
+];
+
+pub(crate) const AZURE_BLOB_OPTIONAL_VARS: &[&str] =
+    &["LOONFS_TEST_ABS_ENDPOINT", "LOONFS_TEST_ABS_PREFIX"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AwsS3ConformanceConfig {
     pub bucket: String,
@@ -62,6 +71,15 @@ pub(crate) struct CloudflareR2ConformanceConfig {
 pub(crate) struct GcpGcsConformanceConfig {
     pub bucket: String,
     pub service_account_key_path: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AzureBlobConformanceConfig {
+    pub account_name: String,
+    pub container: String,
+    pub endpoint: Option<String>,
+    pub account_key: SecretString,
     pub prefix: String,
 }
 
@@ -108,6 +126,19 @@ impl GcpGcsConformanceConfig {
             service_account_key_path: required_env("LOONFS_TEST_GCS_SERVICE_ACCOUNT_KEY_PATH")?,
             prefix: optional_env("LOONFS_TEST_GCS_PREFIX")
                 .unwrap_or_else(|| default_prefix("gcp-gcs")),
+        })
+    }
+}
+
+impl AzureBlobConformanceConfig {
+    pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
+        Ok(Self {
+            account_name: required_env("LOONFS_TEST_ABS_ACCOUNT_NAME")?,
+            container: required_env("LOONFS_TEST_ABS_CONTAINER_NAME")?,
+            endpoint: optional_env("LOONFS_TEST_ABS_ENDPOINT"),
+            account_key: required_env("LOONFS_TEST_ABS_ACCESS_KEY")?.into(),
+            prefix: optional_env("LOONFS_TEST_ABS_PREFIX")
+                .unwrap_or_else(|| default_prefix("azure-blob")),
         })
     }
 }

@@ -6,7 +6,7 @@ use crate::commands::profile_config::{
     profile_provider, provider_name, FieldSource, ProfileProvider,
 };
 use crate::commands::store_builders::{
-    gcs_store, local_store, r2_store, remote_connection, s3_store, RemoteFields,
+    abs_store, gcs_store, local_store, r2_store, remote_connection, s3_store, RemoteFields,
 };
 use crate::config::{ProfileConfig, ProfileConnection, StoreConfig};
 use crate::error::{CliError, Result};
@@ -40,6 +40,9 @@ pub(super) fn apply_update(
                 }
                 (StoreConfig::GcpGcs(current), ProfileProviderCommand::Gcs(args)) => {
                     gcs_store(Some(current), &args.store, source)?
+                }
+                (StoreConfig::AzureBlob(current), ProfileProviderCommand::Abs(args)) => {
+                    abs_store(Some(current), &args.store, source)?
                 }
                 _ => return Err(mismatch()),
             };

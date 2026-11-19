@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "The LoonFS object-store boundary: contract, key layout, and providers."
 repository.workspace = true
 homepage.workspace = true
-keywords = ["object-storage", "s3", "gcs", "r2"]
+keywords = ["object-storage", "s3", "gcs", "r2", "azure"]
 categories = ["filesystem"]
 
 [dependencies]

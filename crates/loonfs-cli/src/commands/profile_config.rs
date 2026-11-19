@@ -2,11 +2,11 @@
 //! prompts.
 
 use crate::args::{
-    GcsStoreArgs, LocalStoreArgs, ProfileActorArgs, ProfileProviderCommand, R2StoreArgs,
-    RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
+    AbsStoreArgs, GcsStoreArgs, LocalStoreArgs, ProfileActorArgs, ProfileProviderCommand,
+    R2StoreArgs, RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
 };
 use crate::commands::store_builders::{
-    absolute_local_root, gcs_store, local_store, parse_profile_principals, r2_store,
+    abs_store, absolute_local_root, gcs_store, local_store, parse_profile_principals, r2_store,
     remote_connection, s3_store,
 };
 use crate::config::{
@@ -21,6 +21,7 @@ pub(super) enum ProfileProvider {
     S3,
     R2,
     Gcs,
+    Abs,
     Local,
     Remote,
 }
@@ -32,6 +33,7 @@ impl ProfileProviderCommand {
             Self::S3(args) => &args.name,
             Self::R2(args) => &args.name,
             Self::Gcs(args) => &args.name,
+            Self::Abs(args) => &args.name,
             Self::Local(args) => &args.name,
             Self::Remote(args) => &args.name,
         }
@@ -42,6 +44,7 @@ impl ProfileProviderCommand {
             Self::S3(args) => &args.actor,
             Self::R2(args) => &args.actor,
             Self::Gcs(args) => &args.actor,
+            Self::Abs(args) => &args.actor,
             Self::Local(args) => &args.actor,
             Self::Remote(args) => &args.actor,
         }
@@ -52,6 +55,7 @@ impl ProfileProviderCommand {
             Self::S3(_) => ProfileProvider::S3,
             Self::R2(_) => ProfileProvider::R2,
             Self::Gcs(_) => ProfileProvider::Gcs,
+            Self::Abs(_) => ProfileProvider::Abs,
             Self::Local(_) => ProfileProvider::Local,
             Self::Remote(_) => ProfileProvider::Remote,
         }
@@ -67,6 +71,7 @@ impl ProfileProviderCommand {
                 Self::S3(args) => args.store.has_update_flags(),
                 Self::R2(args) => args.store.has_update_flags(),
                 Self::Gcs(args) => args.store.has_update_flags(),
+                Self::Abs(args) => args.store.has_update_flags(),
                 Self::Local(args) => args.store.has_update_flags(),
                 Self::Remote(args) => args.server.has_update_flags(),
             }
@@ -116,35 +121,34 @@ pub(super) fn build_profile_interactive(
         ));
     }
     let source = FieldSource::from_runtime(runtime);
-    let connection = match prompt::prompt_choice(
-        "provider",
-        &["s3", "r2", "gcs", "local", "remote"],
-    )?
-    .as_str()
-    {
-        "s3" => embedded(s3_store(None, &S3StoreArgs::default(), source)?),
-        "r2" => embedded(r2_store(None, &R2StoreArgs::default(), source)?),
-        "gcs" => embedded(gcs_store(None, &GcsStoreArgs::default(), source)?),
-        "local" => {
-            let root = prompt::prompt_line("root")?;
-            let path = match root.strip_prefix("~/") {
-                Some(relative) => absolute_env_path("HOME")
-                    .ok_or_else(|| {
-                        CliError::invalid_config(
+    let connection =
+        match prompt::prompt_choice("provider", &["s3", "r2", "gcs", "abs", "local", "remote"])?
+            .as_str()
+        {
+            "s3" => embedded(s3_store(None, &S3StoreArgs::default(), source)?),
+            "r2" => embedded(r2_store(None, &R2StoreArgs::default(), source)?),
+            "gcs" => embedded(gcs_store(None, &GcsStoreArgs::default(), source)?),
+            "abs" => embedded(abs_store(None, &AbsStoreArgs::default(), source)?),
+            "local" => {
+                let root = prompt::prompt_line("root")?;
+                let path = match root.strip_prefix("~/") {
+                    Some(relative) => absolute_env_path("HOME")
+                        .ok_or_else(|| {
+                            CliError::invalid_config(
                             "unable to determine the home directory; enter an absolute root path",
                         )
-                    })?
-                    .join(relative.trim_start_matches('/')),
-                None => PathBuf::from(root),
-            };
-            let args = LocalStoreArgs {
-                root: Some(absolute_local_root(&path)?),
-                key_prefix: None,
-            };
-            embedded(local_store(None, &args, source)?)
-        }
-        _ => remote_connection(name, None, &RemoteServerArgs::default(), source)?,
-    };
+                        })?
+                        .join(relative.trim_start_matches('/')),
+                    None => PathBuf::from(root),
+                };
+                let args = LocalStoreArgs {
+                    root: Some(absolute_local_root(&path)?),
+                    key_prefix: None,
+                };
+                embedded(local_store(None, &args, source)?)
+            }
+            _ => remote_connection(name, None, &RemoteServerArgs::default(), source)?,
+        };
     Ok(ProfileConfig {
         identity: ProfileIdentity::default(),
         default_namespace: None,
@@ -166,6 +170,7 @@ pub(super) fn build_profile_from_command(
         ProfileProviderCommand::S3(args) => embedded(s3_store(None, &args.store, source)?),
         ProfileProviderCommand::R2(args) => embedded(r2_store(None, &args.store, source)?),
         ProfileProviderCommand::Gcs(args) => embedded(gcs_store(None, &args.store, source)?),
+        ProfileProviderCommand::Abs(args) => embedded(abs_store(None, &args.store, source)?),
         ProfileProviderCommand::Remote(args) => {
             remote_connection(&args.name, None, &args.server, source)?
         }
@@ -199,6 +204,10 @@ pub(crate) fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
             ..
         } => ProfileProvider::Gcs,
         ProfileConnection::Embedded {
+            store: StoreConfig::AzureBlob { .. },
+            ..
+        } => ProfileProvider::Abs,
+        ProfileConnection::Embedded {
             store: StoreConfig::LocalFs(_),
             ..
         } => ProfileProvider::Local,
@@ -211,6 +220,7 @@ pub(crate) fn provider_name(provider: ProfileProvider) -> &'static str {
         ProfileProvider::S3 => "s3",
         ProfileProvider::R2 => "r2",
         ProfileProvider::Gcs => "gcs",
+        ProfileProvider::Abs => "abs",
         ProfileProvider::Local => "local",
         ProfileProvider::Remote => "remote",
     }
@@ -220,19 +230,20 @@ pub(crate) fn provider_name(provider: ProfileProvider) -> &'static str {
 mod tests {
     use super::{build_profile_from_command, FieldSource};
     use crate::args::{
-        Cli, Command, CredentialSource, LocalStoreArgs, ProfileActorArgs, ProfileCommand,
-        ProfileLocalArgs, ProfileProviderCommand, ProfileR2Args, ProfileRemoteArgs, ProfileS3Args,
-        R2StoreArgs, RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
-        TopLevelCommand,
+        AbsStoreArgs, Cli, Command, CredentialSource, LocalStoreArgs, ProfileAbsArgs,
+        ProfileActorArgs, ProfileCommand, ProfileLocalArgs, ProfileProviderCommand, ProfileR2Args,
+        ProfileRemoteArgs, ProfileS3Args, R2StoreArgs, RemoteServerArgs, RuntimeBehavior,
+        S3StoreArgs, SubjectSelectors, TopLevelCommand,
     };
     use crate::commands::profile_update::apply_update;
 
     use crate::config::{ProfileConfig, ProfileConnection, ProfileIdentity, StoreConfig};
     use crate::error::Result;
     use clap::Parser;
+    use loonfs_objectstore::azure_blob::AzureBlobStoreConfig;
     use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
     use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
-    use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
+    use loonfs_objectstore::{AwsS3Credentials, AzureBlobCredentials, CloudflareR2Credentials};
     use std::assert_matches;
 
     #[test]
@@ -303,6 +314,58 @@ mod tests {
             update(updated, &reset).expect("restore r2 profile"),
             profile
         );
+    }
+
+    #[test]
+    fn abs_flags_create_a_profile_and_an_update_keeps_the_account_key() {
+        let profile = build(&abs(AbsStoreArgs {
+            account_name: Some("account".to_owned()),
+            container: Some("documents".to_owned()),
+            account_key: Some("a2V5".to_owned()),
+            ..AbsStoreArgs::default()
+        }))
+        .expect("build abs profile");
+        assert_eq!(
+            store(&profile),
+            &StoreConfig::AzureBlob(AzureBlobStoreConfig {
+                account_name: "account".to_owned(),
+                container: "documents".to_owned(),
+                endpoint_url: None,
+                credentials: AzureBlobCredentials::AccountKey {
+                    account_key: "a2V5".into(),
+                },
+                key_prefix: None,
+            })
+        );
+        let updated = update(
+            profile,
+            &abs(AbsStoreArgs {
+                container: Some("archive".to_owned()),
+                endpoint_url: Some("http://127.0.0.1:10000/account".to_owned()),
+                key_prefix: Some("tenant-a".to_owned()),
+                ..AbsStoreArgs::default()
+            }),
+        )
+        .expect("update abs");
+        assert_eq!(
+            store(&updated),
+            &StoreConfig::AzureBlob(AzureBlobStoreConfig {
+                account_name: "account".to_owned(),
+                container: "archive".to_owned(),
+                endpoint_url: Some("http://127.0.0.1:10000/account".to_owned()),
+                credentials: AzureBlobCredentials::AccountKey {
+                    account_key: "a2V5".into(),
+                },
+                key_prefix: Some("tenant-a".to_owned()),
+            })
+        );
+        let missing = build(&abs(AbsStoreArgs {
+            account_name: Some("account".to_owned()),
+            container: Some("documents".to_owned()),
+            ..AbsStoreArgs::default()
+        }))
+        .expect_err("a new abs profile needs the account key");
+        assert_eq!(missing.param.as_deref(), Some("--account-key"));
     }
 
     /// Checks the bare flag, both values, and an omitted flag, which keeps
@@ -488,6 +551,14 @@ mod tests {
 
     fn r2(store: R2StoreArgs) -> ProfileProviderCommand {
         ProfileProviderCommand::R2(ProfileR2Args {
+            name: "default".to_owned(),
+            store,
+            actor: ProfileActorArgs::default(),
+        })
+    }
+
+    fn abs(store: AbsStoreArgs) -> ProfileProviderCommand {
+        ProfileProviderCommand::Abs(ProfileAbsArgs {
             name: "default".to_owned(),
             store,
             actor: ProfileActorArgs::default(),
