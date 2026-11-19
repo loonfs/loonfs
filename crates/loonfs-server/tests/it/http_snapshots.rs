@@ -273,7 +273,7 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
     assert_eq!(status, 400);
     assert_eq!(error.code, "invalid_request");
 
-    let unknown = "snp_00000000000000000001-0000000000ffffffffffffffff";
+    let unknown = "snp_0000000000000zffffffffffff";
     let (status, error) = extend_snapshot(&harness.server_url, namespace.as_str(), unknown, 500)
         .expect_err("unknown snapshot must fail extension");
     assert_eq!(status, 404);

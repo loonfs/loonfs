@@ -166,8 +166,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let snapshot = SnapshotRecord {
             namespace_id: namespace_id.clone(),
-            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
-                .expect("snapshot id"),
+            snapshot_id: SnapshotId::parse("snp_0000000000000g000000000001").expect("snapshot id"),
             owner: SnapshotRecordOwner::User {
                 name: Some("release".to_owned()),
             },
@@ -179,7 +178,7 @@ mod tests {
         };
         let snapshot_json = serde_json::json!({
             "namespace_id": "demo",
-            "snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
+            "snapshot_id": "snp_0000000000000g000000000001",
             "owner": {"kind": "user", "name": "release"},
             "created_at_ms": 1_752_623_000_000_u64,
             "expires_at_ms": 1_752_626_600_000_u64,
@@ -208,8 +207,7 @@ mod tests {
     fn optional_snapshot_record_fields_are_omitted_and_default_when_absent() {
         let snapshot_json = serde_json::to_value(SnapshotRecord {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
-                .expect("snapshot id"),
+            snapshot_id: SnapshotId::parse("snp_0000000000000g000000000001").expect("snapshot id"),
             owner: SnapshotRecordOwner::User {
                 name: Some("release".to_owned()),
             },
@@ -230,7 +228,7 @@ mod tests {
     fn a_snapshot_record_owner_from_a_newer_server_decodes_as_unknown() {
         let snapshot: SnapshotRecord = serde_json::from_value(serde_json::json!({
             "namespace_id": "demo",
-            "snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
+            "snapshot_id": "snp_0000000000000g000000000001",
             "owner": {"kind": "retention_policy", "policy_id": "nightly"},
             "created_at_ms": 1,
             "captured_seq": 3,

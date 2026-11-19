@@ -770,13 +770,9 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                 payload_checksum: payload_checksum(),
             },
             fork_point_seq: CommitSeq(2),
-            source_snapshot_id: snapshot_id("snp_00000000000000000002-00000000000000000000000002"),
-            forked_from_snapshot_id: snapshot_id(
-                "snp_00000000000000000002-00000000000000000000000001",
-            ),
-            fork_point_snapshot_id: snapshot_id(
-                "snp_00000000000000000001-00000000000000000000000003",
-            ),
+            source_snapshot_id: snapshot_id("snp_00000000000010000000000002"),
+            forked_from_snapshot_id: snapshot_id("snp_00000000000010000000000001"),
+            fork_point_snapshot_id: snapshot_id("snp_0000000000000g000000000003"),
             rebased_from: None,
         }),
         ..sample_manifest_payload()
@@ -1083,7 +1079,7 @@ fn control_objects_match_golden_bytes() {
         "control_snapshot.v1.json",
         ControlObjectKind::Snapshot,
         SnapshotPayload {
-            snapshot_id: snapshot_id("snp_00000000000000000002-00000000000000000000000002"),
+            snapshot_id: snapshot_id("snp_00000000000010000000000002"),
             namespace_id: namespace_id(),
             head_seq: (sample_manifest_ref(2)).head_seq,
             payload_checksum: (sample_manifest_ref(2)).payload_checksum.clone(),
@@ -1099,7 +1095,7 @@ fn control_objects_match_golden_bytes() {
         "control_snapshot_unnamed.v1.json",
         ControlObjectKind::Snapshot,
         SnapshotPayload {
-            snapshot_id: snapshot_id("snp_00000000000000000003-00000000000000000000000003"),
+            snapshot_id: snapshot_id("snp_0000000000001g000000000003"),
             namespace_id: namespace_id(),
             head_seq: (sample_manifest_ref(3)).head_seq,
             payload_checksum: (sample_manifest_ref(3)).payload_checksum.clone(),
@@ -1115,7 +1111,7 @@ fn control_objects_match_golden_bytes() {
         "control_snapshot_fork.v1.json",
         ControlObjectKind::Snapshot,
         SnapshotPayload {
-            snapshot_id: snapshot_id("snp_00000000000000000004-00000000000000000000000004"),
+            snapshot_id: snapshot_id("snp_00000000000020000000000004"),
             namespace_id: namespace_id(),
             head_seq: (sample_manifest_ref(4)).head_seq,
             payload_checksum: (sample_manifest_ref(4)).payload_checksum.clone(),

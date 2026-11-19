@@ -728,8 +728,8 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
         name: Some("backup".to_owned()),
         ttl_ms: std::num::NonZeroU64::new(10_000),
     };
-    let snapshot_id = &SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
-        .expect("valid snapshot id");
+    let snapshot_id =
+        &SnapshotId::parse("snp_0000000000000g000000000001").expect("valid snapshot id");
     let presigned = &ObjectTransfer::PresignedUrl {
         method: "PUT".to_owned(),
         url: "http://example.invalid/upload".to_owned(),

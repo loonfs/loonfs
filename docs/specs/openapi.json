@@ -4511,9 +4511,9 @@
         "type": "object"
       },
       "SnapshotId": {
-        "description": "The durable ID of one snapshot.\n\nThe manifest number in the ID determines which namespace manifest the snapshot protects.",
-        "example": "snp_00000000000000000001-1m55n87n588gnafy68ekkbj6bx",
-        "pattern": "^snp_[0-9]{20}-[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "description": "The durable ID of one snapshot.\n\nA snapshot ID uses the spelling of every generated ID: `snp_` and the 26-character\nbody. The high 64 bits of the body's 128 bits are the number of the manifest that the\nsnapshot keeps, and the low 64 bits are random.",
+        "example": "snp_0000000000000tfy68ekkbj6bx",
+        "pattern": "^snp_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
       "SnapshotRecord": {

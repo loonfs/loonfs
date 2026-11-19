@@ -388,7 +388,7 @@ Other objects use generated IDs, which all use one 26-character lowercase Crockf
 
 - A content ID (`con_`), a metadata segment ID (`seg_`), an extension segment ID (`idx_`), a pool ID (`pool_`), an upload ID (`upl_`), a span object ID (`span_`), and a temporary object's ID (`tmp_`) are each the prefix followed by that spelling of a random version 4 UUID. A metadata segment ID is generated, instead of being derived from the segment's position in publication history. A span object's key spells its full ID, as every object key does (see [File contents and ownership](#15-file-contents-and-ownership)).
 - An inode ID is `ino_` followed by the same spelling, but its 128 bits aren't a UUID. Its high 64 bits are the creating commit's sequence and the inode's create number, and its low 64 bits are random. The root directory's ID is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
-- A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. The number identifies the snapshot's manifest, and the random part, in the same 26-character spelling, distinguishes separate user and fork snapshots on the same manifest.
+- A snapshot ID is `snp_` followed by the same spelling, but its 128 bits aren't a UUID. Its high 64 bits are the number of the snapshot's manifest, and its low 64 bits are random, so separate user and fork snapshots on the same manifest have different IDs. For example, `snp_000000000000nb4mnetqkz2j0x` is a snapshot of manifest 42 (high 64 bits `0x000000000000002a`).
 
 A collision at a newly generated immutable key MUST NOT overwrite the existing bytes.
 
@@ -1245,7 +1245,7 @@ A "snapshot" is a durable record that keeps one manifest, and the segments it li
 
 ### 8.1 Records and owners
 
-Each snapshot is stored at `snapshots/{snapshot_id}.json`. Its ID includes its manifest's number and a new random suffix, so creating a snapshot twice on the same manifest, or with the same label, creates two records.
+Each snapshot is stored at `snapshots/{snapshot_id}.json`. Its ID includes its manifest's number and 64 new random bits, so creating a snapshot twice on the same manifest, or with the same label, creates two records.
 
 | Owner | Stored owner fields | Reads | Removal |
 | --- | --- | --- | --- |

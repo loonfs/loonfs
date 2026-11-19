@@ -768,8 +768,7 @@ mod tests {
     #[tokio::test]
     async fn reads_send_only_the_parameters_of_what_they_read_at() {
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
-        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
-            .expect("snapshot ID");
+        let snapshot_id = SnapshotId::parse("snp_0000000000000g000000000002").expect("snapshot ID");
         let transport = scripted_transport::script([
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),

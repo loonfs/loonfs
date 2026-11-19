@@ -729,8 +729,7 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
         ),
         ErrorCode::SnapshotNotFound
     );
-    let missing = SnapshotId::parse("snp_00000000000000000009-00000000000000000000000009")
-        .expect("snapshot id");
+    let missing = SnapshotId::parse("snp_0000000000004g000000000009").expect("snapshot id");
     assert_eq!(
         code(
             crate::NamespaceEngine::reader(crate::test_support::namespace_store(

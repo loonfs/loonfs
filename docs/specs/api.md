@@ -981,7 +981,7 @@ A create request accepts an optional `name` and an optional `ttl_ms`. The name i
 Create, list, retrieve, and extend return the same snapshot object, which contains `snapshot_id`, `namespace_id`, `captured_seq`, `created_at_ms`, an optional `name`, and an optional `expires_at_ms`. The object has no `name` field for a snapshot that was created without a name. For example:
 
 ```json
-{"snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
+{"snapshot_id":"snp_0000000000004s63m8hsbwe8xc","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
 ```
 
 An expired snapshot can't be read, forked, extended, or retrieved. Each of those requests returns `snapshot_not_found`, the same as for a deleted snapshot, and the snapshot listing leaves the expired snapshot out.
@@ -993,7 +993,7 @@ An extension measures its requested `ttl_ms` from the server's current time, and
 Deleting a snapshot records the time of the deletion in the snapshot's record (`deleted_at_ms`), leaves its expiry unchanged, and returns the addressed namespace and snapshot:
 
 ```json
-{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc"}
+{"namespace_id":"demo","snapshot_id":"snp_0000000000004s63m8hsbwe8xc"}
 ```
 
 After a delete, a caller can't read through the snapshot, fork it, extend it, retrieve it, or list it. Each request by ID returns `snapshot_not_found`, and the snapshot listing leaves the snapshot out. Garbage collection deletes the record after the grace window, at the time of the deletion plus the grace window, or earlier if the snapshot's expiry plus the grace window comes first. Until then, the record keeps the snapshot's manifest and segments, and the [snapshot inventory](#snapshot-inventory) shows the snapshot with its `deleted_at_ms`.
@@ -1022,12 +1022,12 @@ The snapshot inventory lists every snapshot of a namespace, so an operator can s
 
 Each entry is a snapshot record, which contains `namespace_id`, `snapshot_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, an optional `deleted_at_ms`, `captured_seq`, and `manifest_no`. For a user snapshot that has a name, `owner` contains the `name`. A user snapshot that a caller deleted has `deleted_at_ms`, the time of the deletion.
 
-A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
+A snapshot ID has the form `snp_` followed by 26 lowercase Crockford base 32 characters. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
 
 `GET /v0/maintenance/namespaces/{ns}/snapshots?limit=100&cursor=...` returns existing snapshots in ascending `snapshot_id` order. For example, a namespace with one user snapshot and one fork returns:
 
 ```json
-{"namespace_id":"demo","snapshots":[{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-000000000000000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","snapshots":[{"namespace_id":"demo","snapshot_id":"snp_0000000000004s63m8hsbwe8xc","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","snapshot_id":"snp_0000000000004w2t8qv0d9a5rj","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
 ```
 
 `GET /v0/maintenance/namespaces/{ns}/snapshots/{snapshot_id}` returns one existing snapshot, as the same object the listing returns for it, including an expired or deleted snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
@@ -2713,7 +2713,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 418,
-    "fork_point_snapshot_id": "snp_00000000000000000002-2gxctgcrcw8cevk81xx02a36fb"
+    "fork_point_snapshot_id": "snp_0000000000001bk81xx02a36fb"
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
@@ -2970,7 +2970,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 431,
-    "fork_point_snapshot_id": "snp_00000000000000000002-5km85prv3b9d0v82r3jhza68dy",
+    "fork_point_snapshot_id": "snp_0000000000001b82r3jhza68dy",
     "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
@@ -3045,7 +3045,7 @@ Representative response:
     "fork_basis": {
       "source_namespace_id": "demo",
       "fork_point_seq": 431,
-      "fork_point_snapshot_id": "snp_00000000000000000002-5km85prv3b9d0v82r3jhza68dy",
+      "fork_point_snapshot_id": "snp_0000000000001b82r3jhza68dy",
       "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
     },
     "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",

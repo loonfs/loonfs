@@ -636,8 +636,8 @@ async fn a_deleted_snapshot_refuses_enumeration_instead_of_answering_current_sta
         .expect_err("a deleted snapshot keeps nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 
-    let missing = loonfs::SnapshotId::parse("snp_00000000000000000001-00000000000123456789abcdef")
-        .expect("valid snapshot id");
+    let missing =
+        loonfs::SnapshotId::parse("snp_0000000000000k456789abcdef").expect("valid snapshot id");
     let error = namespace
         .list_snapshot_files(&missing)
         .page_limit(page_limit(10))

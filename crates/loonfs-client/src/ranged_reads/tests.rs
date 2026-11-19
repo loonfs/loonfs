@@ -34,8 +34,7 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
     ]);
     let client = scripted_transport::client(&transport);
     let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
-    let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
-        .expect("snapshot ID");
+    let snapshot_id = SnapshotId::parse("snp_0000000000000g000000000002").expect("snapshot ID");
 
     let by_path = client
         .read_file_range_stream(&spec, range(2, Some(4)))
