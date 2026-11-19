@@ -21,7 +21,7 @@ pub(super) enum ProfileProvider {
     S3,
     R2,
     Gcs,
-    Azure,
+    Abs,
     Local,
     Remote,
 }
@@ -202,7 +202,7 @@ pub(crate) fn profile_provider(profile: &ProfileConfig) -> ProfileProvider {
         ProfileConnection::Embedded {
             store: StoreConfig::AzureBlob { .. },
             ..
-        } => ProfileProvider::Azure,
+        } => ProfileProvider::Abs,
         ProfileConnection::Embedded {
             store: StoreConfig::LocalFs(_),
             ..
@@ -216,7 +216,7 @@ pub(crate) fn provider_name(provider: ProfileProvider) -> &'static str {
         ProfileProvider::S3 => "s3",
         ProfileProvider::R2 => "r2",
         ProfileProvider::Gcs => "gcs",
-        ProfileProvider::Azure => "azure",
+        ProfileProvider::Abs => "abs",
         ProfileProvider::Local => "local",
         ProfileProvider::Remote => "remote",
     }
