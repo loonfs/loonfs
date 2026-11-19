@@ -751,6 +751,64 @@ fn profile_update_with_only_service_account_key_path_applies() {
 }
 
 #[test]
+fn abs_profile_create_update_and_show_round_trip() {
+    let harness = Harness::new();
+    let create = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "abs",
+        "azure",
+        "--account-name",
+        "account",
+        "--container",
+        "documents",
+        "--account-key",
+        "a2V5",
+    ]);
+    assert_success(&create);
+    let created = json_data(&create);
+    assert_eq!(created["store"]["kind"], "azure_blob");
+    assert_eq!(created["store"]["credentials"]["kind"], "account_key");
+    assert_eq!(created["store"]["credentials"]["account_key"], "<redacted>");
+
+    let update = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "abs",
+        "azure",
+        "--container",
+        "archive",
+    ]);
+    assert_success(&update);
+
+    let show = harness.run(&["--json", "profile", "show", "azure"]);
+    assert_success(&show);
+    let shown = json_data(&show);
+    assert_eq!(shown["store"]["account_name"], "account");
+    assert_eq!(shown["store"]["container"], "archive");
+    assert_eq!(shown["store"]["credentials"]["account_key"], "<redacted>");
+
+    let mismatch = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "gcs",
+        "azure",
+        "--bucket",
+        "documents",
+    ]);
+    assert_failure(&mismatch);
+    assert_eq!(
+        json_error(&mismatch)["message"],
+        "profile `azure` uses provider `abs` not `gcs`"
+    );
+}
+
+#[test]
 fn profile_resolution_is_flag_then_environment_then_config_default() {
     let harness = Harness::new();
     harness.add_embedded_profile("configured");

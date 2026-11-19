@@ -412,9 +412,15 @@ fn command_kind_envelope_values_are_pinned() {
 fn management_command_model_uses_noun_families() {
     let command = Cli::command();
     let profile_create = subcommand(subcommand(&command, "profile"), "create");
-    assert_subcommands(profile_create, &["s3", "r2", "gcs", "local", "remote"]);
+    assert_subcommands(
+        profile_create,
+        &["s3", "r2", "gcs", "abs", "local", "remote"],
+    );
     let profile_update = subcommand(subcommand(&command, "profile"), "update");
-    assert_subcommands(profile_update, &["s3", "r2", "gcs", "local", "remote"]);
+    assert_subcommands(
+        profile_update,
+        &["s3", "r2", "gcs", "abs", "local", "remote"],
+    );
 
     let namespace = subcommand(&command, "namespace");
     assert_subcommands(namespace, &["create", "show", "delete", "fork"]);
@@ -459,6 +465,11 @@ fn provider_create_commands_only_expose_applicable_flags() {
     assert!(has_argument(r2, "credential_source"));
     assert!(has_argument(r2, "account_id"));
     assert!(!has_argument(r2, "region"));
+
+    let abs = subcommand(create, "abs");
+    assert!(has_argument(abs, "account_name"));
+    assert!(has_argument(abs, "account_key"));
+    assert!(!has_argument(abs, "bucket"));
 
     let local = subcommand(create, "local");
     assert!(has_argument(local, "root"));

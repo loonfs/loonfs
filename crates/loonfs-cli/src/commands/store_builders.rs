@@ -2,7 +2,7 @@
 //! profile's connection, from flags or prompts.
 
 use crate::args::{
-    BucketAddressing, CredentialSource, GcsStoreArgs, LocalStoreArgs, R2StoreArgs,
+    AbsStoreArgs, BucketAddressing, CredentialSource, GcsStoreArgs, LocalStoreArgs, R2StoreArgs,
     RemoteServerArgs, S3StoreArgs,
 };
 use crate::commands::profile_config::FieldSource;
@@ -10,10 +10,13 @@ use crate::commands::profile_update::{prompt_aws_credentials, prompt_r2_credenti
 use crate::config::{validate_remote_client_config, ProfileConnection, StoreConfig};
 use crate::error::{CliError, Result};
 use crate::prompt;
+use loonfs_objectstore::azure_blob::AzureBlobStoreConfig;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
-use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
+use loonfs_objectstore::{
+    AwsS3Credentials, AzureBlobCredentials, CloudflareR2Credentials, GcpGcsCredentials,
+};
 use loonfs_types::config::non_blank;
 use loonfs_types::{PrincipalId, PrincipalSet, SecretString};
 use std::path::Path;
@@ -131,6 +134,27 @@ fn static_secret(
              missing `--{field}`"
         ))
         .with_param(format!("--{field}"))),
+    }
+}
+
+/// Returns a stored secret from its flag, or from a prompt, or keeps the
+/// current one when the flags leave it out.
+fn secret_field(
+    value: Option<&String>,
+    current: Option<&SecretString>,
+    field: &str,
+    source: FieldSource,
+) -> Result<SecretString> {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        return Ok(value.clone().into());
+    }
+    match (current, source) {
+        (Some(current), FieldSource::Fail) => Ok(current.clone()),
+        (Some(current), FieldSource::Prompt) => {
+            prompt::prompt_secret_keep_current(field, current.expose()).map(SecretString::from)
+        }
+        (None, FieldSource::Prompt) => prompt::prompt_secret(field).map(SecretString::from),
+        (None, FieldSource::Fail) => Err(CliError::non_interactive_field_required(field)),
     }
 }
 
@@ -329,6 +353,51 @@ pub(crate) fn gcs_store(
                 args.service_account_key_path.as_ref(),
                 current_key_path,
                 "service-account-key-path",
+                source,
+            )?,
+        },
+        key_prefix: optional_field(
+            args.key_prefix.as_ref(),
+            current.and_then(|value| value.key_prefix.as_ref()),
+            "key prefix",
+            source,
+        )?,
+    }))
+}
+
+pub(crate) fn abs_store(
+    current: Option<&AzureBlobStoreConfig>,
+    args: &AbsStoreArgs,
+    source: FieldSource,
+) -> Result<StoreConfig> {
+    let current_key = current.map(|value| {
+        let AzureBlobCredentials::AccountKey { account_key } = &value.credentials;
+        account_key
+    });
+    Ok(StoreConfig::AzureBlob(AzureBlobStoreConfig {
+        account_name: required_field(
+            args.account_name.as_ref(),
+            current.map(|value| &value.account_name),
+            "account-name",
+            source,
+        )?,
+        container: required_field(
+            args.container.as_ref(),
+            current.map(|value| &value.container),
+            "container",
+            source,
+        )?,
+        endpoint_url: optional_field(
+            args.endpoint_url.as_ref(),
+            current.and_then(|value| value.endpoint_url.as_ref()),
+            "endpoint url",
+            source,
+        )?,
+        credentials: AzureBlobCredentials::AccountKey {
+            account_key: secret_field(
+                args.account_key.as_ref(),
+                current_key,
+                "account-key",
                 source,
             )?,
         },
