@@ -472,6 +472,38 @@ async fn assert_child_prefix_contract(store: &dyn ObjectStore) {
         .await;
     assert_matches!(unterminated, Err(ObjectStoreError::InvalidKey { .. }));
 
+    // An object directly under the prefix can fill a page by itself and
+    // become the cursor. Azure starts the next page at the cursor itself, so
+    // that page is empty until the listing follows its continuation token.
+    // The local store counts no objects against the limit, so it returns the
+    // child in the first page.
+    let plain = format!("{prefix}plain/");
+    let plain_keys = [format!("{plain}a"), format!("{plain}b/1")];
+    for key in &plain_keys {
+        store
+            .put_if_absent(key, Bytes::from_static(b"listed"))
+            .await
+            .expect("write plain-object fixture");
+    }
+    let mut listed = Vec::new();
+    let mut cursor = None;
+    for _ in 0..3 {
+        let page = child_page(store, &plain, cursor.as_deref(), 1).await;
+        listed.extend(page.items);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(cursor, None, "the listing must finish within three pages");
+    assert_eq!(listed, [format!("{plain}b/")]);
+    for key in &plain_keys {
+        store
+            .delete(key)
+            .await
+            .expect("delete plain-object fixture");
+    }
+
     for key in &keys {
         store
             .delete(key)

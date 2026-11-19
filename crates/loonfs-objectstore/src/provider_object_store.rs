@@ -688,20 +688,37 @@ impl ObjectStore for ProviderObjectStore {
                 self.key_scope.object_key(&resume_key)
             })
             .transpose()?;
-        let options = PaginatedListOptions {
+        let mut options = PaginatedListOptions {
             offset,
             delimiter: Some(Cow::Borrowed("/")),
             max_keys: Some(limit.as_usize()),
             ..Default::default()
         };
-        let listed = self
-            .paginated
-            .list_paginated(
-                Some(scoped_prefix.as_str()).filter(|scoped| !scoped.is_empty()),
-                options,
-            )
-            .await
-            .map_err(|err| map_provider_error(prefix, err, ProviderClient::Retrying))?;
+        // A page can be empty and still have a continuation token. Azure
+        // starts a listing at the cursor itself and object_store removes that
+        // entry, so a page of one is empty when the cursor is an object. An
+        // empty page lists nothing to resume from, so the listing follows
+        // the token until a page has an entry or the token runs out.
+        let listed = loop {
+            let page = self
+                .paginated
+                .list_paginated(
+                    Some(scoped_prefix.as_str()).filter(|scoped| !scoped.is_empty()),
+                    options.clone(),
+                )
+                .await
+                .map_err(|err| map_provider_error(prefix, err, ProviderClient::Retrying))?;
+            let empty = page.result.objects.is_empty() && page.result.common_prefixes.is_empty();
+            match page.page_token {
+                Some(page_token) if empty => {
+                    options = PaginatedListOptions {
+                        page_token: Some(page_token),
+                        ..options
+                    };
+                }
+                _ => break page,
+            }
+        };
         let children: Vec<String> = listed
             .result
             .common_prefixes
@@ -720,7 +737,7 @@ impl ObjectStore for ProviderObjectStore {
                 Some(last_entry.ok_or_else(|| {
                     ObjectStoreError::transport(
                         prefix,
-                        "provider reported more entries after an empty listing page",
+                        "provider listed an entry outside the key prefix",
                     )
                 })?)
             }
@@ -928,6 +945,7 @@ mod tests {
         store: &InMemory,
         prefix: Option<&str>,
         options: PaginatedListOptions,
+        inclusive_offset: bool,
     ) -> provider_store::Result<PaginatedListResult> {
         let prefix = prefix.unwrap_or_default();
         let max_keys = options.max_keys.unwrap_or(1_000);
@@ -944,7 +962,7 @@ mod tests {
             let after_offset = options
                 .offset
                 .as_deref()
-                .is_none_or(|offset| key.as_str() > offset);
+                .is_none_or(|offset| key.as_str() > offset || (inclusive_offset && key == offset));
             let after_page = options
                 .page_token
                 .as_deref()
@@ -968,6 +986,16 @@ mod tests {
             match common {
                 Some(common) => common_prefixes.push(common),
                 None => objects.push(meta),
+            }
+        }
+        if inclusive_offset {
+            if let Some(offset) = options.offset.as_deref() {
+                if objects
+                    .first()
+                    .is_some_and(|first| first.location.as_ref() == offset)
+                {
+                    objects.remove(0);
+                }
             }
         }
         Ok(PaginatedListResult {
@@ -1185,6 +1213,29 @@ mod tests {
         assert_eq!(root.items, ["namespaces/"]);
     }
 
+    /// Azure starts a listing at the cursor itself and object_store removes
+    /// that entry, so a page of one is empty when the cursor is an object.
+    #[tokio::test]
+    async fn child_prefix_pages_follow_the_token_past_an_empty_page() {
+        let flaky = Arc::new(FlakyStore {
+            inclusive_list_offset: true,
+            ..FlakyStore::default()
+        });
+        let store = retrying_store(Arc::clone(&flaky));
+        for key in ["namespaces/a", "namespaces/b/boundary.json"] {
+            store
+                .put_if_absent(key, Bytes::from_static(b"listed"))
+                .await
+                .expect("put");
+        }
+        let first = child_page(&store, "namespaces/", None, 1).await;
+        assert!(first.items.is_empty(), "{first:?}");
+        assert_eq!(first.next_cursor.as_deref(), Some("namespaces/a"));
+        let second = child_page(&store, "namespaces/", Some("namespaces/a"), 1).await;
+        assert_eq!(second.items, ["namespaces/b/"]);
+        assert_eq!(second.next_cursor, None);
+    }
+
     async fn child_page(
         store: &ProviderObjectStore,
         prefix: &str,
@@ -1340,6 +1391,9 @@ mod tests {
         /// Reports each read's ETag as its version too, as GCS reports a
         /// generation, because the in-memory store reports no version.
         versions_from_etags: bool,
+        /// Starts a listing at the offset itself and then removes that entry,
+        /// as object_store does for Azure, whose `startFrom` is inclusive.
+        inclusive_list_offset: bool,
     }
 
     impl fmt::Debug for FlakyStore {
@@ -1466,7 +1520,7 @@ mod tests {
             prefix: Option<&str>,
             options: PaginatedListOptions,
         ) -> provider_store::Result<PaginatedListResult> {
-            memory_page(&self.inner, prefix, options).await
+            memory_page(&self.inner, prefix, options, self.inclusive_list_offset).await
         }
     }
 
