@@ -112,6 +112,10 @@ limit_keys! {
     LIMIT_COMMIT_MAX_CONTENT_TOKENS = "commit.max_content_tokens";
     /// Advisory limit: the largest accepted commit `message`, in bytes.
     LIMIT_COMMIT_MAX_MESSAGE_BYTES = "commit.max_message_bytes";
+    /// Advisory limit: the retention window, in milliseconds, of a namespace
+    /// created without one. A deployment without a default window leaves the
+    /// key out.
+    LIMIT_NAMESPACE_DEFAULT_RETENTION_WINDOW_MS = "namespace.default_retention_window_ms";
     /// Advisory capability key for the default page size applied when callers omit `limit`.
     LIMIT_PAGINATION_DEFAULT_LIMIT = "pagination.default_limit";
     /// Advisory capability key for the largest page size accepted by a deployment.

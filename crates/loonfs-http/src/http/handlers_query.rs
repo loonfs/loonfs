@@ -81,6 +81,7 @@ pub(super) struct GrepQuery {
         get,
         operation_id = "grep",
         extensions(
+            ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("grep")),

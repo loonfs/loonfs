@@ -857,7 +857,7 @@
             "description": "The durable ID of the new namespace. Without this field, LoonFS generates an ID. The\nresponse's `namespace_id` is the new namespace's ID."
           },
           "retention_window_ms": {
-            "description": "The namespace's retention window, in milliseconds, which must be at least the grace window\n(86400000, which is 24 hours). The reference server's maintenance sweep uses this window\nfor the namespace. Without this field, the namespace's window is the server's\n`retention_window_ms` setting, if the server has that setting. A `retention_window`\nmaintenance job can change or clear the window later.",
+            "description": "The namespace's retention window, in milliseconds, which must be at least the grace window\n(86400000, which is 24 hours). The reference server's maintenance sweep uses this window\nfor the namespace. Without this field, the namespace's window is the server's default\nwindow, if the server has one, which the capability document reports as\n`namespace.default_retention_window_ms`. A `retention_window` maintenance job can change\nor clear the window later.",
             "format": "int64",
             "minimum": 86400000,
             "type": "integer"
@@ -4512,7 +4512,7 @@
       },
       "SnapshotId": {
         "description": "The durable ID of one snapshot.\n\nThe manifest number in the ID determines which namespace manifest the snapshot protects.",
-        "example": "snp_00000000000000000001-00000000000000000000000002",
+        "example": "snp_00000000000000000001-1m55n87n588gnafy68ekkbj6bx",
         "pattern": "^snp_[0-9]{20}-[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
@@ -6207,6 +6207,7 @@
           "namespaces"
         ],
         "x-fern-sdk-method-name": "delete",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "not_idempotent"
       },
       "get": {
@@ -6474,6 +6475,7 @@
           "changes"
         ],
         "x-fern-sdk-method-name": "list",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -6596,6 +6598,7 @@
         ],
         "x-fern-sdk-method-name": "create",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "replayable"
       }
     },
@@ -6780,6 +6783,7 @@
           "diff"
         ],
         "x-fern-sdk-method-name": "list",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -6981,6 +6985,7 @@
           "files"
         ],
         "x-fern-sdk-method-name": "content",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -7092,6 +7097,7 @@
           "files"
         ],
         "x-fern-sdk-method-name": "createDownload",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -7260,6 +7266,7 @@
           "files"
         ],
         "x-fern-sdk-method-name": "list",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -7391,6 +7398,7 @@
           "files"
         ],
         "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -7530,6 +7538,7 @@
           "files"
         ],
         "x-fern-sdk-method-name": "listRevisions",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -7660,6 +7669,7 @@
           "trash"
         ],
         "x-fern-sdk-method-name": "list",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -7775,6 +7785,7 @@
         ],
         "x-fern-sdk-method-name": "fork",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "not_idempotent"
       }
     },
@@ -7994,6 +8005,7 @@
           "files"
         ],
         "x-fern-sdk-method-name": "grep",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -8127,6 +8139,7 @@
           "inodes"
         ],
         "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -8307,6 +8320,7 @@
           "inodes"
         ],
         "x-fern-sdk-method-name": "listChildren",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -8511,6 +8525,7 @@
           "inodes"
         ],
         "x-fern-sdk-method-name": "content",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -8643,6 +8658,7 @@
           "inodes"
         ],
         "x-fern-sdk-method-name": "createDownload",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -8794,6 +8810,7 @@
           "inodes"
         ],
         "x-fern-sdk-method-name": "listRevisions",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -9007,6 +9024,7 @@
           "inodes"
         ],
         "x-fern-sdk-method-name": "revisionContent",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -9148,6 +9166,7 @@
           "inodes"
         ],
         "x-fern-sdk-method-name": "createRevisionDownload",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -9280,6 +9299,7 @@
           "namespaces"
         ],
         "x-fern-sdk-method-name": "nextMergeRange",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       },
       "post": {
@@ -9410,6 +9430,7 @@
         ],
         "x-fern-sdk-method-name": "merge",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "replayable"
       }
     },
@@ -9545,6 +9566,7 @@
         ],
         "x-fern-sdk-method-name": "forkForRebase",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "not_idempotent"
       }
     },
@@ -9677,6 +9699,7 @@
         ],
         "x-fern-sdk-method-name": "replay",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "replayable"
       }
     },
@@ -9786,6 +9809,7 @@
           "snapshots"
         ],
         "x-fern-sdk-method-name": "list",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       },
       "post": {
@@ -9888,6 +9912,7 @@
           "snapshots"
         ],
         "x-fern-sdk-method-name": "create",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "not_idempotent"
       }
     },
@@ -9969,6 +9994,7 @@
           "snapshots"
         ],
         "x-fern-sdk-method-name": "delete",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       },
       "get": {
@@ -10058,6 +10084,7 @@
           "snapshots"
         ],
         "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -10158,6 +10185,7 @@
           "snapshots"
         ],
         "x-fern-sdk-method-name": "extend",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -10274,6 +10302,7 @@
         ],
         "x-fern-sdk-method-name": "create",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "not_idempotent"
       }
     },
@@ -10366,6 +10395,7 @@
         ],
         "x-fern-sdk-method-name": "retrieve",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -10468,6 +10498,7 @@
         ],
         "x-fern-sdk-method-name": "abort",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -10591,6 +10622,7 @@
         ],
         "x-fern-sdk-method-name": "complete",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "replayable"
       }
     },
@@ -10717,6 +10749,7 @@
         ],
         "x-fern-sdk-method-name": "putContent",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     },
@@ -10848,6 +10881,7 @@
         ],
         "x-fern-sdk-method-name": "signParts",
         "x-loonfs-actor": "required",
+        "x-loonfs-authority": "required",
         "x-loonfs-retry": "idempotent"
       }
     }

@@ -2078,3 +2078,70 @@ fn actor_headers_are_global_and_only_attributed_and_upload_operations_require_th
         ])
     );
 }
+
+#[test]
+fn every_content_operation_requires_authority_and_no_other_operation_does() {
+    let full = openapi_postprocess::openapi_json_pretty(&loonfs_http::openapi_document())
+        .expect("generate document");
+    let full: Value = serde_json::from_str(&full).expect("full document");
+    let mut required = BTreeSet::new();
+    for path in full["paths"].as_object().expect("paths").values() {
+        for operation in path.as_object().expect("path").values() {
+            let Some(id) = operation["operationId"].as_str() else {
+                continue;
+            };
+            if let Some(authority) = operation.get("x-loonfs-authority") {
+                assert_eq!(authority, "required");
+                required.insert(id);
+            }
+            if let Some(parameters) = operation["parameters"].as_array() {
+                assert!(!parameters.iter().any(|parameter| {
+                    parameter["in"] == "header"
+                        && parameter["name"].as_str().is_some_and(|name| {
+                            name.eq_ignore_ascii_case("Loonfs-Principals")
+                                || name.eq_ignore_ascii_case("Loonfs-Context")
+                        })
+                }));
+            }
+        }
+    }
+    assert_eq!(
+        required,
+        BTreeSet::from([
+            "abort_upload",
+            "complete_upload",
+            "create_commit",
+            "create_download",
+            "create_download_by_inode",
+            "create_revision_download_by_inode",
+            "create_snapshot",
+            "create_upload",
+            "delete_namespace",
+            "delete_snapshot",
+            "extend_snapshot",
+            "fork_namespace",
+            "fork_namespace_for_rebase",
+            "get_file_content",
+            "get_file_content_by_inode",
+            "get_file_revision_content_by_inode",
+            "get_inode",
+            "get_next_merge_range",
+            "get_path_entry",
+            "get_snapshot",
+            "get_upload",
+            "grep",
+            "list_changes",
+            "list_diff",
+            "list_file_revisions",
+            "list_file_revisions_by_inode",
+            "list_inode_children",
+            "list_path_entries",
+            "list_snapshots",
+            "list_trash",
+            "merge_fork",
+            "put_upload_content",
+            "replay_fork",
+            "sign_upload_parts"
+        ])
+    );
+}

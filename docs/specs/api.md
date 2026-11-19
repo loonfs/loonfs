@@ -108,6 +108,7 @@ Registered limit keys:
 | `upload.service_proxied.max_concurrent_requests` | The number of service-proxied upload requests that a serving process streams at once. All callers share this cap (it isn't a per-caller allowance). A request over the cap returns `server_busy`. |
 | `download.service_proxied.max_concurrent_requests` | The number of service-proxied content reads that a serving process streams at once. All callers share this cap (it isn't a per-caller allowance). A request over the cap returns `server_busy`. A read counts against the cap until its body finishes or is dropped. |
 | `access.max_principals_per_request` | The largest number of principal IDs that one request can act as. Headers over the limit return `invalid_request`. |
+| `namespace.default_retention_window_ms` | The retention window, in milliseconds, that a namespace created without `retention_window_ms` receives. A deployment that gives such a namespace no window leaves the key out. A `retention_window` maintenance job can change or clear the window later. |
 | `commit.max_inline_content_bytes_per_operation` | The largest file size for one `inline_content` value, measured before base64 encoding. This limit is advertised only with `filesystem.commits.inline_content`. A larger value returns `content_too_large` before commit planning. This limit applies to each value, and `commit.max_request_body_bytes` limits the whole request. |
 | `commit.max_request_body_bytes` | The largest JSON body that a commit request accepts, including base64 inline content and every other field. A larger body returns `content_too_large`. HTTP deployments advertise this limit. |
 | `commit.max_operations` | The largest number of path operations that one commit can include. A longer list returns `invalid_request` before planning, on every transport. |
@@ -718,6 +719,8 @@ Every operation includes an `x-loonfs-retry` value for generated SDKs. The value
 - `replayable`: repeating the request returns the original result. A repeated commit is replayed by its `commit_id`, and a repeated upload completion returns the first completion's result.
 - `not_idempotent`: a generated client makes one automatic attempt and leaves recovery to the application.
 
+Two more values mark the identity headers that an operation requires (see [Identity headers](#identity-headers)). `x-loonfs-actor: required` appears on every operation that requires `Loonfs-Actor`, and `x-loonfs-authority: required` on every operation that requires `Loonfs-Principals` or `Loonfs-Context`. An operation without a marker doesn't require that header.
+
 The following table lists v0 operations, with their retry classes and representative HTTP routes.
 
 | Purpose | Operation ID | Retry class | Representative HTTP shape |
@@ -978,7 +981,7 @@ A create request accepts an optional `name` and an optional `ttl_ms`. The name i
 Create, list, retrieve, and extend return the same snapshot object, which contains `snapshot_id`, `namespace_id`, `captured_seq`, `created_at_ms`, an optional `name`, and an optional `expires_at_ms`. The object has no `name` field for a snapshot that was created without a name. For example:
 
 ```json
-{"snapshot_id":"snp_00000000000000000009-00000000000000000000000009","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
+{"snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
 ```
 
 An expired snapshot can't be read, forked, extended, or retrieved. Each of those requests returns `snapshot_not_found`, the same as for a deleted snapshot, and the snapshot listing leaves the expired snapshot out.
@@ -990,7 +993,7 @@ An extension measures its requested `ttl_ms` from the server's current time, and
 Deleting a snapshot records the time of the deletion in the snapshot's record (`deleted_at_ms`), leaves its expiry unchanged, and returns the addressed namespace and snapshot:
 
 ```json
-{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-00000000000000000000000009"}
+{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc"}
 ```
 
 After a delete, a caller can't read through the snapshot, fork it, extend it, retrieve it, or list it. Each request by ID returns `snapshot_not_found`, and the snapshot listing leaves the snapshot out. Garbage collection deletes the record after the grace window, at the time of the deletion plus the grace window, or earlier if the snapshot's expiry plus the grace window comes first. Until then, the record keeps the snapshot's manifest and segments, and the [snapshot inventory](#snapshot-inventory) shows the snapshot with its `deleted_at_ms`.
@@ -1024,7 +1027,7 @@ A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 3
 `GET /v0/maintenance/namespaces/{ns}/snapshots?limit=100&cursor=...` returns existing snapshots in ascending `snapshot_id` order. For example, a namespace with one user snapshot and one fork returns:
 
 ```json
-{"namespace_id":"demo","snapshots":[{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-00000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-000000000000000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","snapshots":[{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-000000000000000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
 ```
 
 `GET /v0/maintenance/namespaces/{ns}/snapshots/{snapshot_id}` returns one existing snapshot, as the same object the listing returns for it, including an expired or deleted snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
@@ -1065,7 +1068,7 @@ The reference server's scheduler runs maintenance on two schedules:
 
 So the reference server collects a pool's content objects, upload records, and temporary objects in sweeps, and not between them. A failed collection of a pool is logged, and the next sweep runs the collection again. A pool that returns `pool_not_found` when the sweep collects the pool isn't a failure, because the pool's prefix can empty after the sweep's listing found the pool.
 
-The sweep also advances the retention floor of each namespace that isn't deleted, to the last commit at or before the current time minus the namespace's retention window. A namespace's window is set with `retention_window_ms` when the namespace is created, or with a `retention_window` job (see [Retention jobs](#retention-jobs)). If a create request doesn't include `retention_window_ms` and the server has a `retention_window_ms` setting, the server records that setting as the new namespace's window. The sweep uses the same advance as a `retention` job with `cutoff_at_ms`, so the cutoff rule in [Advancing the retention floor](format.md#101-advancing-the-retention-floor) applies. The steps that the scheduler runs between sweeps don't advance the floor. If a step of a namespace is running when the sweep reaches that namespace, the step makes the sweep's advance after its own work, so the sweep doesn't wait for the step. The sweep doesn't advance the floor of a namespace without a window.
+The sweep also advances the retention floor of each namespace that isn't deleted, to the last commit at or before the current time minus the namespace's retention window. A namespace's window is set with `retention_window_ms` when the namespace is created, or with a `retention_window` job (see [Retention jobs](#retention-jobs)). If a create request doesn't include `retention_window_ms` and the server has a `retention_window_ms` setting, the server records that setting as the new namespace's window, and its capability document reports the setting as `namespace.default_retention_window_ms`. The sweep uses the same advance as a `retention` job with `cutoff_at_ms`, so the cutoff rule in [Advancing the retention floor](format.md#101-advancing-the-retention-floor) applies. The steps that the scheduler runs between sweeps don't advance the floor. If a step of a namespace is running when the sweep reaches that namespace, the step makes the sweep's advance after its own work, so the sweep doesn't wait for the step. The sweep doesn't advance the floor of a namespace without a window.
 
 The deletions that an advance reaches expire at once, and the next base compaction of each family group removes the rows that those deletions hide. The sweep advances the floor the way a `retention` job does. The advance creates a [floor object](glossary.md#floor-object) in the WAL, through the namespace's writer session in the server when the server has a session for the namespace, and then folds the namespace when no manifest records the new floor. The advance claims no writer epoch, so a writer session for the namespace in another process isn't fenced, and no request returns `writer_fenced` because of a sweep. A store can have more than one maintaining server. If two servers advance the same namespace's floor, each server creates a floor object, and the higher floor applies.
 
@@ -2710,7 +2713,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 418,
-    "fork_point_snapshot_id": "snp_00000000000000000002-00000000003f9c2a7d41e05b68"
+    "fork_point_snapshot_id": "snp_00000000000000000002-2gxctgcrcw8cevk81xx02a36fb"
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
@@ -2967,7 +2970,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 431,
-    "fork_point_snapshot_id": "snp_00000000000000000002-00000000005c2e8f1a9b7d4e60",
+    "fork_point_snapshot_id": "snp_00000000000000000002-5km85prv3b9d0v82r3jhza68dy",
     "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
@@ -3042,7 +3045,7 @@ Representative response:
     "fork_basis": {
       "source_namespace_id": "demo",
       "fork_point_seq": 431,
-      "fork_point_snapshot_id": "snp_00000000000000000002-00000000005c2e8f1a9b7d4e60",
+      "fork_point_snapshot_id": "snp_00000000000000000002-5km85prv3b9d0v82r3jhza68dy",
       "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
     },
     "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",

@@ -16,9 +16,10 @@ pub struct CreateNamespaceRequest {
     pub namespace_id: Option<NamespaceId>,
     /// The namespace's retention window, in milliseconds, which must be at least the grace window
     /// (86400000, which is 24 hours). The reference server's maintenance sweep uses this window
-    /// for the namespace. Without this field, the namespace's window is the server's
-    /// `retention_window_ms` setting, if the server has that setting. A `retention_window`
-    /// maintenance job can change or clear the window later.
+    /// for the namespace. Without this field, the namespace's window is the server's default
+    /// window, if the server has one, which the capability document reports as
+    /// `namespace.default_retention_window_ms`. A `retention_window` maintenance job can change
+    /// or clear the window later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",

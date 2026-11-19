@@ -21,7 +21,7 @@ use loonfs_types::{
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS,
     FEATURE_MERGES, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
-    MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
+    LIMIT_NAMESPACE_DEFAULT_RETENTION_WINDOW_MS, MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -300,6 +300,15 @@ impl RuntimeCore {
                     LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST.to_owned(),
                     u64_from_usize(MAX_SUBJECT_PRINCIPALS),
                 );
+                // The window that a namespace created without one receives,
+                // when this runtime has a default, so a client knows how much
+                // history the default keeps before it creates a namespace.
+                if let Some(window_ms) = self.config().default_retention_window_ms {
+                    limits.insert(
+                        LIMIT_NAMESPACE_DEFAULT_RETENTION_WINDOW_MS.to_owned(),
+                        window_ms.get(),
+                    );
+                }
                 // The commit ceilings are this crate's, enforced before
                 // planning on every transport, so a client can pre-validate a
                 // batch instead of discovering the bound on rejection. A host

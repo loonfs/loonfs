@@ -64,6 +64,15 @@ async fn a_namespace_created_without_a_window_has_the_runtimes_default_window() 
             "{name}"
         );
     }
+    assert_eq!(
+        writer
+            .capabilities()
+            .limits
+            .get(loonfs_types::LIMIT_NAMESPACE_DEFAULT_RETENTION_WINDOW_MS)
+            .copied(),
+        default_window_ms.map(NonZeroU64::get),
+        "the runtime advertises the window that a namespace created without one receives"
+    );
 
     let short = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("short-window"))

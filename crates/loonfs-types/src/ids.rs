@@ -361,7 +361,7 @@ string_id! {
     validate = validate_snapshot_id,
     schema(
         pattern = r"^snp_[0-9]{20}-[0-7][0-9a-hjkmnp-tv-z]{25}$",
-        example = "snp_00000000000000000001-00000000000000000000000002"
+        example = "snp_00000000000000000001-1m55n87n588gnafy68ekkbj6bx"
     )
 }
 
