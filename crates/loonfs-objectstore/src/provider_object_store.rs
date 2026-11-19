@@ -326,7 +326,7 @@ impl ProviderObjectStore {
 
 /// Parses the provider path of `scoped`, and reports a failure against the
 /// caller's `key`.
-fn provider_path(key: &str, scoped: String) -> Result<Path> {
+pub(crate) fn provider_path(key: &str, scoped: String) -> Result<Path> {
     Path::parse(scoped).map_err(|err| ObjectStoreError::InvalidKey {
         object_key: key.to_owned(),
         message: err.to_string(),

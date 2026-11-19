@@ -1,11 +1,13 @@
 use crate::provider_env::{
-    provider_env_example_contents, AwsS3ConformanceConfig, CloudflareR2ConformanceConfig,
-    GcpGcsConformanceConfig, AWS_S3_OPTIONAL_VARS, AWS_S3_REQUIRED_VARS,
+    provider_env_example_contents, AwsS3ConformanceConfig, AzureBlobConformanceConfig,
+    CloudflareR2ConformanceConfig, GcpGcsConformanceConfig, AWS_S3_OPTIONAL_VARS,
+    AWS_S3_REQUIRED_VARS, AZURE_BLOB_OPTIONAL_VARS, AZURE_BLOB_REQUIRED_VARS,
     CLOUDFLARE_R2_OPTIONAL_VARS, CLOUDFLARE_R2_REQUIRED_VARS, GCP_GCS_OPTIONAL_VARS,
     GCP_GCS_REQUIRED_VARS,
 };
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
+use loonfs_objectstore::azure_blob::AzureBlobStoreConfig;
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::keys::{content_blob, content_span, temporary_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -15,8 +17,8 @@ use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfi
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{AssemblySource, GetIfChangedOutcome, ObjectStoreError};
 use loonfs_objectstore::{
-    AwsS3Credentials, ByteRange, CloudflareR2Credentials, GcpGcsCredentials, ObjectStore,
-    SharedObjectStore, StoreConfig,
+    AwsS3Credentials, AzureBlobCredentials, ByteRange, CloudflareR2Credentials, GcpGcsCredentials,
+    ObjectStore, SharedObjectStore, StoreConfig,
 };
 use loonfs_objectstore::{ConfiguredObjectStore, MultipartPart};
 use loonfs_test_support::ids::page_limit;
@@ -89,6 +91,23 @@ fn gcp_gcs_store() -> SharedObjectStore {
     .into_shared()
 }
 
+fn azure_blob_store() -> SharedObjectStore {
+    let config = AzureBlobConformanceConfig::from_env()
+        .expect("load Azure Blob Storage real-provider conformance environment");
+    StoreConfig::AzureBlob(AzureBlobStoreConfig {
+        account_name: config.account_name,
+        container: config.container,
+        endpoint_url: config.endpoint,
+        credentials: AzureBlobCredentials::AccountKey {
+            account_key: config.account_key,
+        },
+        key_prefix: Some(config.prefix),
+    })
+    .configured_object_store()
+    .expect("create Azure Blob Storage object store")
+    .into_shared()
+}
+
 #[test]
 fn provider_env_example_covers_real_provider_contract() {
     let example = provider_env_example_contents().expect("read provider env example");
@@ -99,6 +118,8 @@ fn provider_env_example_covers_real_provider_contract() {
         .chain(CLOUDFLARE_R2_OPTIONAL_VARS.iter())
         .chain(GCP_GCS_REQUIRED_VARS.iter())
         .chain(GCP_GCS_OPTIONAL_VARS.iter())
+        .chain(AZURE_BLOB_REQUIRED_VARS.iter())
+        .chain(AZURE_BLOB_OPTIONAL_VARS.iter())
     {
         assert!(
             example.contains(name),
@@ -202,6 +223,18 @@ async fn gcp_gcs_assembly() {
 }
 
 #[tokio::test]
+#[ignore = "requires real Azure Blob Storage credentials"]
+async fn azure_blob_assembly() {
+    let store = azure_blob_store();
+    assert_assembly(
+        &store,
+        &[(1024, 30), (1024, 9 * MIB), (9 * MIB, 9 * MIB)],
+        ChecksumAlgorithm::Crc64nvme,
+    )
+    .await;
+}
+
+#[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_direct_completion_is_create_only() {
     let configured = StoreConfig::AwsS3(aws_s3_config())
@@ -259,6 +292,13 @@ async fn cloudflare_r2_put_stores_a_trustworthy_checksum() {
 async fn gcp_gcs_put_stores_a_trustworthy_checksum() {
     let store = gcp_gcs_store();
     assert_put_stores_a_trustworthy_checksum(&store, "gcp-gcs").await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Azure Blob Storage credentials"]
+async fn azure_blob_put_stores_a_trustworthy_checksum() {
+    let store = azure_blob_store();
+    assert_put_stores_a_trustworthy_checksum(&store, "azure-blob").await;
 }
 
 #[test]
@@ -350,6 +390,27 @@ async fn cloudflare_r2_get_if_changed_round_trips() {
 #[ignore = "requires real GCP GCS credentials"]
 async fn gcp_gcs_get_if_changed_round_trips() {
     let store = gcp_gcs_store();
+    assert_get_if_changed_round_trips(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Azure Blob Storage credentials"]
+async fn azure_blob_real_provider_conformance() {
+    let store = azure_blob_store();
+    assert_provider_conformance(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Azure Blob Storage credentials"]
+async fn azure_blob_streamed_write_round_trips() {
+    let store = azure_blob_store();
+    assert_streamed_write_round_trips(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real Azure Blob Storage credentials"]
+async fn azure_blob_get_if_changed_round_trips() {
+    let store = azure_blob_store();
     assert_get_if_changed_round_trips(&store).await;
 }
 

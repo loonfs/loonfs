@@ -2,7 +2,7 @@
 
 use super::S3RequestSigner;
 use crate::assembly::{
-    combined_checksum, plan_parts, read_chunks, read_verified, resolve_sources, tail_bytes,
+    combined_checksum, plan_parts, read_assembly_part, resolve_sources, tail_bytes,
     verify_expected, ResolvedSource,
 };
 use crate::object_store::invalid_request;
@@ -10,7 +10,6 @@ use crate::provider_limits::{PROVIDER_MAX_MULTIPART_PARTS, PROVIDER_MULTIPART_TH
 use crate::signed_upload::ProviderSigner;
 use crate::{AssemblySource, ByteRange, ObjectMetadata, ObjectStoreError, Result};
 use bytes::Bytes;
-use futures::StreamExt;
 use loonfs_types::{Checksum, ChecksumAlgorithm};
 
 impl S3RequestSigner {
@@ -51,7 +50,7 @@ impl S3RequestSigner {
             start_inclusive: 0,
             end_exclusive: size_bytes,
         };
-        let bytes = self.read_assembly_part(sources, tail, &whole).await?;
+        let bytes = read_assembly_part(self, sources, tail, &whole).await?;
         verify_expected(key, expected, &Checksum::crc64nvme(&bytes))?;
         self.create_checked(key, bytes, expected).await
     }
@@ -94,9 +93,7 @@ impl S3RequestSigner {
                 self.copy_part(key, &upload_id, number, source, &range)
                     .await?
             } else {
-                let bytes = self
-                    .read_assembly_part(sources, tail, &planned.range)
-                    .await?;
+                let bytes = read_assembly_part(self, sources, tail, &planned.range).await?;
                 self.upload_part(key, &upload_id, number, bytes).await?
             };
             parts.push(part);
@@ -157,54 +154,5 @@ impl S3RequestSigner {
         // key: another writer with the correct expectation may already have
         // accepted this object, and nothing names an unaccepted one.
         Err(error)
-    }
-
-    /// Reads the bytes of the assembly that `part` selects, from the sources
-    /// and the tail it overlaps. A source that the part covers whole is
-    /// checked against its checksum.
-    async fn read_assembly_part(
-        &self,
-        sources: &[ResolvedSource<'_>],
-        tail: &[Bytes],
-        part: &ByteRange,
-    ) -> Result<Bytes> {
-        let mut bytes = Vec::with_capacity(loonfs_types::usize_from_u64(part.len_bytes()));
-        let mut start = 0;
-        for source in sources {
-            let end = start + source.range.len_bytes();
-            let first = start.max(part.start_inclusive);
-            let last = end.min(part.end_exclusive);
-            let key = source.source.key.as_str();
-            let etag = source.etag()?;
-            let read = |range| self.get_range(key, range, &etag);
-            let mut chunks = if part.start_inclusive <= start && part.end_exclusive >= end {
-                read_verified(source, read).boxed()
-            } else if first < last {
-                let range = ByteRange {
-                    start_inclusive: source.range.start_inclusive + first - start,
-                    end_exclusive: source.range.start_inclusive + last - start,
-                };
-                read_chunks(key, range, read).boxed()
-            } else {
-                start = end;
-                continue;
-            };
-            while let Some(chunk) = chunks.next().await {
-                bytes.extend_from_slice(&chunk?);
-            }
-            start = end;
-        }
-        for piece in tail {
-            let end = start + piece.len() as u64;
-            let first = start.max(part.start_inclusive);
-            let last = end.min(part.end_exclusive);
-            if first < last {
-                let first = loonfs_types::usize_from_u64(first - start);
-                let last = loonfs_types::usize_from_u64(last - start);
-                bytes.extend_from_slice(&piece[first..last]);
-            }
-            start = end;
-        }
-        Ok(bytes.into())
     }
 }

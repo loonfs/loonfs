@@ -68,7 +68,7 @@ futures = "0.3"
 # journal.
 fs4 = "0.13"
 getrandom = "0.3"
-object_store = { version = "0.14.2", default-features = false, features = ["aws", "gcp"] }
+object_store = { version = "0.14.2", default-features = false, features = ["aws", "azure", "gcp"] }
 # Self-signed certificates for the TLS tests.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 regex = { version = "1.11", default-features = false, features = ["std", "perf"] }

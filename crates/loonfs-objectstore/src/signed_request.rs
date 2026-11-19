@@ -5,7 +5,7 @@ use crate::presign::PresignedUrl;
 use crate::provider_object_store::last_modified_at_ms;
 use crate::ObjectStoreError;
 use loonfs_types::Checksum;
-use object_store::client::{HttpClient, HttpRequestBody};
+use object_store::client::{HttpClient, HttpRequest, HttpRequestBody};
 
 const RETRYABLE_SIGNED_ERROR_CODES: &[&str] = &[
     "InternalError",
@@ -45,6 +45,16 @@ pub(crate) async fn send(
     let request = request
         .body(body)
         .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+    send_request(client, key, request).await
+}
+
+/// Sends one built request, whose headers an adapter may have signed, and
+/// collects its whole response.
+pub(crate) async fn send_request(
+    client: &HttpClient,
+    key: &str,
+    request: HttpRequest,
+) -> Result<SignedResponse> {
     let response = client
         .execute(request)
         .await
