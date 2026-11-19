@@ -1429,7 +1429,11 @@ mod tests {
     fn a_bind_includes_a_revision_summary_exactly_when_its_child_is_a_file() {
         let summary = RevisionSummary {
             revision_no: RevisionNo(1),
-            size_bytes: 5,
+            content_ref: ContentRef::blob_v1(
+                ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
+                b"hello",
+                crate::ChecksumAlgorithm::Crc64nvme,
+            ),
             revision_committed_by: crate::ActorId::parse("test").expect("actor"),
             revision_committed_at_ms: 0,
         };

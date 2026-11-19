@@ -143,12 +143,12 @@ struct ListingEntry {
     revision: Option<ListedRevision>,
 }
 
-/// A file's current revision, as a listing reports it: without the content
-/// reference, which a listing doesn't report.
+/// A file's current revision, as a listing reports it.
 #[derive(Debug, PartialEq, Eq)]
 struct ListedRevision {
     revision_no: RevisionNo,
     size_bytes: u64,
+    content_ref: ContentRef,
     committed_by: ActorId,
     committed_at_ms: u64,
 }
@@ -351,7 +351,7 @@ fn with_edges_and_revisions(
             let seq = u64::try_from(index + 1).expect("seq");
             let summary = |revision_no: RevisionNo, content_ref: &ContentRef| RevisionSummary {
                 revision_no,
-                size_bytes: content_ref.size_bytes,
+                content_ref: content_ref.clone(),
                 revision_committed_by: actor.clone(),
                 revision_committed_at_ms: committed_at_ms,
             };
@@ -1690,12 +1690,13 @@ fn durable_entry(entry: loonfs_types::PathEntry) -> EntryAnswer {
             loonfs_types::PathEntryKind::File {
                 revision_no,
                 size_bytes,
+                content_ref,
                 revision_committed_by,
                 revision_committed_at_ms,
-                ..
             } => Some(ListedRevision {
                 revision_no,
                 size_bytes,
+                content_ref: content_ref.expect("a read of a readable file reports its content"),
                 committed_by: revision_committed_by,
                 committed_at_ms: revision_committed_at_ms,
             }),
@@ -1927,7 +1928,8 @@ fn core_listing(
         .map(|binding| ListingEntry {
             revision: binding.revision().map(|revision| ListedRevision {
                 revision_no: revision.revision_no,
-                size_bytes: revision.size_bytes,
+                size_bytes: revision.content_ref.size_bytes,
+                content_ref: revision.content_ref.clone(),
                 committed_by: revision.revision_committed_by.clone(),
                 committed_at_ms: revision.revision_committed_at_ms,
             }),
@@ -1952,6 +1954,7 @@ fn model_current_revision(
         .map(|row| ListedRevision {
             revision_no: row.revision_no,
             size_bytes: row.content_ref.size_bytes,
+            content_ref: row.content_ref.clone(),
             committed_by: row.committed_by.clone(),
             committed_at_ms: row.committed_at_ms,
         })

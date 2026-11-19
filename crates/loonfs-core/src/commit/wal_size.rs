@@ -101,7 +101,7 @@ const REVISION_BYTES: usize = delta_bytes(
 const BIND_REVISION_BYTES: usize = cbor_string_bytes("revision".len())
     + cbor_map_bytes(&[
         ("revision_no", INTEGER_BYTES),
-        ("size_bytes", INTEGER_BYTES),
+        ("content_ref", CONTENT_REF_BYTES),
         (
             "revision_committed_by",
             cbor_string_bytes(MAX_ACTOR_ID_BYTES),
