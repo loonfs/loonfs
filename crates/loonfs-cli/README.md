@@ -2,7 +2,7 @@
 
 `loonfs-cli` provides the `loonfs` command, which you can use to manage profiles, namespaces, and namespace maintenance, and to work with files and directories by path. To use LoonFS from a Rust program instead, use the `loonfs` crate to embed the runtime, or `loonfs-client` to call a LoonFS server. To run a server, use `loonfs-server`.
 
-A "profile" is an entry in the config file that tells the CLI which object store or server to use. A remote profile sends requests to a LoonFS server. An embedded profile (`local`, `s3`, `r2`, or `gcs`) reads and writes the object store directly. It runs the HTTP API (`loonfs-http`) in memory, on top of its own runtime handles, and the CLI sends requests to that in-memory HTTP API through the same client that a remote profile uses. Because of that, both kinds of profile follow the same API contract. An embedded profile doesn't open a network listener and doesn't need a bearer token.
+A "profile" is an entry in the config file that tells the CLI which object store or server to use. A remote profile sends requests to a LoonFS server. An embedded profile (`local`, `s3`, `r2`, `gcs`, or `abs`) reads and writes the object store directly. It runs the HTTP API (`loonfs-http`) in memory, on top of its own runtime handles, and the CLI sends requests to that in-memory HTTP API through the same client that a remote profile uses. Because of that, both kinds of profile follow the same API contract. An embedded profile doesn't open a network listener and doesn't need a bearer token.
 
 On an embedded profile, `loonfs maintenance index enable` runs its bounded index steps directly on the local runtime handles, instead of through the HTTP API. A command on an embedded profile returns only after the [folds](../../docs/specs/glossary.md#fold) and metadata compactions that its writes started have finished.
 
@@ -146,6 +146,7 @@ Profile management
   loonfs profile create s3 <name> [s3-options]
   loonfs profile create r2 <name> [r2-options]
   loonfs profile create gcs <name> [gcs-options]
+  loonfs profile create abs <name> [abs-options]
   loonfs profile create local <name> [local-options]
   loonfs profile create remote <name> [remote-options]
     Add a provider-specific profile to the config file
@@ -508,7 +509,7 @@ Profile create options
   provider accepts only its own flags. S3 and R2 use ambient credentials by
   default, and read AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY when the
   store is opened. If you pass the static credential flags, the CLI stores
-  those credentials in the profile.
+  those credentials in the profile. An abs profile stores the account key.
 
   Every embedded profile:
     --key-prefix <prefix>              optional
@@ -539,6 +540,12 @@ Profile create options
   loonfs profile create gcs:
     --bucket <name>
     --service-account-key-path <path>
+
+  loonfs profile create abs:
+    --account-name <name>
+    --container <name>
+    --account-key <key>
+    --endpoint-url <url>               optional
 
   loonfs profile create remote:
     --server-url <url>
@@ -589,6 +596,12 @@ Update options
   gcp_gcs profile updates:
     --bucket <name>
     --service-account-key-path <path>
+
+  azure_blob profile updates:
+    --account-name <name>
+    --container <name>
+    --account-key <key>
+    --endpoint-url <url>
 
   Remote profile updates:
     --server-url <url>
