@@ -470,9 +470,9 @@ impl HeapBytes for DirentryBindingRecord {
             + self.commit_id.heap_bytes()
             + self.committed_by.heap_bytes()
             + self.display_name().map_or(0, HeapBytes::heap_bytes)
-            + self
-                .revision()
-                .map_or(0, |revision| revision.revision_committed_by.heap_bytes())
+            + self.revision().map_or(0, |revision| {
+                revision.content_ref.heap_bytes() + revision.revision_committed_by.heap_bytes()
+            })
     }
 }
 
@@ -585,9 +585,10 @@ impl HeapBytes for WalCommitDelta {
                 name_key.heap_bytes()
                     + display_name.heap_bytes()
                     + child_created_by.heap_bytes()
-                    + revision
-                        .as_ref()
-                        .map_or(0, |revision| revision.revision_committed_by.heap_bytes())
+                    + revision.as_ref().map_or(0, |revision| {
+                        revision.content_ref.heap_bytes()
+                            + revision.revision_committed_by.heap_bytes()
+                    })
             }
             WalDelta::UnbindDirentry {
                 name_key,

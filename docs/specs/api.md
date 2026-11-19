@@ -981,7 +981,7 @@ A create request accepts an optional `name` and an optional `ttl_ms`. The name i
 Create, list, retrieve, and extend return the same snapshot object, which contains `snapshot_id`, `namespace_id`, `captured_seq`, `created_at_ms`, an optional `name`, and an optional `expires_at_ms`. The object has no `name` field for a snapshot that was created without a name. For example:
 
 ```json
-{"snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
+{"snapshot_id":"snp_0000000000004s63m8hsbwe8xc","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
 ```
 
 An expired snapshot can't be read, forked, extended, or retrieved. Each of those requests returns `snapshot_not_found`, the same as for a deleted snapshot, and the snapshot listing leaves the expired snapshot out.
@@ -993,7 +993,7 @@ An extension measures its requested `ttl_ms` from the server's current time, and
 Deleting a snapshot records the time of the deletion in the snapshot's record (`deleted_at_ms`), leaves its expiry unchanged, and returns the addressed namespace and snapshot:
 
 ```json
-{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc"}
+{"namespace_id":"demo","snapshot_id":"snp_0000000000004s63m8hsbwe8xc"}
 ```
 
 After a delete, a caller can't read through the snapshot, fork it, extend it, retrieve it, or list it. Each request by ID returns `snapshot_not_found`, and the snapshot listing leaves the snapshot out. Garbage collection deletes the record after the grace window, at the time of the deletion plus the grace window, or earlier if the snapshot's expiry plus the grace window comes first. Until then, the record keeps the snapshot's manifest and segments, and the [snapshot inventory](#snapshot-inventory) shows the snapshot with its `deleted_at_ms`.
@@ -1022,12 +1022,12 @@ The snapshot inventory lists every snapshot of a namespace, so an operator can s
 
 Each entry is a snapshot record, which contains `namespace_id`, `snapshot_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, an optional `deleted_at_ms`, `captured_seq`, and `manifest_no`. For a user snapshot that has a name, `owner` contains the `name`. A user snapshot that a caller deleted has `deleted_at_ms`, the time of the deletion.
 
-A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
+A snapshot ID has the form `snp_` followed by 26 lowercase Crockford base 32 characters. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
 
 `GET /v0/maintenance/namespaces/{ns}/snapshots?limit=100&cursor=...` returns existing snapshots in ascending `snapshot_id` order. For example, a namespace with one user snapshot and one fork returns:
 
 ```json
-{"namespace_id":"demo","snapshots":[{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-60n2dr62x3845s63m8hsbwe8xc","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-000000000000000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","snapshots":[{"namespace_id":"demo","snapshot_id":"snp_0000000000004s63m8hsbwe8xc","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","snapshot_id":"snp_0000000000004w2t8qv0d9a5rj","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
 ```
 
 `GET /v0/maintenance/namespaces/{ns}/snapshots/{snapshot_id}` returns one existing snapshot, as the same object the listing returns for it, including an expired or deleted snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
@@ -1495,7 +1495,7 @@ Returns one authoritative path entry, addressed by path or by inode ID. Enum val
 }
 ```
 
-Every entry includes `created_by` and `created_at_ms` from its inode row. File entries also include `revision_committed_by` and `revision_committed_at_ms` from their current revision row, and `content_ref`, the current revision's content reference. The `content_ref` field is present on entry reads, which are these two routes, and a directory listing leaves it out (see [`GET /filesystem/entries`](#65-get-filesystementries-and-get-inodesinode_idchildren)). These stamps are informational. Sequence numbers determine order, and no validity rule reads the stamps. In v0, directories have a creation time but no modification time, and a rename or move changes neither the attribution nor the time.
+Every entry includes `created_by` and `created_at_ms` from its inode row. File entries also include `revision_committed_by` and `revision_committed_at_ms` from their current revision row, and `content_ref`, the current revision's content reference. The `content_ref` field is present on entry reads, which are these two routes, and on directory listings, which leave it out for a file that the subject can't read (see [`GET /filesystem/entries`](#65-get-filesystementries-and-get-inodesinode_idchildren)). These stamps are informational. Sequence numbers determine order, and no validity rule reads the stamps. In v0, directories have a creation time but no modification time, and a rename or move changes neither the attribution nor the time.
 
 A newer server might report an `inode_kind` that this document doesn't define. A client MUST tolerate an `inode_kind` it doesn't know. It treats such an entry as opaque, so it reads the fields that every entry includes (such as `display_name`, `inode_id`, `path`, and `binding_version`) and ignores any field that belongs to that kind.
 
@@ -1515,7 +1515,7 @@ Why are the attribute fields siblings of the entry's other fields, instead of on
 
 ### 6.5 `GET /filesystem/entries` and `GET /inodes/{inode_id}/children`
 
-Lists the children of a directory, or, with `recursive=true`, its whole subtree, addressed by path or by inode ID. The response envelope identifies the listing target and the head the listing was read from, so an empty directory still reports which state it observed, and the response can grow without changing the shape of `entries`. The path route identifies its target as `path`, and the inode route identifies it as `parent_inode_id`. Each entry has the shape that `GET /filesystem/entry` returns (directory entries omit file-only fields), except that a file entry leaves out `content_ref`. A listing reports each file's `revision_no`, `size_bytes`, `revision_committed_by`, and `revision_committed_at_ms` from the file's directory binding, so it reads no revision of any file. A client that needs a file's content reference reads the file's entry.
+Lists the children of a directory, or, with `recursive=true`, its whole subtree, addressed by path or by inode ID. The response envelope identifies the listing target and the head the listing was read from, so an empty directory still reports which state it observed, and the response can grow without changing the shape of `entries`. The path route identifies its target as `path`, and the inode route identifies it as `parent_inode_id`. Each entry has the shape that `GET /filesystem/entry` returns (directory entries omit file-only fields). A listing reports each file's `revision_no`, `size_bytes`, `content_ref`, `revision_committed_by`, and `revision_committed_at_ms` from the file's directory binding, so it reads no revision of any file.
 
 A directory listing returns entries in canonical `name_key` order, and a recursive listing returns them in the depth-first order described below. Concatenating the pages in cursor order produces the complete listing in that same order, and clients MUST NOT re-sort the combined pages. The listing target is required on every page (the `path` query parameter on the path route, or the `inode_id` route segment on the inode route). The cursor records the resume position, but the request target determines what's being listed. Responses include `next_cursor` only when another page is available.
 
@@ -1565,7 +1565,13 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
       "revision_no": 7,
       "revision_committed_by": "render-worker",
       "revision_committed_at_ms": 1752624000000,
-      "size_bytes": 19482
+      "size_bytes": 19482,
+      "content_ref": {
+        "kind": "blob_v1",
+        "content_id": "con_4z59p0wjvx9a8b2frdhhf6mat1",
+        "size_bytes": 19482,
+        "checksum": { "algorithm": "crc64nvme", "value": "42d..." }
+      }
     },
     {
       "namespace_id": "demo",
@@ -1584,7 +1590,7 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
 }
 ```
 
-Why doesn't a listing report a file's content reference? A listing reads each file's revision summary from the file's directory binding, where LoonFS copies the summary each time the file gets a new revision. The copy leaves out the content reference, so a listing of a large directory reads small binding rows and no revision rows. Downloads and content reads return the reference with the bytes, and a client that needs the reference without the bytes reads the file's entry.
+Why does a listing report a file's content reference? A client that keeps a copy of a tree current follows the [change feed](#611-get-changes), and each event for a new revision includes the revision's content reference. A client copies from a listing for its first copy, after the feed returns `below_retention_floor`, or when the client isn't an administrator (the feed requires an administrator or the service context). That client compares each listed file with a file that it already has. Inside one namespace, the two files have the same bytes if they have the same inode ID and revision number, and the revision number alone isn't enough. For example, if a client has `/report` at revision 1 and the file is deleted, a new file created at `/report` is a different inode whose first revision is also 1. A fork and its source can each publish the same revision number of one inode with different bytes, so a client that has files from one member of a pool and lists another member needs the content reference. An equal content ID and size means the same stored bytes, and the client can compare the checksum with the checksum of a local file. Without the reference in the listing, the client would read each file's entry.
 
 Why does a recursive listing walk depth first? A depth-first walk's position is one name key per level, so the cursor stays small. A breadth-first walk would need the cursor to record every directory it has found but not listed yet, and that list grows with the width of the tree.
 
@@ -2141,7 +2147,7 @@ The same not-found and forbidden rule applies to reads. A subject with no right 
 | Batch file resolution and grep candidates | `read` on the candidate inode. Snapshot resolution also requires `history`. |
 | Change feed, diff, a fork's next merge range, or bare content reference read | Administrator, and for a fork's next merge range, administrator in the fork too. |
 
-Names belong to the directory, so a subject with `read` on a directory sees every child in a listing. A child that the subject can't read keeps its entry fields, but its `attributes` projection is left out, even when attributes were requested. A recursive listing also returns a child directory that the subject can't read, but it doesn't descend into that directory. For a snapshot read, LoonFS evaluates rights at the current head, on the historical inode that the snapshot resolves, never on the inode that occupies the path today. Every snapshot read of an inode also requires `history`. If an expired deletion hides that inode at the current head, which means that the deletion is at or below the retention floor of the current head's manifest, or if the inode's ancestry there is disconnected (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)), a snapshot read of it requires an administrator, and any other subject receives `path_not_found` or `inode_not_found`, as a live read of the inode does. For example, if a snapshot captured `/team/hr/salaries.csv` before `/team/hr` was deleted, then once the floor reaches that deletion, a principal with `read` and `history` on `/team/hr` can no longer read the file through the snapshot, but an administrator can.
+Names belong to the directory, so a subject with `read` on a directory sees every child in a listing. A child that the subject can't read keeps its entry fields, but its `attributes` projection and, for a file, its `content_ref` are left out, even when attributes were requested. The checksum in a content reference would let the subject confirm a guess of the file's bytes. (A boundary applies only to a directory, and grants only add rights, so a listed file can be unreadable only in a snapshot listing, when the file has since moved under a directory that the subject can't read.) A recursive listing also returns a child directory that the subject can't read, but it doesn't descend into that directory. For a snapshot read, LoonFS evaluates rights at the current head, on the historical inode that the snapshot resolves, never on the inode that occupies the path today. Every snapshot read of an inode also requires `history`. If an expired deletion hides that inode at the current head, which means that the deletion is at or below the retention floor of the current head's manifest, or if the inode's ancestry there is disconnected (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)), a snapshot read of it requires an administrator, and any other subject receives `path_not_found` or `inode_not_found`, as a live read of the inode does. For example, if a snapshot captured `/team/hr/salaries.csv` before `/team/hr` was deleted, then once the floor reaches that deletion, a principal with `read` and `history` on `/team/hr` can no longer read the file through the snapshot, but an administrator can.
 
 The trash listing filters out entries whose saved original parent the subject can't read. A filtered page can be short and still include `next_cursor`. Grep filters out candidates that the subject can't read before it reads their content, but those candidates still count against the page's candidate budget.
 
@@ -2713,7 +2719,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 418,
-    "fork_point_snapshot_id": "snp_00000000000000000002-2gxctgcrcw8cevk81xx02a36fb"
+    "fork_point_snapshot_id": "snp_0000000000001bk81xx02a36fb"
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
@@ -2970,7 +2976,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 431,
-    "fork_point_snapshot_id": "snp_00000000000000000002-5km85prv3b9d0v82r3jhza68dy",
+    "fork_point_snapshot_id": "snp_0000000000001b82r3jhza68dy",
     "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
@@ -3045,7 +3051,7 @@ Representative response:
     "fork_basis": {
       "source_namespace_id": "demo",
       "fork_point_seq": 431,
-      "fork_point_snapshot_id": "snp_00000000000000000002-5km85prv3b9d0v82r3jhza68dy",
+      "fork_point_snapshot_id": "snp_0000000000001b82r3jhza68dy",
       "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
     },
     "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",

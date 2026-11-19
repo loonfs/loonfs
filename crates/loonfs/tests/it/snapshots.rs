@@ -580,11 +580,7 @@ async fn shared_read_options_select_the_snapshot_for_paths_and_inodes() {
         .await
         .expect("snapshot children");
     assert_eq!(paths.entries.len(), 1);
-    let mut listed_kind = before.kind.clone();
-    if let loonfs::PathEntryKind::File { content_ref, .. } = &mut listed_kind {
-        *content_ref = None;
-    }
-    assert_eq!(paths.entries[0].kind, listed_kind);
+    assert_eq!(paths.entries[0].kind, before.kind);
     assert_eq!(paths.entries[0].revision_no(), Some(loonfs::RevisionNo(2)));
     assert_eq!(paths.entries, inodes.entries);
     assert_eq!(paths.head_seq, snapshot.captured_seq);

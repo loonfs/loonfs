@@ -323,7 +323,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             })?;
         Ok(Some(RevisionSummary {
             revision_no: revision.revision_no,
-            size_bytes: revision.content_ref.size_bytes,
+            content_ref: revision.content_ref,
             revision_committed_by: revision.committed_by,
             revision_committed_at_ms: revision.committed_at_ms,
         }))

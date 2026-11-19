@@ -479,10 +479,11 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
     /// Builds the entry of a listed child from its binding row, which
     /// includes a file's revision summary, so the entry reads no revision
-    /// and reports no content reference
+    /// row and reports the content reference from the summary
     /// ([format section 4.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#44-paths-listings-and-revision-reads)).
     ///
-    /// The attributes of a child the subject can't read are left out.
+    /// The attributes and the content reference of a child the subject can't
+    /// read are left out.
     async fn build_listed_entry(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
@@ -501,8 +502,8 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 })?;
                 PathEntryKind::File {
                     revision_no: revision.revision_no,
-                    size_bytes: revision.size_bytes,
-                    content_ref: None,
+                    size_bytes: revision.content_ref.size_bytes,
+                    content_ref: child.readable.then(|| revision.content_ref.clone()),
                     revision_committed_by: revision.revision_committed_by.clone(),
                     revision_committed_at_ms: revision.revision_committed_at_ms,
                 }

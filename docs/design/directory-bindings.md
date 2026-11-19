@@ -6,7 +6,7 @@ A "directory slot" is a name within a parent directory, identified by `(parent_i
 
 ## Records and indexes
 
-A directory binding row (`direntry_binding`) contains the parent's inode ID (`parent_inode_id`), the name key (`name_key`), the child's inode ID (`child_inode_id`), the child's kind and creation attribution, and the row's state (`state`). It records its position in the namespace history (`committed_seq` and `delta_index`), its commit's ID, actor, and time, and the position of the bind that established the binding (`bind_position`). A bound state is `{"kind":"bound","display_name":...}`, and a bound file row's state also includes the file's revision summary (`revision`): the revision number, the size, and the actor and time of the revision's commit. An unbound state is `{"kind":"unbound"}`.
+A directory binding row (`direntry_binding`) contains the parent's inode ID (`parent_inode_id`), the name key (`name_key`), the child's inode ID (`child_inode_id`), the child's kind and creation attribution, and the row's state (`state`). It records its position in the namespace history (`committed_seq` and `delta_index`), its commit's ID, actor, and time, and the position of the bind that established the binding (`bind_position`). A bound state is `{"kind":"bound","display_name":...}`, and a bound file row's state also includes the file's revision summary (`revision`): the revision number, the content reference (which includes the size), and the actor and time of the revision's commit. An unbound state is `{"kind":"unbound"}`.
 
 | Family | Order | Filter keys |
 | --- | --- | --- |
@@ -23,7 +23,7 @@ At sequence `N`, an edge's value is its first row in key order whose `committed_
 
 LoonFS checks two rules when it validates a commit: a slot has at most one child, and a child has at most one parent. A commit fails validation if it binds into a slot that already has another child, or binds a child that already has a binding, unless the same operation unbinds that binding first. A move unbinds the old slot before it binds the new one, and a restore binds a deletion root, which has no binding. So the two indexes agree at every readable sequence.
 
-A path lookup reads the slot index once for each path component. A listing scans the parent's prefix of the slot index once, takes each edge's value, and includes the bound children that no tombstone hides. A file's entry reports its revision number, size, and revision attribution from the summary in its row, so the listing reads no revision row and no inode row, and it doesn't report a content reference. The parent probe in each `direntry_binds` filter lets the listing skip a run that has no row under the parent. Snapshots read through their own manifests, at their captured sequences, and the first row at or below the captured sequence has the summary as of that sequence.
+A path lookup reads the slot index once for each path component. A listing scans the parent's prefix of the slot index once, takes each edge's value, and includes the bound children that no tombstone hides. A file's entry reports its revision number, size, content reference, and revision attribution from the summary in its row, so the listing reads no revision row and no inode row. The parent probe in each `direntry_binds` filter lets the listing skip a run that has no row under the parent. Snapshots read through their own manifests, at their captured sequences, and the first row at or below the captured sequence has the summary as of that sequence.
 
 ## Retention
 
@@ -61,6 +61,15 @@ WAL deltas, semantic fingerprints, and change-feed events don't depend on how bi
 This section describes what this design costs, and the alternatives to it.
 
 An unbind writes two rows, and a bottom-anchored compaction can remove those rows along with the history they hide. A revision writes one summary row, which compaction removes once a newer summary row is at or below the floor. Reads don't need a join against removals or against revisions. Compaction processes one index at a time, and it doesn't collect removals or make point reads to find them.
+
+Each bound file row stores the file's content reference, so a listing reports the reference without a lookup for each file, and each row is larger. This table shows the stored bytes per row of 1,000 slot-index rows, after the segment encoder compresses them:
+
+| Rows | Without the content reference | With the content reference |
+| --- | --- | --- |
+| 1,000 files, one commit each | 101 | 136 |
+| 1,000 files, 100 to a commit | 84 | 118 |
+| One file rewritten 1,000 times | 45 | 78 |
+| One file appended 1,000 times | 45 | 60 |
 
 | Alternative | Cost |
 | --- | --- |

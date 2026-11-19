@@ -251,8 +251,8 @@ async fn instrumented_store_forwards_start_after_listing() {
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let prefix = "namespaces/ns-1/snapshots/";
-    let first = format!("{prefix}snp_00000000000000000001-00000000000000000000000001.json");
-    let second = format!("{prefix}snp_00000000000000000001-00000000000000000000000002.json");
+    let first = format!("{prefix}snp_0000000000000g000000000001.json");
+    let second = format!("{prefix}snp_0000000000000g000000000002.json");
     for key in [&first, &second] {
         store
             .put_if_absent(key, bytes(b"snapshot"))
@@ -313,10 +313,8 @@ async fn classifies_durable_key_families() {
         .put_if_absent(
             &snapshot_record(
                 &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
-                &loonfs_types::SnapshotId::parse(
-                    "snp_00000000000000000001-00000000000000000000000001",
-                )
-                .expect("valid snapshot id"),
+                &loonfs_types::SnapshotId::parse("snp_0000000000000g000000000001")
+                    .expect("valid snapshot id"),
             ),
             bytes(b"snapshot"),
         )

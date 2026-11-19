@@ -141,7 +141,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 InodeKind::File,
                 Some(RevisionSummary {
                     revision_no: RevisionNo(1),
-                    size_bytes: content_ref.size_bytes,
+                    content_ref: content_ref.clone(),
                     revision_committed_by: self.actor_id.clone(),
                     revision_committed_at_ms: self.committed_at_ms,
                 }),

@@ -304,8 +304,7 @@ mod tests {
     }
 
     fn snapshot_id() -> SnapshotId {
-        SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
-            .expect("valid snapshot id")
+        SnapshotId::parse("snp_0000000000000g000000000001").expect("valid snapshot id")
     }
 
     fn metadata_segment_id() -> MetadataSegmentId {
@@ -371,10 +370,7 @@ mod tests {
                 .replace("{pool_id}", pool_id().as_str())
                 .replace("{wal_no:020}", &format!("{:020}", 42))
                 .replace("{manifest_no:020}", "00000000000000000400")
-                .replace(
-                    "{snapshot_id}",
-                    "snp_00000000000000000001-00000000000000000000000001",
-                )
+                .replace("{snapshot_id}", "snp_0000000000000g000000000001")
                 .replace("{extension_name}", "grep")
                 .replace("{segment_id}", segment_id)
                 .replace("{upload_id}", "upl_00000000000000000000000001")

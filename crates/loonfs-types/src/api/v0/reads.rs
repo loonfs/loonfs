@@ -79,9 +79,9 @@ impl PathEntry {
         }
     }
 
-    /// Returns the current content reference of a file entry that a stat
-    /// returned. A directory listing doesn't report it, so a listed entry
-    /// returns `None`.
+    /// Returns the current content reference of a file entry. A directory
+    /// listing leaves it out for a file that the subject can't read, so that
+    /// listed entry returns `None`.
     pub const fn content_ref(&self) -> Option<&ContentRef> {
         match &self.kind {
             PathEntryKind::Directory {} | PathEntryKind::Unknown => None,
@@ -117,7 +117,8 @@ pub enum PathEntryKind {
         /// The file's current size in bytes.
         size_bytes: u64,
         /// The file's current content. It's present on entry reads (a stat by
-        /// path or by inode) and absent from directory listings.
+        /// path or by inode) and on directory listings, and a listing leaves
+        /// it out for a file that the subject can't read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         content_ref: Option<ContentRef>,
@@ -448,17 +449,18 @@ mod tests {
             revision_committed_at_ms: 1_752_624_000_000,
         };
 
-        // A listed entry has no content reference, and its JSON leaves the
-        // field out.
-        let mut listed = file.clone();
-        if let PathEntryKind::File { content_ref, .. } = &mut listed.kind {
+        // A listing leaves out the content reference of a file that the
+        // subject can't read, and its JSON leaves the field out.
+        let mut unreadable = file.clone();
+        if let PathEntryKind::File { content_ref, .. } = &mut unreadable.kind {
             *content_ref = None;
         }
-        let listed_json = serde_json::to_value(&listed).expect("serialize listed entry");
-        assert!(listed_json.get("content_ref").is_none());
+        let unreadable_json =
+            serde_json::to_value(&unreadable).expect("serialize unreadable entry");
+        assert!(unreadable_json.get("content_ref").is_none());
         assert_eq!(
-            serde_json::from_value::<PathEntry>(listed_json).expect("decode listed entry"),
-            listed
+            serde_json::from_value::<PathEntry>(unreadable_json).expect("decode unreadable entry"),
+            unreadable
         );
 
         assert_eq!(

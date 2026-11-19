@@ -54,7 +54,9 @@ validation_error!(
 ///
 /// Every generated ID type has a `generate()` constructor that calls this
 /// function, except `InodeId`, whose `generate()` builds an ID from the
-/// creating commit's sequence, the inode's create number, and `random_u64`.
+/// creating commit's sequence, the inode's create number, and `random_u64`,
+/// and `SnapshotId`, whose `generate()` builds an ID from the manifest number
+/// and `random_u64`.
 /// This function stays public for free-form generated labels that have no
 /// validated ID type, such as a server's per-request ID.
 pub fn generated_id(prefix: &'static str) -> String {
@@ -355,50 +357,48 @@ impl CommitId {
 string_id! {
     /// The durable ID of one snapshot.
     ///
-    /// The manifest number in the ID determines which namespace manifest the snapshot protects.
+    /// A snapshot ID uses the spelling of every generated ID: `snp_` and the 26-character
+    /// body. The high 64 bits of the body's 128 bits are the number of the manifest that the
+    /// snapshot keeps, and the low 64 bits are random.
     SnapshotId,
     error = GeneratedIdValidationError,
     validate = validate_snapshot_id,
     schema(
-        pattern = r"^snp_[0-9]{20}-[0-7][0-9a-hjkmnp-tv-z]{25}$",
-        example = "snp_00000000000000000001-1m55n87n588gnafy68ekkbj6bx"
+        pattern = r"^snp_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        example = "snp_0000000000000tfy68ekkbj6bx"
     )
 }
 
 impl SnapshotId {
     /// Generates a new snapshot ID for the given manifest number.
     pub fn generate(manifest_no: ManifestNo) -> Self {
-        let body = encode_generated_id_body(random_uuid_v4());
-        Self::parse(format!("snp_{:020}-{body}", manifest_no.0))
+        let bits = (u128::from(manifest_no.0) << 64) | u128::from(random_u64());
+        Self::parse(format!("snp_{}", encode_generated_id_body(bits)))
             .expect("the snapshot's manifest number should be valid")
     }
 
     /// Returns the manifest number encoded in this id.
     pub fn manifest_no(&self) -> ManifestNo {
-        ManifestNo(
-            self.0[4..24]
-                .parse()
-                .expect("a snapshot id should contain a manifest number"),
-        )
+        snapshot_manifest_no(&self.0).expect("a snapshot id should contain a manifest number")
     }
 }
 
+/// Returns the manifest number that a snapshot ID spells, or `None` when `value` isn't a
+/// snapshot ID.
+fn snapshot_manifest_no(value: &str) -> Option<ManifestNo> {
+    let bits = decode_generated_id_body(value.strip_prefix("snp_")?)?;
+    let number = u64::try_from(bits >> 64).ok()?;
+    ManifestNo::parse(number).ok().filter(|number| number.0 > 0)
+}
+
 fn validate_snapshot_id(value: &str) -> Result<(), GeneratedIdValidationError> {
-    let valid = value
-        .strip_prefix("snp_")
-        .and_then(|body| body.split_once('-'))
-        .is_some_and(|(number, body)| {
-            number.len() == 20
-                && number.bytes().all(|byte| byte.is_ascii_digit())
-                && number
-                    .parse::<u64>()
-                    .ok()
-                    .and_then(|number| ManifestNo::parse(number).ok())
-                    .is_some_and(|number| number.0 > 0)
-                && generated_id_body_error(body).is_none()
-        });
-    if !valid {
-        return Err(GeneratedIdValidationError::new(value, "must be `snp_` followed by a twenty-digit positive manifest number, `-`, and 26 lowercase Crockford base 32 characters".to_owned()));
+    if snapshot_manifest_no(value).is_none() {
+        return Err(GeneratedIdValidationError::new(
+            value,
+            "must be `snp_` followed by 26 lowercase Crockford base 32 characters, the first \
+             from `0` through `7`, whose high 64 bits are a positive manifest number"
+                .to_owned(),
+        ));
     }
     Ok(())
 }
@@ -786,10 +786,10 @@ mod tests {
             "commit-1"
         );
         assert_eq!(
-            SnapshotId::try_from("snp_00000000000000000001-00000000000000000000000001")
+            SnapshotId::try_from("snp_0000000000000g000000000001")
                 .expect("valid snapshot id")
                 .as_str(),
-            "snp_00000000000000000001-00000000000000000000000001"
+            "snp_0000000000000g000000000001"
         );
         assert_eq!(
             NameKey::try_from("report.txt".to_owned())
@@ -802,7 +802,7 @@ mod tests {
             .expect_err("a namespace ID with a slash should be rejected");
         CommitId::try_from("invalid/name")
             .expect_err("a commit ID with a slash should be rejected");
-        SnapshotId::try_from("snp_00000000000000000001-0000000000000000000000000u")
+        SnapshotId::try_from("snp_0000000000000g00000000000u")
             .expect_err("a snapshot ID with a character outside the alphabet should be rejected");
         NameKey::try_from("a/b").expect_err("a name key with a slash should be rejected");
     }
@@ -815,13 +815,9 @@ mod tests {
         let commit_id: CommitId =
             serde_json::from_str(r#""commit-1""#).expect("valid commit id json");
         assert_eq!(commit_id.as_str(), "commit-1");
-        let snapshot_id: SnapshotId =
-            serde_json::from_str(r#""snp_00000000000000000001-00000000000000000000000001""#)
-                .expect("valid snapshot id json");
-        assert_eq!(
-            snapshot_id.as_str(),
-            "snp_00000000000000000001-00000000000000000000000001"
-        );
+        let snapshot_id: SnapshotId = serde_json::from_str(r#""snp_0000000000000g000000000001""#)
+            .expect("valid snapshot id json");
+        assert_eq!(snapshot_id.as_str(), "snp_0000000000000g000000000001");
 
         let namespace_error = serde_json::from_str::<NamespaceId>(r#""invalid/name""#)
             .expect_err("invalid namespace id json");
@@ -829,10 +825,9 @@ mod tests {
         let commit_error = serde_json::from_str::<CommitId>(r#""invalid/name""#)
             .expect_err("invalid commit id json");
         assert!(commit_error.to_string().contains("commit_id"));
-        let snapshot_id_error = serde_json::from_str::<SnapshotId>(
-            r#""snp_00000000000000000001-0000000000000000000000000u""#,
-        )
-        .expect_err("invalid snapshot id json");
+        let snapshot_id_error =
+            serde_json::from_str::<SnapshotId>(r#""snp_0000000000000g00000000000u""#)
+                .expect_err("invalid snapshot id json");
         assert!(snapshot_id_error.to_string().contains("generated id"));
     }
 
@@ -840,7 +835,9 @@ mod tests {
     fn generated_upload_wal_metadata_segment_and_snapshot_ids_reject_hyphenated_ids() {
         assert!(UploadId::parse("upl_00000000000000000000000001").is_ok());
         assert!(MetadataSegmentId::parse("seg_00000000000000000000000001").is_ok());
-        assert!(SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001").is_ok());
+        assert!(SnapshotId::parse("snp_0000000000000g000000000001").is_ok());
+        SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
+            .expect_err("a hyphenated snapshot ID should be rejected");
         UploadId::parse(["upl", "123"].join("-"))
             .expect_err("a hyphenated upload ID should be rejected");
         // The two positional families are told apart by their prefix, never
@@ -893,10 +890,8 @@ mod tests {
 
     #[test]
     fn snapshot_ids_order_and_validate_their_manifest_numbers() {
-        let first = SnapshotId::parse("snp_00000000000000000009-0000000000ffffffffffffffff")
-            .expect("snapshot");
-        let second = SnapshotId::parse("snp_00000000000000000010-00000000000000000000000000")
-            .expect("snapshot");
+        let first = SnapshotId::parse("snp_0000000000004zzzzzzzzzzzzz").expect("snapshot");
+        let second = SnapshotId::parse("snp_00000000000050000000000000").expect("snapshot");
         assert!(first < second);
         assert_eq!(second.manifest_no(), ManifestNo(10));
         let decoded: SnapshotId =
@@ -904,14 +899,15 @@ mod tests {
                 .expect("decode snapshot id");
         assert_eq!(decoded, second);
         for invalid in [
-            "snp_00000000000000000000-00000000000000000000000000".to_owned(),
+            "snp_00000000000000000000000000".to_owned(),
             format!(
-                "snp_{:020}-00000000000000000000000000",
-                MAX_PUBLIC_INTEGER + 1
+                "snp_{}",
+                super::encode_generated_id_body(u128::from(MAX_PUBLIC_INTEGER + 1) << 64)
             ),
-            "snp_00000000000000000001-0000000000000000000000000G".to_owned(),
-            "snp_1-00000000000000000000000000".to_owned(),
-            "snp_00000000000000000001-000000000000000000000000000".to_owned(),
+            "snp_0000000000000G000000000001".to_owned(),
+            "snp_1".to_owned(),
+            "snp_0000000000000g0000000000001".to_owned(),
+            "snp_8000000000000g000000000001".to_owned(),
         ] {
             SnapshotId::parse(&invalid).expect_err(&format!("{invalid} should be rejected"));
         }

@@ -34,13 +34,9 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
         .expect("snapshot")
         .expect("record")
         .state;
-    for number in 0..1025 {
+    for _ in 0..1025 {
         let record = SnapshotPayload {
-            snapshot_id: SnapshotId::parse(format!(
-                "snp_{:020}-{number:026x}",
-                basis.snapshot_id.manifest_no().0
-            ))
-            .expect("snapshot id"),
+            snapshot_id: SnapshotId::generate(basis.snapshot_id.manifest_no()),
             owner: SnapshotOwner::User {
                 name: Some("expired".to_owned()),
                 expires_at_ms: Some(2_000),

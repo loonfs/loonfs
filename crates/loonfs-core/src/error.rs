@@ -1097,8 +1097,7 @@ mod tests {
         use crate::wal::WalPublishError;
         use loonfs_types::{ErrorCause, SnapshotId};
 
-        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
-            .expect("snapshot id");
+        let snapshot_id = SnapshotId::parse("snp_0000000000000g000000000002").expect("snapshot id");
         let cases = [
             (
                 CoreError::SnapshotManifestMissing {

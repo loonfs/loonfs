@@ -195,8 +195,7 @@ mod tests {
                 .expect("decode pinned request");
         assert_eq!(pinned.revision_no, Some(RevisionNo(3)));
 
-        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
-            .expect("snapshot id");
+        let snapshot_id = SnapshotId::parse("snp_0000000000000g000000000002").expect("snapshot id");
         for revision_no in [None, Some(RevisionNo(3))] {
             let request: CreateDownloadRequest = serde_json::from_value(serde_json::json!({
                 "path": "/docs/report.txt",

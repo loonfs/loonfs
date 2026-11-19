@@ -337,8 +337,9 @@ pub enum DirentryBindingState {
 pub struct RevisionSummary {
     /// The file's current revision number.
     pub revision_no: RevisionNo,
-    /// The current revision's length in bytes.
-    pub size_bytes: u64,
+    /// Immutable bytes published by the current revision, including their
+    /// size.
+    pub content_ref: ContentRef,
     /// Actor of the commit that published the current revision.
     pub revision_committed_by: crate::ActorId,
     /// Unix milliseconds of the commit that published the current revision.

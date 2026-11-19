@@ -77,8 +77,7 @@ mod tests {
     async fn generated_id_create_recovers_when_the_first_write_has_an_ambiguous_outcome() {
         let temp_dir = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-        let object_key =
-            "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json";
+        let object_key = "namespaces/demo/snapshots/snp_0000000000000g000000000001.json";
         let payload = Bytes::from_static(b"generated control record");
         let store = FailStore::new(
             inner,
@@ -105,8 +104,7 @@ mod tests {
     #[tokio::test]
     async fn generated_id_create_adopts_its_own_put_that_is_written_after_the_read_back() {
         let temp_dir = tempdir().expect("tempdir");
-        let object_key =
-            "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json";
+        let object_key = "namespaces/demo/snapshots/snp_0000000000000g000000000001.json";
         let payload = Bytes::from_static(b"generated control record");
         let store = FailStore::new(
             BlockingStore::new(
@@ -149,8 +147,7 @@ mod tests {
     async fn generated_id_create_adopts_its_record_after_another_caller_changed_it() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let object_key =
-            "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json";
+        let object_key = "namespaces/demo/snapshots/snp_0000000000000g000000000001.json";
         // The first put was written and lost its answer; a renewal changed the
         // record before this attempt reads it back.
         let renewed = Bytes::from_static(b"the record with its expiry extended");

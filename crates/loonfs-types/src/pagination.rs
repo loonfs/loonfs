@@ -922,8 +922,7 @@ mod tests {
         assert_cursor_round_trips(DirectoryPageCursor {
             head_seq: CommitSeq(11),
             snapshot_id: Some(
-                crate::SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
-                    .expect("snapshot id"),
+                crate::SnapshotId::parse("snp_0000000000000g000000000001").expect("snapshot id"),
             ),
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),

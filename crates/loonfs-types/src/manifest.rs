@@ -853,15 +853,15 @@ mod tests {
                         },
                         fork_point_seq: CommitSeq(0),
                         source_snapshot_id: crate::SnapshotId::parse(
-                            "snp_00000000000000000001-00000000000000000000000001",
+                            "snp_0000000000000g000000000001",
                         )
                         .expect("snapshot"),
                         forked_from_snapshot_id: crate::SnapshotId::parse(
-                            "snp_00000000000000000001-00000000000000000000000002",
+                            "snp_0000000000000g000000000002",
                         )
                         .expect("snapshot"),
                         fork_point_snapshot_id: crate::SnapshotId::parse(
-                            "snp_00000000000000000001-00000000000000000000000003",
+                            "snp_0000000000000g000000000003",
                         )
                         .expect("snapshot"),
                         rebased_from: None,
@@ -914,12 +914,7 @@ mod tests {
             crate::ActorId::parse("test").expect("actor"),
         )
         .activated();
-        let snapshot_id = |random: u8| {
-            crate::SnapshotId::parse(format!(
-                "snp_00000000000000000001-0000000000000000000000000{random}"
-            ))
-            .expect("snapshot")
-        };
+        let snapshot_id = || crate::SnapshotId::generate(ManifestNo(1));
         let fork_basis = crate::control::ForkBasis {
             manifest: crate::control::ManifestRef {
                 owner_namespace_id: source.namespace_id.clone(),
@@ -928,9 +923,9 @@ mod tests {
                 payload_checksum: crate::sha256_digest(b"source"),
             },
             fork_point_seq: CommitSeq(0),
-            source_snapshot_id: snapshot_id(1),
-            forked_from_snapshot_id: snapshot_id(2),
-            fork_point_snapshot_id: snapshot_id(3),
+            source_snapshot_id: snapshot_id(),
+            forked_from_snapshot_id: snapshot_id(),
+            fork_point_snapshot_id: snapshot_id(),
             rebased_from: None,
         };
         let initializing = NamespaceManifestPayload::initial_fork(
@@ -998,12 +993,7 @@ mod tests {
             crate::ActorId::parse("test").expect("actor"),
         )
         .activated();
-        let snapshot_id = |manifest_no: u8, random: u8| {
-            crate::SnapshotId::parse(format!(
-                "snp_0000000000000000000{manifest_no}-0000000000000000000000000{random}"
-            ))
-            .expect("snapshot")
-        };
+        let snapshot_id = |manifest_no: u64| crate::SnapshotId::generate(ManifestNo(manifest_no));
         let fork_basis = crate::control::ForkBasis {
             manifest: crate::control::ManifestRef {
                 owner_namespace_id: source.namespace_id.clone(),
@@ -1012,9 +1002,9 @@ mod tests {
                 payload_checksum: crate::sha256_digest(b"source"),
             },
             fork_point_seq: CommitSeq(5),
-            source_snapshot_id: snapshot_id(1, 1),
-            forked_from_snapshot_id: snapshot_id(1, 2),
-            fork_point_snapshot_id: snapshot_id(2, 3),
+            source_snapshot_id: snapshot_id(1),
+            forked_from_snapshot_id: snapshot_id(1),
+            fork_point_snapshot_id: snapshot_id(2),
             rebased_from: None,
         };
         let manifest_1 = NamespaceManifestPayload::initial_fork(
@@ -1087,7 +1077,7 @@ mod tests {
             .expect_err("the active manifest raises the floor to the fork point");
 
         let mut snapshot_on_manifest_1 = fork_basis.clone();
-        snapshot_on_manifest_1.fork_point_snapshot_id = snapshot_id(1, 3);
+        snapshot_on_manifest_1.fork_point_snapshot_id = snapshot_id(1);
         let mut no_tail_on_manifest_2 = fork_basis;
         no_tail_on_manifest_2.fork_point_seq = CommitSeq(0);
         for (refused, reason) in [

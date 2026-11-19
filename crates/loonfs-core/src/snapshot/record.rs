@@ -260,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn listed_loader_rejects_invalid_key_ids() {
         let (_directory, store) = local_store();
-        let snapshot_id = "snp_00000000000000000001-00000000000000000000000001";
+        let snapshot_id = "snp_0000000000000g000000000001";
         let invalid_keys = [
             format!("namespaces/not valid/snapshots/{snapshot_id}.json"),
             "namespaces/demo/snapshots/not-a-snapshot.json".to_owned(),
@@ -283,7 +283,7 @@ mod tests {
 
         let (_directory, store) = local_store();
         let key_namespace_id = namespace("demo");
-        let key_snapshot_id = snapshot_id("snp_00000000000000000001-00000000000000000000000001");
+        let key_snapshot_id = snapshot_id("snp_0000000000000g000000000001");
         let object_key = snapshot_record(&key_namespace_id, &key_snapshot_id);
 
         let cases = [
@@ -296,7 +296,7 @@ mod tests {
                 "embedded snapshot id",
                 record(
                     key_namespace_id.clone(),
-                    snapshot_id("snp_00000000000000000001-00000000000000000000000002"),
+                    snapshot_id("snp_0000000000000g000000000002"),
                 ),
                 Mismatch::SnapshotId,
             ),

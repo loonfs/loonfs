@@ -104,7 +104,7 @@ One committed version of a file's contents. Each file revision is assigned a mon
 
 ### Revision summary
 
-The fields of a file's current revision that a directory listing reports: the revision number, the size, and the actor and time of the commit that published the revision. LoonFS copies the summary into the bound rows of the file's directory binding. A bind of a file includes it, and each new revision writes a "summary row" under the file's binding with the new summary, so a listing reads the summary from the binding rows instead of from the file's revisions. The summary doesn't include the content reference. See [Directory bindings](format.md#13-directory-bindings).
+The fields of a file's current revision that a directory listing reports: the revision number, the content reference (which includes the size), and the actor and time of the commit that published the revision. LoonFS copies the summary into the bound rows of the file's directory binding. A bind of a file includes it, and each new revision writes a "summary row" under the file's binding with the new summary, so a listing reads the summary from the binding rows instead of from the file's revisions. See [Directory bindings](format.md#13-directory-bindings).
 
 ### Tombstone
 
