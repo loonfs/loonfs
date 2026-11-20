@@ -83,6 +83,7 @@ pub(super) struct GrepQuery {
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("grep")),
             ("x-fern-request-name" = json!("GrepRequest")),
@@ -186,6 +187,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         operation_id = "enable_grep_index",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "grepIndex"])),
             ("x-fern-sdk-method-name" = json!("enable")),
             ("x-fern-request-name" = json!("EnableGrepIndexRequest")),
@@ -236,6 +238,7 @@ pub(super) async fn enable_grep_index(
         operation_id = "get_grep_index",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "grepIndex"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
             ("x-fern-request-name" = json!("GetGrepIndexRequest")),
@@ -280,6 +283,7 @@ async fn read_grep_index_status(
         operation_id = "disable_grep_index",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "grepIndex"])),
             ("x-fern-sdk-method-name" = json!("disable")),
             ("x-fern-request-name" = json!("DisableGrepIndexRequest")),

@@ -721,6 +721,10 @@ Every operation includes an `x-loonfs-retry` value for generated SDKs. The value
 
 Two more values mark the identity headers that an operation requires (see [Identity headers](#identity-headers)). `x-loonfs-actor: required` appears on every operation that requires `Loonfs-Actor`, and `x-loonfs-authority: required` on every operation that requires `Loonfs-Principals` or `Loonfs-Context`. An operation without a marker doesn't require that header.
 
+Every operation except `get_health`, `get_readiness`, and `get_capabilities` also has an `x-loonfs-scope` value, which classifies the operation by its effect on the store. `read` marks the operations that read a namespace or a store: every `GET` except `get_upload`, and creating a download. `write` marks the operations that change a namespace's contents, or create a namespace, an upload session, a fork, a merge, or a rebase, and `get_upload`, because reading an open `direct_put` session returns a new presigned URL that uploads bytes. `admin` marks the operations that delete a namespace, create, extend, or delete a snapshot, run under `/v0/maintenance/`, or scrape metrics. No scope includes another. The server checks nothing from the marker. A deployment that limits a credential to some operations reads each operation's scope from the marker, and the three operations without one are open to every credential.
+
+Why is creating a download a `read`, and creating a snapshot an `admin`? The scope follows what the operation does to the store, not the HTTP method. A download reads a file's content, and a snapshot keeps a namespace's history from being compacted, which is a decision about the deployment's storage rather than about a file.
+
 The following table lists v0 operations, with their retry classes and representative HTTP routes.
 
 | Purpose | Operation ID | Retry class | Representative HTTP shape |

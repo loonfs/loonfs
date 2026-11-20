@@ -25,6 +25,7 @@ use std::sync::Arc;
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("create")),
         ),
@@ -71,6 +72,7 @@ pub(super) async fn create_snapshot(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("list")),
             ("x-fern-request-name" = json!("ListSnapshotsRequest")),
@@ -119,6 +121,7 @@ pub(super) async fn list_snapshots(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("extend")),
         ),
@@ -165,6 +168,7 @@ pub(super) async fn extend_snapshot(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
             ("x-fern-request-name" = json!("GetSnapshotRequest")),
@@ -211,6 +215,7 @@ pub(super) async fn get_snapshot(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["snapshots"])),
             ("x-fern-sdk-method-name" = json!("delete")),
             ("x-fern-request-name" = json!("DeleteSnapshotRequest")),
@@ -270,6 +275,7 @@ pub(super) struct SnapshotPathParams {
         operation_id = "list_snapshot_records",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "snapshots"])),
             ("x-fern-sdk-method-name" = json!("list")),
             ("x-fern-request-name" = json!("ListSnapshotRecordsRequest")),
@@ -314,6 +320,7 @@ pub(super) async fn list_snapshot_records(
         operation_id = "get_snapshot_record",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "snapshots"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
             ("x-fern-request-name" = json!("GetSnapshotRecordRequest")),

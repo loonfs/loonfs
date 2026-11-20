@@ -100,6 +100,7 @@ pub(super) struct StatInodeQuery {
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
             ("x-fern-request-name" = json!("GetInodeRequest")),
@@ -191,6 +192,7 @@ pub(super) struct ListInodeChildrenQuery {
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("listChildren")),
             ("x-fern-request-name" = json!("ListInodeChildrenRequest")),
@@ -252,6 +254,7 @@ pub(super) async fn list_inode_children(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("listRevisions")),
             ("x-fern-request-name" = json!("ListFileRevisionsByInodeRequest")),
@@ -307,6 +310,7 @@ pub(super) async fn list_file_revisions_by_inode(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("content")),
             ("x-fern-request-name" = json!("GetFileContentByInodeRequest")),
@@ -367,6 +371,7 @@ pub(super) async fn get_file_content_by_inode(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("revisionContent")),
             ("x-fern-request-name" = json!("GetFileRevisionContentByInodeRequest")),
