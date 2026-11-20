@@ -389,8 +389,9 @@ impl S3CompatiblePresigner {
             },
             ttl,
             now,
-            |message| Ok(hex_encode_bytes(&hmac_sha256(&signing_key, message))),
-        )?;
+            async |message| Ok(hex_encode_bytes(&hmac_sha256(&signing_key, message))),
+        )
+        .await?;
         // AWS also expires the capability when its session credentials expire.
         // Report that effective lifetime even when refresh returned the same
         // still-valid credentials; rotation must not make issuance unavailable.

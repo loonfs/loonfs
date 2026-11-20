@@ -45,8 +45,11 @@ path = "/path/to/service-account.json"
 # environment provides: a service-account key or authorized-user file that
 # GOOGLE_APPLICATION_CREDENTIALS points to, the gcloud application default
 # credentials, or the metadata server of the VM or pod (workload identity).
-# A workload identity federation file is not supported. Ambient credentials
-# sign no direct upload or download URLs, whichever source they come from, so
-# clients send and receive content through the server.
+# A workload identity federation file is not supported. Direct upload and
+# download URLs are signed through the IAM Credentials API as the service
+# account those credentials resolve to, one signBlob request per URL, so the
+# service account needs the Service Account Token Creator role
+# (roles/iam.serviceAccountTokenCreator) on itself. A user account, such as
+# gcloud's, can't sign this way.
 # [store.credentials]
 # kind = "ambient"

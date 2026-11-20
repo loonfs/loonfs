@@ -511,9 +511,8 @@ Profile create options
   store is opened. If you pass the static credential flags, the CLI stores
   those credentials in the profile. A gcs profile also uses ambient
   credentials by default, Google's application default credentials, and
-  stores a key file's path when you pass one. An ambient gcs profile
-  sends content through the CLI instead of direct transfers. An abs
-  profile stores the account key.
+  stores a key file's path when you pass one. An abs profile stores the
+  account key.
 
   Every embedded profile:
     --key-prefix <prefix>              optional

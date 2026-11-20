@@ -166,9 +166,7 @@ impl ConfiguredObjectStore {
         let direct_transfers_enabled =
             endpoint_is_proven(config.endpoint_url.as_deref(), AWS_S3_PROVEN_DOMAINS);
         let provider = aws_s3_with_credentials(config, credentials)?;
-        let direct_transfers = provider
-            .direct_transfers
-            .filter(|_| direct_transfers_enabled);
+        let direct_transfers = direct_transfers_enabled.then_some(provider.direct_transfers);
         Ok(Self {
             inner: Arc::new(provider.store),
             direct_transfers,
@@ -188,18 +186,16 @@ impl ConfiguredObjectStore {
             CLOUDFLARE_R2_PROVEN_DOMAINS,
         );
         let provider = cloudflare_r2_with_credentials(config, credentials)?;
-        let direct_transfers = provider
-            .direct_transfers
-            .filter(|_| direct_transfers_enabled);
+        let direct_transfers = direct_transfers_enabled.then_some(provider.direct_transfers);
         Ok(Self {
             inner: Arc::new(provider.store),
             direct_transfers,
         })
     }
 
-    /// Builds a native GCS store, and the direct transfers it can authorize
-    /// with a service-account key. Ambient credentials have no key to sign
-    /// with, so a store built from them offers no direct transfers.
+    /// Builds a native GCS store, and the direct transfers it authorizes with
+    /// its credentials: a service-account key signs in this process, and
+    /// ambient credentials sign through the IAM Credentials API.
     ///
     /// This adapter implements no multipart signing for GCS, so the bundle's
     /// multipart slot stays empty instead of containing a signer that would
@@ -212,7 +208,7 @@ impl ConfiguredObjectStore {
         let provider = gcp_gcs_with_issuers(config)?;
         Ok(Self {
             inner: Arc::new(provider.store),
-            direct_transfers: provider.direct_transfers,
+            direct_transfers: Some(provider.direct_transfers),
         })
     }
 
@@ -380,8 +376,9 @@ mod tests {
             .is_none());
 
         // GCS has no endpoint override to judge, so a GCS store offers direct
-        // transfers whenever its credentials can sign: a service-account key
-        // can, and ambient credentials can't.
+        // transfers under both credential sources: a service-account key
+        // signs in this process, and ambient credentials sign through the
+        // IAM Credentials API.
         assert!(gcs_store().direct_transfers().is_some());
         let ambient = ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
             bucket: "bucket".to_owned(),
@@ -389,7 +386,7 @@ mod tests {
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct ambient gcs store");
-        assert!(ambient.direct_transfers().is_none());
+        assert!(ambient.direct_transfers().is_some());
     }
 
     #[test]

@@ -8,26 +8,39 @@ use super::{
     DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest, PresignedUrl,
 };
 use crate::checksum_header::decode_base64_checksum;
-use crate::gcs::GcpGcsStoreConfig;
 use crate::keyspace::KeyScope;
 use crate::object_store::Result;
 use crate::presign::v4::{
     percent_encode_path, percent_encode_segment, presign_v4, signing_dates, V4Endpoint,
     V4RequestParts, V4Scheme,
 };
-use crate::{GcpGcsCredentials, ObjectStoreError};
+use crate::provider_error::{map_provider_error, ProviderClient};
+use crate::retry::TransportRetry;
+use crate::signed_request::send;
+use crate::ObjectStoreError;
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use bytes::Bytes;
+use http::header::{AUTHORIZATION, CONTENT_TYPE};
 use loonfs_types::format::hex::hex_encode_bytes;
-use loonfs_types::{Checksum, ChecksumAlgorithm, REDACTED};
+use loonfs_types::{Checksum, ChecksumAlgorithm};
+use object_store::client::HttpClient;
+use object_store::gcp::{GcpCredentialProvider, GcpSigningCredentialProvider};
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Host used for every GCS signed URL.
 const GCS_HOST: &str = "storage.googleapis.com";
+
+/// The IAM Credentials API resource under which `signBlob` signs as a service
+/// account, for a caller with the Service Account Token Creator role on it.
+const IAM_SERVICE_ACCOUNTS: &str =
+    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts";
 
 /// A generation of zero makes the request create-only.
 const GCS_GENERATION_MATCH_HEADER: &str = "x-goog-if-generation-match";
@@ -51,10 +64,41 @@ pub const GCP_GCS_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 pub struct GcsV4Presigner {
     bucket: String,
     key_scope: KeyScope,
-    /// The service account named in the credential parameter, which is also
-    /// the identity GCS resolves the signing key from.
-    client_email: String,
-    signing_key: RsaKeyPair,
+    signer: GcsSigner,
+}
+
+/// What produces the RSA signature: a service-account key in this process,
+/// or the IAM Credentials API signing as the service account that ambient
+/// credentials resolve to.
+enum GcsSigner {
+    ServiceAccountKey {
+        /// The service account written into the credential parameter, which
+        /// is also the identity GCS resolves the signing key from.
+        client_email: String,
+        signing_key: Box<RsaKeyPair>,
+    },
+    SignBlob {
+        http: HttpClient,
+        /// The OAuth token each `signBlob` request is sent under.
+        credentials: GcpCredentialProvider,
+        /// The service account to sign as, resolved from the metadata server
+        /// or the application default credentials file.
+        signing_credentials: GcpSigningCredentialProvider,
+        retry: Arc<TransportRetry>,
+    },
+}
+
+/// The `signBlob` request body: the bytes to sign, base64-encoded.
+#[derive(serde::Serialize)]
+struct SignBlobRequest {
+    payload: String,
+}
+
+/// The field of a `signBlob` response this module reads.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignBlobResponse {
+    signed_blob: String,
 }
 
 /// The two fields of a service-account JSON this module needs. Every other
@@ -71,38 +115,28 @@ impl fmt::Debug for GcsV4Presigner {
     /// is a bearer credential for the whole bucket, so nothing about it
     /// reaches a log through a `Debug` of the store that contains it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let signer = match &self.signer {
+            GcsSigner::ServiceAccountKey { .. } => "service_account_key",
+            GcsSigner::SignBlob { .. } => "sign_blob",
+        };
         f.debug_struct("GcsV4Presigner")
             .field("bucket", &self.bucket)
             .field("key_prefix", &self.key_scope.prefix())
-            .field("client_email", &REDACTED)
-            .field("signing_key", &REDACTED)
+            .field("signer", &signer)
             .finish()
     }
 }
 
 impl GcsV4Presigner {
-    /// Creates a presigner, reading and parsing the service-account key once.
-    ///
-    /// Construction fails for ambient credentials, which have no key to sign
-    /// with, an unusable key prefix, an unreadable or malformed key file, or
-    /// a private key that is not an RSA key in PKCS#8 form.
-    pub fn new(config: &GcpGcsStoreConfig) -> Result<Self> {
-        let GcpGcsCredentials::ServiceAccountFile { path } = &config.credentials else {
-            return Err(ObjectStoreError::Configuration(
-                "ambient GCS credentials can't sign direct transfers".to_owned(),
-            ));
-        };
-        let key_json = read_service_account_key(path)?;
-        let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
-        Self::with_service_account_key(config.bucket.clone(), key_scope, &key_json)
-    }
-
     /// Creates a presigner that signs as the service account in `key_json`
     /// and scopes keys with `key_scope`, the scope of the store it signs for.
     ///
     /// The store and the presigner have to resolve an object key to the same
     /// string, or a signed write is stored where the store's own reads,
     /// listings, and collection never look.
+    ///
+    /// Construction fails for a malformed key, or a private key that is not
+    /// an RSA key in PKCS#8 form.
     pub(crate) fn with_service_account_key(
         bucket: String,
         key_scope: KeyScope,
@@ -132,12 +166,38 @@ impl GcsV4Presigner {
         Ok(Self {
             bucket,
             key_scope,
-            client_email: key.client_email,
-            signing_key,
+            signer: GcsSigner::ServiceAccountKey {
+                client_email: key.client_email,
+                signing_key: Box::new(signing_key),
+            },
         })
     }
 
-    fn presign(
+    /// Creates a presigner that signs through the IAM Credentials API as the
+    /// service account `signing_credentials` resolves to, under the OAuth
+    /// token from `credentials`. Each signed URL costs one `signBlob` request,
+    /// sent with the store's transport retry.
+    pub(crate) fn with_sign_blob(
+        bucket: String,
+        key_scope: KeyScope,
+        http: HttpClient,
+        credentials: GcpCredentialProvider,
+        signing_credentials: GcpSigningCredentialProvider,
+        retry: Arc<TransportRetry>,
+    ) -> Self {
+        Self {
+            bucket,
+            key_scope,
+            signer: GcsSigner::SignBlob {
+                http,
+                credentials,
+                signing_credentials,
+                retry,
+            },
+        }
+    }
+
+    async fn presign(
         &self,
         method: &str,
         object_key: &str,
@@ -153,11 +213,12 @@ impl GcsV4Presigner {
         );
         let dates = signing_dates(object_key, now)?;
         let credential_scope = format!("{}/{GCS_CREDENTIAL_SCOPE_SUFFIX}", dates.short_date);
+        let client_email = self.signer.client_email(object_key).await?;
         presign_v4(
             V4Scheme {
                 algorithm: GCS_SIGNING_ALGORITHM,
                 query_prefix: "X-Goog",
-                credential: format!("{}/{credential_scope}", self.client_email),
+                credential: format!("{client_email}/{credential_scope}"),
                 credential_scope,
                 extra_query: BTreeMap::new(),
                 signing_dates: dates,
@@ -175,29 +236,121 @@ impl GcsV4Presigner {
             },
             ttl,
             now,
-            |message| self.sign(object_key, message),
+            async |message| self.signer.sign(object_key, &client_email, message).await,
         )
+        .await
+    }
+}
+
+impl GcsSigner {
+    /// The service account whose signature GCS verifies, written into the
+    /// credential parameter.
+    async fn client_email(&self, object_key: &str) -> Result<String> {
+        match self {
+            Self::ServiceAccountKey { client_email, .. } => Ok(client_email.clone()),
+            Self::SignBlob {
+                signing_credentials,
+                ..
+            } => {
+                let credential = signing_credentials
+                    .get_credential()
+                    .await
+                    .map_err(|error| {
+                        map_provider_error(object_key, error, ProviderClient::Retrying)
+                    })?;
+                Ok(credential.email.clone())
+            }
+        }
     }
 
     /// Produces the hex-encoded RSASSA-PKCS1-v1_5 SHA-256 signature GCS
     /// verifies against the service account's public key.
-    fn sign(&self, object_key: &str, message: &[u8]) -> Result<String> {
-        let mut signature = vec![0u8; self.signing_key.public().modulus_len()];
-        self.signing_key
-            .sign(
-                &RSA_PKCS1_SHA256,
-                &SystemRandom::new(),
-                message,
-                &mut signature,
-            )
-            .map_err(|_| {
-                ObjectStoreError::transport(
-                    object_key,
-                    "service account key could not sign the request".to_owned(),
-                )
-            })?;
-        Ok(hex_encode_bytes(&signature))
+    async fn sign(&self, object_key: &str, client_email: &str, message: &[u8]) -> Result<String> {
+        match self {
+            Self::ServiceAccountKey { signing_key, .. } => {
+                sign_with_key(signing_key, object_key, message)
+            }
+            Self::SignBlob {
+                http,
+                credentials,
+                retry,
+                ..
+            } => {
+                let url = format!("{IAM_SERVICE_ACCOUNTS}/{client_email}:signBlob");
+                let body = Bytes::from(
+                    serde_json::to_vec(&SignBlobRequest {
+                        payload: BASE64.encode(message),
+                    })
+                    .expect("a signBlob request body should serialize"),
+                );
+                retry
+                    .run(object_key, "sign_blob", 0, || async {
+                        sign_blob(http, credentials, object_key, &url, body.clone()).await
+                    })
+                    .await
+            }
+        }
     }
+}
+
+fn sign_with_key(signing_key: &RsaKeyPair, object_key: &str, message: &[u8]) -> Result<String> {
+    let mut signature = vec![0u8; signing_key.public().modulus_len()];
+    signing_key
+        .sign(
+            &RSA_PKCS1_SHA256,
+            &SystemRandom::new(),
+            message,
+            &mut signature,
+        )
+        .map_err(|_| {
+            ObjectStoreError::transport(
+                object_key,
+                "service account key could not sign the request".to_owned(),
+            )
+        })?;
+    Ok(hex_encode_bytes(&signature))
+}
+
+/// Sends one `signBlob` request under the credential source's OAuth token and
+/// reads the signature back. A refusal is reported as a permission error,
+/// which means the token's identity lacks the role or is a user account and
+/// not a service account. A server error is retryable.
+async fn sign_blob(
+    http: &HttpClient,
+    credentials: &GcpCredentialProvider,
+    object_key: &str,
+    url: &str,
+    body: Bytes,
+) -> Result<String> {
+    let credential = credentials
+        .get_credential()
+        .await
+        .map_err(|error| map_provider_error(object_key, error, ProviderClient::Retrying))?;
+    let request = http::Request::post(url)
+        .header(AUTHORIZATION, format!("Bearer {}", credential.bearer))
+        .header(CONTENT_TYPE, "application/json");
+    let response = send(http, object_key, request, body.into()).await?;
+    if response.status.is_server_error() {
+        return Err(ObjectStoreError::retryable_transport(
+            object_key,
+            format!("signBlob failed with {}", response.status),
+        ));
+    }
+    if !response.status.is_success() {
+        return Err(ObjectStoreError::PermissionDenied {
+            object_key: object_key.to_owned(),
+            message: format!("signBlob refused with {}", response.status),
+        });
+    }
+    let signed: SignBlobResponse = serde_json::from_slice(&response.body)
+        .map_err(|_| ObjectStoreError::transport(object_key, "signBlob returned no signature"))?;
+    let signature = BASE64.decode(signed.signed_blob).map_err(|_| {
+        ObjectStoreError::transport(
+            object_key,
+            "signBlob returned a signature that is not base64",
+        )
+    })?;
+    Ok(hex_encode_bytes(&signature))
 }
 
 #[async_trait]
@@ -222,6 +375,7 @@ impl DirectPutIssuer for GcsV4Presigner {
             request.ttl,
             now,
         )
+        .await
     }
 }
 
@@ -239,6 +393,7 @@ impl DirectGetIssuer for GcsV4Presigner {
             request.ttl,
             now,
         )
+        .await
     }
 }
 
@@ -286,28 +441,38 @@ fn pkcs8_der(private_key_pem: &str) -> Result<Vec<u8>> {
             )
         })?;
     let base64_body: String = body.split_whitespace().collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(base64_body)
-        .map_err(|_| {
-            ObjectStoreError::Configuration(
-                "service account private key is not valid base64".to_owned(),
-            )
-        })
+    BASE64.decode(base64_body).map_err(|_| {
+        ObjectStoreError::Configuration(
+            "service account private key is not valid base64".to_owned(),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{stored_crc32c, GcsV4Presigner};
-    use crate::gcs::GcpGcsStoreConfig;
+    use super::{
+        pkcs8_der, read_service_account_key, stored_crc32c, GcsV4Presigner, ServiceAccountKey,
+        BASE64,
+    };
     use crate::keyspace::KeyScope;
     use crate::presign::{
         DirectGetIssuer, DirectPutIssuer, PresignedGetRequest, PresignedPutRequest,
     };
-    use crate::test_support::{gcs_fixture_service_account_key_file, GCS_FIXTURE_CLIENT_EMAIL};
-    use crate::GcpGcsCredentials;
+    use crate::retry::TransportRetry;
+    use crate::test_support::{GCS_FIXTURE_CLIENT_EMAIL, GCS_FIXTURE_SERVICE_ACCOUNT_KEY};
     use crate::{ByteRange, ObjectStoreError};
-    use loonfs_types::ChecksumAlgorithm;
+    use base64::Engine as _;
+    use bytes::Bytes;
+    use loonfs_types::{ChecksumAlgorithm, StdMonotonicTimer};
+    use object_store::client::{
+        HttpClient, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
+    };
+    use object_store::gcp::{GcpCredential, GcpSigningCredential};
+    use object_store::StaticCredentialProvider;
+    use ring::rand::SystemRandom;
+    use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
     use std::assert_matches;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const CONTENT_KEY: &str = "namespaces/demo/content/con_0123456789abcdef0123456789abcdef";
@@ -343,16 +508,86 @@ mod tests {
     }
 
     fn presigner(key_prefix: Option<&str>) -> GcsV4Presigner {
-        let (_key_dir, service_account_key_path) =
-            gcs_fixture_service_account_key_file("gcs-presign");
-        GcsV4Presigner::new(&GcpGcsStoreConfig {
-            bucket: "bucket".to_owned(),
-            credentials: GcpGcsCredentials::ServiceAccountFile {
-                path: service_account_key_path.display().to_string(),
-            },
-            key_prefix: key_prefix.map(ToOwned::to_owned),
-        })
+        GcsV4Presigner::with_service_account_key(
+            "bucket".to_owned(),
+            KeyScope::new(key_prefix).expect("prefix"),
+            GCS_FIXTURE_SERVICE_ACCOUNT_KEY,
+        )
         .expect("signer")
+    }
+
+    /// The IAM Credentials API as a double: records each `signBlob` request,
+    /// and signs its payload with the fixture key or refuses with `status`.
+    #[derive(Clone, Debug)]
+    struct SignBlobService {
+        requests: Arc<Mutex<Vec<(String, http::HeaderMap, Bytes)>>>,
+        status: http::StatusCode,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpService for SignBlobService {
+        async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+            use http_body_util::BodyExt as _;
+            let (parts, body) = request.into_parts();
+            let bytes = body.collect().await?.to_bytes();
+            self.requests.lock().expect("requests").push((
+                parts.uri.to_string(),
+                parts.headers,
+                bytes.clone(),
+            ));
+            let body = if self.status.is_success() {
+                let request: serde_json::Value =
+                    serde_json::from_slice(&bytes).expect("a JSON body");
+                let message = BASE64
+                    .decode(request["payload"].as_str().expect("a payload"))
+                    .expect("a base64 payload");
+                Bytes::from(format!(
+                    r#"{{"keyId":"fixture","signedBlob":"{}"}}"#,
+                    BASE64.encode(fixture_signature(&message))
+                ))
+            } else {
+                Bytes::new()
+            };
+            Ok(http::Response::builder()
+                .status(self.status)
+                .body(body)
+                .expect("response")
+                .map(HttpResponseBody::from))
+        }
+    }
+
+    /// Signs `message` with the fixture key, as signBlob signs with the
+    /// service account's own key.
+    fn fixture_signature(message: &[u8]) -> Vec<u8> {
+        let key: ServiceAccountKey =
+            serde_json::from_str(GCS_FIXTURE_SERVICE_ACCOUNT_KEY).expect("fixture key");
+        let key =
+            RsaKeyPair::from_pkcs8(&pkcs8_der(&key.private_key).expect("pkcs8")).expect("rsa key");
+        let mut signature = vec![0u8; key.public().modulus_len()];
+        key.sign(
+            &RSA_PKCS1_SHA256,
+            &SystemRandom::new(),
+            message,
+            &mut signature,
+        )
+        .expect("sign");
+        signature
+    }
+
+    fn sign_blob_presigner(service: SignBlobService) -> GcsV4Presigner {
+        GcsV4Presigner::with_sign_blob(
+            "bucket".to_owned(),
+            KeyScope::new(Some("tenant-a")).expect("prefix"),
+            HttpClient::new(service),
+            Arc::new(StaticCredentialProvider::new(GcpCredential {
+                bearer: "test".to_owned(),
+            })),
+            Arc::new(StaticCredentialProvider::new(GcpSigningCredential {
+                email: GCS_FIXTURE_CLIENT_EMAIL.to_owned(),
+                private_key: None,
+            })),
+            Arc::new(TransportRetry::new(Arc::new(StdMonotonicTimer::default()))),
+        )
     }
 
     async fn presign_put(signer: &GcsV4Presigner) -> crate::presign::PresignedUrl {
@@ -438,6 +673,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sign_blob_signer_sends_the_string_to_sign_under_the_token_and_signs_like_the_key() {
+        let service = SignBlobService {
+            requests: Arc::default(),
+            status: http::StatusCode::OK,
+        };
+        let signer = sign_blob_presigner(service.clone());
+
+        let put = presign_put(&signer).await;
+        let get = signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    range: GRANT,
+                    ttl: TTL,
+                },
+                signing_time(),
+            )
+            .await
+            .expect("presign get");
+
+        // The URLs the key file produces, so the bytes sent to signBlob are the
+        // string the key signs.
+        assert_eq!(
+            put.url,
+            format!(
+                "https://storage.googleapis.com/bucket/tenant-a/{CONTENT_KEY}?{EXPECTED_CREDENTIAL}\
+                 &X-Goog-SignedHeaders=host%3Bx-goog-if-generation-match\
+                 &X-Goog-Signature={PUT_PREFIXED_SIGNATURE}"
+            )
+        );
+        assert_eq!(
+            get.url,
+            format!(
+                "https://storage.googleapis.com/bucket/tenant-a/{CONTENT_KEY}?{EXPECTED_CREDENTIAL}\
+                 &X-Goog-SignedHeaders=host%3Brange&X-Goog-Signature={GET_PREFIXED_SIGNATURE}"
+            )
+        );
+
+        let requests = service.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        let (url, headers, body) = &requests[0];
+        assert_eq!(
+            url,
+            &format!(
+                "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts\
+                 /{GCS_FIXTURE_CLIENT_EMAIL}:signBlob"
+            )
+        );
+        assert_eq!(headers["authorization"], "Bearer test");
+        assert_eq!(headers["content-type"], "application/json");
+        let request: serde_json::Value = serde_json::from_slice(body).expect("a JSON body");
+        let message = BASE64
+            .decode(request["payload"].as_str().expect("a payload"))
+            .expect("a base64 payload");
+        assert!(String::from_utf8(message).expect("utf-8").starts_with(
+            "GOOG4-RSA-SHA256\n20231114T221320Z\n20231114/auto/storage/goog4_request\n"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_sign_blob_fails_the_presign_as_permission_denied() {
+        let service = SignBlobService {
+            requests: Arc::default(),
+            status: http::StatusCode::FORBIDDEN,
+        };
+        let error = sign_blob_presigner(service)
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: CONTENT_KEY,
+                    ttl: TTL,
+                },
+                signing_time(),
+            )
+            .await
+            .expect_err("signBlob refused");
+        assert_matches!(error, ObjectStoreError::PermissionDenied { .. });
+    }
+
+    #[tokio::test]
     async fn the_signer_and_the_store_resolve_a_key_to_the_same_string() {
         for raw_prefix in [None, Some("   "), Some(""), Some("tenant-a")] {
             let signed = presigner(raw_prefix)
@@ -463,24 +777,6 @@ mod tests {
                 signed_path,
                 format!("https://storage.googleapis.com/bucket/{store_key}"),
                 "signer and store disagree about the key under prefix {raw_prefix:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_unusable_key_prefix_fails_construction() {
-        for raw_prefix in ["tenant-a//bad", "../escape"] {
-            let (_key_dir, service_account_key_path) =
-                gcs_fixture_service_account_key_file("gcs-presign-prefix");
-            assert_matches!(
-                GcsV4Presigner::new(&GcpGcsStoreConfig {
-                    bucket: "bucket".to_owned(),
-                    credentials: GcpGcsCredentials::ServiceAccountFile {
-                        path: service_account_key_path.display().to_string(),
-                    },
-                    key_prefix: Some(raw_prefix.to_owned()),
-                }),
-                Err(ObjectStoreError::InvalidKey { .. })
             );
         }
     }
@@ -529,44 +825,36 @@ mod tests {
     }
 
     #[test]
-    fn a_key_file_that_cannot_sign_fails_construction() {
-        let (key_dir, _key_path) = gcs_fixture_service_account_key_file("gcs-presign-bad");
-
-        let not_json = key_dir.path().join("not-json.json");
-        std::fs::write(&not_json, b"this is not a service account").expect("write");
-        let no_pem = key_dir.path().join("no-pem.json");
-        std::fs::write(
-            &no_pem,
-            br#"{"client_email":"a@b.iam.gserviceaccount.com","private_key":"private_key"}"#,
-        )
-        .expect("write");
-        let missing = key_dir.path().join("absent.json");
-
-        for path in [not_json, no_pem, missing] {
+    fn a_key_that_cannot_sign_fails_construction() {
+        for key_json in [
+            "this is not a service account",
+            r#"{"client_email":"a@b.iam.gserviceaccount.com","private_key":"private_key"}"#,
+        ] {
             assert_matches!(
-                GcsV4Presigner::new(&GcpGcsStoreConfig {
-                    bucket: "bucket".to_owned(),
-                    credentials: GcpGcsCredentials::ServiceAccountFile {
-                        path: path.display().to_string(),
-                    },
-                    key_prefix: None,
-                }),
+                GcsV4Presigner::with_service_account_key(
+                    "bucket".to_owned(),
+                    KeyScope::default(),
+                    key_json
+                ),
                 Err(ObjectStoreError::Configuration(_)),
-                "{} should not have produced a signer",
-                path.display()
+                "{key_json} should not have produced a signer"
             );
         }
+        assert_matches!(
+            read_service_account_key("/nonexistent/absent.json"),
+            Err(ObjectStoreError::Configuration(_))
+        );
     }
 
     #[test]
-    fn presigner_debug_redacts_the_service_account_and_its_key() {
+    fn presigner_debug_shows_the_signer_kind_and_no_service_account_or_key() {
         let signer = presigner(Some("tenant-a"));
         let rendered = format!("{signer:?}");
 
         assert!(!rendered.contains(GCS_FIXTURE_CLIENT_EMAIL));
         assert!(!rendered.contains("BEGIN PRIVATE KEY"));
         assert!(!rendered.contains("MIIEv"));
-        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("service_account_key"));
         assert!(rendered.contains("bucket"));
     }
 
