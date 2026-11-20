@@ -1,37 +1,35 @@
 # LoonFS architecture
 
-This document describes how LoonFS stores a filesystem in object storage, and how reads, writes, forks, and maintenance fit together. The [format specification](format.md) defines the exact rules, and the [glossary](glossary.md) defines each term.
+LoonFS stores a filesystem directly in object storage, with no external metadata database. File bytes go into immutable content objects, and every change to the directory tree goes into a numbered write-ahead log (WAL). The [format specification](format.md) defines the exact rules, and the [glossary](glossary.md) defines each term.
 
-LoonFS stores everything in object storage. File bytes are stored in content objects, and every change to the directory tree is recorded in a numbered write-ahead log (WAL). LoonFS uses seven object-store operations (see [Required operations](format.md#31-required-operations)): put-if-absent, compare-and-swap on small objects, full and ranged reads, reads that are conditional on an object's version, deletes, prefix listings, and listings of the child prefixes under a prefix. It doesn't use transactions across objects, so every change to a namespace becomes durable through a single object write.
+LoonFS relies on seven object-store operations ([Required operations](format.md#31-required-operations)): put-if-absent, compare-and-swap on small objects, full and ranged reads, version-conditional reads, deletes, prefix listings, and child-prefix listings. Because object storage offers no multi-object transactions, every durable state change commits through a single object write.
 
-Each "namespace" is one directory tree with its own history, stored under `namespaces/{namespace_id}/`. A namespace's content objects are stored under the prefix of its [pool](glossary.md#pool) (`pools/{pool_id}/`), which the namespace shares with its forks.
+Each "namespace" is one directory tree with its own history under `namespaces/{namespace_id}/`. Its content objects, upload records, and assembly temporary objects are stored under its [pool](glossary.md#pool) prefix (`pools/{pool_id}/`), which it shares with all of its forks.
 
-An application can use LoonFS as an embedded Rust library (`loonfs`) or through the HTTP API, which `loonfs-http` implements and `loonfs-server` runs as a standalone server. LoonFS coordinates writers through object-storage writes, so a change of writer takes about 200 ms. Because of that, most applications are better served by one long-lived writer in a server that many clients share.
+Applications can embed LoonFS as a Rust library (`loonfs`) or talk to it over HTTP (`loonfs-http`, hosted by the standalone `loonfs-server` binary). Because writer handoff goes through object storage and takes around 200 ms, most deployments run one long-lived writer session per namespace inside a shared server.
 
 ## Stored objects
 
-Each namespace is stored as six main kinds of objects:
+Each namespace is represented by six main object types:
 
 | Object | What it stores |
 | --- | --- |
-| Manifest | The namespace's identity and status, the current writer, the metadata runs that make up its files and directories, and its retention floor. Manifests are numbered. |
-| WAL object | Commits made after the most recent manifest, a writer fence, or a "[floor object](glossary.md#floor-object)", which records a new retention floor and contains no commits. WAL objects are numbered. |
-| Manifest boundary | A manifest number at or below which every manifest has been replaced by a newer one. Garbage collection raises it before it deletes manifests. |
-| Snapshot | A reference to one manifest that keeps it, and everything it lists, from being deleted. Callers create user snapshots, and forks create fork snapshots on their source. |
-| Metadata segment | Sorted metadata rows, in blocks that can be read independently. |
-| Content object | File bytes, stored under the namespace's pool. Content objects are immutable, and a file's bytes can span several of them. |
+| Manifest | Numbered, immutable snapshot of namespace identity, lifecycle status, current writer, metadata runs, and retention floor. |
+| WAL object | Numbered, immutable log object containing one or more commits, a writer [fence](glossary.md#fence), or a [floor object](glossary.md#floor-object) (which advances the retention floor with no commits). |
+| Manifest boundary | Small control object recording a manifest number at or below which every manifest is obsolete. Garbage collection raises it before deleting old manifests. |
+| Snapshot | Record pointing to one manifest so garbage collection keeps that manifest and all of its segments. Callers create user snapshots, and forks create fork snapshots. |
+| Metadata segment | Immutable sorted metadata rows organized into independently readable blocks. |
+| Content object | Immutable file bytes stored under the namespace's pool (`pools/{pool_id}/content/`). A file can span multiple content objects. |
 
-Manifests and WAL objects are numbered 1, 2, 3, and so on, with a separate counter for each. LoonFS creates every numbered object with put-if-absent, so when two processes try to write the same number, exactly one of them succeeds. Successfully writing the next WAL object commits every record in it. Writing the next manifest publishes a new set of metadata segments or a change to the namespace's state (for example, a new writer or a deletion).
+Manifests and WAL objects each use their own 1-based counter (1, 2, 3, ...), and every numbered object is written with put-if-absent so only one writer can win a given number. Writing the next WAL object commits its records, while writing the next manifest publishes new metadata segments or namespace state changes (such as a writer takeover or deletion).
 
-To find the current manifest, a reader reads the [manifest boundary](glossary.md#manifest-boundary), lists the manifests numbered above it, and loads the highest one. A publisher reads the boundary after it writes a manifest, so a manifest written at a number that garbage collection emptied doesn't count. The [format specification](format.md#2-objects-and-references) defines the complete layout and the stored fields.
-
-Why not list every manifest? A namespace keeps one manifest for each snapshot and each fork, so a namespace's manifest folder can contain thousands of manifests. The listing above the boundary returns only the manifests published since garbage collection last raised the boundary.
+Because a namespace with many snapshots or forks can keep thousands of historical manifests, readers don't list the whole manifest directory. Instead, a reader reads the [manifest boundary](glossary.md#manifest-boundary), lists only manifests numbered above it, and loads the highest one. A publisher checks the boundary again after writing a manifest so any write at or below a boundary raised by garbage collection counts as lost. See [Objects and references](format.md#2-objects-and-references) for the full layout.
 
 ## Writing a file
 
-A file change is committed in two parts. First the file's bytes become durable, and then a commit records the change in the WAL. File content can be published via one of two paths.
+File writes are durable in two steps: bytes become durable first, and then a WAL commit makes the change visible. There are two paths for file content ([File contents and ownership](format.md#15-file-contents-and-ownership)).
 
-Uploaded content is written and verified before the commit that references it:
+For uploaded content, bytes are uploaded and verified before the commit references them:
 
 ```text
 create upload session -> transfer bytes -> verify and complete upload
@@ -45,9 +43,9 @@ create upload session -> transfer bytes -> verify and complete upload
                                              file committed
 ```
 
-Completing an upload doesn't automatically update a file in a LoonFS namespace. The file changes only when the WAL object that commits the change is written. (If the upload is never committed, garbage collection deletes it later.)
+Completing an upload does not change any file in the namespace. The file updates only when a commit referencing that upload is written to the WAL (an uncommitted upload is cleaned up later by garbage collection).
 
-A small file's bytes can be included in the commit itself, as "inline" content. One WAL write then makes the bytes durable and the file visible. Later, a fold writes the bytes to a content object before it publishes the manifest that allows garbage collection to delete that WAL object. Appends use the same path, and the WAL object includes only the appended bytes.
+For small files ("inline" content) and appends, the bytes go directly into the WAL object so a single write makes them durable and visible. A later fold copies those bytes into a content object before publishing the manifest that lets garbage collection delete the WAL object:
 
 ```text
 validate metadata -> create next numbered WAL object with the bytes
@@ -58,24 +56,24 @@ validate metadata -> create next numbered WAL object with the bytes
                  fold writes the content object, then the manifest
 ```
 
-[File contents and ownership](format.md#15-file-contents-and-ownership) defines both paths. Several requests can share one WAL object, but each accepted request still has its own sequence number and commit ID.
+Multiple requests can share one WAL object, while each accepted request keeps its own sequence number and commit ID.
 
-Only one writer session can commit to a namespace at a time. A new writer session takes over in two steps:
+### Writer ownership and retries
 
-1. It publishes the next manifest with a higher writer epoch.
+Only one writer session can commit to a namespace at a time. LoonFS coordinates writers with monotonic epochs rather than leases so a new writer can take over immediately without waiting for a lease timeout:
+
+1. The new writer publishes the next manifest with a higher writer epoch.
 2. It writes an empty WAL object (a "fence") with that epoch at the next WAL number.
 
-Between the two steps, the previous writer can still commit, and those commits are valid. Once the fence is written, the previous writer can't commit anymore. Its next WAL write collides with an object that already exists, and when it reloads the namespace, it finds the higher epoch and stops with `writer_fenced`.
+Commits from the old writer remain valid between steps 1 and 2. Once the fence is written, the old writer's next WAL put collides with an existing object, reloads the namespace, sees the higher epoch, and fails with `writer_fenced`.
 
-A lost response can hide a successful commit. To find out what happened, a client retries with the same commit ID and the same request. If the original commit succeeded, LoonFS returns its result instead of committing again.
+If a commit response is lost, the client retries with the exact same commit ID and request. If the original commit succeeded, LoonFS replays its original result rather than committing twice.
 
-Warning: when a client retries a commit, it shouldn't retry the upload too. If the upload is retried, it's assigned a different content ID, so the retried commit is no longer the same request. If the original commit succeeded, the retry would fail with `commit_id_reuse_conflict` instead of returning the original result.
-
-Why use epochs instead of a writer lease? With a lease, a new writer would have to wait for the old lease to expire. With epochs, a new writer can take over at any time, and correctness depends only on conditional writes.
+Warning: when retrying a commit, reuse the original content reference instead of re-uploading the file. A new upload gets a new content ID, which changes the commit fingerprint and causes a retry of an already-committed write to fail with `commit_id_reuse_conflict`.
 
 ## Reading a file
 
-To read a namespace, a reader finds the current manifest and the last WAL object (the "WAL tip"). It reads the metadata runs that the manifest lists, then replays the WAL objects written after the manifest's folded boundary. The result is a view of the namespace at one sequence number.
+To read a namespace, a reader locates the current manifest and the WAL tip, loads the metadata runs listed in the manifest, and replays any WAL objects written after the manifest's folded boundary:
 
 ```text
 current manifest -> listed metadata runs --+
@@ -85,42 +83,46 @@ later numbered WAL -> committed changes ---+            |
                                         path -> inode -> revision -> content
 ```
 
-A new namespace's first manifest describes only the root directory. A fork's first manifest lists the metadata runs it inherited from its source.
+A new namespace's first manifest contains only the root directory, and a fork's first manifest inherits its source's metadata runs.
 
-LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records a content ID, a size, and a checksum. The content ID and the namespace's [pool](glossary.md#pool), which its manifest records, determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
+Paths resolve by walking [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision stores a content reference (content ID, size, and checksum). Combining that content ID with the `pool_id` from the reader's manifest yields the content object keys directly, so a fork reads inherited content without loading its source's manifest or walking fork ancestry. Unfolded inline bytes are read from the WAL tail.
 
-Directory listings use committed metadata for names and file sizes, so listing a directory doesn't download any files. Reading a file verifies its complete size and checksum. If an object needed to recover the namespace is missing or corrupt, the read fails.
+Directory listings read names and file sizes from committed binding metadata without downloading file content. Whole-file reads verify complete length and checksum. If any required object is missing or corrupt, the read fails rather than silently falling back to an older version.
 
-In a process without the namespace's writer session, an `eventual` read (the default) from a cached view sends no request while the view was confirmed less than its maximum staleness ago (one second by default), so it may miss commits made since (see [Read consistency](api.md#read-consistency)). After that, and on every `strong` read, the reader checks the next WAL number for new commits, and it checks for a newer manifest about once a second by default. In the writer's process, reads take the head from the writer session's [position](glossary.md#writer-position), which includes every commit that the session made, so a read sends no request to confirm the head apart from the session's check for a newer manifest. Because content objects are immutable, a reader also keeps recently read small content objects in memory and doesn't need to invalidate them. Local caches affect only read cost and freshness. They aren't needed for recovery.
+### Caching and freshness
 
-Why fail instead of reading an older version of the files? A fallback would return files from an earlier point in history, and the caller would have no way to tell.
+Local caches affect latency and freshness only and are never needed for recovery:
+
+- **Readers without a local writer session.** Under the default `eventual` consistency ([Read consistency](api.md#read-consistency)), cached reads make no object-store requests while the cached head was confirmed within `max_staleness_ms` (1 second by default). Past that window, and on every `strong` read, the reader probes the next WAL number for new commits and checks for a newer manifest (about once per second by default).
+- **Readers in the writer's process.** Reads start from the writer session's in-memory [position](glossary.md#writer-position), which already includes every locally acknowledged commit, so they skip WAL probes and only check for newer manifests.
+- **Content caching.** Because content objects are immutable, readers cache recently fetched small content objects in memory without invalidation.
 
 ## Forks and retained views
 
-A "fork" is a new namespace that starts as a copy of another namespace at one point in its history. To create one, LoonFS writes the fork's manifest 1, which lists the source's metadata runs, then writes and verifies a [fork snapshot](glossary.md#snapshot) on the source's manifest and writes the fork's [member entry](glossary.md#member-entry) in its pool, and then writes manifest 2, which makes the fork usable. (A fork of the source's head first takes a short-lived snapshot of the source, which keeps the source's manifest until the fork snapshot is verified. [Forking a namespace](format.md#92-forking-a-namespace) describes the exact order.) The fork shares the source's content and metadata objects, so nothing is copied (and the cost of a fork doesn't depend on how much data the source stores). Forking the source's current head may first fold the source's WAL tail, which writes its inline content to content objects. After the fork, commits to one namespace appear in the other only when a [merge](glossary.md#merge) applies them.
+A "fork" is a new namespace initialized from a point in another namespace's history. Creating one copies no file bytes or metadata segments, so forking cost is independent of namespace size. LoonFS writes the fork's initializing manifest 1 (listing the source's metadata runs), writes and verifies a fork snapshot on the source and a [member entry](glossary.md#member-entry) in the pool, folds any source WAL tail into the fork's own manifest when needed, and writes the fork's active manifest ([Forking a namespace](format.md#92-forking-a-namespace)). After creation, commits to either namespace stay isolated unless applied by a [merge](glossary.md#merge).
 
-A fork joins its source's [pool](glossary.md#pool), the set of namespaces that share one set of content objects, and every member of the pool stores its content objects under the pool's prefix. So the fork reads inherited content and its own content with the same kind of key, and a merge of the fork refers to the fork's content without copying bytes. When the fork publishes its own manifests, the inherited objects stay where they are. The source keeps its fork snapshot for the fork until the fork is deleted and retired.
+Every fork joins its source's [pool](glossary.md#pool), so all namespaces in the fork tree store content under the same `pools/{pool_id}/` prefix. Forks read inherited content and write new content with identical key shapes, and merges reference fork content without copying bytes. The source retains its fork snapshot until the fork is deleted and retired.
 
-A caller can also create a snapshot (a user snapshot) to keep one version of a namespace readable, and the read endpoints and forks accept its `snapshot_id`. A snapshot can have an expiry time, or none. Each create call writes a new snapshot with a new ID, so a snapshot's name is a label, not a key (two snapshots can have the same name). The maintenance API's snapshot inventory lists every snapshot, user snapshots and fork snapshots, so an operator can see what keeps old manifests.
+Callers can also create user snapshots to pin a point in history for reads or forks. Each create call generates a new `snapshot_id` (names are optional non-unique labels), with an optional expiry time. The maintenance snapshot inventory lists both user and fork snapshots so operators can inspect everything keeping old manifests alive.
 
-| Snapshot | Readable | Removed |
+| Snapshot type | Readable directly? | Removed when |
 | --- | --- | --- |
-| User snapshot | Before it expires, or while it exists if it has no expiry time | When it's deleted, or by garbage collection after it expires |
-| Fork snapshot | Not read directly | By garbage collection, after the fork no longer depends on it |
+| User snapshot | Yes, until deleted or expired | Deleted by caller, or by garbage collection after expiry |
+| Fork snapshot | Fork point snapshot on the fork only | Deleted by garbage collection after the fork retires |
 
-An expired snapshot still protects its manifest until garbage collection deletes the snapshot (see [Snapshots](format.md#8-snapshots)).
+An expired snapshot continues protecting its manifest until garbage collection removes the snapshot record ([Snapshots](format.md#8-snapshots)).
 
 ## Maintenance and deletion
 
 | Operation | What it does |
 | --- | --- |
-| Fold | Moves committed records from the WAL into new metadata segments, and publishes the next manifest. |
-| Compaction | Rewrites metadata runs into fewer runs and drops rows that are no longer needed, without changing any retained view. |
-| Retention advance | Moves the [retention floor](glossary.md#retention-floor) forward, after checking that the current manifest's segments exist. The advance writes the new floor to the WAL as a floor object, and the next fold records the floor in a manifest. Compaction can then remove history at or below the floor. |
-| Garbage collection | Deletes objects that nothing references anymore, once they're old enough. A namespace's collection deletes the namespace's own manifests, WAL objects, segments, and snapshots, and a pool's collection deletes the pool's content with roots from every member. Each collection starts from a fresh list of what's still referenced. |
+| Fold | Moves committed WAL tail records into new metadata segments and publishes the next manifest. |
+| Compaction | Rewrites metadata runs into fewer runs and drops obsolete rows without altering any retained view. |
+| Retention advance | Verifies the current manifest's segments and writes a [floor object](glossary.md#floor-object) to the WAL. The next fold copies the new floor into a manifest, allowing compaction to remove older history. |
+| Garbage collection | Deletes unreferenced objects past the grace window from a fresh root scan. Namespace collections clean manifests, WAL commit objects, segments, and snapshots, while pool collections clean content objects, upload records, and temporary objects across all pool members. |
 
-Deleting a file records a subtree tombstone, which can be undone. Deleting a namespace publishes a final manifest with a deleted status. Neither one deletes shared content right away.
+Deleting a file records a reversible subtree tombstone, and deleting a namespace publishes a final manifest with status `deleted`. Neither reclaims content immediately.
 
-A namespace is retired once a grace period has passed and no snapshots on the namespace remain (see [Retirement](format.md#95-retirement)). Retiring a fork deletes its fork snapshot on its source, and every retirement deletes the namespace's [member entry](glossary.md#member-entry) in its pool and then raises the namespace's manifest boundary to a retired state. Later collections of a retired namespace delete every object under its prefix except the boundary, and no retirement deletes content (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)). Once no member of a pool refers to a content object, the pool's collection deletes the object under the same age rule as any other unreferenced object (see [Content roots](format.md#119-content-roots)).
+A deleted namespace becomes eligible for retirement once the grace window has elapsed and no snapshots remain on it besides its own fork point snapshot ([Retirement](format.md#95-retirement)). Retiring a namespace deletes its fork snapshots (if it is a fork), deletes its pool [member entry](glossary.md#member-entry), and raises its manifest boundary to `retired`. Later namespace collections delete everything under its prefix except the boundary object, fences, and floor objects ([Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)). Pool collections delete unreferenced content objects once no pool member references them and they pass the grace window ([Content roots](format.md#119-content-roots)).
 
-Hosts decide when to run maintenance and which namespaces and pools to maintain. The format defines what each operation can publish or delete. An extension such as grep lists its segments in its own entry of the namespace's manifest. The extension publishes each change to its entry as the namespace's next manifest, and garbage collection deletes an extension's unreferenced segments by the same age rule as metadata segments (see [Extensions](format.md#124-extensions)).
+Hosts choose when and where to run maintenance, while the format defines what each operation may publish or delete. Extensions such as grep store their segment lists inside the namespace manifest and publish updates as the next manifest, so garbage collection cleans up unreferenced extension segments under the same age rule as metadata segments ([Extensions](format.md#124-extensions)).
