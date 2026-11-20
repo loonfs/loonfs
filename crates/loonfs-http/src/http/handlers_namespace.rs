@@ -217,6 +217,7 @@ pub(super) async fn get_capabilities(
         extensions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-scope" = json!("write")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("create")),
         ),
@@ -280,6 +281,7 @@ pub(super) struct ListNamespacesQuery {
         operation_id = "list_namespaces",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("list")),
             ("x-fern-request-name" = json!("ListNamespacesRequest")),
@@ -323,6 +325,7 @@ pub(super) async fn list_namespaces(
         operation_id = "get_namespace",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
             ("x-fern-request-name" = json!("GetNamespaceRequest")),
@@ -368,6 +371,7 @@ pub(super) async fn get_namespace(
         operation_id = "get_namespace_diagnostics",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "diagnostics"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
             ("x-fern-request-name" = json!("GetNamespaceDiagnosticsRequest")),
@@ -408,6 +412,7 @@ pub(super) async fn get_namespace_diagnostics(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("delete")),
             ("x-fern-request-name" = json!("DeleteNamespaceRequest")),
@@ -458,6 +463,7 @@ pub(super) async fn delete_namespace(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-scope" = json!("write")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("fork")),
         ),
@@ -516,6 +522,7 @@ pub(super) async fn fork_namespace(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
+            ("x-loonfs-scope" = json!("write")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("merge")),
         ),
@@ -585,6 +592,7 @@ pub(super) async fn merge_fork(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("nextMergeRange")),
             ("x-fern-request-name" = json!("GetNextMergeRangeRequest")),
@@ -644,6 +652,7 @@ pub(super) async fn get_next_merge_range(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-scope" = json!("write")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("forkForRebase")),
         ),
@@ -706,6 +715,7 @@ pub(super) async fn fork_namespace_for_rebase(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
+            ("x-loonfs-scope" = json!("write")),
             ("x-fern-sdk-group-name" = json!(["namespaces"])),
             ("x-fern-sdk-method-name" = json!("replay")),
         ),

@@ -23,6 +23,7 @@ use std::sync::Arc;
         operation_id = "run_maintenance_job",
         extensions(
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "jobs"])),
             ("x-fern-sdk-method-name" = json!("create")),
         ),
@@ -105,6 +106,7 @@ pub(super) struct PoolSegment {
         operation_id = "run_pool_maintenance_job",
         extensions(
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "pools", "jobs"])),
             ("x-fern-sdk-method-name" = json!("create")),
         ),

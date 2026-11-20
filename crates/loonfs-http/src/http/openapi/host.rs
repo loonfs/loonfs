@@ -51,6 +51,7 @@ fn get_readiness() {}
         operation_id = "get_metrics",
         extensions(
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-ignore" = json!(true)),
         ),
         path = "/metrics",

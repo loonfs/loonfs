@@ -656,6 +656,41 @@ fn non_idempotent_operations_disable_generated_sdk_retries() {
 }
 
 #[test]
+fn every_operation_states_its_scope() {
+    let generated =
+        openapi_postprocess::document::openapi_json_pretty(&loonfs_http::openapi_document())
+            .expect("generate openapi json");
+    let spec: Value = serde_json::from_str(&generated).expect("parse generated openapi json");
+    let paths = spec["paths"].as_object().expect("openapi paths object");
+
+    for (path, path_item) in paths {
+        let path_item = path_item.as_object().expect("openapi path item object");
+        for method in ["get", "post", "put", "delete", "patch"] {
+            let Some(operation) = path_item.get(method) else {
+                continue;
+            };
+            let operation_id = operation["operationId"].as_str().expect("operationId");
+            let expected = match (method, path.as_str()) {
+                (_, "/health" | "/readiness" | "/v0/capabilities") => None,
+                (_, "/metrics") => Some("admin"),
+                (_, path) if path.starts_with("/v0/maintenance/") => Some("admin"),
+                ("delete", _) => Some("admin"),
+                ("post", path) if path.contains("/snapshots") => Some("admin"),
+                ("get", path) if path.ends_with("/uploads/{upload_id}") => Some("write"),
+                ("get", _) => Some("read"),
+                ("post", path) if path.ends_with("/downloads") => Some("read"),
+                _ => Some("write"),
+            };
+            assert_eq!(
+                operation.get("x-loonfs-scope").and_then(Value::as_str),
+                expected,
+                "scope of `{operation_id}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn cursor_list_operations_publish_the_registered_pagination_metadata() {
     let spec: Value = serde_json::from_str(
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),

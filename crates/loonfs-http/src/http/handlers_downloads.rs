@@ -39,6 +39,7 @@ const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/max_staleness_ms", "/s
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("createDownload")),
         ),
@@ -123,6 +124,7 @@ pub(super) async fn create_download(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("createDownload")),
         ),
@@ -189,6 +191,7 @@ pub(super) async fn create_download_by_inode(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["inodes"])),
             ("x-fern-sdk-method-name" = json!("createRevisionDownload")),
         ),

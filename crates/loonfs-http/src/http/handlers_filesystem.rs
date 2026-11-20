@@ -275,6 +275,7 @@ pub(super) struct DiffQuery {
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("list")),
             ("x-fern-request-name" = json!("ListPathEntriesRequest")),
@@ -335,6 +336,7 @@ pub(super) async fn list_path_entries(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("retrieve")),
             ("x-fern-request-name" = json!("GetPathEntryRequest")),
@@ -388,6 +390,7 @@ pub(super) async fn get_path_entry(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("content")),
             ("x-fern-request-name" = json!("GetFileContentRequest")),
@@ -455,6 +458,7 @@ pub(super) async fn get_file_content(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["trash"])),
             ("x-fern-sdk-method-name" = json!("list")),
             ("x-fern-request-name" = json!("ListTrashRequest")),
@@ -506,6 +510,7 @@ pub(super) async fn list_trash(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["files"])),
             ("x-fern-sdk-method-name" = json!("listRevisions")),
             ("x-fern-request-name" = json!("ListFileRevisionsRequest")),
@@ -560,6 +565,7 @@ pub(super) async fn list_file_revisions(
             ("x-loonfs-actor" = json!("required")),
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("replayable")),
+            ("x-loonfs-scope" = json!("write")),
             ("x-fern-sdk-group-name" = json!(["commits"])),
             ("x-fern-sdk-method-name" = json!("create")),
         ),
@@ -675,6 +681,7 @@ pub(super) async fn create_commit(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["changes"])),
             ("x-fern-sdk-method-name" = json!("list")),
             ("x-fern-request-name" = json!("ListChangesRequest")),
@@ -730,6 +737,7 @@ pub(super) async fn list_changes(
         extensions(
             ("x-loonfs-authority" = json!("required")),
             ("x-loonfs-retry" = json!("idempotent")),
+            ("x-loonfs-scope" = json!("read")),
             ("x-fern-sdk-group-name" = json!(["diff"])),
             ("x-fern-sdk-method-name" = json!("list")),
             ("x-fern-request-name" = json!("ListDiffRequest")),

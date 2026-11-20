@@ -18,6 +18,7 @@ use std::sync::Arc;
         operation_id = "probe_store",
         extensions(
             ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-scope" = json!("admin")),
             ("x-fern-sdk-group-name" = json!(["maintenance", "store"])),
             ("x-fern-sdk-method-name" = json!("probe")),
         ),
