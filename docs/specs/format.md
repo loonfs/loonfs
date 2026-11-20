@@ -625,7 +625,7 @@ A writer session claims authority lazily before its first metadata-changing publ
 
 Before planning mutations, the writer reconstructs state from a verified basis and visible WAL, evaluates operations in order within each request (and across requests in a group-commit batch), validates content references and admission proofs before metadata preconditions, checks preconditions, and generates IDs for newly created inodes ([Namespaces and identity](#11-namespaces-and-identity), while [merges](glossary.md#merge) keep the fork's inode IDs).
 
-Metadata preconditions can assert namespace head sequence, name availability, exact binding version (`binding_is(parent_inode_id, name_key, child_inode_id, committed_seq, delta_index)`, because checking inode ID alone would miss a move away and back), file/attribute/access revisions, ancestor visibility, and directory emptiness. Revision preconditions paired with optional inode preconditions require the inode precondition, inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves/deletes require `expected_binding_version`. Rejected requests allocate no sequence number and write nothing. Restore and merge-floor validation use the writer position's effective [retention floor](glossary.md#retention-floor), including any [floor objects](glossary.md#floor-object) in its WAL tail.
+Metadata preconditions can assert namespace head sequence, name availability, exact binding version (`binding_is(parent_inode_id, name_key, child_inode_id, committed_seq, delta_index)`, because checking inode ID alone would miss a move away and back), file/attribute/access revisions, ancestor visibility, and directory emptiness. Revision preconditions paired with optional inode preconditions require the inode precondition, inode-addressed revision writes require `expected_revision_no`, and inode-addressed moves/deletes require `expected_binding_version`. A rejected request gets no sequence number and creates no WAL record (validation can still materialize unfolded base pieces into a span object before a later operation fails, leaving any unreferenced span for pool garbage collection). Restore and merge-floor validation use the writer position's effective [retention floor](glossary.md#retention-floor), including any [floor objects](glossary.md#floor-object) in its WAL tail.
 
 #### Merges
 
@@ -710,7 +710,7 @@ Optional preconditions have no default. Replacing moves delete the destination f
 An append writes appended bytes as WAL pieces and combines base + appended CRCs algebraically in the store's algorithm without reading prior bytes (`namespace_corrupt` if the base uses a different algorithm):
 
 - **Same chain.** Keeps the same `content_id` (no layout in delta, no content write) only when this namespace is the chain's [creator](#15-file-contents-and-ownership), base size `> 0`, and base equals the chain's full current length. Limiting in-place extension to the creator ensures every layout of a chain is a prefix of its longest layout even after cross-member merges.
-- **New chain.** Otherwise (empty file, branched revision, or another pool member's chain), allocates a new `content_id` whose delta embeds the base layout truncated to the append offset with this namespace as creator. If the base has unfolded pieces, validation materializes them into a span object first (missing base bytes report corruption).
+- **New chain.** Otherwise, allocates a new `content_id`. For an empty base file (base size `0`), the commit writes a whole-value piece at offset `0` and omits `layout` (the WAL decoder rejects a `layout` when a piece starts at offset `0`). For a non-empty base (branched revision or another pool member's chain), the delta embeds the base layout truncated to the append offset with this namespace as creator. If that base has unfolded pieces, validation materializes them into a span object first (missing base bytes report corruption).
 
 Every append's `append_file_revision` delta records `append_offset` (equal to the base revision's `size_bytes`) so the change feed reports the exact offset both before and after folding (when pieces are stripped from `commits` rows, and even when `append_offset == 0`). Non-append revisions omit `append_offset`.
 
@@ -1740,7 +1740,7 @@ A [merge](glossary.md#merge) commit includes `merge`, and non-merge commits omit
 | `source_namespace_id` | Fork whose commits were applied. |
 | `source_after_seq` | Exclusive lower bound of applied fork commits (the fork point on the first merge). |
 | `source_through_seq` | Inclusive upper bound of applied fork commits. |
-| `conflicts` | Conflict report (`MergeConflict` shape) omitted by a [rebase](glossary.md#rebase) replay commit. Omitted when empty, defaults to empty when absent. |
+| `conflicts` | Conflict report (`MergeConflict` shape) recording the conflicting changes a [rebase](glossary.md#rebase) replay commit skipped. Omitted when empty, defaults to empty when absent. |
 
 A replay commit stores `conflicts` so retries with the same commit ID return the identical report (ordinary merges never commit on conflict). The conflict list counts toward `MAX_WAL_OBJECT_BYTES`.
 

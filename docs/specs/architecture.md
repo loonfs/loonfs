@@ -108,7 +108,7 @@ Callers can also create user snapshots to pin a point in history for reads or fo
 | Snapshot type | Readable directly? | Removed when |
 | --- | --- | --- |
 | User snapshot | Yes, until deleted or expired | Deleted by caller, or by garbage collection after expiry |
-| Fork snapshot | Fork point snapshot on the fork only | Deleted by garbage collection after the fork retires |
+| Fork snapshot | Yes, on read routes for both the source-side fork snapshot and the fork's fork-point snapshot (not accepted by snapshot management or fork creation) | Deleted by garbage collection after the fork retires |
 
 An expired snapshot continues protecting its manifest until garbage collection removes the snapshot record ([Snapshots](format.md#8-snapshots)).
 
