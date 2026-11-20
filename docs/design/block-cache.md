@@ -6,7 +6,7 @@ This note describes how a LoonFS server caches the blocks of [metadata segments]
 
 This section describes what a read pays for a block that isn't cached, and why that cost grows on a server that serves many namespaces.
 
-A LoonFS server keeps no durable state of its own. Every [metadata segment](../specs/glossary.md#metadata-segment) is an immutable object in the bucket, and the server reads a segment's data, index, and filter blocks with ranged GETs, as [Metadata block storage](metadata-block-storage.md) describes. The server keeps decoded blocks in memory under one byte budget, `metadata_cache.max_segment_bytes`. The budget is 256 MiB on a server without a memory limit, and 30% of managed memory on a sized server (40% when the server doesn't serve grep). A block that isn't in memory costs a GET, and a GET from a server next to its bucket takes tens of milliseconds.
+A LoonFS server keeps no durable state of its own. Every [metadata segment](../specs/glossary.md#metadata-segment) is an immutable object in the bucket, and the server reads a segment's data, index, and filter blocks with ranged GETs, as [Metadata block storage](metadata-block-storage.md) describes. The server keeps decoded blocks in memory under one byte budget, `metadata_cache.max_segment_bytes`. The budget is 256 MiB on a server without a memory limit, and 50% of managed memory on a sized server (60% when the server doesn't serve grep). A block that isn't in memory costs a GET, and a GET from a server next to its bucket takes tens of milliseconds.
 
 Three cases make those misses most of what a read costs:
 
