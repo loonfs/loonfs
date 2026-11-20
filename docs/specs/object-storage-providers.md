@@ -1,138 +1,113 @@
 # LoonFS object-storage provider reference
 
-This document lists provider limits and performance data points that inform LoonFS design work, and the requirements that a bucket's configuration and a LoonFS provider adapter MUST meet. It isn't a substitute for provider conformance tests.
+This reference summarizes the provider limits and performance characteristics behind LoonFS's design, along with the bucket configuration and adapter requirements every deployment MUST meet. It does not replace running the provider conformance tests.
 
 The key word MUST in this document is to be interpreted as described in BCP 14 ([RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174)) when, and only when, it appears in capitals.
 
 ## 1. Frequently used data points
 
-This section lists the provider data points that come up most often in LoonFS design work.
-
-- Don't assume that any CAS object can be updated more often than once per second. GCS documents a limit of one write per second to the same object name, and R2 documents a limit of one concurrent write per second to the same object key.[^1][^2] LoonFS raises a namespace's manifest boundary only in a collection of that namespace, before the collection deletes manifests, and a manifest publication reads the boundary without writing it (see [One complete collection](format.md#111-one-complete-collection)). The other compare-and-swap writes, such as a snapshot's expiry extension, are made on request, and a provider that refuses one returns its error to that caller.
-- Don't assume that an `ETag` is a portable content hash. ETags aren't consistent across providers, especially for multipart uploads.
-- A HEAD request usually takes around 30 ms, and a full GET of a small object (with content) should be assumed to take about 200 ms. A HEAD request (or a GET with if-none-match) is a useful way to check control objects faster.
+- **Same-key write ceiling:** Do not assume any CAS object can be updated faster than once per second. GCS limits writes to 1/s per object name, and R2 limits concurrent writes to 1/s per key.[^1][^2] LoonFS raises a namespace's manifest boundary only during a namespace collection (right before deleting manifests), while manifest publications read the boundary without writing it ([One complete collection](format.md#111-one-complete-collection)). Other CAS writes (such as extending or deleting a user snapshot) happen on demand and return provider throttling errors to that caller.
+- **ETags aren't hashes:** Never assume an `ETag` is a portable MD5 or content hash, especially across multipart uploads.
+- **Typical latency:** Assume roughly 30 ms for a HEAD request and 200 ms for a small full GET. Prefer HEAD or conditional GET (`If-None-Match`) when checking control objects.
 
 ## 2. Provider matrix
 
-This section compares the providers feature by feature. The paragraphs after the table describe listing timestamps, retries, and ambient AWS credentials.
-
 | Feature | AWS S3 | Google Cloud Storage | Cloudflare R2 | Azure Blob Storage | S3-Compatible |
-| ----- | ----- | ----- | ----- | ----- | ----- |
-| CAS / conditional write | Yes. | Yes. | Yes. | Yes. | Unknown until tested. |
-| Same-key CAS/write ceiling to remember | No documented 1/s same-key cap found. | 1 write/s to the same object name, and 1 metadata update/s to the same object. Exceeding this can throttle.[^12] | 1 concurrent write/s to the same object key. Excess concurrent writes can return 429.[^23] | No 1/s same-key cap found.[^35][^36] | Unknown. Some providers might impose same-key, partition, account, or hidden fairness limits. |
-| Multipart / large upload | Yes, with up to 10,000 parts.[^4] | Yes.[^13][^14] | Yes. A single upload can be up to 5 GiB. A multipart upload can be up to 5 TiB, with up to 10,000 parts of 5 MiB to 5 GiB each. SDKs can upload parts in parallel.[^24][^25] | Native block-blob upload, with Put Block and Put Block List. For current service versions, a block blob can have up to 50,000 blocks of up to 4,000 MiB each, and a maximum size of about 190.7 TiB.[^37][^38][^39] | Usually S3-like, but limits and checksum semantics vary. |
-| Parallel/ranged download | Yes, with Range and partNumber.[^5] | Yes. Sliced object downloads use parallel ranged GETs.[^15] | Yes. The S3 API's GetObject supports Range and PartNumber.[^26][^27] | Yes.[^40] | Unknown until tested. |
-| ETag and full-object checksums | The ETag is opaque in many cases. S3 supports stored object checksums, including CRC64NVME, CRC32, CRC32C, SHA-1, SHA-256, MD5, and others. Full-object checksums can be stored for single-part or multipart uploads.[^6][^7] | Every object has a CRC32C. Composite objects and XML API multipart objects have no MD5. ETags exist, but their values can differ between the XML and JSON APIs.[^16][^17] | The S3 API supports full-object CRC64NVME, and composite CRC32, CRC32C, SHA-1, and SHA-256. Multipart ETags use the S3 multipart format (an MD5 of the parts' MD5s).[^28][^29][^30] | The ETag is for conditional operations, and it isn't a portable hash. A full-blob Content-MD5 can be set, and it's returned for full reads. Range MD5 and CRC64 are limited to ranges of at most 4 MiB.[^41][^42] | Never assume that the ETag is an MD5. Check the provider's documentation. |
-| Availability SLA / target | For the S3 Standard family, service credits begin when monthly uptime is below 99.9%. Some IA classes use a 99.0% threshold.[^8] | For Standard storage, 99.95% in multi-region and dual-region locations, and 99.9% in regional ones. Other storage classes and locations vary.[^18] | The R2 docs state an availability SLA of 99.9%, and a designed annual durability of 99.999999999%.[^31] | Availability depends on the redundancy option and the access tier. In the redundancy table, reads and writes are at least 99.9% available for common hot tiers, and RA-GRS and RA-GZRS reads are at least 99.99% available. The cool, cold, and archive tiers can be lower.[^43] | Depends on the vendor and the contract. |
-| Request scale, partitions, throughput | At least 3,500 write-class requests/s and 5,500 GET or HEAD requests/s per partitioned prefix, with no limit on the number of prefixes. Scaling is gradual, and requests can fail with 503 Slow Down while it happens. AWS also cites up to 100 Gb/s from a single EC2 instance, and aggregate workloads of several Tb/s.[^9] | A bucket starts at about 1,000 writes/s and 5,000 reads/s, and then scales automatically. Increase the request rate no faster than roughly doubling it every 20 minutes. Sequential object names can create hotspots, and random prefixes improve the initial fan-out. The default internet egress quota is commonly 200 Gbps per region, subject to account history and quotas.[^19][^20] | Public r2.dev buckets are for testing only, and they might throttle at hundreds of requests/s. Production deployments should use custom domains or direct API access. The Cloudflare REST management API isn't meant for high-throughput object I/O, so use the S3-compatible or Workers APIs instead.[^32] | For standard GPv2 and blob storage accounts, the default maximum request rate is 40,000 requests/s in many of the listed regions, and 20,000 elsewhere. Ingress is commonly 60 or 25 Gbps, and egress 200 or 50 Gbps, depending on the region, and both can be increased on request. Partition hot spots can cause 503 or 500 responses, so distribute requests and use backoff.[^44][^45] | Vendor-specific. Run compatibility and load tests before relying on any numbers. |
-| Published GET/HEAD latency | AWS publishes rough, general S3 latencies of about 100-200 ms (for small objects, or to the first byte).[^10] | No provider-published average GET or HEAD latency was found, so it needs to be benchmarked. | No provider-published average GET or HEAD latency was found, so it needs to be benchmarked. | No provider-published average GET or HEAD latency was found, so it needs to be benchmarked. | Needs to be benchmarked. |
-| Content checksums | CRC-64/NVME for every content reference. | CRC-32C for every content reference. | CRC-64/NVME for every content reference. | CRC-64/NVME for every content reference. | CRC-64/NVME for every content reference. |
-| Stored checksums | Uploads verify and store CRC-64/NVME. A HEAD request asks for checksum mode. | Uploads verify and store CRC-32C. A HEAD request reads `x-goog-hash`. | Same as AWS S3. | Put Blob and Put Block verify `x-ms-content-crc64`. Azure stores no checksum of a block blob, so the whole-blob CRC-64/NVME is recorded as blob metadata (`crc64nvme`) when the blob is created or committed, and a HEAD request reads it back. | CRC-64/NVME verification and storage are required. |
-| Conditional create completion | A publication (a WAL object, manifest, or control object) is one PUT with `If-None-Match: *`, at every size. An immutable write of less than 8 MiB is the same kind of PUT. From 8 MiB, it's LoonFS's own signed multipart upload, completed with `If-None-Match: *` and the full-object CRC-64/NVME. A client's direct multipart upload completes with `If-None-Match: *` too, and a completion refused because the key is occupied (for example, the retry of a completion whose response was lost) is checked against the stored checksum.[^48] | A publication or an immutable write below 8 MiB uses one JSON API media upload, with `ifGenerationMatch=0` and the CRC-32C. A larger immutable write uses a JSON API resumable upload with the same precondition, and it sends the full-object checksum on the final request.[^14][^17][^49] | Same as AWS S3. *Live:* `cloudflare_r2_direct_completion_is_create_only` completes a direct multipart upload twice, then completes a second upload of other bytes at the same key, and checks that the stored object still has the first upload's size and CRC-64/NVME. | A publication, and an immutable write of less than 8 MiB, is one Put Blob with `If-None-Match: *`. From 8 MiB, it's one Put Block per part, and a Put Block List with `If-None-Match: *` that commits them with the whole-blob CRC-64/NVME as metadata.[^53] There is no direct multipart upload: a shared access signature can't require a checksum header. | Required, and unknown until tested. An endpoint that ignores `If-None-Match: *` on a multipart completion would let a second upload with different bytes replace the first upload's object. |
-| Conditional read of a control object | A GET with `If-None-Match` and the ETag of an earlier read. An unchanged object returns 304 with no body. | LoonFS keeps an object's generation as its version, because GCS conditional writes compare the generation, and the client library can't make a read conditional on a generation. The read returns the whole object (a manifest boundary is about 150 bytes), and LoonFS compares the generation itself. | Same as AWS S3. | Same as AWS S3. | Unknown until tested. |
-| Assembly | Below 8 MiB, read the sources in chunks of at most 8 MiB, verify their checksums, and send one create-only PUT. At or above 8 MiB, start a CreateMultipartUpload with the full-object CRC-64/NVME. Copy source ranges of at least 5 MiB, in parts of at most 5 GiB. Read small runs and tail bytes in ranges of at most 8 MiB, and pad a short part that isn't the last one with bytes from the next source. Combine the reported part CRCs, and reject a wrong expected CRC before CompleteMultipartUpload with `If-None-Match: *`.[^48][^50] | Below 8 MiB, read the sources in chunks of at most 8 MiB, verify their checksums, and send one create-only media request. At or above 8 MiB, compose whole sources directly, and first write ranged sources and tail bytes as temporary objects. Compose at most 32 sources per request, through intermediate temporary objects, and then onto the destination with `ifGenerationMatch=0`. Check the source CRCs before composing, and the returned CRC-32C afterwards. Delete every temporary object. *Live:* the source and destination generation preconditions, and a chained compose of 40 whole sources.[^51] | Below 8 MiB, read the sources in chunks of at most 8 MiB, verify their checksums, and send one create-only PUT. At or above 8 MiB, cut the result into 64 MiB chunks (except the last). Copy a chunk that lies within one source, and read and upload every chunk that spans sources. Don't send `x-amz-copy-source-if-match`. R2 reports no checksum for copied parts. Complete with `If-None-Match: *`, and then send a HEAD with checksum mode and compare the stored full-object CRC-64/NVME with the expected CRC. A missing or different checksum fails the assembly and leaves the object for garbage collection. (A writer never deletes an immutable key, because another writer might already have accepted it.) Live runs cover copied parts and a 64 MiB chunk that spans two sources. | Below 8 MiB, read the sources in chunks of at most 8 MiB, verify their checksums, and send one create-only Put Blob. At or above 8 MiB, copy source ranges of at least 5 MiB with Put Block From URL, in blocks of at most 4,000 MiB, each identifying its source by a short-lived shared access signature. Read small runs and tail bytes in ranges of at most 8 MiB, upload them as blocks under `x-ms-content-crc64`, and pad a short block that isn't the last one with bytes from the next source. Put Block From URL takes no source precondition, so the check is the checksum: combine the CRC-64 the service reports for each block, and reject a wrong expected CRC before the Put Block List with `If-None-Match: *`.[^52][^53] | Unknown until tested. |
+| --- | --- | --- | --- | --- | --- |
+| CAS / conditional write | Yes | Yes | Yes | Yes | Unknown until tested |
+| Same-key CAS/write ceiling | No documented 1/s cap | 1 write/s and 1 metadata update/s per object name[^12] | 1 concurrent write/s per key (excess can 429)[^23] | No documented 1/s cap[^35][^36] | Vendor-specific |
+| Multipart / large upload | Up to 10,000 parts[^4] | Resumable / XML multipart[^13][^14] | Single <= 5 GiB, multipart <= 5 TiB (10,000 parts of 5 MiB to 5 GiB)[^24][^25] | Put Block / Put Block List: up to 50,000 blocks x 4,000 MiB (~190.7 TiB)[^37][^38][^39] | S3-like (limits vary) |
+| Parallel / ranged download | `Range` and `partNumber`[^5] | Sliced parallel ranged GETs[^15] | `Range` and `PartNumber`[^26][^27] | Ranged `Get Blob`[^40] | Unknown until tested |
+| ETag and full-object checksums | Opaque ETag, stored CRC64NVME, CRC32/C, SHA-1/256, MD5 for single and multipart[^6][^7] | Every object has CRC32C, no MD5 on composite/XML multipart, XML vs JSON ETags differ[^16][^17] | Full-object CRC64NVME, composite CRC32/C, SHA-1/256, S3 multipart ETag[^28][^29][^30] | Conditional-only ETag, optional full-blob MD5, range MD5/CRC64 <= 4 MiB[^41][^42] | Check vendor docs |
+| Availability SLA / target | 99.9% Standard (99.0% some IA)[^8] | 99.95% multi/dual-region, 99.9% regional Standard[^18] | 99.9% SLA, 11 nines annual durability[^31] | >= 99.9% hot tiers (>= 99.99% RA-GRS/GZRS reads), lower on cool/cold/archive[^43] | Vendor-specific |
+| Request scale and throughput | >= 3,500 write/s and 5,500 GET/HEAD/s per prefix (gradual ramp, 503 Slow Down), up to 100 Gb/s per EC2[^9] | Starts ~1,000 write/s and 5,000 read/s, auto-scales (ramp <= 2x / 20 min), ~200 Gbps regional egress[^19][^20] | Avoid `r2.dev` and REST management API for production. Use custom domains or S3/Workers APIs[^32] | 40,000 req/s (20,000 some regions), 60/25 Gbps ingress, 200/50 Gbps egress, backoff on 503/500[^44][^45] | Load-test first |
+| Published GET/HEAD latency | ~100-200 ms first-byte rough figure[^10] | Not published (benchmark) | Not published (benchmark) | Not published (benchmark) | Benchmark |
+| Content checksum | CRC-64/NVME | CRC-32C | CRC-64/NVME | CRC-64/NVME | CRC-64/NVME |
+| Stored checksum readback | Verified & stored CRC-64/NVME, HEAD with checksum mode | Verified & stored CRC-32C, HEAD reads `x-goog-hash` | Same as AWS S3 | Verified per block via `x-ms-content-crc64`, full CRC-64/NVME stored in blob metadata (`crc64nvme`), read via HEAD | CRC-64/NVME required |
+| Conditional create completion | `If-None-Match: *` on PUT (< 8 MiB) and multipart completion (>= 8 MiB)[^48] | JSON media (< 8 MiB) or resumable (>= 8 MiB) with `ifGenerationMatch=0`[^14][^17][^49] | Same as AWS S3 (*live* verified) | Put Blob (< 8 MiB) or Put Block List (>= 8 MiB) with `If-None-Match: *`[^53] | Required (unknown until tested) |
+| Conditional control-object read | GET with `If-None-Match` ETag (304 if unchanged) | Full GET (~150 B boundary), compares generation locally | Same as AWS S3 | Same as AWS S3 | Unknown until tested |
+| Assembly (>= 8 MiB) | `UploadPartCopy` (>= 5 MiB parts, <= 5 GiB), combines part CRCs before completion[^48][^50] | `objects.compose` (<= 32 sources/step via temp objects), `ifGenerationMatch=0` (*live* verified)[^51] | 64 MiB chunks, copies single-source chunks, re-uploads spanning chunks, verifies full CRC via HEAD (*live* verified) | `Put Block From URL` (>= 5 MiB ranges via SAS, <= 4,000 MiB blocks), combines block CRCs before `Put Block List`[^52][^53] | Unknown until tested |
 
-Items marked *live* are documented behavior that only a run against the provider confirms. The ignored tests in `crates/loonfs-objectstore/tests/it/objectstore_conformance.rs` exercise them.
+Items marked *live* are verified by the ignored conformance tests in `crates/loonfs-objectstore/tests/it/objectstore_conformance.rs`.
 
-Every provider MUST complete a create conditionally at every size, so that a create sent as a multipart upload is refused at completion if the key already exists. This condition keeps a content object immutable when two requests upload different bytes to one service-proxied session at the same time. Both requests write the session's one content key, and the provider refuses the second completion (see [Service-proxied staging](format.md#53-service-proxied-staging)). An S3-compatible endpoint that ignores the condition on a multipart completion would let the second upload replace the first upload's bytes, after the session had reported the first upload's checksum. The store contract probe (`POST /v0/maintenance/store/probe`) tests an endpoint for this. Its `multipart_round_trip` check completes a multipart create over an existing key and expects the provider to refuse it.
+### Conditional create, assembly, and retries
 
-For an object that hasn't changed, the modification time in a listing and the modification time a HEAD request returns differ by less than one second. R2 and GCS listings keep fractional seconds, while HEAD reports whole seconds. The garbage collector uses listing times, without a HEAD request for each object. Its `GC_SAFETY_MARGIN_MS` is 300,000 milliseconds, and that allowance includes timestamp precision.
+- **Conditional create at every size.** Every provider MUST enforce create-only completion at every object size, including multipart completions. Otherwise two concurrent writes to one service-proxied upload session could overwrite already-verified bytes ([Service-proxied staging](format.md#53-service-proxied-staging)). On S3 and R2, a direct multipart completion refused because the key already exists (such as a retry after a lost response) is verified against the stored checksum. On R2, `cloudflare_r2_direct_completion_is_create_only` tests this live. The store contract probe (`POST /v0/maintenance/store/probe`) checks this via `multipart_round_trip`.
+- **Assembly below 8 MiB.** All adapters read source ranges in chunks of at most 8 MiB, verify their checksums, and publish with one create-only PUT (or JSON media upload on GCS, or Put Blob on Azure).
+- **Assembly at or above 8 MiB:**
+  - *AWS S3:* Starts a multipart upload with full-object CRC-64/NVME, copies source ranges of at least 5 MiB (up to 5 GiB per part), reads small runs and tail bytes in chunks up to 8 MiB (padding short non-final parts from the next source), combines part CRCs, and rejects mismatches before `CompleteMultipartUpload` with `If-None-Match: *`.[^48][^50]
+  - *GCS:* Composes whole sources directly, stages ranged sources and tail bytes as temporary objects, chains `objects.compose` in batches of at most 32 sources onto the destination with `ifGenerationMatch=0`, checks source CRCs beforehand and returned CRC-32C afterward, and deletes every temporary object (*live* verified up to 40 whole sources).[^51]
+  - *Cloudflare R2:* Cuts the output into 64 MiB chunks (except the last), copies chunks inside a single source without `x-amz-copy-source-if-match`, and reads/uploads chunks spanning sources. Because R2 omits checksums on copied parts, LoonFS completes with `If-None-Match: *` and verifies the stored full-object CRC-64/NVME with HEAD. On mismatch or missing checksum, assembly fails and leaves the object for GC (writers never delete immutable keys).
+  - *Azure Blob Storage:* Copies ranges of at least 5 MiB (up to 4,000 MiB per block) via `Put Block From URL` using short-lived SAS URLs, uploads small runs and tail bytes with `x-ms-content-crc64` (padding short non-final blocks), combines the service-reported block CRCs (since `Put Block From URL` has no source precondition), and rejects mismatches before `Put Block List` with `If-None-Match: *`.[^52][^53]
+- **Conditional control-object reads.** S3, R2, and Azure use GET with `If-None-Match` (receiving 304 on match). GCS uses object generation as its version token because GCS conditional writes compare generations and the client library cannot send generation-conditional GETs, so LoonFS reads the small object (around 150 bytes for a boundary) and compares generations locally.
+- **Listing timestamps.** For unchanged objects, LIST and HEAD timestamps differ by less than 1 second (R2 and GCS listings keep fractional seconds while HEAD reports whole seconds). GC uses LIST timestamps without per-object HEAD requests, covered by `GC_SAFETY_MARGIN_MS` (300,000 ms).
+- **Retry budget.** Each request gets one retry budget: up to 10 attempts within the 120-second `PROVIDER_OPERATION_DEADLINE_MS` (covering provider-client retries, LoonFS-signed requests, verified immutable writes, and timed-out deletes). Exhausting the budget returns a non-retryable error. Conditional publications always make a single attempt.
 
-Each request has one retry budget: the provider client retries the requests it sends, LoonFS retries the requests it signs itself (parts, part copies, resumable chunks, composes, reads, and HEAD requests), its verified immutable writes, and a delete whose attempt timed out (which the provider client doesn't resend), each up to 10 times within the 120-second `PROVIDER_OPERATION_DEADLINE_MS`, an exhausted budget is reported as a non-retryable error, and a conditional publication is one attempt.
+### Ambient credentials
 
-AWS S3 credentials with `kind = "ambient"` use the standard AWS SDK credential chain. The chain checks environment variables, shared config and credentials files, credential processes, SSO, web identity, ECS task credentials, and EC2 instance metadata. `AWS_PROFILE` selects a profile by its name.
-
-The provider client and presigned URLs use the same credential source. Each ambient AWS source caches one resolved credential value, with its native expiration. Requests reuse that value until 60 seconds before it expires, and concurrent callers share one refresh. A refresh runs on demand, with the provider's existing timeout and retry policy. Cancellation releases the refresh lock and keeps the previous value. If a refresh fails, or returns the same nearly expired credentials, a value that's still valid can be reused for at most one second before another refresh attempt, and never past its expiration. Cold failures and expired values aren't cached.
-
-Once an ambient source returns credentials without an expiration, later lookups skip the cache and its refresh lock for the rest of that source's lifetime. This keeps lookups concurrent, and it keeps the source's rotation behavior. Later results are still checked for expiration, but they aren't cached. Explicit static credentials are used exactly as configured. The cache is in memory and scoped to the shared source, and it has no background task or persistence.
-
-Presigned URLs include the current session token. A requested signing lifetime can trigger an early refresh of the shared cache, subject to the same one-second refresh backoff. If the resolved credentials still expire before that lifetime ends, LoonFS still issues the URL, and it reports the effective `expires_at_ms`, which is the earlier of the requested expiry and the credential expiry. The signed query keeps the requested lifetime, and AWS also enforces the credential expiration. Credentials that have already expired are rejected. This applies to reads, whole-object uploads, multipart operations, and checksum readback. Explicit static session tokens have no declared expiration in the configuration schema, so the caller is responsible for keeping them valid.
-
-Google Cloud Storage credentials with `kind = "ambient"` come from one of three sources: a service-account key file or an authorized-user file that `GOOGLE_APPLICATION_CREDENTIALS` points to, the gcloud application default credentials file (an authorized user), or the metadata server of the VM or pod (workload identity). A workload identity federation configuration file (`external_account`) is not supported, and the server fails to start on one. The provider client refreshes the OAuth token. LoonFS reads no private key from an ambient source, so it signs each direct-transfer URL through the IAM Credentials API's `signBlob` method, as the service account the credentials resolve to. Each signed URL costs one `signBlob` request, and the service account needs the Service Account Token Creator role (`roles/iam.serviceAccountTokenCreator`) on itself. An authorized-user file, such as gcloud's, is a user account, and a user can't sign this way, so a store built from one offers no direct transfers, and every upload and download goes through the server. On GKE, a Kubernetes ServiceAccount that the `iam.gke.io/gcp-service-account` annotation links to the service account also needs the annotation `iam.gke.io/return-principal-id-as-email: "true"`. Without it, the metadata server reports a `.svc.id.goog` identity in place of the service account's email, which `signBlob` rejects, so each direct-transfer request fails with a permission error that says which annotation to add. A key file that should sign in the server process belongs in `kind = "service_account_file"`, which reads one service-account key file that authenticates requests and signs direct transfers.
-
-Cloudflare R2 doesn't use this chain. R2 ambient credentials are read from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` when the store starts.
+- **AWS S3 (`kind = "ambient"`).** Uses the standard AWS SDK credential chain (environment variables, shared config/credentials files, credential processes, SSO, web identity, ECS task credentials, and EC2 instance metadata, honoring `AWS_PROFILE`). Both the client and presigned URL signer share one in-memory cache per ambient source (no background task or persistence):
+  - Credentials are reused until 60 seconds before expiry, with concurrent callers sharing one on-demand refresh. Cancelling a refresh releases the lock and keeps the previous credentials.
+  - After a failed refresh or near-expiry response, still-valid credentials can be reused for at most 1 second before retrying (never past expiry). Cold failures and expired credentials are never cached.
+  - If an ambient source returns credentials with no expiration, later lookups bypass the cache and lock for the rest of the source's lifetime (still checking expiration on each result). Explicit static credentials are used verbatim.
+  - Presigned URLs include the active session token and can trigger an early refresh (subject to the 1-second backoff). If credentials still expire before the requested URL lifetime, LoonFS issues the URL and sets `expires_at_ms` to the earlier of the two expirations (AWS enforces credential expiry on its side). Already-expired credentials are rejected. Static session tokens have no configured expiry, so callers must keep them valid.
+- **Google Cloud Storage (`kind = "ambient"`).** Resolves credentials from `GOOGLE_APPLICATION_CREDENTIALS` (service-account key or authorized-user file), gcloud application default credentials, or the VM/pod metadata server (workload identity). Workload identity federation files (`external_account`) aren't supported and fail startup. Because LoonFS reads no private key from ambient sources, it signs direct-transfer URLs via the IAM Credentials API's `signBlob` (1 `signBlob` call per signed URL, requiring `roles/iam.serviceAccountTokenCreator` on the service account itself). Authorized-user credentials can't call `signBlob` this way, so stores using them disable direct transfers and proxy all traffic. On GKE, Kubernetes ServiceAccounts linked with `iam.gke.io/gcp-service-account` also need `iam.gke.io/return-principal-id-as-email: "true"` (without it, the metadata server reports a `.svc.id.goog` identity that `signBlob` rejects). To sign locally with a key file instead, configure `kind = "service_account_file"`.
+- **Cloudflare R2.** Doesn't use the AWS chain. Reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` at startup.
 
 ## 3. Proven providers and direct-put
 
-This section describes which providers support direct transfers, in which a client sends bytes to the provider instead of through the server.
+Direct PUT is enabled only when a provider can both enforce create-only uploads (preventing overwrites of existing content objects) and return a durable stored checksum for completion verification. Because many S3-compatible gateways silently ignore conditional write headers, direct transfers are restricted to endpoints covered by live provider tests, with no configuration override (other endpoints use service-proxied transfers):
 
-Direct PUT is enabled only when the provider can do both of the following:
+- AWS S3: default endpoint or HTTPS under `amazonaws.com` or `amazonaws.com.cn` (CRC-64/NVME, `upload.direct_put.max_content_bytes` = 5 GiB).
+- Cloudflare R2: HTTPS under `r2.cloudflarestorage.com` (CRC-64/NVME, limit = 5 GiB minus 5 MiB).
+- Google Cloud Storage: native API at `storage.googleapis.com` (CRC-32C, limit = 5 TiB).[^1]
 
-1. Enforce a create-only upload, so a client can't replace an existing content object.
-2. Return a durable checksum for the stored object.
-
-When an upload completes, LoonFS compares the client's byte count and checksum with the provider's metadata, and it publishes the object only if they match.
-
-Direct transfers are limited to endpoints that live provider tests cover:
-
-- AWS S3, with its default endpoint or an HTTPS endpoint under `amazonaws.com` or `amazonaws.com.cn`.
-- Cloudflare R2, with an HTTPS endpoint under `r2.cloudflarestorage.com`.
-- Google Cloud Storage, through the native API at `storage.googleapis.com`.
-
-LoonFS doesn't issue presigned URLs for other S3-compatible endpoints, and no configuration setting overrides this. The service-proxied upload path is still available for them.
-
-LoonFS represents a checksum as an algorithm and a lowercase hexadecimal value. The direct-PUT begin response returns the required algorithm. The client calculates that checksum while it uploads, and it sends the checksum at completion. AWS S3 and R2 use CRC-64/NVME, and GCS uses CRC-32C.
-
-The capability document also returns the provider's single-request limit, as `upload.direct_put.max_content_bytes`. The current limits are 5 GiB for AWS S3, 5 GiB minus 5 MiB for R2, and 5 TiB for GCS.[^1]
-
-Every provider that supports direct writes also supports direct reads.
+Every provider offering direct writes also offers direct reads so objects exceeding the proxied size limit can always be downloaded without passing through the server.
 
 | Provider | `direct_get` | `direct_put` | `direct_multipart` | Direct PUT contract | Proven endpoints |
 | --- | --- | --- | --- | --- | --- |
 | AWS S3 | Yes | Yes | Yes | SigV4, `if-none-match: *`, stored CRC-64/NVME | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
 | Cloudflare R2 | Yes | Yes | Yes | SigV4, `if-none-match: *`, stored CRC-64/NVME | `r2.cloudflarestorage.com` |
 | Other S3-compatible endpoints | No | No | No | n/a | None (unproven) |
-| Google Cloud Storage | Yes[^47] | Yes[^47] | No | GOOG4-RSA-SHA256, generation 0, stored CRC-32C | `storage.googleapis.com` (no override exists) |
+| Google Cloud Storage | Yes[^47] | Yes[^47] | No | GOOG4-RSA-SHA256, generation 0, stored CRC-32C | `storage.googleapis.com` (no override) |
 | Azure Blob Storage | No | No | No | n/a | n/a |
 | Local filesystem | No | No | No | n/a | n/a |
 
-The GCS adapter signs native V4 URLs with the service-account key, or through the IAM Credentials API under ambient credentials. It doesn't use the GCS S3-interoperability API, and it doesn't implement multipart uploads, even though GCS documents an XML multipart API.[^46] The adapter's own requests use the JSON API, and the XML API for an object's metadata, with the credential source's OAuth token.
+The direct-PUT begin response returns the required checksum algorithm (formatted as lowercase hex), and the client hashes bytes while uploading and sends the checksum on completion.
 
-Browser clients send direct transfers to the provider. The bucket's CORS configuration MUST:
+The GCS adapter signs native V4 URLs locally (with a service-account key) or via IAM `signBlob` (under ambient credentials), using the JSON API for requests and XML API for object metadata. It does not use GCS S3-interoperability or XML multipart uploads.[^46]
 
-- allow the application origin,
-- allow the `PUT` and `GET` methods,
-- allow the `range` request header, which every presigned download URL signs,
-- for the S3 family, also allow the `if-none-match` and `x-amz-checksum-crc64nvme` request headers,
-- for GCS, also allow the `x-goog-if-generation-match` request header, and
-- expose the `ETag` response header.
+### Browser CORS requirements
 
-A browser multipart upload reads each part's `ETag`, and it fails if that header isn't exposed.
+Because browser clients transfer directly to object storage, the bucket's CORS configuration MUST:
 
-Why isn't S3 API compatibility enough by itself for direct transfers? Some S3-compatible gateways ignore write preconditions.
-
-Why does every provider with direct writes also support direct reads? That way, an object too large for a proxied upload can also be downloaded without passing through the server.
+- Allow the application origin and the `PUT` and `GET` methods.
+- Allow the `range` request header (signed on every presigned download).
+- For S3 and R2, allow `if-none-match` and `x-amz-checksum-crc64nvme`.
+- For GCS, allow `x-goog-if-generation-match`.
+- Expose the `ETag` response header (required by browser multipart uploads to read per-part ETags).
 
 ## 4. Incremental writes by provider
 
-This section describes how much of a large proxied upload the server keeps in memory on each provider.
+The server hashes proxied upload streams on the fly without buffering the whole payload. Every built-in provider streams incrementally, keeping only one part or chunk in server memory regardless of object size (an internal memory property not advertised as a capability):
 
-The server doesn't keep a proxied upload's whole body in memory. It hashes the payload as it forwards it to the store. Whether the store then keeps the whole payload in memory depends on the provider. The difference is visible only in memory use, so this document describes it, and LoonFS doesn't advertise it as a capability.
-
-| Provider | Incremental write | What a large proxied upload costs the server |
+| Provider | Incremental write path | Server memory per large proxied upload |
 | --- | --- | --- |
-| AWS S3 | Yes, provider multipart | One part (8 MiB by default), whatever the object's size |
-| Cloudflare R2 | Yes, provider multipart | One part, whatever the object's size |
-| Other S3-compatible endpoints | Yes, provider multipart | One part, whatever the object's size |
-| Google Cloud Storage | Yes, a resumable upload | One part, whatever the object's size |
-| Azure Blob Storage | Yes, Put Block and Put Block List | One block (8 MiB by default), whatever the object's size |
-| Local filesystem | Yes, a staging file for uploads and assemblies | One chunk, and assembly reads are at most 8 MiB |
+| AWS S3 | Provider multipart | 1 part (8 MiB default) |
+| Cloudflare R2 | Provider multipart | 1 part |
+| Other S3-compatible endpoints | Provider multipart | 1 part |
+| Google Cloud Storage | Resumable upload | 1 part |
+| Azure Blob Storage | Put Block and Put Block List | 1 block (8 MiB default) |
+| Local filesystem | Staging file for uploads and assemblies | 1 chunk (assembly reads <= 8 MiB) |
 
-Every built-in provider has a real incremental write path. For a cloud provider, the incoming stream is regrouped into provider multipart parts, and the local filesystem provider writes chunks to a staging file. So the server keeps only one part or chunk of a proxied upload in memory, whatever the object's total size.
-
-On Azure Blob Storage, the adapter sends each block's CRC-64 as the transactional checksum that the service verifies, copies source ranges with Put Block From URL under the same check, combines the verified values, records the whole-blob checksum as blob metadata at Put Block List, and reads it back with HEAD. Azure's CRC-64 is CRC-64/NVME, spelled base64 with the least significant byte first. Creates use `If-None-Match: *` at every size. Uploads are proxied only, because a SAS (shared access signature) can't require a checksum header. No request abandons an upload: the service discards the blocks of an upload that never commits after a week, and every upload identifies its blocks by IDs of its own, so another writer's commit of the same key never includes them.
+On Azure Blob Storage, the adapter verifies each block's CRC-64/NVME (base64 little-endian) via `x-ms-content-crc64`, copies source ranges via `Put Block From URL` under the same check, combines block CRCs, stores the whole-blob checksum in blob metadata on `Put Block List`, and reads it back with HEAD. Creates enforce `If-None-Match: *` at every size. Azure has no direct uploads because SAS URLs cannot enforce a checksum header. Abandoned uploads need no explicit abort: Azure discards uncommitted blocks after a week, and each upload uses unique block IDs so concurrent commits never mix blocks.
 
 ## 5. Local filesystem provider
 
-This section describes the local filesystem provider, which is a development and test provider supported on Unix-family platforms.
+The local filesystem provider supports development and testing on Unix-family platforms (construction fails on other platforms rather than weakening atomicity). Replacements write to a staging file in the target directory, sync it, and atomically rename it over the destination so concurrent readers never see partial or missing objects.
 
-The local provider writes each replacement to a staging file in the destination directory, makes the staged bytes durable, and atomically renames the staged file over the destination. So a concurrent reader sees either the complete previous object or the complete replacement, never a missing or partial object. Constructing the provider fails on other platforms, instead of returning a provider with a weaker replacement contract.
-
-For a HEAD request, the local provider computes the file's CRC-64/NVME. Its ETag is `local-fs-v1:crc64nvme:<hex>`. An assembly reads source ranges in chunks of at most 8 MiB, and writes the ordered tail pieces into a staging file. It computes the CRC-64/NVME while it writes, and it checks the expected checksum before it publishes the file with a create-only link. Each HEAD request or assembly buffers at most one read chunk.
+HEAD requests compute CRC-64/NVME in bounded chunks and return ETag `local-fs-v1:crc64nvme:<hex>`. Assemblies stream source ranges (chunks <= 8 MiB) and ordered tail pieces into a staging file, compute CRC-64/NVME on the fly, verify the expected checksum, and publish with a create-only link.
 
 ## 6. Sources
-
-The footnotes in this document cite these sources.
 
 [^1]: Google Cloud Storage, "Quotas & limits": [https://cloud.google.com/storage/quotas](https://cloud.google.com/storage/quotas)
 
@@ -214,7 +189,7 @@ The footnotes in this document cite these sources.
 
 [^46]: Google Cloud Storage, "XML API multipart uploads": [https://cloud.google.com/storage/docs/multipart-uploads](https://cloud.google.com/storage/docs/multipart-uploads)
 
-[^47]: A credentialed conformance run against a live bucket proved this. The GCS provider conformance assertions in `crates/loonfs-objectstore/tests/it/objectstore_conformance.rs` and both GCS signed direct-transfer tests in `crates/loonfs-server/tests/it/direct_put_real_provider.rs` (the round trip, and the scoped, bounded, single-use capability checks) passed.
+[^47]: Verified by credentialed live runs of `crates/loonfs-objectstore/tests/it/objectstore_conformance.rs` and `crates/loonfs-server/tests/it/direct_put_real_provider.rs` (round trip and scoped, bounded, single-use capability checks).
 
 [^48]: AWS S3 User Guide, "Checking object integrity for data uploads in Amazon S3": [https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html](https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html)
 
