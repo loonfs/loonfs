@@ -16,7 +16,7 @@ use crate::presign::v4::{
 };
 use crate::provider_error::{map_provider_error, ProviderClient};
 use crate::retry::TransportRetry;
-use crate::signed_request::send;
+use crate::signed_request::{retryable_status, send};
 use crate::ObjectStoreError;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -41,6 +41,16 @@ const GCS_HOST: &str = "storage.googleapis.com";
 /// account, for a caller with the Service Account Token Creator role on it.
 const IAM_SERVICE_ACCOUNTS: &str =
     "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts";
+
+/// The suffix of the identity that GKE's metadata server reports for a
+/// Kubernetes ServiceAccount linked to a service account by annotation,
+/// unless the ServiceAccount also has [`GKE_RETURN_EMAIL_ANNOTATION`].
+/// `signBlob` rejects it, because it is not a service account email.
+const GKE_WORKLOAD_IDENTITY_SUFFIX: &str = ".svc.id.goog";
+
+/// The Kubernetes ServiceAccount annotation that makes GKE's metadata server
+/// report the linked service account's email.
+const GKE_RETURN_EMAIL_ANNOTATION: &str = "iam.gke.io/return-principal-id-as-email=\"true\"";
 
 /// A generation of zero makes the request create-only.
 const GCS_GENERATION_MATCH_HEADER: &str = "x-goog-if-generation-match";
@@ -258,6 +268,18 @@ impl GcsSigner {
                     .map_err(|error| {
                         map_provider_error(object_key, error, ProviderClient::Retrying)
                     })?;
+                if credential.email.ends_with(GKE_WORKLOAD_IDENTITY_SUFFIX) {
+                    return Err(ObjectStoreError::PermissionDenied {
+                        object_key: object_key.to_owned(),
+                        message: format!(
+                            "signBlob can't sign as `{}`, the Kubernetes ServiceAccount's own \
+                             identity and not a service account email. Annotate the pod's \
+                             Kubernetes ServiceAccount with `{GKE_RETURN_EMAIL_ANNOTATION}` so \
+                             the metadata server reports the service account's email",
+                            credential.email
+                        ),
+                    });
+                }
                 Ok(credential.email.clone())
             }
         }
@@ -314,7 +336,8 @@ fn sign_with_key(signing_key: &RsaKeyPair, object_key: &str, message: &[u8]) -> 
 /// Sends one `signBlob` request under the credential source's OAuth token and
 /// reads the signature back. A refusal is reported as a permission error,
 /// which means the token's identity lacks the role or is a user account and
-/// not a service account. A server error is retryable.
+/// not a service account. A server error, a timeout, or throttling is
+/// retryable, as on the store's own requests.
 async fn sign_blob(
     http: &HttpClient,
     credentials: &GcpCredentialProvider,
@@ -330,7 +353,7 @@ async fn sign_blob(
         .header(AUTHORIZATION, format!("Bearer {}", credential.bearer))
         .header(CONTENT_TYPE, "application/json");
     let response = send(http, object_key, request, body.into()).await?;
-    if response.status.is_server_error() {
+    if retryable_status(response.status) {
         return Err(ObjectStoreError::retryable_transport(
             object_key,
             format!("signBlob failed with {}", response.status),
@@ -517,11 +540,31 @@ mod tests {
     }
 
     /// The IAM Credentials API as a double: records each `signBlob` request,
-    /// and signs its payload with the fixture key or refuses with `status`.
+    /// and signs its payload with the fixture key or refuses, as the next
+    /// reply's status says.
     #[derive(Clone, Debug)]
     struct SignBlobService {
         requests: Arc<Mutex<Vec<(String, http::HeaderMap, Bytes)>>>,
-        status: http::StatusCode,
+        /// The status of each reply in order. The last one repeats.
+        replies: Arc<Mutex<Vec<http::StatusCode>>>,
+    }
+
+    impl SignBlobService {
+        fn replying(statuses: &[http::StatusCode]) -> Self {
+            Self {
+                requests: Arc::default(),
+                replies: Arc::new(Mutex::new(statuses.to_vec())),
+            }
+        }
+
+        fn next_status(&self) -> http::StatusCode {
+            let mut replies = self.replies.lock().expect("replies");
+            if replies.len() > 1 {
+                replies.remove(0)
+            } else {
+                replies[0]
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -535,7 +578,8 @@ mod tests {
                 parts.headers,
                 bytes.clone(),
             ));
-            let body = if self.status.is_success() {
+            let status = self.next_status();
+            let body = if status.is_success() {
                 let request: serde_json::Value =
                     serde_json::from_slice(&bytes).expect("a JSON body");
                 let message = BASE64
@@ -549,7 +593,7 @@ mod tests {
                 Bytes::new()
             };
             Ok(http::Response::builder()
-                .status(self.status)
+                .status(status)
                 .body(body)
                 .expect("response")
                 .map(HttpResponseBody::from))
@@ -575,6 +619,11 @@ mod tests {
     }
 
     fn sign_blob_presigner(service: SignBlobService) -> GcsV4Presigner {
+        sign_blob_presigner_as(service, GCS_FIXTURE_CLIENT_EMAIL)
+    }
+
+    /// A signBlob presigner whose credentials resolve to `email`.
+    fn sign_blob_presigner_as(service: SignBlobService, email: &str) -> GcsV4Presigner {
         GcsV4Presigner::with_sign_blob(
             "bucket".to_owned(),
             KeyScope::new(Some("tenant-a")).expect("prefix"),
@@ -583,7 +632,7 @@ mod tests {
                 bearer: "test".to_owned(),
             })),
             Arc::new(StaticCredentialProvider::new(GcpSigningCredential {
-                email: GCS_FIXTURE_CLIENT_EMAIL.to_owned(),
+                email: email.to_owned(),
                 private_key: None,
             })),
             Arc::new(TransportRetry::new(Arc::new(StdMonotonicTimer::default()))),
@@ -674,10 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_sign_blob_signer_sends_the_string_to_sign_under_the_token_and_signs_like_the_key() {
-        let service = SignBlobService {
-            requests: Arc::default(),
-            status: http::StatusCode::OK,
-        };
+        let service = SignBlobService::replying(&[http::StatusCode::OK]);
         let signer = sign_blob_presigner(service.clone());
 
         let put = presign_put(&signer).await;
@@ -734,10 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_sign_blob_fails_the_presign_as_permission_denied() {
-        let service = SignBlobService {
-            requests: Arc::default(),
-            status: http::StatusCode::FORBIDDEN,
-        };
+        let service = SignBlobService::replying(&[http::StatusCode::FORBIDDEN]);
         let error = sign_blob_presigner(service)
             .presign_put(
                 PresignedPutRequest {
@@ -749,6 +792,48 @@ mod tests {
             .await
             .expect_err("signBlob refused");
         assert_matches!(error, ObjectStoreError::PermissionDenied { .. });
+    }
+
+    /// Checks that throttling is retried, as the store's own requests are,
+    /// and not reported as a refusal.
+    #[tokio::test]
+    async fn a_throttled_sign_blob_is_sent_again() {
+        let service =
+            SignBlobService::replying(&[http::StatusCode::TOO_MANY_REQUESTS, http::StatusCode::OK]);
+
+        let signed = presign_put(&sign_blob_presigner(service.clone())).await;
+
+        assert_eq!(service.requests.lock().expect("requests").len(), 2);
+        assert!(signed
+            .url
+            .ends_with(&format!("&X-Goog-Signature={PUT_PREFIXED_SIGNATURE}")));
+    }
+
+    /// Checks that the identity GKE reports for a Kubernetes ServiceAccount
+    /// without the email annotation fails before any signBlob request, with
+    /// the annotation to add.
+    #[tokio::test]
+    async fn a_kubernetes_identity_fails_the_presign_with_the_annotation_to_add() {
+        let service = SignBlobService::replying(&[http::StatusCode::OK]);
+
+        let error = sign_blob_presigner_as(service.clone(), "loonfs.svc.id.goog")
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: CONTENT_KEY,
+                    ttl: TTL,
+                },
+                signing_time(),
+            )
+            .await
+            .expect_err("not a service account email");
+
+        assert_matches!(
+            error,
+            ObjectStoreError::PermissionDenied { ref message, .. }
+                if message.contains("loonfs.svc.id.goog")
+                    && message.contains("iam.gke.io/return-principal-id-as-email")
+        );
+        assert!(service.requests.lock().expect("requests").is_empty());
     }
 
     #[tokio::test]

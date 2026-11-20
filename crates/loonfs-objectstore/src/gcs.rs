@@ -31,6 +31,7 @@ use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, StdMonotonicTime
 use object_store::client::{HttpClient, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Root of the JSON API object resources.
@@ -76,6 +77,57 @@ pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<ProviderObjectStore> {
     gcp_gcs_with_issuers(config).map(|provider| provider.store)
 }
 
+/// Whether the credentials can sign direct transfers. A service-account key
+/// signs in this process, and a service account that ambient credentials
+/// resolve to signs through `signBlob`. An authorized-user file, such as
+/// gcloud's, is a user, who can't sign that way, so a store built from one
+/// offers no direct transfers.
+///
+/// The ambient credentials file is found the way the provider client finds
+/// it: the file `GOOGLE_APPLICATION_CREDENTIALS` points to, else the gcloud
+/// application default credentials file. Without either, the credentials
+/// come from the metadata server, whose identity is a service account. An
+/// unreadable or malformed file is left to the provider client, which fails
+/// on it.
+pub(crate) fn credentials_sign_direct_transfers(credentials: &GcpGcsCredentials) -> bool {
+    #[derive(Deserialize)]
+    struct CredentialsFile {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+
+    match credentials {
+        GcpGcsCredentials::ServiceAccountFile { .. } => true,
+        GcpGcsCredentials::Ambient {} => {
+            let Some(path) = application_default_credentials_file() else {
+                return true;
+            };
+            let file = std::fs::read(path)
+                .ok()
+                .and_then(|contents| serde_json::from_slice::<CredentialsFile>(&contents).ok());
+            file.is_none_or(|file| file.kind != "authorized_user")
+        }
+    }
+}
+
+/// The credentials file the provider client reads for ambient credentials,
+/// when there is one.
+fn application_default_credentials_file() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(GOOGLE_APPLICATION_CREDENTIALS_ENV) {
+        return Some(PathBuf::from(path));
+    }
+    let (home_var, relative_path) = if cfg!(windows) {
+        ("APPDATA", "gcloud/application_default_credentials.json")
+    } else {
+        (
+            "HOME",
+            ".config/gcloud/application_default_credentials.json",
+        )
+    };
+    let path = Path::new(&std::env::var_os(home_var)?).join(relative_path);
+    path.exists().then_some(path)
+}
+
 /// Returns the store and the issuers that sign direct transfers with its
 /// credentials.
 ///
@@ -85,7 +137,10 @@ pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<ProviderObjectStore> {
 /// `GOOGLE_APPLICATION_CREDENTIALS` points to, from the gcloud application
 /// default credentials file, or from the metadata server, and the presigner
 /// signs through the IAM Credentials API as the service account they resolve
-/// to.
+/// to. The issuers are built for every source, and
+/// [`ConfiguredObjectStore::gcp_gcs`](crate::ConfiguredObjectStore::gcp_gcs)
+/// leaves them out when [`credentials_sign_direct_transfers`] says the
+/// credentials can't sign.
 pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<ConfiguredProvider> {
     let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
     let io_runtime = StoreIoRuntime::new()?;

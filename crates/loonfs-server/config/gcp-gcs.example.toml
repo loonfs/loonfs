@@ -49,7 +49,11 @@ path = "/path/to/service-account.json"
 # download URLs are signed through the IAM Credentials API as the service
 # account those credentials resolve to, one signBlob request per URL, so the
 # service account needs the Service Account Token Creator role
-# (roles/iam.serviceAccountTokenCreator) on itself. A user account, such as
-# gcloud's, can't sign this way.
+# (roles/iam.serviceAccountTokenCreator) on itself. An authorized-user file,
+# such as gcloud's, can't sign this way, so a store built from one offers no
+# direct transfers. On GKE, the Kubernetes ServiceAccount linked to the
+# service account also needs the annotation
+# iam.gke.io/return-principal-id-as-email="true", so that the metadata server
+# reports the service account's email.
 # [store.credentials]
 # kind = "ambient"

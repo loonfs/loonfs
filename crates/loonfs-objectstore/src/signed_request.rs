@@ -166,14 +166,17 @@ fn request_error(key: &str, status: http::StatusCode, code: Option<&str>) -> Obj
                 object_key: key.to_owned(),
             }
         }
-        _ if status == http::StatusCode::REQUEST_TIMEOUT
-            || status == http::StatusCode::TOO_MANY_REQUESTS
-            || status.is_server_error() =>
-        {
-            ObjectStoreError::retryable_transport(key, message)
-        }
+        _ if retryable_status(status) => ObjectStoreError::retryable_transport(key, message),
         _ => ObjectStoreError::transport(key, message),
     }
+}
+
+/// Whether a provider reply is a passing failure that the same request can be
+/// sent again after: a timeout, throttling, or a server error.
+pub(crate) fn retryable_status(status: http::StatusCode) -> bool {
+    status == http::StatusCode::REQUEST_TIMEOUT
+        || status == http::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
 }
 
 #[cfg(test)]
