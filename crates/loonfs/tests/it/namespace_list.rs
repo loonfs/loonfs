@@ -1,16 +1,19 @@
 //! The store's namespace listing.
 
 use crate::common::*;
+use bytes::Bytes;
 use loonfs::{
-    CommitSeq, EffectiveLimit, ErrorCode, InodeId, ListNamespacesResponse, NamespaceId,
-    NamespacesPager, SharedObjectStore,
+    CommitSeq, EffectiveLimit, ErrorCode, ExecutionBudget, InodeId, ListNamespacesResponse,
+    NamespaceId, NamespacesPager, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::{ObjectStore as _, PutMode};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
-use loonfs_types::TrashPageCursor;
-use std::num::NonZeroU32;
+use loonfs_types::{NamespaceListPageCursor, TrashPageCursor};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 /// Returns every page of `pager`.
@@ -46,11 +49,14 @@ fn page_limit(limit: u32) -> EffectiveLimit {
     EffectiveLimit::new(NonZeroU32::new(limit).expect("nonzero limit"))
 }
 
+/// Checks the listing's order, which is the order of the keys
+/// `namespaces/{id}/`: `a-b` comes before `a`, because `-` sorts before the
+/// `/` that ends `a`'s key, and `a_b` and `alpha` come after `a`.
 #[tokio::test]
-async fn namespaces_are_listed_in_id_order_with_their_metadata() {
+async fn namespaces_are_listed_in_key_order_with_their_metadata() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "namespace-list-order").await;
-    create(&fs, &["charlie", "alpha", "bravo"]).await;
+    create(&fs, &["alpha", "a", "a_b", "a-b"]).await;
 
     let pages = pages(fs.writer.list_namespaces().page_limit(page_limit(2))).await;
 
@@ -63,7 +69,7 @@ async fn namespaces_are_listed_in_id_order_with_their_metadata() {
             .iter()
             .map(|namespace| namespace.namespace_id.as_str())
             .collect::<Vec<_>>(),
-        ["alpha", "bravo", "charlie"]
+        ["a-b", "a", "a_b", "alpha"]
     );
     for namespace in &listed {
         let metadata = fs
@@ -141,6 +147,56 @@ async fn an_initializing_namespace_is_left_out() {
     assert_eq!(page.next_cursor, None);
 }
 
+/// Checks that a store page with no namespace in it, here a page of one
+/// child of `namespaces/` that is not a namespace, returns no namespaces and
+/// a cursor, and that the next page resumes after it, with one store listing
+/// per page.
+#[tokio::test]
+async fn a_store_page_without_a_namespace_returns_a_cursor_and_no_namespaces() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = store(temp_dir.path());
+    let fs = open_runtime_async(store.clone(), "namespace-list-foreign").await;
+    // An uppercase name is not a namespace ID, and sorts before every ID.
+    store
+        .put(
+            "namespaces/Foreign/object",
+            Bytes::from_static(b"not a namespace"),
+            PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("put a foreign object");
+    create(&fs, &["alpha"]).await;
+
+    let paged = pages(fs.reader.list_namespaces().page_limit(page_limit(1))).await;
+
+    assert_eq!(
+        paged
+            .iter()
+            .map(|page| (ids(page), page.next_cursor.is_some()))
+            .collect::<Vec<_>>(),
+        [(vec![], true), (vec!["alpha"], false)]
+    );
+}
+
+#[tokio::test]
+async fn a_cursor_outside_the_namespace_listing_is_rejected() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = open_runtime_async(store(temp_dir.path()), "namespace-list-key").await;
+    let cursor = loonfs_types::encode_cursor(&NamespaceListPageCursor {
+        last_key: "pools/pool_01/".to_owned(),
+    })
+    .expect("encode cursor");
+
+    expect_code(
+        fs.reader
+            .list_namespaces()
+            .cursor(Some(cursor))
+            .page()
+            .await,
+        ErrorCode::InvalidRequest,
+    );
+}
+
 #[tokio::test]
 async fn a_cursor_from_another_listing_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
@@ -160,6 +216,34 @@ async fn a_cursor_from_another_listing_is_rejected() {
             .await,
         ErrorCode::InvalidRequest,
     );
+}
+
+/// Checks that a page finishes on a runtime with one read permit: the store
+/// listing takes the permit and releases it before the metadata reads take
+/// theirs, one at a time.
+#[tokio::test]
+async fn a_listing_finishes_with_one_read_permit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = open_runtime_with_async(store(temp_dir.path()), "namespace-list-permit", |builder| {
+        builder.execution_budget(
+            ExecutionBudget::builder()
+                .max_concurrent_reads(NonZeroUsize::MIN)
+                .build(),
+        )
+    })
+    .await;
+    create(&fs, &["alpha", "bravo"]).await;
+
+    let page = loonfs_test_support::clock::bounded(
+        Duration::from_secs(30),
+        fs.writer.list_namespaces().page(),
+    )
+    .await
+    .expect("a page before the timeout")
+    .expect("one page");
+
+    assert_eq!(ids(&page), ["alpha", "bravo"]);
+    assert_eq!(page.next_cursor, None);
 }
 
 #[tokio::test]

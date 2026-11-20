@@ -14,17 +14,22 @@ use loonfs_types::{EffectiveLimit, NamespaceListPageCursor, PageRequest};
 /// How many namespaces' metadata one page reads at once.
 ///
 /// Each read takes a read permit from the runtime's execution budget as
-/// well, so one page can't take every permit.
+/// well, so one page can't take every permit. The store listing before them
+/// takes one permit too, and releases it before the reads start, so a
+/// runtime with one permit still finishes a page.
 const MAX_CONCURRENT_METADATA_READS: usize = 16;
 
 impl<M: Mode> LoonFs<M> {
-    /// Lists the store's namespaces in ascending namespace ID order, with
-    /// each namespace's metadata as [`crate::Namespace::metadata`] returns it.
+    /// Lists the store's namespaces in object-key order, which is namespace
+    /// ID order except that an ID sorts after the longer IDs that extend it
+    /// with `-` or `.`, with each namespace's metadata as
+    /// [`crate::Namespace::metadata`] returns it.
     ///
     /// A deleted or retired namespace, and a namespace whose creation hasn't
     /// finished, are left out, so a page can have fewer namespaces than its
-    /// limit, even none, and still have a next cursor. Each page lists one
-    /// page of namespace IDs from the store and reads each listed namespace's
+    /// limit, even none, and still have a next cursor. So can a page of the
+    /// store listing with no namespace in it. Each page lists one page of
+    /// namespace IDs from the store and reads each listed namespace's
     /// metadata, [`MAX_CONCURRENT_METADATA_READS`] at a time. Without a page
     /// limit, a page lists [`DEFAULT_NAMESPACE_PAGE_LIMIT`] IDs.
     ///
@@ -45,30 +50,24 @@ impl LoonFs<ReadOnly> {
         request: PageRequest<NamespaceListPageCursor>,
     ) -> Result<ListNamespacesResponse> {
         trace::in_operation(operation_span!(self.core, "list_namespaces"), async {
-            let mut start_after = request
+            let start_after = request
                 .cursor
-                .as_ref()
-                .map(|cursor| NamespacePageCursor::after(&cursor.last_namespace_id));
-            let page = loop {
-                let page =
-                    list_namespace_ids(&*self.object_store(), start_after.as_ref(), request.limit)
-                        .await
-                        .map_err(|error| {
-                            Error::from(CoreError::store(NAMESPACES_PREFIX, &error))
-                        })?;
-                // A page of children that aren't namespace IDs has no ID to
-                // resume after, so the listing continues from the store's
-                // own position instead of returning a cursor.
-                if page.namespace_ids.is_empty() && page.next_cursor.is_some() {
-                    start_after = page.next_cursor;
-                    continue;
-                }
-                break page;
+                .map(|cursor| {
+                    NamespacePageCursor::from_key(cursor.last_key).ok_or_else(|| {
+                        CoreError::InvalidCursor(
+                            "the cursor's position is outside the namespace listing".to_owned(),
+                        )
+                    })
+                })
+                .transpose()?;
+            let page = {
+                let _permit = self.core.read_permit().await;
+                list_namespace_ids(&*self.object_store(), start_after.as_ref(), request.limit)
+                    .await
+                    .map_err(|error| Error::from(CoreError::store(NAMESPACES_PREFIX, &error)))?
             };
-            let next_cursor = page.next_cursor.and(page.namespace_ids.last()).map(|last| {
-                NamespaceListPageCursor {
-                    last_namespace_id: last.clone(),
-                }
+            let next_cursor = page.next_cursor.map(|cursor| NamespaceListPageCursor {
+                last_key: cursor.into_key(),
             });
             let next_cursor = crate::pagers::encode_next_cursor(next_cursor.as_ref())?;
             let options = LiveReadOptions::default();

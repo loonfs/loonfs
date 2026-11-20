@@ -64,7 +64,9 @@ impl Client {
         }
     }
 
-    /// Lists the store's namespaces in ascending namespace ID order.
+    /// Lists the store's namespaces in object-key order, which is namespace
+    /// ID order except that an ID sorts after the longer IDs that extend it
+    /// with `-` or `.`.
     ///
     /// Deleted namespaces and namespaces whose creation hasn't finished are
     /// left out, so a page can have fewer namespaces than its limit, even

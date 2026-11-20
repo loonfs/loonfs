@@ -19,7 +19,8 @@ pub(crate) enum NamespaceCommand {
     Create(NamespaceCreateArgs),
     /// Show a namespace's current status.
     Show(NamespaceShowArgs),
-    /// List the store's namespaces in namespace ID order.
+    /// List the store's namespaces in object-key order: namespace ID order,
+    /// except that an ID sorts after the longer IDs that extend it with - or .
     ///
     /// Deleted namespaces and namespaces whose creation hasn't finished are
     /// left out. Without --page-size, each request lists up to 100

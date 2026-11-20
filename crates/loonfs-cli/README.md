@@ -186,9 +186,10 @@ Namespace management
 
   loonfs namespace list [--limit <n>] [--page-size <n>] [--cursor <cursor>]
                         [--all] [--jsonl]
-    List the store's namespaces in namespace ID order. Deleted namespaces
-    and namespaces whose creation hasn't finished are left out. Without
-    --page-size, each request lists up to 100 namespaces
+    List the store's namespaces in object-key order: namespace ID order,
+    except that an ID sorts after the longer IDs that extend it with - or .
+    Deleted namespaces and namespaces whose creation hasn't finished are
+    left out. Without --page-size, each request lists up to 100 namespaces
 
   loonfs namespace fork <source> [new-namespace] [--snapshot <id>] [--actor-id <stable-id>]
     Fork a namespace into a new one. Without a new namespace ID, the CLI

@@ -287,7 +287,7 @@ pub(super) struct ListNamespacesQuery {
         path = "/v0/namespaces",
         tag = "namespaces",
         summary = "List namespaces",
-        description = "Lists the store's namespaces in namespace ID order, and returns for each one the object that `GET /v0/namespaces/{namespace_id}` returns. The list leaves out deleted namespaces and namespaces whose creation hasn't finished, so a page can have fewer namespaces than `limit`, even none, and still include `next_cursor`. Without `limit`, a page lists up to 100 namespaces.",
+        description = "Lists the store's namespaces in object-key order (namespace ID order, except that an ID sorts after the longer IDs that extend it with `-` or `.`), and returns for each one the object that `GET /v0/namespaces/{namespace_id}` returns. The list leaves out deleted namespaces and namespaces whose creation hasn't finished, so a page can have fewer namespaces than `limit`, even none, and still include `next_cursor`. Without `limit`, a page lists up to 100 namespaces.",
         params(ListNamespacesQuery),
         responses(
             (status = 200, description = "Namespaces", body = ListNamespacesResponse),

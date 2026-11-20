@@ -297,6 +297,18 @@ impl NamespacePageCursor {
     pub fn after(namespace_id: &NamespaceId) -> Self {
         Self(namespace_prefix(namespace_id))
     }
+
+    /// Builds the position `key`, which [`NamespacePageCursor::into_key`]
+    /// returned for an earlier page. A key outside `namespaces/` is no
+    /// position in this listing, and returns `None`.
+    pub fn from_key(key: String) -> Option<Self> {
+        key.starts_with(NAMESPACES_PREFIX).then_some(Self(key))
+    }
+
+    /// The position as an object key, for a cursor that leaves this process.
+    pub fn into_key(self) -> String {
+        self.0
+    }
 }
 
 /// Lists one page of the namespace ids in `store`, in ascending key order.

@@ -21,7 +21,7 @@ fn listed_namespace_ids(harness: &Harness) -> Vec<String> {
 }
 
 #[test]
-fn namespace_list_returns_live_namespaces_in_id_order() {
+fn namespace_list_returns_live_namespaces_in_key_order() {
     let harness = Harness::with_demo_namespace();
     assert_success(&harness.run(&["--json", "namespace", "create", "alpha"]));
     assert_eq!(listed_namespace_ids(&harness), ["alpha", "demo"]);

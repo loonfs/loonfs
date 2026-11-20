@@ -1,6 +1,6 @@
 //! Page sizes, page envelopes, and opaque cursors for paginated endpoints.
 
-use crate::{CommitSeq, ContentId, InodeId, NameKey, NamespaceId, RevisionNo};
+use crate::{CommitSeq, ContentId, InodeId, NameKey, RevisionNo};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -584,16 +584,16 @@ impl PageCursor for TrashPageCursor {
     const KIND: &'static str = "trash";
 }
 
-/// A cursor that resumes the namespace listing after `last_namespace_id`.
+/// A cursor that resumes the namespace listing after a position in the store.
 ///
-/// The ID is the last one the previous page listed from the store, whether
-/// or not that namespace was returned, so the cursor doesn't expire and a
-/// namespace created or deleted between pages doesn't invalidate it.
+/// The position is where the previous page's store listing ended, whether or
+/// not that page returned a namespace there, so the cursor doesn't expire and
+/// a namespace created or deleted between pages doesn't invalidate it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NamespaceListPageCursor {
-    /// The namespace ID the previous page ended on.
-    pub last_namespace_id: NamespaceId,
+    /// The object key the previous page's store listing ended on.
+    pub last_key: String,
 }
 
 impl PageCursor for NamespaceListPageCursor {
@@ -1043,7 +1043,7 @@ mod tests {
     #[test]
     fn a_namespace_list_cursor_round_trips_and_decodes_only_as_its_own_kind() {
         let cursor = NamespaceListPageCursor {
-            last_namespace_id: NamespaceId::parse("bravo").expect("namespace ID"),
+            last_key: "namespaces/bravo/".to_owned(),
         };
         let encoded = encode_cursor(&cursor).expect("encode cursor");
 

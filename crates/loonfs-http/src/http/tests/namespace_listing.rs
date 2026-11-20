@@ -29,7 +29,7 @@ async fn app(directory: &Path) -> axum::Router {
 /// namespace keeps its place in a page without being returned, and that each
 /// item is the namespace's own metadata.
 #[tokio::test]
-async fn the_listing_pages_through_live_namespaces_in_id_order() {
+async fn the_listing_pages_through_live_namespaces_in_key_order() {
     let directory = tempdir().expect("tempdir");
     let router = app(directory.path()).await;
     for namespace_id in ["alpha", "bravo", "charlie"] {

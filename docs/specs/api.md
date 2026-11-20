@@ -1331,7 +1331,7 @@ If a creation acknowledgement is lost, a new create or fork request with the sam
 
 ### Listing namespaces
 
-`GET /v0/namespaces?limit=100&cursor=...` lists the namespaces in the store, in ascending namespace ID order, and returns each namespace as the same object that `GET /v0/namespaces/{ns}` returns. The response contains the page's namespaces (`namespaces`) and, when another page is available, an opaque cursor (`next_cursor`) for the next request. For example, a store with two namespaces returns:
+`GET /v0/namespaces?limit=100&cursor=...` lists the namespaces in the store, in the order of their object keys, and returns each namespace as the same object that `GET /v0/namespaces/{ns}` returns. The response contains the page's namespaces (`namespaces`) and, when another page is available, an opaque cursor (`next_cursor`) for the next request. For example, a store with two namespaces returns:
 
 ```json
 {
@@ -1342,9 +1342,11 @@ If a creation acknowledgement is lost, a new create or fork request with the sam
 }
 ```
 
-A page lists one page of namespace IDs from object storage, up to `limit` of them, and then reads each listed namespace's metadata at the server's default consistency. The listing leaves out a deleted or retired namespace, and a namespace whose creation hasn't finished, which are the namespaces for which `GET /v0/namespaces/{ns}` returns `namespace_deleted` or `namespace_not_found`. Those namespaces still take their place in the page, so a page can return fewer namespaces than `limit`, even none, and still include `next_cursor`. A client that wants every namespace follows `next_cursor` until a response leaves it out.
+A page lists one page of namespace IDs from object storage, up to `limit` of them, and then reads each listed namespace's metadata at the server's default consistency. The listing leaves out a deleted or retired namespace, and a namespace whose creation hasn't finished, which are the namespaces for which `GET /v0/namespaces/{ns}` returns `namespace_deleted` or `namespace_not_found`. Those namespaces still take their place in the page, so a page can return fewer namespaces than `limit`, even none, and still include `next_cursor`. So can a page of the store listing with no namespace in it, which happens when objects that aren't namespaces sit under the `namespaces/` prefix. A client that wants every namespace follows `next_cursor` until a response leaves it out.
 
-`limit` defaults to 100 for this listing, instead of the advertised `pagination.default_limit`, and its maximum is the advertised `pagination.max_limit`. The cursor records the namespace ID that the previous page ended on, so it doesn't expire, and namespaces created or deleted while a client is paging don't invalidate it. A namespace created with an ID that sorts before the cursor isn't listed by that pass, as in any listing in key order. A cursor from another listing returns `invalid_request`.
+Object-key order is namespace ID order, except that an ID sorts after the longer IDs that extend it with `-` or `.`: `a-b` and `a.b` are listed before `a`, because the key `namespaces/a/` ends in `/`, which sorts after `-` and `.`. The other characters an ID allows, letters, digits and the underscore, sort after `/`, so `a` is listed before `a0` and `ab`, as in namespace ID order.
+
+`limit` defaults to 100 for this listing, instead of the advertised `pagination.default_limit`, and its maximum is the advertised `pagination.max_limit`. The cursor records the position in object storage where the previous page's listing ended, so it doesn't expire, and namespaces created or deleted while a client is paging don't invalidate it. A namespace created with a key that sorts before the cursor isn't listed by that pass, as in any listing in key order. A cursor from another listing returns `invalid_request`.
 
 Why does the listing read each namespace instead of returning the IDs alone? The object-storage listing lists every namespace ID that was ever created, because a deleted namespace keeps its tombstone until retirement, and a retired namespace keeps its boundary object (see [Retirement](format.md#95-retirement)). The namespace's newest manifest is what shows whether the namespace is live, and that manifest is also what the metadata needs, so returning the metadata costs no more than leaving the dead IDs out.
 

@@ -83,7 +83,8 @@ pub struct NamespaceMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListNamespacesResponse {
-    /// The namespaces, in ascending namespace ID order. Deleted namespaces and namespaces whose
+    /// The namespaces, in object-key order, which is namespace ID order except that an ID sorts
+    /// after the longer IDs that extend it with `-` or `.`. Deleted namespaces and namespaces whose
     /// creation hasn't finished are left out, so a page can have fewer namespaces than its limit,
     /// even none, and still have a `next_cursor`.
     pub namespaces: Vec<NamespaceMetadata>,
