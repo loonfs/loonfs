@@ -11,7 +11,7 @@ use crate::commands::store_builders::{
 use crate::config::{ProfileConfig, ProfileConnection, StoreConfig};
 use crate::error::{CliError, Result};
 use crate::prompt;
-use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
+use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials, GcpGcsCredentials};
 use loonfs_types::SecretString;
 
 /// Applies an update's flags, or prompts when `source` is `Prompt`, to a
@@ -122,6 +122,28 @@ pub(crate) fn prompt_aws_credentials(current: AwsS3Credentials) -> Result<AwsS3C
             }),
         },
     }
+}
+
+pub(crate) fn prompt_gcs_credentials(current: GcpGcsCredentials) -> Result<GcpGcsCredentials> {
+    let default = usize::from(matches!(
+        &current,
+        GcpGcsCredentials::ServiceAccountFile { .. }
+    ));
+    let choice = prompt::prompt_choice_default(
+        "credential source",
+        &["ambient", "service-account-file"],
+        default,
+    )?;
+    if choice == "ambient" {
+        return Ok(GcpGcsCredentials::Ambient {});
+    }
+    let path = match current {
+        GcpGcsCredentials::ServiceAccountFile { path } => {
+            prompt::prompt_line_default("service-account-key-path", &path)?
+        }
+        GcpGcsCredentials::Ambient {} => prompt::prompt_line("service-account-key-path")?,
+    };
+    Ok(GcpGcsCredentials::ServiceAccountFile { path })
 }
 
 pub(crate) fn prompt_r2_credentials(

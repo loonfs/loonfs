@@ -48,6 +48,8 @@ Once an ambient source returns credentials without an expiration, later lookups 
 
 Presigned URLs include the current session token. A requested signing lifetime can trigger an early refresh of the shared cache, subject to the same one-second refresh backoff. If the resolved credentials still expire before that lifetime ends, LoonFS still issues the URL, and it reports the effective `expires_at_ms`, which is the earlier of the requested expiry and the credential expiry. The signed query keeps the requested lifetime, and AWS also enforces the credential expiration. Credentials that have already expired are rejected. This applies to reads, whole-object uploads, multipart operations, and checksum readback. Explicit static session tokens have no declared expiration in the configuration schema, so the caller is responsible for keeping them valid.
 
+Google Cloud Storage credentials with `kind = "ambient"` use Google's application default credentials: the credentials file that `GOOGLE_APPLICATION_CREDENTIALS` points to, the gcloud application default credentials file, or the metadata server of the VM or pod (workload identity). The provider client refreshes the OAuth token. Ambient credentials include no private key, so they sign no direct-transfer URLs: a store built from them reports no direct transfers in its capability document, and clients send and receive content through the server. Credentials with `kind = "service_account_file"` read one service-account key file, which authenticates requests and signs direct transfers.
+
 Cloudflare R2 doesn't use this chain. R2 ambient credentials are read from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` when the store starts.
 
 ## 3. Proven providers and direct-put
@@ -84,7 +86,7 @@ Every provider that supports direct writes also supports direct reads.
 | Azure Blob Storage | No | No | No | n/a | n/a |
 | Local filesystem | No | No | No | n/a | n/a |
 
-The GCS adapter uses native V4 signed URLs. It doesn't use the GCS S3-interoperability API, and it doesn't implement multipart uploads, even though GCS documents an XML multipart API.[^46] The adapter's own large creates and extensions use the JSON API, with the service account's OAuth token.
+The GCS adapter signs native V4 URLs with the service-account key, and signs none under ambient credentials. It doesn't use the GCS S3-interoperability API, and it doesn't implement multipart uploads, even though GCS documents an XML multipart API.[^46] The adapter's own requests use the JSON API, and the XML API for an object's metadata, with the credential source's OAuth token.
 
 Browser clients send direct transfers to the provider. The bucket's CORS configuration MUST:
 

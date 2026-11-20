@@ -30,13 +30,21 @@ token = "dev-token"
 [store]
 kind = "gcp_gcs"
 bucket = "your-bucket"
+key_prefix = "loonfs-demo"
+
 # The provider client authenticates with this key, and its RSA private key
 # also signs the direct upload and download URLs handed to clients. The
 # service account therefore needs object read and create rights on the
-# bucket, plus the ability to sign — which for a downloaded service-account
+# bucket, plus the ability to sign, which for a downloaded service-account
 # key it has by holding the key. Startup fails if the file cannot sign.
-key_prefix = "loonfs-demo"
-
 [store.credentials]
 kind = "service_account_file"
 path = "/path/to/service-account.json"
+
+# To run without a key file, use the credentials the environment provides:
+# the file that GOOGLE_APPLICATION_CREDENTIALS points to, the gcloud
+# application default credentials, or the metadata server of the VM or pod
+# (workload identity). Ambient credentials sign no direct upload or download
+# URLs, so clients send and receive content through the server.
+# [store.credentials]
+# kind = "ambient"

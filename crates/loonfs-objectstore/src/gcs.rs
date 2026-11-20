@@ -3,13 +3,12 @@
 mod assembly;
 
 use crate::checksum_header::encode_base64_checksum;
-use crate::clock::wall_now;
 use crate::configured::ConfiguredObjectStoreKind;
 use crate::keyspace::KeyScope;
 use crate::object_store::Result;
 use crate::presign::{
-    percent_encode_segment, read_service_account_key, stored_crc32c, DirectTransferIssuers,
-    GcsV4Presigner, INTERNAL_REQUEST_TTL,
+    percent_encode_path, percent_encode_segment, read_service_account_key, stored_crc32c,
+    DirectTransferIssuers, GcsV4Presigner,
 };
 use crate::provider_error::{map_provider_error, ProviderClient};
 use crate::provider_limits::provider_client_options;
@@ -17,11 +16,12 @@ use crate::provider_object_store::{
     configuration_error, provider_http, ConfiguredProvider, ProviderParts,
 };
 use crate::retry::{one_attempt_retry_config, provider_retry_config, TransportRetry};
-use crate::signed_request::{ensure_succeeded, send, send_signed, SignedResponse};
+use crate::signed_request::{ensure_succeeded, send, SignedResponse};
 use crate::signed_upload::{AbortUploadOnDrop, PartReader, ProviderSigner};
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     AssemblySource, GcpGcsCredentials, ObjectMetadata, ObjectStoreError, ProviderObjectStore,
+    GOOGLE_APPLICATION_CREDENTIALS_ENV,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -39,6 +39,10 @@ const GCS_JSON_OBJECTS: &str = "https://storage.googleapis.com/storage/v1/b";
 /// Root of the JSON API media and resumable uploads.
 const GCS_JSON_UPLOADS: &str = "https://storage.googleapis.com/upload/storage/v1/b";
 
+/// Root of the XML API, whose object responses report the generation and the
+/// stored hashes in headers.
+const GCS_XML_OBJECTS: &str = "https://storage.googleapis.com";
+
 /// The header that includes an object's checksums, in requests and responses.
 const GCS_HASH_HEADER: &str = "x-goog-hash";
 
@@ -50,7 +54,8 @@ const GCS_HASH_HEADER: &str = "x-goog-hash";
 pub struct GcpGcsStoreConfig {
     /// Bucket that acts as the LoonFS object-store root.
     pub bucket: String,
-    /// Credential source used for requests and direct-transfer signing.
+    /// Credential source for requests, and for direct-transfer signing when
+    /// it's a service-account key.
     pub credentials: GcpGcsCredentials,
     /// Logical prefix prepended to every key, or `None` to use the bucket root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,7 +64,6 @@ pub struct GcpGcsStoreConfig {
 
 #[derive(Clone)]
 struct GcsRequestSigner {
-    request_signer: Arc<GcsV4Presigner>,
     http: HttpClient,
     io_runtime: tokio::runtime::Handle,
     credentials: GcpCredentialProvider,
@@ -73,27 +77,45 @@ pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<ProviderObjectStore> {
     gcp_gcs_with_issuers(config).map(|provider| provider.store)
 }
 
-/// Returns the store and the issuers that sign direct transfers against it.
+/// Returns the store and, for a service-account key, the issuers that sign
+/// direct transfers against it.
 ///
-/// The service-account key is read once, so the provider client and the
-/// presigner sign with the same key even when the file is replaced.
+/// A service-account key is read once, so the provider client and the
+/// presigner sign with the same key even when the file is replaced. Ambient
+/// credentials come from the file that `GOOGLE_APPLICATION_CREDENTIALS`
+/// points to, from the gcloud application default credentials file, or from
+/// the metadata server, and they sign no direct transfers.
 pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<ConfiguredProvider> {
-    let key_json = read_service_account_key(&config)?;
     let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
-    let request_signer = Arc::new(GcsV4Presigner::with_service_account_key(
-        config.bucket.clone(),
-        key_scope.clone(),
-        &key_json,
-    )?);
-
     let io_runtime = StoreIoRuntime::new()?;
     let http = provider_http(&io_runtime)?;
-    let builder = GoogleCloudStorageBuilder::new()
+    let mut builder = GoogleCloudStorageBuilder::new()
         .with_http_connector(io_runtime.connector())
         .with_client_options(provider_client_options())
         .with_retry(provider_retry_config())
-        .with_bucket_name(config.bucket.clone())
-        .with_service_account_key(key_json);
+        .with_bucket_name(config.bucket.clone());
+    let direct_transfers = match &config.credentials {
+        GcpGcsCredentials::Ambient {} => {
+            if let Some(path) = std::env::var_os(GOOGLE_APPLICATION_CREDENTIALS_ENV) {
+                builder = builder.with_application_credentials(path.to_string_lossy());
+            }
+            None
+        }
+        GcpGcsCredentials::ServiceAccountFile { path } => {
+            let key_json = read_service_account_key(path)?;
+            let request_signer = Arc::new(GcsV4Presigner::with_service_account_key(
+                config.bucket.clone(),
+                key_scope.clone(),
+                &key_json,
+            )?);
+            builder = builder.with_service_account_key(key_json);
+            Some(DirectTransferIssuers {
+                get: request_signer.clone(),
+                put: Some(request_signer),
+                multipart: None,
+            })
+        }
+    };
 
     let provider = Arc::new(builder.clone().build().map_err(configuration_error)?);
     let credentials = Arc::clone(provider.credentials());
@@ -104,7 +126,6 @@ pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<Configur
         .map_err(configuration_error)?;
     let retry = Arc::new(TransportRetry::new(Arc::new(StdMonotonicTimer::default())));
     let signer = Arc::new(GcsRequestSigner {
-        request_signer: Arc::clone(&request_signer),
         http,
         io_runtime: io_runtime.handle(),
         credentials,
@@ -123,11 +144,6 @@ pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<Configur
         io_runtime,
         retry,
     });
-    let direct_transfers = DirectTransferIssuers {
-        get: request_signer.clone(),
-        put: Some(request_signer),
-        multipart: None,
-    };
 
     Ok(ConfiguredProvider {
         store,
@@ -143,7 +159,21 @@ impl GcsRequestSigner {
             .map(|name| percent_encode_segment(&name))
     }
 
-    /// Sends one JSON API request under the service account's OAuth token
+    /// Adds the credential source's OAuth token to `request`.
+    async fn authorized(
+        &self,
+        key: &str,
+        request: http::request::Builder,
+    ) -> Result<http::request::Builder> {
+        let credential = self
+            .credentials
+            .get_credential()
+            .await
+            .map_err(|error| map_provider_error(key, error, ProviderClient::Retrying))?;
+        Ok(request.header(AUTHORIZATION, format!("Bearer {}", credential.bearer)))
+    }
+
+    /// Sends one JSON API request under the credential source's OAuth token
     /// and fails on any error status.
     async fn send_authorized(
         &self,
@@ -151,12 +181,7 @@ impl GcsRequestSigner {
         request: http::request::Builder,
         body: HttpRequestBody,
     ) -> Result<SignedResponse> {
-        let credential = self
-            .credentials
-            .get_credential()
-            .await
-            .map_err(|error| map_provider_error(key, error, ProviderClient::Retrying))?;
-        let request = request.header(AUTHORIZATION, format!("Bearer {}", credential.bearer));
+        let request = self.authorized(key, request).await?;
         let response = send(&self.http, key, request, body).await?;
         ensure_succeeded(key, &response, None)?;
         Ok(response)
@@ -186,15 +211,20 @@ impl GcsRequestSigner {
 
 #[async_trait]
 impl ProviderSigner for GcsRequestSigner {
+    /// Sends one XML API `HEAD` under the credential source's OAuth token,
+    /// and reads the object's size, generation, and stored CRC-32C back from
+    /// the response headers.
     async fn head_metadata(&self, key: &str) -> Result<Option<ObjectMetadata>> {
+        let url = format!(
+            "{GCS_XML_OBJECTS}/{}/{}",
+            percent_encode_segment(&self.bucket),
+            percent_encode_path(&self.key_scope.object_key(key)?)
+        );
         let mut metadata = self
             .retry
             .run(key, "head", 0, || async {
-                let signed =
-                    self.request_signer
-                        .presign_head(key, INTERNAL_REQUEST_TTL, wall_now())?;
-                let response =
-                    send_signed(&self.http, key, signed, HttpRequestBody::empty()).await?;
+                let request = self.authorized(key, http::Request::head(&url)).await?;
+                let response = send(&self.http, key, request, HttpRequestBody::empty()).await?;
                 crate::signed_request::metadata_from_signed_head(
                     key,
                     &response,
@@ -460,7 +490,17 @@ mod tests {
                 bytes,
             ));
             let response = http::Response::builder();
-            let response = if parts
+            let response = if parts.method == http::Method::HEAD {
+                response
+                    .header(http::header::CONTENT_LENGTH, "5")
+                    .header(http::header::ETAG, "\"etag\"")
+                    .header("x-goog-generation", "1")
+                    .header(
+                        "x-goog-hash",
+                        "md5=XUFAKrxLKna5cZ2REBfFkg==,crc32c=mnG7TA==",
+                    )
+                    .body(Bytes::new())
+            } else if parts
                 .uri
                 .query()
                 .is_some_and(|query| query.contains("alt=media"))
@@ -503,21 +543,10 @@ mod tests {
         }
     }
 
-    /// Builds a signer that sends its requests to `http`, with the fixture
-    /// service account at `path` and a static token.
-    fn test_signer(path: &std::path::Path, http: HttpClient) -> super::GcsRequestSigner {
+    /// Builds a signer that sends its requests to `http` with a static token.
+    fn test_signer(http: HttpClient) -> super::GcsRequestSigner {
         use std::sync::Arc;
         super::GcsRequestSigner {
-            request_signer: Arc::new(
-                super::GcsV4Presigner::new(&GcpGcsStoreConfig {
-                    bucket: "bucket".to_owned(),
-                    credentials: GcpGcsCredentials::ServiceAccountFile {
-                        path: path.display().to_string(),
-                    },
-                    key_prefix: None,
-                })
-                .expect("signer"),
-            ),
             http,
             io_runtime: tokio::runtime::Handle::current(),
             credentials: Arc::new(object_store::StaticCredentialProvider::new(
@@ -577,7 +606,6 @@ mod tests {
     async fn a_failing_chunk_is_attempted_under_one_retry_budget() {
         use super::*;
         use futures::{stream, StreamExt};
-        let (_directory, path) = gcs_fixture_service_account_key_file("gcs-chunk-retry");
         let store_directory = tempfile::tempdir().expect("store directory");
         let store = crate::local_fs_store::LocalFsStore::new(store_directory.path())
             .expect("store for the verified write's occupied-key check");
@@ -593,7 +621,7 @@ mod tests {
                 fault,
                 attempts: Arc::default(),
             };
-            let signer = test_signer(&path, HttpClient::new(service.clone()));
+            let signer = test_signer(HttpClient::new(service.clone()));
             let bytes = Bytes::from_static(b"hello");
             let clock = TokioClock::start();
             let error =
@@ -642,10 +670,9 @@ mod tests {
     async fn media_and_resumable_uploads_send_crc32c_and_chunk_lengths() {
         use super::*;
         use futures::{stream, StreamExt};
-        let (_directory, path) = gcs_fixture_service_account_key_file("gcs-checksum");
         for part_bytes in [3, 5, 8] {
             let requests = UploadRequests::default();
-            let signer = test_signer(&path, HttpClient::new(requests.clone()));
+            let signer = test_signer(HttpClient::new(requests.clone()));
             let mut parts = PartReader::new(
                 stream::iter(vec![
                     Ok(Bytes::from_static(b"he")),
@@ -683,9 +710,8 @@ mod tests {
     #[tokio::test]
     async fn small_assemblies_read_sources_and_create_with_one_media_request() {
         use super::*;
-        let (_directory, path) = gcs_fixture_service_account_key_file("gcs-assembly");
         let requests = UploadRequests::default();
-        let signer = test_signer(&path, HttpClient::new(requests.clone()));
+        let signer = test_signer(HttpClient::new(requests.clone()));
         let expected = Checksum::crc32c(b"hello");
         let key = "pools/pool_00000000000000000000000001/content/con_014d2pf2dbsqqg28t5cy4tqkff";
         for sources in [
@@ -769,6 +795,29 @@ mod tests {
             .expect_err("non-generation compare token should fail");
 
         assert_matches!(error, ObjectStoreError::PreconditionFailed { .. });
+    }
+
+    #[tokio::test]
+    async fn a_head_reads_the_generation_and_crc32c_back_under_the_bearer_token() {
+        use super::*;
+        let requests = UploadRequests::default();
+        let signer = test_signer(HttpClient::new(requests.clone()));
+        let metadata = signer
+            .head_metadata("namespaces/ns/manifests/1.json")
+            .await
+            .expect("head")
+            .expect("object");
+        assert_eq!(metadata.size_bytes, 5);
+        assert_eq!(metadata.version.as_deref(), Some("1"));
+        assert_eq!(metadata.etag, metadata.version);
+        assert_eq!(metadata.checksum, Some(Checksum::crc32c(b"hello")));
+        let requests = requests.0.lock().expect("requests");
+        let (url, headers, _) = &requests[0];
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/bucket/namespaces/ns/manifests/1.json"
+        );
+        assert_eq!(headers[AUTHORIZATION], "Bearer test");
     }
 
     #[test]

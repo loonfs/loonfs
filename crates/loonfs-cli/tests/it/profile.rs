@@ -751,6 +751,70 @@ fn profile_update_with_only_service_account_key_path_applies() {
 }
 
 #[test]
+fn gcs_profile_without_a_key_path_uses_ambient_credentials() {
+    let harness = Harness::new();
+    let create = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "gcs",
+        "gcp",
+        "--bucket",
+        "documents",
+    ]);
+    assert_success(&create);
+    let show = harness.run(&["--json", "profile", "show", "gcp"]);
+    assert_success(&show);
+    assert_eq!(json_data(&show)["store"]["credentials"]["kind"], "ambient");
+
+    let conflict = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "gcs",
+        "gcp",
+        "--credential-source",
+        "ambient",
+        "--service-account-key-path",
+        "/keys/gcs.json",
+    ]);
+    assert_failure(&conflict);
+    assert_eq!(json_error(&conflict)["code"], "invalid_request");
+
+    let keyed = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "gcs",
+        "gcp",
+        "--service-account-key-path",
+        "/keys/gcs.json",
+    ]);
+    assert_success(&keyed);
+    let show = harness.run(&["--json", "profile", "show", "gcp"]);
+    assert_eq!(
+        json_data(&show)["store"]["credentials"]["kind"],
+        "service_account_file"
+    );
+
+    let reset = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "gcs",
+        "gcp",
+        "--credential-source",
+        "ambient",
+    ]);
+    assert_success(&reset);
+    let show = harness.run(&["--json", "profile", "show", "gcp"]);
+    assert_eq!(json_data(&show)["store"]["credentials"]["kind"], "ambient");
+}
+
+#[test]
 fn abs_profile_create_update_and_show_round_trip() {
     let harness = Harness::new();
     let create = harness.run(&[

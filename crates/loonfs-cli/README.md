@@ -509,7 +509,11 @@ Profile create options
   provider accepts only its own flags. S3 and R2 use ambient credentials by
   default, and read AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY when the
   store is opened. If you pass the static credential flags, the CLI stores
-  those credentials in the profile. An abs profile stores the account key.
+  those credentials in the profile. A gcs profile also uses ambient
+  credentials by default, Google's application default credentials, and
+  stores a key file's path when you pass one. An ambient gcs profile
+  sends content through the CLI instead of direct transfers. An abs
+  profile stores the account key.
 
   Every embedded profile:
     --key-prefix <prefix>              optional
@@ -539,7 +543,8 @@ Profile create options
 
   loonfs profile create gcs:
     --bucket <name>
-    --service-account-key-path <path>
+    --credential-source <ambient|service-account-file>
+    --service-account-key-path <path>  service-account-file only
 
   loonfs profile create abs:
     --account-name <name>
@@ -595,6 +600,7 @@ Update options
 
   gcp_gcs profile updates:
     --bucket <name>
+    --credential-source <ambient|service-account-file>
     --service-account-key-path <path>
 
   azure_blob profile updates:

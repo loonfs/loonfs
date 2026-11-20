@@ -230,10 +230,11 @@ pub(crate) fn provider_name(provider: ProfileProvider) -> &'static str {
 mod tests {
     use super::{build_profile_from_command, FieldSource};
     use crate::args::{
-        AbsStoreArgs, Cli, Command, CredentialSource, LocalStoreArgs, ProfileAbsArgs,
-        ProfileActorArgs, ProfileCommand, ProfileLocalArgs, ProfileProviderCommand, ProfileR2Args,
-        ProfileRemoteArgs, ProfileS3Args, R2StoreArgs, RemoteServerArgs, RuntimeBehavior,
-        S3StoreArgs, SubjectSelectors, TopLevelCommand,
+        AbsStoreArgs, Cli, Command, CredentialSource, GcsCredentialSource, GcsStoreArgs,
+        LocalStoreArgs, ProfileAbsArgs, ProfileActorArgs, ProfileCommand, ProfileGcsArgs,
+        ProfileLocalArgs, ProfileProviderCommand, ProfileR2Args, ProfileRemoteArgs, ProfileS3Args,
+        R2StoreArgs, RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
+        TopLevelCommand,
     };
     use crate::commands::profile_update::apply_update;
 
@@ -241,9 +242,12 @@ mod tests {
     use crate::error::Result;
     use clap::Parser;
     use loonfs_objectstore::azure_blob::AzureBlobStoreConfig;
+    use loonfs_objectstore::gcs::GcpGcsStoreConfig;
     use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
     use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
-    use loonfs_objectstore::{AwsS3Credentials, AzureBlobCredentials, CloudflareR2Credentials};
+    use loonfs_objectstore::{
+        AwsS3Credentials, AzureBlobCredentials, CloudflareR2Credentials, GcpGcsCredentials,
+    };
     use std::assert_matches;
 
     #[test]
@@ -271,6 +275,71 @@ mod tests {
                 key_prefix: Some("tenant-a".to_owned()),
             })
         );
+    }
+
+    #[test]
+    fn gcs_flags_default_to_ambient_credentials_and_a_key_path_round_trips() {
+        let gcs_profile = |credentials, bucket: &str| {
+            StoreConfig::GcpGcs(GcpGcsStoreConfig {
+                bucket: bucket.to_owned(),
+                credentials,
+                key_prefix: None,
+            })
+        };
+        let profile = build(&gcs(GcsStoreArgs {
+            bucket: Some("documents".to_owned()),
+            ..GcsStoreArgs::default()
+        }))
+        .expect("build ambient gcs profile");
+        assert_eq!(
+            store(&profile),
+            &gcs_profile(GcpGcsCredentials::Ambient {}, "documents")
+        );
+
+        let keyed = update(
+            profile.clone(),
+            &gcs(GcsStoreArgs {
+                service_account_key_path: Some("/keys/gcs.json".to_owned()),
+                ..GcsStoreArgs::default()
+            }),
+        )
+        .expect("store a key path");
+        let key_file = GcpGcsCredentials::ServiceAccountFile {
+            path: "/keys/gcs.json".to_owned(),
+        };
+        assert_eq!(store(&keyed), &gcs_profile(key_file.clone(), "documents"));
+
+        let renamed = update(
+            keyed.clone(),
+            &gcs(GcsStoreArgs {
+                bucket: Some("archive".to_owned()),
+                ..GcsStoreArgs::default()
+            }),
+        )
+        .expect("an update without a credential flag keeps the key path");
+        assert_eq!(store(&renamed), &gcs_profile(key_file, "archive"));
+
+        let conflict = update(
+            keyed.clone(),
+            &gcs(GcsStoreArgs {
+                credential_source: Some(GcsCredentialSource::Ambient),
+                service_account_key_path: Some("/keys/other.json".to_owned()),
+                ..GcsStoreArgs::default()
+            }),
+        )
+        .expect_err("ambient credentials take no key path");
+        assert_eq!(conflict.code, "invalid_request");
+        assert_eq!(conflict.param.as_deref(), Some("--credential-source"));
+
+        let reset = update(
+            keyed,
+            &gcs(GcsStoreArgs {
+                credential_source: Some(GcsCredentialSource::Ambient),
+                ..GcsStoreArgs::default()
+            }),
+        )
+        .expect("restore ambient credentials");
+        assert_eq!(reset, profile);
     }
 
     #[test]
@@ -551,6 +620,14 @@ mod tests {
 
     fn r2(store: R2StoreArgs) -> ProfileProviderCommand {
         ProfileProviderCommand::R2(ProfileR2Args {
+            name: "default".to_owned(),
+            store,
+            actor: ProfileActorArgs::default(),
+        })
+    }
+
+    fn gcs(store: GcsStoreArgs) -> ProfileProviderCommand {
+        ProfileProviderCommand::Gcs(ProfileGcsArgs {
             name: "default".to_owned(),
             store,
             actor: ProfileActorArgs::default(),

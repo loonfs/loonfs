@@ -62,5 +62,5 @@ pub use provider_limits::{
 pub use provider_object_store::ProviderObjectStore;
 pub use store_config::{
     AwsS3Credentials, AzureBlobCredentials, CloudflareR2Credentials, GcpGcsCredentials,
-    StoreConfig, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
+    StoreConfig, ACCESS_KEY_ID_ENV, GOOGLE_APPLICATION_CREDENTIALS_ENV, SECRET_ACCESS_KEY_ENV,
 };

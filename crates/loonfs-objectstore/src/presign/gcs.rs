@@ -83,11 +83,16 @@ impl fmt::Debug for GcsV4Presigner {
 impl GcsV4Presigner {
     /// Creates a presigner, reading and parsing the service-account key once.
     ///
-    /// Construction fails for an unusable key prefix, an unreadable or
-    /// malformed key file, or a private key that is not an RSA key in PKCS#8
-    /// form.
+    /// Construction fails for ambient credentials, which have no key to sign
+    /// with, an unusable key prefix, an unreadable or malformed key file, or
+    /// a private key that is not an RSA key in PKCS#8 form.
     pub fn new(config: &GcpGcsStoreConfig) -> Result<Self> {
-        let key_json = read_service_account_key(config)?;
+        let GcpGcsCredentials::ServiceAccountFile { path } = &config.credentials else {
+            return Err(ObjectStoreError::Configuration(
+                "ambient GCS credentials can't sign direct transfers".to_owned(),
+            ));
+        };
+        let key_json = read_service_account_key(path)?;
         let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
         Self::with_service_account_key(config.bucket.clone(), key_scope, &key_json)
     }
@@ -130,20 +135,6 @@ impl GcsV4Presigner {
             client_email: key.client_email,
             signing_key,
         })
-    }
-
-    /// Signs a `HEAD` that reads an object's size and stored checksum back.
-    ///
-    /// GCS reports the stored CRC-32C in the `x-goog-hash` response header of
-    /// an ordinary object request, so no special request header is needed to
-    /// ask for it and the capability signs `host` alone.
-    pub(crate) fn presign_head(
-        &self,
-        object_key: &str,
-        ttl: Duration,
-        now: SystemTime,
-    ) -> Result<PresignedUrl> {
-        self.presign("HEAD", object_key, BTreeMap::new(), ttl, now)
     }
 
     fn presign(
@@ -252,8 +243,7 @@ impl DirectGetIssuer for GcsV4Presigner {
 }
 
 /// Reads the service-account JSON that a GCS configuration points to.
-pub(crate) fn read_service_account_key(config: &GcpGcsStoreConfig) -> Result<String> {
-    let GcpGcsCredentials::ServiceAccountFile { path } = &config.credentials;
+pub(crate) fn read_service_account_key(path: &str) -> Result<String> {
     std::fs::read_to_string(path).map_err(|err| {
         ObjectStoreError::Configuration(format!("service account key is unreadable: {err}"))
     })
@@ -345,7 +335,6 @@ mod tests {
     // Independent Python canonicalization and OpenSSL signing pin the exact request.
     const PUT_PREFIXED_SIGNATURE: &str = "a6e71b5a0046de4486b7a16341153ba9c499fefd27a122248580d0bfc7e3abe453d9dae811a479f7c48467d706cfcc5cc9a0b8b9195129a1d0f1fd21da2828141f4c305b09b1e5277d52adc683810a65bb4612ad71033004723c1971f017aec0a4b6147c872380b94468a8355887ab56cd69906c4ab208015b68b9af5ac84702cedc1459911d96c2cb72dad19e89006119e2f355af281ff48b3a4ef5a5a597f72582829f51fc8d4705b087b22a0efbc8c0374db177aea60276553d8b635ed0d40c7f3aa380a34052741837b4477804e06c6dbb554b6fff2f86557a4fbd5ca3c58d7807756fcc6ce418d42bd4026c01e4473500c305441731aa8be68cf975e00e";
     const GET_PREFIXED_SIGNATURE: &str = "8ca0497a06d4bce1ae1c08c5d6162de145018ca165aee0f629722f78bb98ddc944819be439cf6bbde60c64abcf814137debe2b16c3819202573a444313f94e6f74c058f34922c698f6c849af142f15b04b24123e1b651970fa23e3ded67c670f5b9d26234cc8a6248cc0eebccbd4165cb10bc7504e0826c85a31a97b08a50b4b74f72847dda604e7e75438dfcc19fe99bcb0881b805c37157fcfdf630227e01c44251231761d5c194c0173254e3f2e99ec1f6b72f1ea94936b017034ef4aca923804c4b479014c1a8d0aee8f21218c4a8ee1d67ba0e97ebb4117200921c0b7d11effd8bf81d37476764ed8b4318788a1baab657e72fa6e266a148797d423975c";
-    const HEAD_PREFIXED_SIGNATURE: &str = "68bc280612724b108e0692aff38037c8c7604e3fa3bf3cfe97b4e58e5f5ff8de8d8743b3319399c072d2ba5a3c80320f0744fdabe989388238d45810bf0e87d1f5809e49da2cba2874b3a4cbdb4382854f243d11997172b9799398d11f3a55ee5a0daab7e9f116be9b302ea17bf047ab27ddbcb326c33fca46fa99fe3e8231e465b9642b34710164f68bdbcaa73bd1f5750fea1d14fbf942210d64d44310ddfb81549263a9a28ae5c5e0a84922ef5cedbc4ee4f1b197609a16ad63e5c3c3951ea1d3eaeb7962f0300916564a8a10601961ce80542b6cf9eab6fcf525cf14a67a5a0672813678cbf80840f07b2e959e6415b214cdc2596c5ebbeaf0ea12104985";
     const PUT_UNPREFIXED_SIGNATURE: &str = "201e2951edf8d3d2da08d8dcb9bea6318dda0a2927480717202ce6294c694aeb98fb8f128f73470b790decc1e38e5c5fdb454e3c5fb438c10bbdc3f1e0a2b5f73cb8f160477ae507ea7ccf6cee93d00420b936558c94673d932c8854b5864466035c6fa5e8a4c17c9e6be5908f1659c13a1720b24da96537fe641816074391d752d8d0feb8307faa95003601d05918ae9602e23b40abf4afb734065ed528404981ff9d0f5d8e46cac190dbe69b63c96d302d4eecf8c01e041015817a8287621e8e32ac3b2060f84e0827ccf0f86871c57dc6180d68ef72b9be42ee6573be53ca4621f38eccb32077a2869d7906f6ea7064eb2a03d1ac72a0ff0a40f8d2bdb741";
     const GET_ESCAPED_SIGNATURE: &str = "69f413dc31744f07063ec59fba35a7eb2e7853f65173ee5fe889d34994c046cc51f8d4517db671e90a64720e5aeb2d2583195043bcb5ef8b9c60b3f32af19e2fc3bcbb5cfbc0ad808236920b106987237a85bc45dbc22ddd8c2592330b4869b3885380376345fcd279252945a95139466e50b6d650dcff4e364c7705ea73514a73a045ad4245cb1a5f2debc5e04832a87c214b8ba302e8500f53ded590b24e92ad0d790f00afc0d1530b9605021532cf6eab6da0b79bd675843fe10e816fa5152922983741797f7bbaa722b023d14986f0f922b8c9165d38ece5d343b33d306a9cb6615f10e16dc277b269ce2dc0f8e80c3a4237b00f0dc51347e35f08761e01";
 
@@ -430,23 +419,6 @@ mod tests {
             format!(
                 "https://storage.googleapis.com/bucket/tenant-a/{CONTENT_KEY}?{EXPECTED_CREDENTIAL}\
                  &X-Goog-SignedHeaders=host%3Brange&X-Goog-Signature={GET_PREFIXED_SIGNATURE}"
-            )
-        );
-    }
-
-    #[test]
-    fn presigned_head_reads_the_object_back_with_host_signed_alone() {
-        let signed = presigner(Some("tenant-a"))
-            .presign_head(CONTENT_KEY, TTL, signing_time())
-            .expect("presign head");
-
-        assert_eq!(signed.method, "HEAD");
-        assert!(signed.headers.is_empty());
-        assert_eq!(
-            signed.url,
-            format!(
-                "https://storage.googleapis.com/bucket/tenant-a/{CONTENT_KEY}?{EXPECTED_CREDENTIAL}\
-                 &X-Goog-SignedHeaders=host&X-Goog-Signature={HEAD_PREFIXED_SIGNATURE}"
             )
         );
     }
