@@ -2,11 +2,13 @@
 //! profile's connection, from flags or prompts.
 
 use crate::args::{
-    AbsStoreArgs, BucketAddressing, CredentialSource, GcsStoreArgs, LocalStoreArgs, R2StoreArgs,
-    RemoteServerArgs, S3StoreArgs,
+    AbsStoreArgs, BucketAddressing, CredentialSource, GcsCredentialSource, GcsStoreArgs,
+    LocalStoreArgs, R2StoreArgs, RemoteServerArgs, S3StoreArgs,
 };
 use crate::commands::profile_config::FieldSource;
-use crate::commands::profile_update::{prompt_aws_credentials, prompt_r2_credentials};
+use crate::commands::profile_update::{
+    prompt_aws_credentials, prompt_gcs_credentials, prompt_r2_credentials,
+};
 use crate::config::{validate_remote_client_config, ProfileConnection, StoreConfig};
 use crate::error::{CliError, Result};
 use crate::prompt;
@@ -115,6 +117,44 @@ fn r2_credentials(
                 source,
             )?,
         }),
+    }
+}
+
+/// Returns a GCS store's credentials from the flags, or `current` when no
+/// credential flag is given (ambient for a new profile).
+fn gcs_credentials(
+    current: Option<GcpGcsCredentials>,
+    args: &GcsStoreArgs,
+    source: FieldSource,
+) -> Result<GcpGcsCredentials> {
+    let has_key_path = args.service_account_key_path.is_some();
+    let selected = match args.credential_source {
+        Some(GcsCredentialSource::Ambient) if has_key_path => {
+            return Err(CliError::invalid_request(
+                "`--credential-source ambient` cannot be combined with `--service-account-key-path`",
+            )
+            .with_param("--credential-source"))
+        }
+        Some(selected) => selected,
+        None if has_key_path => GcsCredentialSource::ServiceAccountFile,
+        None => return Ok(current.unwrap_or(GcpGcsCredentials::Ambient {})),
+    };
+    match selected {
+        GcsCredentialSource::Ambient => Ok(GcpGcsCredentials::Ambient {}),
+        GcsCredentialSource::ServiceAccountFile => {
+            let current_path = match &current {
+                Some(GcpGcsCredentials::ServiceAccountFile { path }) => Some(path),
+                Some(GcpGcsCredentials::Ambient {}) | None => None,
+            };
+            Ok(GcpGcsCredentials::ServiceAccountFile {
+                path: required_field(
+                    args.service_account_key_path.as_ref(),
+                    current_path,
+                    "service-account-key-path",
+                    source,
+                )?,
+            })
+        }
     }
 }
 
@@ -337,10 +377,11 @@ pub(crate) fn gcs_store(
     args: &GcsStoreArgs,
     source: FieldSource,
 ) -> Result<StoreConfig> {
-    let current_key_path = current.map(|value| {
-        let GcpGcsCredentials::ServiceAccountFile { path } = &value.credentials;
-        path
-    });
+    let current_credentials = current.map(|value| value.credentials.clone());
+    let credentials = match (current_credentials, source) {
+        (Some(current), FieldSource::Prompt) => prompt_gcs_credentials(current)?,
+        (current, source) => gcs_credentials(current, args, source)?,
+    };
     Ok(StoreConfig::GcpGcs(GcpGcsStoreConfig {
         bucket: required_field(
             args.bucket.as_ref(),
@@ -348,14 +389,7 @@ pub(crate) fn gcs_store(
             "bucket",
             source,
         )?,
-        credentials: GcpGcsCredentials::ServiceAccountFile {
-            path: required_field(
-                args.service_account_key_path.as_ref(),
-                current_key_path,
-                "service-account-key-path",
-                source,
-            )?,
-        },
+        credentials,
         key_prefix: optional_field(
             args.key_prefix.as_ref(),
             current.and_then(|value| value.key_prefix.as_ref()),

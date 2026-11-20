@@ -78,6 +78,15 @@ pub(crate) enum CredentialSource {
     Static,
 }
 
+/// Where a GCS store's credentials come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum GcsCredentialSource {
+    /// Google's application default credentials.
+    Ambient,
+    /// The service-account key file, whose path is stored in the profile.
+    ServiceAccountFile,
+}
+
 #[derive(Debug, Clone, Default, Args)]
 pub(crate) struct S3StoreArgs {
     /// S3 bucket name.
@@ -173,6 +182,9 @@ pub(crate) struct GcsStoreArgs {
     /// GCS bucket name.
     #[arg(long, value_hint = ValueHint::Other)]
     pub bucket: Option<String>,
+    /// GCS credential source.
+    #[arg(long, value_enum)]
+    pub credential_source: Option<GcsCredentialSource>,
     /// Path to a GCP service-account key.
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub service_account_key_path: Option<String>,
@@ -184,6 +196,7 @@ pub(crate) struct GcsStoreArgs {
 impl GcsStoreArgs {
     pub(crate) fn has_update_flags(&self) -> bool {
         self.bucket.is_some()
+            || self.credential_source.is_some()
             || self.service_account_key_path.is_some()
             || self.key_prefix.is_some()
     }

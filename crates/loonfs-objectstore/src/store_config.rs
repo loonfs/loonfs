@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
 /// Standard AWS environment credential name for the secret access key.
 pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
+/// Standard Google environment variable that points to a credentials file.
+pub const GOOGLE_APPLICATION_CREDENTIALS_ENV: &str = "GOOGLE_APPLICATION_CREDENTIALS";
 
 /// AWS S3 credential source, stored separately from provider settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +66,17 @@ pub enum CloudflareR2Credentials {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GcpGcsCredentials {
+    /// Resolves credentials from one of three sources: a service-account key
+    /// file or an authorized-user file that `GOOGLE_APPLICATION_CREDENTIALS`
+    /// points to, the gcloud application default credentials file, or the
+    /// metadata server of the VM or pod (workload identity). A workload
+    /// identity federation file (`external_account`) is not supported, and
+    /// store construction fails on one. Tokens refresh automatically.
+    ///
+    /// A store with these credentials signs no direct-transfer URLs,
+    /// whichever source they come from, so clients send and receive content
+    /// through the server.
+    Ambient {},
     /// Reads one service-account JSON file for requests and direct-transfer signing.
     ///
     /// Store construction fails if the key cannot sign direct-transfer URLs.
@@ -129,7 +142,10 @@ impl StoreConfig {
                 CloudflareR2Credentials::Ambient {} => "ambient",
                 CloudflareR2Credentials::Static { .. } => "static",
             }),
-            StoreConfig::GcpGcs { .. } => Some("service_account_file"),
+            StoreConfig::GcpGcs(config) => Some(match config.credentials {
+                GcpGcsCredentials::Ambient {} => "ambient",
+                GcpGcsCredentials::ServiceAccountFile { .. } => "service_account_file",
+            }),
             StoreConfig::AzureBlob { .. } => Some("account_key"),
         }
     }
@@ -198,11 +214,13 @@ impl StoreConfig {
             }
             StoreConfig::GcpGcs(GcpGcsStoreConfig {
                 bucket,
-                credentials: GcpGcsCredentials::ServiceAccountFile { path },
+                credentials,
                 ..
             }) => {
                 validate_non_empty("store.bucket", bucket)?;
-                validate_non_empty("store.credentials.path", path)?;
+                if let GcpGcsCredentials::ServiceAccountFile { path } = credentials {
+                    validate_non_empty("store.credentials.path", path)?;
+                }
             }
             StoreConfig::AzureBlob(AzureBlobStoreConfig {
                 account_name,
@@ -338,7 +356,7 @@ mod tests {
 
     #[test]
     fn parses_all_provider_kinds_and_reports_their_kind() {
-        let cases: [(&str, ConfiguredObjectStoreKind); 5] = [
+        let cases: [(&str, ConfiguredObjectStoreKind); 6] = [
             (
                 "kind = \"local_fs\"\nroot = \"/tmp/store\"",
                 ConfiguredObjectStoreKind::LocalFs,
@@ -378,6 +396,16 @@ bucket = "bucket"
 [credentials]
 kind = "service_account_file"
 path = "/tmp/service-account.json"
+"#,
+                ConfiguredObjectStoreKind::GcpGcs,
+            ),
+            (
+                r#"
+kind = "gcp_gcs"
+bucket = "bucket"
+
+[credentials]
+kind = "ambient"
 "#,
                 ConfiguredObjectStoreKind::GcpGcs,
             ),
@@ -783,6 +811,13 @@ key_prefix = "demo"
 [credentials]
 kind = "service_account_file"
 path = "/tmp/service-account.json"
+"#,
+            r#"
+kind = "gcp_gcs"
+bucket = "bucket"
+
+[credentials]
+kind = "ambient"
 "#,
             r#"
 kind = "azure_blob"

@@ -88,10 +88,11 @@ pub(crate) enum CreatePath {
     Signer,
 }
 
-/// A provider store and the issuers that sign direct transfers against it.
+/// A provider store and the issuers that sign direct transfers against it,
+/// or `None` when its credentials can't sign.
 pub(crate) struct ConfiguredProvider {
     pub(crate) store: ProviderObjectStore,
-    pub(crate) direct_transfers: DirectTransferIssuers,
+    pub(crate) direct_transfers: Option<DirectTransferIssuers>,
 }
 
 /// The clients and provider facts that one provider store is built from.
