@@ -66,13 +66,16 @@ pub enum CloudflareR2Credentials {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GcpGcsCredentials {
-    /// Resolves credentials the way Google's client libraries do: the
-    /// credentials file that `GOOGLE_APPLICATION_CREDENTIALS` points to, the
-    /// gcloud application default credentials file, or the metadata server of
-    /// the VM or pod (workload identity). Tokens refresh automatically.
+    /// Resolves credentials from one of three sources: a service-account key
+    /// file or an authorized-user file that `GOOGLE_APPLICATION_CREDENTIALS`
+    /// points to, the gcloud application default credentials file, or the
+    /// metadata server of the VM or pod (workload identity). A workload
+    /// identity federation file (`external_account`) is not supported, and
+    /// store construction fails on one. Tokens refresh automatically.
     ///
-    /// A store with these credentials signs no direct-transfer URLs, so
-    /// clients send and receive content through the server.
+    /// A store with these credentials signs no direct-transfer URLs,
+    /// whichever source they come from, so clients send and receive content
+    /// through the server.
     Ambient {},
     /// Reads one service-account JSON file for requests and direct-transfer signing.
     ///

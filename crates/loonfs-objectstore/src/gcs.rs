@@ -82,9 +82,10 @@ pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<ProviderObjectStore> {
 ///
 /// A service-account key is read once, so the provider client and the
 /// presigner sign with the same key even when the file is replaced. Ambient
-/// credentials come from the file that `GOOGLE_APPLICATION_CREDENTIALS`
-/// points to, from the gcloud application default credentials file, or from
-/// the metadata server, and they sign no direct transfers.
+/// credentials come from a service-account key or authorized-user file that
+/// `GOOGLE_APPLICATION_CREDENTIALS` points to, from the gcloud application
+/// default credentials file, or from the metadata server, and they sign no
+/// direct transfers.
 pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<ConfiguredProvider> {
     let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
     let io_runtime = StoreIoRuntime::new()?;
