@@ -250,7 +250,7 @@ fn new(config: S3CompatibleConfig) -> Result<ConfiguredProvider> {
 
     Ok(ConfiguredProvider {
         store,
-        direct_transfers: Some(direct_transfers),
+        direct_transfers,
     })
 }
 

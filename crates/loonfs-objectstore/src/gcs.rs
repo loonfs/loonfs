@@ -31,6 +31,7 @@ use loonfs_types::{Checksum, ChecksumAlgorithm, ChecksumDigest, StdMonotonicTime
 use object_store::client::{HttpClient, HttpRequestBody};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Root of the JSON API object resources.
@@ -54,8 +55,7 @@ const GCS_HASH_HEADER: &str = "x-goog-hash";
 pub struct GcpGcsStoreConfig {
     /// Bucket that acts as the LoonFS object-store root.
     pub bucket: String,
-    /// Credential source for requests, and for direct-transfer signing when
-    /// it's a service-account key.
+    /// Credential source for requests and for direct-transfer signing.
     pub credentials: GcpGcsCredentials,
     /// Logical prefix prepended to every key, or `None` to use the bucket root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,15 +77,70 @@ pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<ProviderObjectStore> {
     gcp_gcs_with_issuers(config).map(|provider| provider.store)
 }
 
-/// Returns the store and, for a service-account key, the issuers that sign
-/// direct transfers against it.
+/// Whether the credentials can sign direct transfers. A service-account key
+/// signs in this process, and a service account that ambient credentials
+/// resolve to signs through `signBlob`. An authorized-user file, such as
+/// gcloud's, is a user, who can't sign that way, so a store built from one
+/// offers no direct transfers.
+///
+/// The ambient credentials file is found the way the provider client finds
+/// it: the file `GOOGLE_APPLICATION_CREDENTIALS` points to, else the gcloud
+/// application default credentials file. Without either, the credentials
+/// come from the metadata server, whose identity is a service account. An
+/// unreadable or malformed file is left to the provider client, which fails
+/// on it.
+pub(crate) fn credentials_sign_direct_transfers(credentials: &GcpGcsCredentials) -> bool {
+    #[derive(Deserialize)]
+    struct CredentialsFile {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+
+    match credentials {
+        GcpGcsCredentials::ServiceAccountFile { .. } => true,
+        GcpGcsCredentials::Ambient {} => {
+            let Some(path) = application_default_credentials_file() else {
+                return true;
+            };
+            let file = std::fs::read(path)
+                .ok()
+                .and_then(|contents| serde_json::from_slice::<CredentialsFile>(&contents).ok());
+            file.is_none_or(|file| file.kind != "authorized_user")
+        }
+    }
+}
+
+/// The credentials file the provider client reads for ambient credentials,
+/// when there is one.
+fn application_default_credentials_file() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(GOOGLE_APPLICATION_CREDENTIALS_ENV) {
+        return Some(PathBuf::from(path));
+    }
+    let (home_var, relative_path) = if cfg!(windows) {
+        ("APPDATA", "gcloud/application_default_credentials.json")
+    } else {
+        (
+            "HOME",
+            ".config/gcloud/application_default_credentials.json",
+        )
+    };
+    let path = Path::new(&std::env::var_os(home_var)?).join(relative_path);
+    path.exists().then_some(path)
+}
+
+/// Returns the store and the issuers that sign direct transfers with its
+/// credentials.
 ///
 /// A service-account key is read once, so the provider client and the
 /// presigner sign with the same key even when the file is replaced. Ambient
 /// credentials come from a service-account key or authorized-user file that
 /// `GOOGLE_APPLICATION_CREDENTIALS` points to, from the gcloud application
-/// default credentials file, or from the metadata server, and they sign no
-/// direct transfers.
+/// default credentials file, or from the metadata server, and the presigner
+/// signs through the IAM Credentials API as the service account they resolve
+/// to. The issuers are built for every source, and
+/// [`ConfiguredObjectStore::gcp_gcs`](crate::ConfiguredObjectStore::gcp_gcs)
+/// leaves them out when [`credentials_sign_direct_transfers`] says the
+/// credentials can't sign.
 pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<ConfiguredProvider> {
     let key_scope = KeyScope::new(config.key_prefix.as_deref())?;
     let io_runtime = StoreIoRuntime::new()?;
@@ -95,7 +150,7 @@ pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<Configur
         .with_client_options(provider_client_options())
         .with_retry(provider_retry_config())
         .with_bucket_name(config.bucket.clone());
-    let direct_transfers = match &config.credentials {
+    let key_presigner = match &config.credentials {
         GcpGcsCredentials::Ambient {} => {
             if let Some(path) = std::env::var_os(GOOGLE_APPLICATION_CREDENTIALS_ENV) {
                 builder = builder.with_application_credentials(path.to_string_lossy());
@@ -104,17 +159,13 @@ pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<Configur
         }
         GcpGcsCredentials::ServiceAccountFile { path } => {
             let key_json = read_service_account_key(path)?;
-            let request_signer = Arc::new(GcsV4Presigner::with_service_account_key(
+            let presigner = GcsV4Presigner::with_service_account_key(
                 config.bucket.clone(),
                 key_scope.clone(),
                 &key_json,
-            )?);
+            )?;
             builder = builder.with_service_account_key(key_json);
-            Some(DirectTransferIssuers {
-                get: request_signer.clone(),
-                put: Some(request_signer),
-                multipart: None,
-            })
+            Some(presigner)
         }
     };
 
@@ -126,6 +177,21 @@ pub(crate) fn gcp_gcs_with_issuers(config: GcpGcsStoreConfig) -> Result<Configur
         .build()
         .map_err(configuration_error)?;
     let retry = Arc::new(TransportRetry::new(Arc::new(StdMonotonicTimer::default())));
+    let request_signer = Arc::new(key_presigner.unwrap_or_else(|| {
+        GcsV4Presigner::with_sign_blob(
+            config.bucket.clone(),
+            key_scope.clone(),
+            http.clone(),
+            Arc::clone(&credentials),
+            Arc::clone(provider.signing_credentials()),
+            Arc::clone(&retry),
+        )
+    }));
+    let direct_transfers = DirectTransferIssuers {
+        get: request_signer.clone(),
+        put: Some(request_signer),
+        multipart: None,
+    };
     let signer = Arc::new(GcsRequestSigner {
         http,
         io_runtime: io_runtime.handle(),

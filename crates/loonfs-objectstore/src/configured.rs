@@ -4,7 +4,7 @@
 use crate::assembly::PartSizing;
 use crate::aws_credentials::{aws_credentials_source, cloudflare_r2_credentials_source};
 use crate::azure_blob::AzureBlobStoreConfig;
-use crate::gcs::{gcp_gcs_with_issuers, GcpGcsStoreConfig};
+use crate::gcs::{credentials_sign_direct_transfers, gcp_gcs_with_issuers, GcpGcsStoreConfig};
 use crate::local_fs_store::{LocalFsStore, LocalFsStoreConfig};
 use crate::object_store::{Result, SharedObjectStore};
 use crate::presign::DirectTransferIssuers;
@@ -166,9 +166,7 @@ impl ConfiguredObjectStore {
         let direct_transfers_enabled =
             endpoint_is_proven(config.endpoint_url.as_deref(), AWS_S3_PROVEN_DOMAINS);
         let provider = aws_s3_with_credentials(config, credentials)?;
-        let direct_transfers = provider
-            .direct_transfers
-            .filter(|_| direct_transfers_enabled);
+        let direct_transfers = direct_transfers_enabled.then_some(provider.direct_transfers);
         Ok(Self {
             inner: Arc::new(provider.store),
             direct_transfers,
@@ -188,18 +186,18 @@ impl ConfiguredObjectStore {
             CLOUDFLARE_R2_PROVEN_DOMAINS,
         );
         let provider = cloudflare_r2_with_credentials(config, credentials)?;
-        let direct_transfers = provider
-            .direct_transfers
-            .filter(|_| direct_transfers_enabled);
+        let direct_transfers = direct_transfers_enabled.then_some(provider.direct_transfers);
         Ok(Self {
             inner: Arc::new(provider.store),
             direct_transfers,
         })
     }
 
-    /// Builds a native GCS store, and the direct transfers it can authorize
-    /// with a service-account key. Ambient credentials have no key to sign
-    /// with, so a store built from them offers no direct transfers.
+    /// Builds a native GCS store, and the direct transfers it authorizes with
+    /// its credentials: a service-account key signs in this process, and
+    /// ambient credentials sign through the IAM Credentials API as the service
+    /// account they resolve to. An ambient store built from an authorized-user
+    /// file offers no direct transfers, because a user can't sign that way.
     ///
     /// This adapter implements no multipart signing for GCS, so the bundle's
     /// multipart slot stays empty instead of containing a signer that would
@@ -209,10 +207,11 @@ impl ConfiguredObjectStore {
     ///
     /// Construction fails when the key file, provider, runtime, or key prefix is invalid.
     pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
+        let direct_transfers_enabled = credentials_sign_direct_transfers(&config.credentials);
         let provider = gcp_gcs_with_issuers(config)?;
         Ok(Self {
             inner: Arc::new(provider.store),
-            direct_transfers: provider.direct_transfers,
+            direct_transfers: direct_transfers_enabled.then_some(provider.direct_transfers),
         })
     }
 
@@ -296,9 +295,10 @@ mod tests {
     use crate::ObjectStoreExtension;
     use crate::{
         AwsS3Credentials, AzureBlobCredentials, CloudflareR2Credentials, GcpGcsCredentials,
-        ObjectStore,
+        ObjectStore, GOOGLE_APPLICATION_CREDENTIALS_ENV,
     };
     use bytes::Bytes;
+    use loonfs_test_support::EnvGuard;
     use std::assert_matches;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -380,16 +380,34 @@ mod tests {
             .is_none());
 
         // GCS has no endpoint override to judge, so a GCS store offers direct
-        // transfers whenever its credentials can sign: a service-account key
-        // can, and ambient credentials can't.
+        // transfers whenever its credentials can sign. A service-account key
+        // signs in this process.
         assert!(gcs_store().direct_transfers().is_some());
-        let ambient = ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
-            bucket: "bucket".to_owned(),
-            credentials: GcpGcsCredentials::Ambient {},
-            key_prefix: Some("tenant-a".to_owned()),
-        })
-        .expect("construct ambient gcs store");
-        assert!(ambient.direct_transfers().is_none());
+    }
+
+    /// Checks that an ambient GCS store offers direct transfers when its
+    /// credentials resolve to a service account, from the metadata server or
+    /// from a key file, and none when they are an authorized user, who can't
+    /// sign through the IAM Credentials API.
+    #[test]
+    fn an_ambient_gcs_store_offers_direct_transfers_only_as_a_service_account() {
+        let home = tempfile::tempdir().expect("home");
+        let _home = EnvGuard::set("HOME", home.path());
+        let _unset = EnvGuard::unset(GOOGLE_APPLICATION_CREDENTIALS_ENV);
+        assert!(ambient_gcs_store().direct_transfers().is_some());
+
+        let (_key_dir, key_path) = gcs_fixture_service_account_key_file("configured-store-ambient");
+        let _key = EnvGuard::set(GOOGLE_APPLICATION_CREDENTIALS_ENV, &key_path);
+        assert!(ambient_gcs_store().direct_transfers().is_some());
+
+        let user_path = home.path().join("authorized_user.json");
+        std::fs::write(
+            &user_path,
+            r#"{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"token"}"#,
+        )
+        .expect("write the authorized-user file");
+        let _user = EnvGuard::set(GOOGLE_APPLICATION_CREDENTIALS_ENV, &user_path);
+        assert!(ambient_gcs_store().direct_transfers().is_none());
     }
 
     #[test]
@@ -466,6 +484,15 @@ mod tests {
     fn gcs_store() -> ConfiguredObjectStore {
         let (_key_dir, config) = gcs_config();
         ConfiguredObjectStore::gcp_gcs(config).expect("construct gcs store")
+    }
+
+    fn ambient_gcs_store() -> ConfiguredObjectStore {
+        ConfiguredObjectStore::gcp_gcs(GcpGcsStoreConfig {
+            bucket: "bucket".to_owned(),
+            credentials: GcpGcsCredentials::Ambient {},
+            key_prefix: Some("tenant-a".to_owned()),
+        })
+        .expect("construct ambient gcs store")
     }
 
     fn gcs_config() -> (tempfile::TempDir, GcpGcsStoreConfig) {

@@ -47,14 +47,17 @@ pub(crate) struct V4RequestParts<'a> {
     pub(crate) required_headers: BTreeMap<String, String>,
 }
 
-pub(crate) fn presign_v4(
+/// Builds the canonical request and signs it with `sign`, which runs once
+/// with the string to sign. The signing step is async because one signer
+/// sends that string to Google's IAM Credentials API.
+pub(crate) async fn presign_v4(
     scheme: V4Scheme,
     endpoint: V4Endpoint,
     method: &str,
     request_parts: V4RequestParts<'_>,
     ttl: Duration,
     now: SystemTime,
-    sign: impl FnOnce(&[u8]) -> Result<String>,
+    sign: impl AsyncFnOnce(&[u8]) -> Result<String>,
 ) -> Result<PresignedUrl> {
     if ttl.is_zero() {
         return Err(ObjectStoreError::Configuration(
@@ -119,7 +122,7 @@ pub(crate) fn presign_v4(
         scheme.credential_scope,
         hex_encode_bytes(&Sha256::digest(canonical_request.as_bytes()))
     );
-    let signature = sign(string_to_sign.as_bytes())?;
+    let signature = sign(string_to_sign.as_bytes()).await?;
     let url = format!(
         "{}://{}{}?{}&{}-Signature={}",
         endpoint.scheme,

@@ -73,9 +73,16 @@ pub enum GcpGcsCredentials {
     /// identity federation file (`external_account`) is not supported, and
     /// store construction fails on one. Tokens refresh automatically.
     ///
-    /// A store with these credentials signs no direct-transfer URLs,
-    /// whichever source they come from, so clients send and receive content
-    /// through the server.
+    /// A store with these credentials reads no private key, whichever source
+    /// they come from. It signs direct-transfer URLs through the IAM
+    /// Credentials API as the service account they resolve to, one `signBlob`
+    /// request per URL, so that service account needs the Service Account
+    /// Token Creator role on itself. An authorized-user file is a user, who
+    /// can't sign this way, so a store built from one offers no direct
+    /// transfers. On GKE, the Kubernetes ServiceAccount linked to the service
+    /// account also needs the annotation
+    /// `iam.gke.io/return-principal-id-as-email: "true"`, so that the
+    /// metadata server reports the service account's email.
     Ambient {},
     /// Reads one service-account JSON file for requests and direct-transfer signing.
     ///
