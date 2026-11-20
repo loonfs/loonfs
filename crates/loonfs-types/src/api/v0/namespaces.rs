@@ -79,6 +79,20 @@ pub struct NamespaceMetadata {
     pub retention_window_ms: Option<u64>,
 }
 
+/// One page of the namespaces in a store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ListNamespacesResponse {
+    /// The namespaces, in ascending namespace ID order. Deleted namespaces and namespaces whose
+    /// creation hasn't finished are left out, so a page can have fewer namespaces than its limit,
+    /// even none, and still have a `next_cursor`.
+    pub namespaces: Vec<NamespaceMetadata>,
+    /// An opaque cursor for the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub next_cursor: Option<String>,
+}
+
 /// The source namespace and sequence that a forked namespace started from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -184,6 +198,38 @@ mod tests {
             serde_json::to_value(windowed).expect("serialize namespace")["retention_window_ms"],
             86_400_000,
             "the metadata of a namespace with its own window includes retention_window_ms"
+        );
+    }
+
+    #[test]
+    fn a_namespace_listing_includes_next_cursor_only_when_another_page_exists() {
+        let namespace = NamespaceMetadata {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            created_at_ms: 1_000,
+            created_by: crate::ActorId::parse("test").expect("actor"),
+            fork_basis: None,
+            pool_id: crate::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x").expect("pool id"),
+            head_seq: CommitSeq(11),
+            retention_floor_seq: CommitSeq(4),
+            retention_window_ms: None,
+        };
+        let last_page = ListNamespacesResponse {
+            namespaces: vec![namespace.clone()],
+            next_cursor: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&last_page).expect("serialize listing"),
+            serde_json::json!({
+                "namespaces": [serde_json::to_value(&namespace).expect("serialize namespace")]
+            })
+        );
+        let page = ListNamespacesResponse {
+            next_cursor: Some("c".to_owned()),
+            ..last_page
+        };
+        assert_eq!(
+            serde_json::to_value(page).expect("serialize listing")["next_cursor"],
+            "c"
         );
     }
 

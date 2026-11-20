@@ -107,16 +107,16 @@ pub use loonfs_types::{
     DeleteSnapshotResponse, DeletedObjectCounts, DeletedSnapshotsByOwner, DestinationBehavior,
     DirectoryPageCursor, DisplayName, EffectiveLimit, EntryInodeKind, FileRevision,
     FileRevisionsPageCursor, GcResponse, GcSkippedWork, InodeId, InodeKind,
-    ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
-    ListSnapshotRecordsResponse, ListSnapshotsResponse, ManifestNo, MetadataMaintenanceOutcome,
-    MetadataMaintenanceResponse, MetadataSkippedWork, MonotonicTimer, NameKey,
-    NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
-    PathEntryKind, PoolDeletedObjectCounts, PoolGcResponse, PoolId, PoolRetainedCandidates,
-    PoolRetainedReason, PrincipalId, PrincipalSet, RetainedCandidates, RetainedReason, RevisionNo,
-    SetRetentionWindowResponse, Snapshot, SnapshotId, SnapshotRecord, SnapshotRecordOwner, Subject,
-    TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    ListFileRevisionsResponse, ListInodeChildrenResponse, ListNamespacesResponse,
+    ListPathEntriesResponse, ListSnapshotRecordsResponse, ListSnapshotsResponse, ManifestNo,
+    MetadataMaintenanceOutcome, MetadataMaintenanceResponse, MetadataSkippedWork, MonotonicTimer,
+    NameKey, NamespaceDiagnostics, NamespaceId, NamespaceListPageCursor, NamespaceMetadata, Page,
+    PageRequest, PathEntry, PathEntryKind, PoolDeletedObjectCounts, PoolGcResponse, PoolId,
+    PoolRetainedCandidates, PoolRetainedReason, PrincipalId, PrincipalSet, RetainedCandidates,
+    RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot, SnapshotId, SnapshotRecord,
+    SnapshotRecordOwner, Subject, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0,
+    API_GROUP_MAINTENANCE_V0, DEFAULT_NAMESPACE_PAGE_LIMIT, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
@@ -248,8 +248,8 @@ pub use options::{
     UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 pub use pagers::{
-    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, RetainedRevisionsPager,
-    SnapshotFilesPager, SnapshotRecordsPager, SnapshotsPager, TrashPager,
+    ChangesPager, FileRevisionsPager, InodeChildrenPager, NamespacesPager, PathEntriesPager,
+    RetainedRevisionsPager, SnapshotFilesPager, SnapshotRecordsPager, SnapshotsPager, TrashPager,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
 pub use read_view::ReadView;

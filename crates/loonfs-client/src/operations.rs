@@ -46,6 +46,7 @@ impl Operation {
 pub(crate) const GET_HEALTH: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_CAPABILITIES: Operation = Operation::retry(Method::GET);
 pub(crate) const CREATE_NAMESPACE: Operation = Operation::once(Method::POST);
+pub(crate) const LIST_NAMESPACES: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_NAMESPACE: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_PATH_ENTRY: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_INODE: Operation = Operation::retry(Method::GET);
@@ -104,6 +105,7 @@ mod tests {
         ("get_health", GET_HEALTH),
         ("get_capabilities", GET_CAPABILITIES),
         ("create_namespace", CREATE_NAMESPACE),
+        ("list_namespaces", LIST_NAMESPACES),
         ("get_namespace", GET_NAMESPACE),
         ("get_path_entry", GET_PATH_ENTRY),
         ("get_inode", GET_INODE),

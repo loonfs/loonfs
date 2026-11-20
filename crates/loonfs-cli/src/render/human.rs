@@ -61,6 +61,7 @@ fn human_success_text(output: &CommandOutput) -> String {
         CommandData::Current { profile, namespace } => human_current(profile, namespace.as_deref()),
         CommandData::NamespaceStatus(namespace) => human_namespace_status(namespace),
         CommandData::NamespaceDeleted(response) => human_namespace_deleted(response),
+        CommandData::NamespacesListed(response) => human_namespaces_listed(response),
         CommandData::SnapshotCreated(snapshot) => human_snapshot_created(snapshot),
         CommandData::SnapshotsListed(response) => human_snapshots_listed(response),
         CommandData::SnapshotExtended(snapshot) => human_snapshot_extended(snapshot),

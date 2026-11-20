@@ -1,6 +1,6 @@
 //! Page sizes, page envelopes, and opaque cursors for paginated endpoints.
 
-use crate::{CommitSeq, ContentId, InodeId, NameKey, RevisionNo};
+use crate::{CommitSeq, ContentId, InodeId, NameKey, NamespaceId, RevisionNo};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -232,6 +232,11 @@ string_cursor_response!(
     snapshots
 );
 string_cursor_response!(crate::ListSnapshotsResponse, crate::Snapshot, snapshots);
+string_cursor_response!(
+    crate::ListNamespacesResponse,
+    crate::NamespaceMetadata,
+    namespaces
+);
 
 impl PagedResponse for crate::GrepResponse {
     type Item = crate::GrepMatch;
@@ -316,6 +321,12 @@ pub const DEFAULT_PAGE_LIMIT: u32 = 1_000;
 /// This value is deliberately fixed and advertised through capabilities.
 pub const MAX_PAGE_LIMIT: u32 = 1_000;
 
+/// Page size of the namespace listing when a caller omits `limit`.
+///
+/// The listing reads each listed namespace's metadata, so its default page
+/// is smaller than [`DEFAULT_PAGE_LIMIT`]. Its maximum is [`MAX_PAGE_LIMIT`].
+pub const DEFAULT_NAMESPACE_PAGE_LIMIT: u32 = 100;
+
 /// Format version written into every encoded cursor.
 pub const PAGE_CURSOR_FORMAT_VERSION: u8 = 1;
 
@@ -331,6 +342,12 @@ impl EffectiveLimit {
     /// The largest page size that a caller can request.
     pub const MAX: Self =
         Self(NonZeroU32::new(MAX_PAGE_LIMIT).expect("the maximum page limit is nonzero"));
+
+    /// The page size of the namespace listing when a caller omits `limit`.
+    pub const NAMESPACE_DEFAULT: Self = Self(
+        NonZeroU32::new(DEFAULT_NAMESPACE_PAGE_LIMIT)
+            .expect("the default namespace page limit is nonzero"),
+    );
 
     /// Creates an effective limit from a non-zero value.
     pub fn new(value: NonZeroU32) -> Self {
@@ -565,6 +582,22 @@ pub struct TrashPageCursor {
 
 impl PageCursor for TrashPageCursor {
     const KIND: &'static str = "trash";
+}
+
+/// A cursor that resumes the namespace listing after `last_namespace_id`.
+///
+/// The ID is the last one the previous page listed from the store, whether
+/// or not that namespace was returned, so the cursor doesn't expire and a
+/// namespace created or deleted between pages doesn't invalidate it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamespaceListPageCursor {
+    /// The namespace ID the previous page ended on.
+    pub last_namespace_id: NamespaceId,
+}
+
+impl PageCursor for NamespaceListPageCursor {
+    const KIND: &'static str = "namespace_list";
 }
 
 /// A cursor that resumes content search at one position in candidate order,
@@ -895,6 +928,10 @@ mod tests {
 
         assert_eq!(limit.get(), DEFAULT_PAGE_LIMIT);
         assert_eq!(limit.limit_plus_one(), 1_001);
+        assert_eq!(
+            EffectiveLimit::NAMESPACE_DEFAULT.get(),
+            DEFAULT_NAMESPACE_PAGE_LIMIT
+        );
     }
 
     #[test]
@@ -1001,6 +1038,26 @@ mod tests {
                 Err(OpaqueTokenError::InvalidJson(message)) if message.contains("unknown field")
             );
         }
+    }
+
+    #[test]
+    fn a_namespace_list_cursor_round_trips_and_decodes_only_as_its_own_kind() {
+        let cursor = NamespaceListPageCursor {
+            last_namespace_id: NamespaceId::parse("bravo").expect("namespace ID"),
+        };
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+
+        assert_eq!(
+            decode_cursor::<NamespaceListPageCursor>(&encoded).expect("decode cursor"),
+            cursor
+        );
+        assert_eq!(
+            decode_cursor::<TrashPageCursor>(&encoded),
+            Err(OpaqueTokenError::WrongKind {
+                expected: "trash",
+                actual: "namespace_list".to_owned(),
+            })
+        );
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         host::get_metrics,
         crate::http::handlers_namespace::get_capabilities,
         crate::http::handlers_namespace::create_namespace,
+        crate::http::handlers_namespace::list_namespaces,
         crate::http::handlers_namespace::get_namespace,
         crate::http::handlers_namespace::get_namespace_diagnostics,
         crate::http::handlers_namespace::delete_namespace,

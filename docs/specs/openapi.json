@@ -3020,6 +3020,26 @@
         ],
         "type": "object"
       },
+      "ListNamespacesResponse": {
+        "description": "One page of the namespaces in a store.",
+        "properties": {
+          "namespaces": {
+            "description": "The namespaces, in ascending namespace ID order. Deleted namespaces and namespaces whose\ncreation hasn't finished are left out, so a page can have fewer namespaces than its limit,\neven none, and still have a `next_cursor`.",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceMetadata"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "An opaque cursor for the next page.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespaces"
+        ],
+        "type": "object"
+      },
       "ListPathEntriesResponse": {
         "description": "One page of a directory's entries, with the namespace head that the read used.",
         "properties": {
@@ -6013,6 +6033,84 @@
       }
     },
     "/v0/namespaces": {
+      "get": {
+        "description": "Lists the store's namespaces in namespace ID order, and returns for each one the object that `GET /v0/namespaces/{namespace_id}` returns. The list leaves out deleted namespaces and namespaces whose creation hasn't finished, so a page can have fewer namespaces than `limit`, even none, and still include `next_cursor`. Without `limit`, a page lists up to 100 namespaces.",
+        "operationId": "list_namespaces",
+        "parameters": [
+          {
+            "description": "The maximum number of namespace IDs the page lists from the store.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "format": "int32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The opaque cursor that the previous page returned.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListNamespacesResponse"
+                }
+              }
+            },
+            "description": "Namespaces"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid limit or cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "List namespaces",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.namespaces"
+        },
+        "x-fern-request-name": "ListNamespacesRequest",
+        "x-fern-sdk-group-name": [
+          "namespaces"
+        ],
+        "x-fern-sdk-method-name": "list",
+        "x-loonfs-retry": "idempotent"
+      },
       "post": {
         "description": "Creates a new empty namespace. Without `namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         "operationId": "create_namespace",

@@ -99,7 +99,7 @@ Registered limit keys:
 
 | Limit key | Meaning |
 | --- | --- |
-| `pagination.default_limit` | The page size used when a paged request omits `limit`. An explicit `limit=0` is rejected with 400 `invalid_request`. |
+| `pagination.default_limit` | The page size used when a paged request omits `limit`, except for the namespace listing, whose default is 100 (see [Listing namespaces](#listing-namespaces)). An explicit `limit=0` is rejected with 400 `invalid_request`. |
 | `pagination.max_limit` | The largest page size accepted for paged requests. A `limit` greater than this value is rejected with 400 `invalid_request`. |
 | `upload.service_proxied.max_content_bytes` | The largest request body that one service-proxied upload content request (`PUT .../uploads/{upload_id}/content`) accepts. It isn't a maximum file size. Clients can use `direct_put` for larger content only when `filesystem.uploads.direct_put` is advertised. Otherwise, they MUST stay within this limit. |
 | `upload.direct_put.max_content_bytes` | The largest object that this deployment's provider accepts in one presigned `direct_put` request. It's unrelated to `upload.service_proxied.max_content_bytes`, which limits service-proxied uploads. A size hint above this limit returns `content_too_large` when the upload begins, and completing the upload checks the actual stored size. This limit is advertised only with `filesystem.uploads.direct_put`. |
@@ -557,7 +557,7 @@ Three request headers contain identity information, and a request sends at most 
 | `create_upload`, `put_upload_content`, `sign_upload_parts`, `complete_upload`, `get_upload`, `abort_upload` | Required. Recorded as the owner of the session. | Required. |
 | Path and inode reads, downloads, `list_trash`, and `grep` | Not required. | Required. |
 | `run_maintenance_job` | Not recorded, but a malformed value is rejected. | Not read. |
-| `get_capabilities`, `get_namespace`, the other maintenance operations, and the health, readiness, and metrics routes | Not read. | Not read. |
+| `get_capabilities`, `get_namespace`, `list_namespaces`, the other maintenance operations, and the health, readiness, and metrics routes | Not read. | Not read. |
 
 Where an operation reads these headers:
 
@@ -729,6 +729,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
 | Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `namespace_id` and `retention_window_ms` body fields. A create of an ID whose creation hasn't finished, with the same options, finishes it (see [Creating and forking namespaces](#creating-and-forking-namespaces)). |
+| List namespaces | `list_namespaces` | `idempotent` | `GET /v0/namespaces?limit=100&cursor=...` (`limit` defaults to 100 for this listing, see [Listing namespaces](#listing-namespaces)) |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}?consistency=strong` (`consistency` and `max_staleness_ms` are optional) |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=true&snapshot_id=...` (`include_attributes` is optional and defaults to `false`, and `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=true&snapshot_id=...` (`include_attributes` is optional and defaults to `false`, and `snapshot_id` is optional) |
@@ -1327,6 +1328,27 @@ A create or fork that stops between manifest 1 and the active manifest leaves th
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
 If a creation acknowledgement is lost, a new create or fork request with the same ID and the same options returns success while the first call's namespace is initializing, and `namespace_exists` once the namespace is active (or the namespace's summary, when a create request explicitly allows an existing namespace). A create request matches an initializing create when it has the same retention window. A fork request matches an initializing fork when it has the same source and, if the request identifies a snapshot, the same snapshot, and for a rebase's new fork, the same rebased fork. A request that identifies no snapshot matches whichever snapshot the first request used. A request that doesn't match returns `namespace_exists`, even when a create request allows an existing namespace. The time of the request and the principal that sent it aren't compared. Within the original attempt, after an unknown transport outcome of the manifest 1 put, the call finds the newest manifest and finishes the namespace in the same way (see [Finishing an initializing namespace](format.md#finishing-an-initializing-namespace)).
+
+### Listing namespaces
+
+`GET /v0/namespaces?limit=100&cursor=...` lists the namespaces in the store, in ascending namespace ID order, and returns each namespace as the same object that `GET /v0/namespaces/{ns}` returns. The response contains the page's namespaces (`namespaces`) and, when another page is available, an opaque cursor (`next_cursor`) for the next request. For example, a store with two namespaces returns:
+
+```json
+{
+  "namespaces": [
+    {"namespace_id": "demo", "created_at_ms": 1752623000000, "created_by": "usr_8f3c", "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x", "head_seq": 418, "retention_floor_seq": 0},
+    {"namespace_id": "ns_01jcd8z6b4r8v7w4a6ygqz0d1k", "created_at_ms": 1752700000000, "created_by": "usr_8f3c", "pool_id": "pool_7h2m9kq4xw1c0bz5trnp8e3vfy", "head_seq": 0, "retention_floor_seq": 0}
+  ]
+}
+```
+
+A page lists one page of namespace IDs from object storage, up to `limit` of them, and then reads each listed namespace's metadata at the server's default consistency. The listing leaves out a deleted or retired namespace, and a namespace whose creation hasn't finished, which are the namespaces for which `GET /v0/namespaces/{ns}` returns `namespace_deleted` or `namespace_not_found`. Those namespaces still take their place in the page, so a page can return fewer namespaces than `limit`, even none, and still include `next_cursor`. A client that wants every namespace follows `next_cursor` until a response leaves it out.
+
+`limit` defaults to 100 for this listing, instead of the advertised `pagination.default_limit`, and its maximum is the advertised `pagination.max_limit`. The cursor records the namespace ID that the previous page ended on, so it doesn't expire, and namespaces created or deleted while a client is paging don't invalidate it. A namespace created with an ID that sorts before the cursor isn't listed by that pass, as in any listing in key order. A cursor from another listing returns `invalid_request`.
+
+Why does the listing read each namespace instead of returning the IDs alone? The object-storage listing lists every namespace ID that was ever created, because a deleted namespace keeps its tombstone until retirement, and a retired namespace keeps its boundary object (see [Retirement](format.md#95-retirement)). The namespace's newest manifest is what shows whether the namespace is live, and that manifest is also what the metadata needs, so returning the metadata costs no more than leaving the dead IDs out.
+
+Why is the default page size smaller than for other listings? Each listed namespace costs a manifest read, where another listing's item is one row of a page that's already loaded.
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -3156,7 +3178,7 @@ The pattern uses the Rust `regex` crate's dialect (no backreferences or lookarou
 
 Every candidate is verified, so a stale index makes a query slower, but it doesn't change the results. The index records content values. A "content value" is the bytes that a file revision refers to, identified by the content ID and size of the revision's content reference, so files that refer to the same bytes share one value. The server reports a result for each current file whose content value matches. Matches are ordered by content value, then by `inode_id`, and then by `byte_offset`, and one match is reported per line. A client that needs inode order sorts a page.
 
-Two budgets bound a page: the match limit, and a per-page budget of candidates. The match limit is the request's `limit`, and it has the same default and maximum as every other paged request (`pagination.default_limit` and `pagination.max_limit`). The candidate budget counts the content values whose bytes the page reads and verifies, and the files whose state it checks. Because of the candidate budget, a page can return fewer matches than its limit and still include a cursor, and it can stop inside the files of one content value.
+Two budgets bound a page: the match limit, and a per-page budget of candidates. The match limit is the request's `limit`, and it has the same default and maximum as the other paged requests (`pagination.default_limit` and `pagination.max_limit`). The candidate budget counts the content values whose bytes the page reads and verifies, and the files whose state it checks. Because of the candidate budget, a page can return fewer matches than its limit and still include a cursor, and it can stop inside the files of one content value.
 
 The first page reads the namespace at its head, and it reports that head in `head_seq`. The request accepts `consistency` and `max_staleness_ms`, which select how recently the server confirms that head, as on the entry route (see [Read consistency](#read-consistency)). If a later page's cursor records a head newer than the head that the page's consistency would read, the server confirms the head the way a `strong` read does. Every later page reads the namespace at the first page's `head_seq`, which the cursor records, and reports the same `head_seq`. So a multi-page search is one consistent cut, and a file whose content changes between pages keeps its place in the order. Every later page decides which files the search's cut contains at the first page's `head_seq`, and it reports their paths then. A file whose revision and path haven't changed since then is served with the subject's current rights, and any other file only to a subject with the `history` right, so a subject without that right gets later pages that leave out the files that changed. The cursor records the content value, the inode, and the position in the file where the issuing page stopped, and the next page resumes strictly after that position. The cursor is bound to its request, so replaying it with different criteria is rejected as `invalid_request`, and so is a cursor whose `head_seq` is newer than the namespace's head. The cursor is also bound to the build of the grep index that issued it. If the index is rebuilt between pages (after a rebootstrap, or after grep is disabled and enabled again), the next page returns `invalid_request`, and the client issues the search again from its first page. When the retention floor passes the cursor's `head_seq` between pages, the next page returns `below_retention_floor`, and the client issues the search again from its first page too.
 

@@ -448,7 +448,7 @@ impl CoreError {
     /// without a stored checksum, breaks a rule of the format, so either
     /// error becomes [`CoreError::NamespaceCorrupt`]. Every other failure
     /// becomes [`CoreError::Store`].
-    pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
+    pub fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
         match error {
             ObjectStoreError::DifferentObject { object_key: key } => Self::NamespaceCorrupt(
                 format!("immutable object `{key}` already exists with different bytes"),

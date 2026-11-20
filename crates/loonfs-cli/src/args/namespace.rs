@@ -19,6 +19,12 @@ pub(crate) enum NamespaceCommand {
     Create(NamespaceCreateArgs),
     /// Show a namespace's current status.
     Show(NamespaceShowArgs),
+    /// List the store's namespaces in namespace ID order.
+    ///
+    /// Deleted namespaces and namespaces whose creation hasn't finished are
+    /// left out. Without --page-size, each request lists up to 100
+    /// namespaces.
+    List(NamespaceListArgs),
     /// Delete a namespace. The deletion can't be undone.
     Delete(NamespaceDeleteArgs),
     /// Fork a namespace into a new one.
@@ -34,6 +40,12 @@ pub(crate) struct NamespaceShowArgs {
     /// Namespace to show. When omitted, the usual namespace selection applies.
     #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
     pub namespace_id: Option<NamespaceId>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct NamespaceListArgs {
+    #[command(flatten)]
+    pub pagination: PaginationArgs,
 }
 
 #[derive(Debug, Args)]

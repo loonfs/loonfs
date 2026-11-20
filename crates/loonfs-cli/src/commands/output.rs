@@ -11,8 +11,9 @@ use loonfs_merge::{MergeSessionOutcome, MergeSessionState, MergeSessionStatus};
 use loonfs_types::{
     AbsolutePath, CapabilityDocument, Commit, CommitId, CommitSeq, DeleteNamespaceResponse,
     DeleteSnapshotResponse, FileRevision, GrepIndex, GrepMatch, InodeId, ListChangesResponse,
-    ListSnapshotRecordsResponse, ListSnapshotsResponse, NamespaceId, NamespaceMetadata, PathEntry,
-    RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
+    ListNamespacesResponse, ListSnapshotRecordsResponse, ListSnapshotsResponse, NamespaceId,
+    NamespaceMetadata, PathEntry, RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse,
+    Snapshot, StoreProbeResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -184,6 +185,7 @@ pub(crate) enum CommandData {
     },
     NamespaceStatus(NamespaceMetadata),
     NamespaceDeleted(DeleteNamespaceResponse),
+    NamespacesListed(ListNamespacesResponse),
     SnapshotCreated(Snapshot),
     SnapshotsListed(ListSnapshotsResponse),
     SnapshotExtended(Snapshot),

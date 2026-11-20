@@ -3,7 +3,7 @@
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, ContextHeaders};
 use super::handlers_uploads::{direct_multipart_issuer, direct_put_issuer};
-use super::query_params::{live_consistency, required_query_param};
+use super::query_params::{effective_page_limit, live_consistency, required_query_param};
 
 use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -15,9 +15,10 @@ use loonfs::{
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    CapabilityDocument, Commit, CommitSeq, CreateNamespaceRequest, ForkNamespaceForRebaseRequest,
-    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NextMergeRangeResponse, ReplayForkRequest,
-    ReplayForkResponse, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
+    CapabilityDocument, Commit, CommitSeq, CreateNamespaceRequest, EffectiveLimit,
+    ForkNamespaceForRebaseRequest, ForkNamespaceRequest, ListNamespacesResponse, MergeForkRequest,
+    NamespaceId, NextMergeRangeResponse, ReplayForkRequest, ReplayForkResponse,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
@@ -256,6 +257,63 @@ pub(super) async fn create_namespace(
             ApiResponseError::runtime(error).with_body_field_params(&["/retention_window_ms"])
         })?;
     Ok(Json(namespace))
+}
+
+/// The query of the namespace listing, whose default page is smaller than
+/// the other listings' (see [`EffectiveLimit::NAMESPACE_DEFAULT`]).
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[serde(deny_unknown_fields)]
+pub(super) struct ListNamespacesQuery {
+    /// The maximum number of namespace IDs the page lists from the store.
+    #[cfg_attr(feature = "openapi", param(minimum = 1, maximum = 1000, default = 100))]
+    pub(super) limit: Option<u32>,
+    /// The opaque cursor that the previous page returned.
+    pub(super) cursor: Option<String>,
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        operation_id = "list_namespaces",
+        extensions(
+            ("x-loonfs-retry" = json!("idempotent")),
+            ("x-fern-sdk-group-name" = json!(["namespaces"])),
+            ("x-fern-sdk-method-name" = json!("list")),
+            ("x-fern-request-name" = json!("ListNamespacesRequest")),
+        ),
+        path = "/v0/namespaces",
+        tag = "namespaces",
+        summary = "List namespaces",
+        description = "Lists the store's namespaces in namespace ID order, and returns for each one the object that `GET /v0/namespaces/{namespace_id}` returns. The list leaves out deleted namespaces and namespaces whose creation hasn't finished, so a page can have fewer namespaces than `limit`, even none, and still include `next_cursor`. Without `limit`, a page lists up to 100 namespaces.",
+        params(ListNamespacesQuery),
+        responses(
+            (status = 200, description = "Namespaces", body = ListNamespacesResponse),
+            (status = 400, description = "Invalid limit or cursor", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn list_namespaces(
+    State(state): State<Arc<HttpState>>,
+    AppQuery(query): AppQuery<ListNamespacesQuery>,
+) -> Result<Json<ListNamespacesResponse>, ApiResponseError> {
+    let page_limit = match query.limit {
+        None => EffectiveLimit::NAMESPACE_DEFAULT,
+        Some(limit) => effective_page_limit(Some(limit))?,
+    };
+    let response = state
+        .runtime
+        .list_namespaces()
+        .page_limit(page_limit)
+        .cursor(query.cursor)
+        .page()
+        .await
+        .map_err(ApiResponseError::runtime)?;
+    Ok(Json(response))
 }
 
 #[cfg_attr(

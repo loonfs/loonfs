@@ -14,7 +14,8 @@ use loonfs_types::{
 };
 use std::num::NonZeroU32;
 
-const NAMESPACES_PREFIX: &str = "namespaces/";
+/// The key prefix that every namespace's objects are under.
+pub const NAMESPACES_PREFIX: &str = "namespaces/";
 const POOLS_PREFIX: &str = "pools/";
 
 /// Length of a content ID: `con_` and a generated ID body.

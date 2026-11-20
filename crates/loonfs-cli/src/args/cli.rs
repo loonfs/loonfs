@@ -197,7 +197,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
-    /// Create, fork, or delete namespaces.
+    /// Create, list, fork, or delete namespaces.
     Namespace {
         #[command(subcommand)]
         command: NamespaceCommand,
@@ -326,6 +326,9 @@ impl Command {
             Self::Revisions(args) => Some(&args.pagination.page_limits),
             Self::Trash(args) => Some(&args.pagination.page_limits),
             Self::Changes(args) => Some(&args.page_limits),
+            Self::Namespace {
+                command: NamespaceCommand::List(args),
+            } => Some(&args.pagination.page_limits),
             Self::Snapshot {
                 command: SnapshotCommand::List(args),
             } => Some(&args.pagination.page_limits),

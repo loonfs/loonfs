@@ -4,16 +4,20 @@
 use crate::operations::{self};
 use crate::reads::push_read_at;
 use crate::transport::QueryBuilder;
-use crate::{Client, Result};
+use crate::{Client, ClientError, Result};
 use loonfs_types::options::{
     CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions, LiveReadOptions,
     MergeForkOptions, ReadAt,
 };
 use loonfs_types::{
-    headers, ActorId, Commit, CommitId, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
-    ForkNamespaceForRebaseRequest, ForkNamespaceRequest, MergeForkRequest, NamespaceId,
-    NamespaceMetadata, NextMergeRangeResponse, ReplayForkRequest, ReplayForkResponse,
+    headers, ActorId, Commit, CommitId, CreateNamespaceRequest, DeleteNamespaceResponse,
+    EffectiveLimit, ErrorCode, ForkNamespaceForRebaseRequest, ForkNamespaceRequest,
+    ListNamespacesResponse, MergeForkRequest, NamespaceId, NamespaceMetadata,
+    NextMergeRangeResponse, PageRequest, Pager, ReplayForkRequest, ReplayForkResponse,
 };
+
+/// A pager over the namespaces in a store.
+pub type NamespacesPager = Pager<ListNamespacesResponse, ClientError>;
 
 impl Client {
     /// Creates an empty namespace with the given ID and returns
@@ -58,6 +62,29 @@ impl Client {
             }
             created => created,
         }
+    }
+
+    /// Lists the store's namespaces in ascending namespace ID order.
+    ///
+    /// Deleted namespaces and namespaces whose creation hasn't finished are
+    /// left out, so a page can have fewer namespaces than its limit, even
+    /// none, and still have a next cursor. Without a page limit, each request
+    /// asks for `DEFAULT_NAMESPACE_PAGE_LIMIT` namespaces.
+    pub fn list_namespaces(&self) -> NamespacesPager {
+        Pager::with_state(self.clone(), |client, request| async move {
+            client.namespaces_page(request).await
+        })
+        .page_limit(EffectiveLimit::NAMESPACE_DEFAULT)
+    }
+
+    async fn namespaces_page(
+        &self,
+        request: PageRequest<String>,
+    ) -> Result<ListNamespacesResponse> {
+        let mut query = QueryBuilder::new(format!("{}/v0/namespaces", self.base_url));
+        query.page(&request);
+        self.send_json(self.request(operations::LIST_NAMESPACES, &query.build()))
+            .await
     }
 
     /// Returns the namespace's current state, at the server's default
@@ -356,6 +383,33 @@ mod tests {
                 "source_namespace_id=fork&consistency=strong",
                 "consistency=eventual&max_staleness_ms=2500",
                 "source_namespace_id=fork&consistency=eventual&max_staleness_ms=2500",
+            ]
+        );
+    }
+
+    /// Checks that the namespace listing asks for the namespace listing's
+    /// default page size and passes each page's cursor to the next request.
+    #[tokio::test]
+    async fn the_namespace_listing_asks_for_its_default_page_size_and_follows_the_cursor() {
+        let transport = scripted_transport::script([
+            Outcome::Success(br#"{"namespaces":[],"next_cursor":"c"}"#.to_vec()),
+            Outcome::Success(br#"{"namespaces":[]}"#.to_vec()),
+        ]);
+        let client = scripted_transport::client(&transport);
+        let mut pager = client.list_namespaces();
+        while let Some(page) = pager.next().await {
+            page.expect("page");
+        }
+        let urls: Vec<_> = transport
+            .sent()
+            .into_iter()
+            .map(|request| request.url)
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "http://example.invalid/v0/namespaces?limit=100",
+                "http://example.invalid/v0/namespaces?limit=100&cursor=c",
             ]
         );
     }

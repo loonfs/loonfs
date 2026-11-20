@@ -1,10 +1,11 @@
-//! `loonfs namespace` commands: create, show, fork, and delete.
+//! `loonfs namespace` commands: create, show, list, fork, and delete.
 
 use super::context::{Invocation, ProfileContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
+use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
     NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs, NamespaceForkArgs,
-    NamespaceShowArgs, NamespaceUseArgs,
+    NamespaceListArgs, NamespaceShowArgs, NamespaceUseArgs,
 };
 use crate::config_file::{load_config, mutate_config};
 use crate::error::{CliError, Result};
@@ -22,6 +23,7 @@ pub(crate) async fn run_namespace_command(
     match command {
         NamespaceCommand::Create(args) => run_namespace_create(invocation, args).await,
         NamespaceCommand::Show(args) => run_namespace_show(invocation, args).await,
+        NamespaceCommand::List(args) => run_namespace_list(invocation, args).await,
         NamespaceCommand::Delete(args) => run_namespace_delete(invocation, args).await,
         NamespaceCommand::Fork(args) => run_namespace_fork(invocation, args).await,
     }
@@ -45,6 +47,28 @@ async fn run_namespace_show(
         .map_err(|error| context.fail(error))?;
 
     Ok(context.output(CommandData::NamespaceStatus(namespace)))
+}
+
+async fn run_namespace_list(
+    invocation: &Invocation,
+    args: NamespaceListArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = ProfileContext::resolve(invocation).await?;
+    let listing = collect_or_stream_pages(
+        context
+            .target
+            .client
+            .list_namespaces()
+            .cursor(args.pagination.cursor),
+        &args.pagination.page_limits,
+        |_: &loonfs_types::ListNamespacesResponse| {},
+    )
+    .await
+    .map_err(|error| context.fail(error))?;
+    let PagedListing::Collected(response) = listing else {
+        return Ok(context.output(CommandData::StreamedToStdout));
+    };
+    Ok(context.output(CommandData::NamespacesListed(response)))
 }
 
 async fn run_namespace_create(

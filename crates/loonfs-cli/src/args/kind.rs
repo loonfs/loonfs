@@ -44,6 +44,7 @@ command_kinds! {
     ProfileUse => "profile_use",
     NamespaceCreate => "namespace_create",
     NamespaceShow => "namespace_show",
+    NamespaceList => "namespace_list",
     NamespaceDelete => "namespace_delete",
     NamespaceFork => "namespace_fork",
     NamespaceUse => "namespace_use",
@@ -119,6 +120,7 @@ impl Command {
             Command::Namespace { command } => match command {
                 NamespaceCommand::Create(_) => CommandKind::NamespaceCreate,
                 NamespaceCommand::Show(_) => CommandKind::NamespaceShow,
+                NamespaceCommand::List(_) => CommandKind::NamespaceList,
                 NamespaceCommand::Delete(_) => CommandKind::NamespaceDelete,
                 NamespaceCommand::Fork(_) => CommandKind::NamespaceFork,
             },

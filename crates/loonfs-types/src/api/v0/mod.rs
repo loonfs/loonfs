@@ -45,8 +45,8 @@ pub use merges::{
     NextMergeRangeResponse, ReplayForkRequest, ReplayForkResponse,
 };
 pub use namespaces::{
-    CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceDiagnostics,
-    NamespaceForkBasis, NamespaceMetadata, NamespaceRebasedFrom,
+    CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, ListNamespacesResponse,
+    NamespaceDiagnostics, NamespaceForkBasis, NamespaceMetadata, NamespaceRebasedFrom,
 };
 pub use operations::{DeleteDirectoryBehavior, FileContent, FilesystemOperation};
 pub use preconditions::{DestinationBehavior, DestinationPrecondition};
