@@ -202,6 +202,20 @@ Access changes follow these ordering and revocation rules:
 6. Replaying a receipt returns the original result to the same actor without authorizing again.
 7. The application is responsible for the freshness of group membership, on each request.
 
+## Forks and merges
+
+This section describes what happens to access rows when a namespace is forked and when a fork is merged.
+
+A fork copies every row of its source at the fork point, and access rows are rows, so a fork starts with its source's grants, boundaries, and administrators. A request in the fork is checked against the fork's rows. A grant that changes on the source after the fork doesn't reach the fork, and a grant that changes in the fork doesn't reach the source, until a merge carries it across.
+
+A merge treats an inode's access row as one of its four row kinds, with its content, binding, and attributes (see [The conflict rule](merge.md#the-conflict-rule)). If the fork changed an inode's row and both sides now hold the same boundary and grants, there's nothing to merge. If the source's current row is one the fork started from, or one that an earlier merge of this fork wrote, the merge replaces it with the fork's row. If the source wrote a different row on its own since the fork point, the merge reports an `access` conflict, and a rebase skips that change and reports it. The row is the unit: there's no merge of two grant maps, so a resolver sets the row it wants once, in the new fork.
+
+A merge with principals is authorized against the source's rows at merge time, as if the subject made each change directly. An access change needs `manage`, or `share` for a change that keeps the boundary and grants only rights that the subject has itself. A change to the root's administrators needs an administrator. The subject also needs `read`, in the fork, on every changed inode that is still visible there; a deletion needs no `read` in the fork, because the inode is already hidden, and the deletion is still authorized against the source. So a subject whose `write` was revoked on the source can't merge a fork's write, whatever the fork's rows say. A merge in the service context checks nothing.
+
+Forking a namespace, creating a rebase's new fork, and reading a fork's next merge range need an administrator or the service context. An application forks on a user's behalf, and the fork carries every access row of its source, so a fork is as open as its source until the application changes the fork's rows. Narrowing a fork means changing each row that grants the access, as in any namespace, because replacing the root row leaves the grants below it in place.
+
+Why is an access row merged like any other row, instead of staying with the source? A long-lived fork, such as one that stands in for a staging environment, manages access like any namespace, and a rule that kept access rows out of merges would be the one row kind with its own merge rule. The cost is the whole-row conflict when both sides change the same item's grants, which the resolver settles by writing the row once.
+
 ## Alternatives considered
 
 - **A per-namespace access mode.** A namespace records whether requests are checked, and an "unrestricted" namespace ignores the principals that a request sends. A request in the service context already has every right, so an application that sends only the service context is never checked, and a namespace without access rows costs nothing. The mode adds one behavior to that: every right for a request that sends principals, without reporting it. It lets an application do nothing that the service context doesn't, and it makes every rule in the API specification depend on the namespace.
