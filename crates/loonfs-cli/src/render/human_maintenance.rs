@@ -7,8 +7,8 @@ use loonfs_merge::{
 };
 use loonfs_types::{
     CommitSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
-    ListSnapshotRecordsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome,
-    MetadataSkippedWork, NamespaceMetadata, RunMaintenanceJobResponse,
+    ListNamespacesResponse, ListSnapshotRecordsResponse, ListSnapshotsResponse,
+    MetadataMaintenanceOutcome, MetadataSkippedWork, NamespaceMetadata, RunMaintenanceJobResponse,
     RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
 };
 use loonfs_types::{MergeConflict, MergeConflictKind};
@@ -41,6 +41,28 @@ pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
 /// window.
 fn retention_window(retention_window_ms: Option<u64>) -> String {
     retention_window_ms.map_or_else(|| "-".to_owned(), |window_ms| window_ms.to_string())
+}
+
+pub(super) fn human_namespaces_listed(response: &ListNamespacesResponse) -> String {
+    let mut lines = vec!["NAMESPACE\tSEQ\tFLOOR\tWINDOW_MS\tCREATED_BY\tPOOL".to_owned()];
+    for namespace in &response.namespaces {
+        lines.push(format!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            namespace.namespace_id,
+            namespace.head_seq.0,
+            namespace.retention_floor_seq.0,
+            retention_window(namespace.retention_window_ms),
+            namespace.created_by,
+            namespace.pool_id,
+        ));
+    }
+    if response.namespaces.is_empty() {
+        lines.push("(none)".to_owned());
+    }
+    if let Some(cursor) = &response.next_cursor {
+        lines.push(format!("next_cursor: {cursor}"));
+    }
+    lines.join("\n")
 }
 
 pub(super) fn human_namespace_deleted(response: &DeleteNamespaceResponse) -> String {

@@ -17,8 +17,8 @@ use super::handlers_inodes::{
 use super::handlers_maintenance::{run_maintenance_job, run_pool_maintenance_job};
 use super::handlers_namespace::{
     create_namespace, delete_namespace, fork_namespace, fork_namespace_for_rebase,
-    get_capabilities, get_namespace, get_namespace_diagnostics, get_next_merge_range, merge_fork,
-    replay_fork,
+    get_capabilities, get_namespace, get_namespace_diagnostics, get_next_merge_range,
+    list_namespaces, merge_fork, replay_fork,
 };
 use super::handlers_query::{
     disable_grep_index, enable_grep_index, get_grep_index, grep, grep_index_not_maintained,
@@ -95,7 +95,7 @@ macro_rules! routes {
 routes! {
     ROUTES, add_routes(state);
     "/v0/capabilities" => { GET get_capabilities },
-    "/v0/namespaces" => { POST create_namespace },
+    "/v0/namespaces" => { POST create_namespace, GET list_namespaces },
     "/v0/namespaces/{namespace_id}" => { GET get_namespace, DELETE delete_namespace },
     "/v0/namespaces/{namespace_id}/forks" => { POST fork_namespace },
     "/v0/namespaces/{namespace_id}/merges" => { POST merge_fork, GET get_next_merge_range },

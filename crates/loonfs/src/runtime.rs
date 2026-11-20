@@ -46,6 +46,7 @@ use std::sync::Arc;
 use tracing::Instrument;
 
 mod builder;
+mod namespace_list;
 
 pub use builder::LoonFsBuilder;
 

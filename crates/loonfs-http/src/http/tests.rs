@@ -8,6 +8,7 @@ mod hosted_content_ref_access;
 mod http_access;
 mod inline_commits;
 mod maintenance_jobs;
+mod namespace_listing;
 mod namespaces;
 mod ranged_reads;
 mod read_consistency;

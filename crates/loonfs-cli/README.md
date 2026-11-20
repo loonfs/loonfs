@@ -184,6 +184,13 @@ Namespace management
     Show the selected namespace's status, creator, retention window, and
     pool ID
 
+  loonfs namespace list [--limit <n>] [--page-size <n>] [--cursor <cursor>]
+                        [--all] [--jsonl]
+    List the store's namespaces in object-key order: namespace ID order,
+    except that an ID sorts after the longer IDs that extend it with - or .
+    Deleted namespaces and namespaces whose creation hasn't finished are
+    left out. Without --page-size, each request lists up to 100 namespaces
+
   loonfs namespace fork <source> [new-namespace] [--snapshot <id>] [--actor-id <stable-id>]
     Fork a namespace into a new one. Without a new namespace ID, the CLI
     generates an ID, prints it on stderr before it sends the request, and
@@ -249,10 +256,10 @@ Snapshot management
     command can be repeated
 
 Pagination
-  ls, grep, revisions, trash, changes, snapshot list, and maintenance
-  snapshot list return one page by default. --limit sets the total
-  maximum across pages, --page-size sets the size of each request, and
-  --cursor resumes a previous result. --all fetches every page for human
+  ls, grep, revisions, trash, changes, namespace list, snapshot list, and
+  maintenance snapshot list return one page by default. --limit sets the
+  total maximum across pages, --page-size sets the size of each request,
+  and --cursor resumes a previous result. --all fetches every page for human
   output. --json returns a bounded document and can't be combined with
   --all. Use --jsonl to stream every result. --jsonl prints only the items,
   without envelope fields such as the namespace, head sequence, or

@@ -3,8 +3,8 @@
 
 use crate::{
     CommitSeq, CoreError, Error, InodeId, ListChangesResponse, ListFileRevisionsResponse,
-    ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, ListSnapshotRecordsResponse,
-    ListSnapshotsResponse, NamespaceId, SnapshotFilesPage,
+    ListInodeChildrenResponse, ListNamespacesResponse, ListOptions, ListPathEntriesResponse,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, NamespaceId, SnapshotFilesPage,
 };
 use loonfs_types::{
     decode_cursor, encode_cursor, FileRevision, FileRevisionsPageCursor, ListPageCursor, Page,
@@ -29,6 +29,8 @@ pub type RetainedRevisionsPager = loonfs_types::Pager<loonfs_core::RetainedRevis
 pub type SnapshotRecordsPager = loonfs_types::Pager<ListSnapshotRecordsResponse, Error>;
 /// A pager over snapshots.
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
+/// A pager over the namespaces in a store.
+pub type NamespacesPager = loonfs_types::Pager<ListNamespacesResponse, Error>;
 
 /// Decodes the wire cursor a pager has into the typed cursor a read
 /// takes.

@@ -243,6 +243,19 @@ fn every_paginated_listing_accepts_the_shared_flags() {
         ],
         &[
             "loonfs",
+            "namespace",
+            "list",
+            "--limit",
+            "5",
+            "--page-size",
+            "2",
+            "--all",
+            "--jsonl",
+            "--cursor",
+            "c",
+        ],
+        &[
+            "loonfs",
             "maintenance",
             "snapshot",
             "list",
@@ -295,6 +308,15 @@ fn all_json_is_rejected_for_every_paginated_listing() {
             "loonfs", "--json", "snapshot", "list", "demo", "--all", "--limit", "5",
         ],
         &["loonfs", "--json", "trash", "--all", "--limit", "5"],
+        &[
+            "loonfs",
+            "--json",
+            "namespace",
+            "list",
+            "--all",
+            "--limit",
+            "5",
+        ],
         &["loonfs", "--json", "changes", "--all", "--limit", "5"],
         &["loonfs", "--json", "grep", "x", "--all", "--limit", "5"],
         &[
@@ -332,6 +354,7 @@ fn command_kind_envelope_values_are_pinned() {
         (CommandKind::ProfileUse, "profile_use"),
         (CommandKind::NamespaceCreate, "namespace_create"),
         (CommandKind::NamespaceShow, "namespace_show"),
+        (CommandKind::NamespaceList, "namespace_list"),
         (CommandKind::NamespaceDelete, "namespace_delete"),
         (CommandKind::NamespaceFork, "namespace_fork"),
         (CommandKind::NamespaceUse, "namespace_use"),
@@ -423,7 +446,7 @@ fn management_command_model_uses_noun_families() {
     );
 
     let namespace = subcommand(&command, "namespace");
-    assert_subcommands(namespace, &["create", "show", "delete", "fork"]);
+    assert_subcommands(namespace, &["create", "show", "list", "delete", "fork"]);
 
     let snapshot = subcommand(&command, "snapshot");
     assert_subcommands(snapshot, &["create", "list", "extend", "delete"]);

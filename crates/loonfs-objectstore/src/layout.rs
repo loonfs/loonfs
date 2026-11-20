@@ -14,7 +14,8 @@ use loonfs_types::{
 };
 use std::num::NonZeroU32;
 
-const NAMESPACES_PREFIX: &str = "namespaces/";
+/// The key prefix that every namespace's objects are under.
+pub const NAMESPACES_PREFIX: &str = "namespaces/";
 const POOLS_PREFIX: &str = "pools/";
 
 /// Length of a content ID: `con_` and a generated ID body.
@@ -295,6 +296,18 @@ impl NamespacePageCursor {
     /// Builds the position just after `namespace_id`.
     pub fn after(namespace_id: &NamespaceId) -> Self {
         Self(namespace_prefix(namespace_id))
+    }
+
+    /// Builds the position `key`, which [`NamespacePageCursor::into_key`]
+    /// returned for an earlier page. A key outside `namespaces/` is no
+    /// position in this listing, and returns `None`.
+    pub fn from_key(key: String) -> Option<Self> {
+        key.starts_with(NAMESPACES_PREFIX).then_some(Self(key))
+    }
+
+    /// The position as an object key, for a cursor that leaves this process.
+    pub fn into_key(self) -> String {
+        self.0
     }
 }
 
