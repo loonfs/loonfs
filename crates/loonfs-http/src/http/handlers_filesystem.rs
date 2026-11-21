@@ -645,7 +645,8 @@ pub(super) async fn create_commit(
                 &put_content_refs,
                 &content_tokens,
             )
-            .await?,
+            .await
+            .map_err(|error| error.with_commit_id(&commit_id_for_errors))?,
         )
     };
     let request = CommitIntent {

@@ -587,9 +587,10 @@ async fn provider_failure_is_projected_in_the_presign_api_envelope() {
 
     let response = super::middleware::REQUEST_ID
         .scope("req_presign_hygiene".to_owned(), async {
-            super::handlers_uploads::presign_issuer_error(PoisonProviderStore::denied(
-                "namespaces/customer-a/hint.json",
-            ))
+            super::handlers_uploads::presign_issuer_error(
+                PoisonProviderStore::denied("namespaces/customer-a/hint.json"),
+                None,
+            )
             .into_response()
         })
         .await;
@@ -610,19 +611,36 @@ async fn provider_failure_is_projected_in_the_presign_api_envelope() {
 async fn invalid_presign_content_is_a_bad_request() {
     use axum::response::IntoResponse;
 
-    let response =
-        super::handlers_uploads::presign_issuer_error(ObjectStoreError::InvalidRequest {
+    let response = super::handlers_uploads::presign_issuer_error(
+        ObjectStoreError::InvalidRequest {
             object_key: "pools/pool_00000000000000000000000001/content/con_1".to_owned(),
             message: "invalid checksum".to_owned(),
-        })
-        .into_response();
+        },
+        Some("/parts"),
+    )
+    .into_response();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read presign error body");
     let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
     assert!(rendered.contains("invalid_request"), "{rendered}");
-    assert!(rendered.contains("/content"), "{rendered}");
+    assert!(rendered.contains("/parts"), "{rendered}");
+
+    let download_response = super::handlers_uploads::presign_issuer_error(
+        ObjectStoreError::InvalidRequest {
+            object_key: "pools/pool_00000000000000000000000001/content/con_1".to_owned(),
+            message: "invalid range".to_owned(),
+        },
+        None,
+    )
+    .into_response();
+    assert_eq!(download_response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(download_response.into_body(), usize::MAX)
+        .await
+        .expect("read presign error body");
+    let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
+    assert!(!rendered.contains("/content"), "{rendered}");
 }
 
 fn data_wal_put_for(

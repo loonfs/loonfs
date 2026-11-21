@@ -64,6 +64,7 @@ The example below is the reference deployment's document with default server set
     "download.service_proxied.max_content_bytes": 268435456,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
+    "pagination.namespaces_default_limit": 100,
     "query.grep.scan_budget_files": 4096,
     "query.grep.tail_budget_files": 512,
     "upload.complete.max_request_body_bytes": 8388608,
@@ -91,7 +92,8 @@ Registered limit keys:
 
 | Limit key | Meaning |
 | --- | --- |
-| `pagination.default_limit` | Page size used when a paged request omits `limit`, except namespace listing, which defaults to 100 (see [Listing namespaces](#listing-namespaces)). An explicit `limit=0` returns 400 `invalid_request`. |
+| `pagination.default_limit` | Page size used when a paged request omits `limit`, except namespace listing, which uses `pagination.namespaces_default_limit` (see [Listing namespaces](#listing-namespaces)). An explicit `limit=0` returns 400 `invalid_request`. |
+| `pagination.namespaces_default_limit` | Page size used when `GET /v0/namespaces` omits `limit` (100). |
 | `pagination.max_limit` | Largest page size accepted for paged requests. A larger `limit` returns 400 `invalid_request`. |
 | `upload.service_proxied.max_content_bytes` | Largest body accepted by one `PUT .../uploads/{upload_id}/content` request. This is a per-request proxy cap, not a maximum file size. Clients can use `direct_put` for larger uploads when `filesystem.uploads.direct_put` is advertised, and otherwise MUST stay within this limit. |
 | `upload.direct_put.max_content_bytes` | Largest object the deployment's provider accepts in one presigned `direct_put` request, independent of the service-proxied limit. A size hint above this limit returns `content_too_large` at upload begin, and completion checks the actual stored size. Advertised only with `filesystem.uploads.direct_put`. |

@@ -1,5 +1,13 @@
 {
   "components": {
+    "headers": {
+      "RequestId": {
+        "description": "Unique request identifier echoed in error envelopes and server logs",
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
     "responses": {
       "UnavailableResponse": {
         "content": {
@@ -47,6 +55,9 @@
             "schema": {
               "type": "string"
             }
+          },
+          "x-request-id": {
+            "$ref": "#/components/headers/RequestId"
           }
         }
       }
@@ -5109,7 +5120,12 @@
                 }
               }
             },
-            "description": "Server health check"
+            "description": "Server health check",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5139,7 +5155,12 @@
                 }
               }
             },
-            "description": "Prometheus text exposition"
+            "description": "Prometheus text exposition",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5149,7 +5170,12 @@
                 }
               }
             },
-            "description": "Missing or invalid bearer token"
+            "description": "Missing or invalid bearer token",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5177,7 +5203,12 @@
                 }
               }
             },
-            "description": "The server admits new work"
+            "description": "The server admits new work",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5207,7 +5238,12 @@
                 }
               }
             },
-            "description": "Capability document"
+            "description": "Capability document",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5217,7 +5253,12 @@
                 }
               }
             },
-            "description": "Unknown query parameter"
+            "description": "Unknown query parameter",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5227,7 +5268,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5268,7 +5314,12 @@
                 }
               }
             },
-            "description": "Namespace diagnostics"
+            "description": "Namespace diagnostics",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5278,7 +5329,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID"
+            "description": "Invalid namespace ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5288,7 +5344,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -5298,7 +5359,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -5308,7 +5374,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5352,7 +5423,12 @@
                 }
               }
             },
-            "description": "Grep index status and build progress"
+            "description": "Grep index status and build progress",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5362,7 +5438,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID"
+            "description": "Invalid namespace ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5372,7 +5453,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -5382,7 +5468,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -5392,7 +5483,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "500": {
             "content": {
@@ -5402,7 +5498,12 @@
                 }
               }
             },
-            "description": "The grep index is corrupt or its backing store is unavailable"
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -5412,7 +5513,12 @@
                 }
               }
             },
-            "description": "This deployment doesn't maintain the grep index"
+            "description": "This deployment doesn't maintain the grep index",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5456,7 +5562,12 @@
                 }
               }
             },
-            "description": "Grep index disabled or already disabled"
+            "description": "Grep index disabled or already disabled",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5466,7 +5577,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID"
+            "description": "Invalid namespace ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5476,7 +5592,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -5486,7 +5607,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -5496,7 +5622,12 @@
                 }
               }
             },
-            "description": "Another publication changed the namespace manifest first. Retry the request."
+            "description": "Another publication changed the namespace manifest first. Retry the request.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -5506,7 +5637,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "500": {
             "content": {
@@ -5516,7 +5652,12 @@
                 }
               }
             },
-            "description": "The grep index is corrupt or its backing store is unavailable"
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -5526,7 +5667,12 @@
                 }
               }
             },
-            "description": "This deployment doesn't maintain the grep index"
+            "description": "This deployment doesn't maintain the grep index",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5570,7 +5716,12 @@
                 }
               }
             },
-            "description": "Grep index enabled or already enabled"
+            "description": "Grep index enabled or already enabled",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5580,7 +5731,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID"
+            "description": "Invalid namespace ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5590,7 +5746,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -5600,7 +5761,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -5610,7 +5776,12 @@
                 }
               }
             },
-            "description": "Another publication changed the namespace manifest first. Retry the request."
+            "description": "Another publication changed the namespace manifest first. Retry the request.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -5620,7 +5791,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "500": {
             "content": {
@@ -5630,7 +5806,12 @@
                 }
               }
             },
-            "description": "The grep index is corrupt or its backing store is unavailable"
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -5640,7 +5821,12 @@
                 }
               }
             },
-            "description": "This deployment doesn't maintain the grep index"
+            "description": "This deployment doesn't maintain the grep index",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5695,7 +5881,12 @@
                 }
               }
             },
-            "description": "Maintenance job completed"
+            "description": "Maintenance job completed",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5705,7 +5896,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID or options"
+            "description": "Invalid namespace ID or options",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5715,7 +5911,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -5725,7 +5926,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -5735,7 +5941,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -5745,7 +5956,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5813,7 +6029,12 @@
                 }
               }
             },
-            "description": "Existing snapshot objects"
+            "description": "Existing snapshot objects",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5823,7 +6044,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID, limit, or cursor"
+            "description": "Invalid namespace ID, limit, or cursor",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5833,7 +6059,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -5843,7 +6074,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5901,7 +6137,12 @@
                 }
               }
             },
-            "description": "Existing snapshot"
+            "description": "Existing snapshot",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5911,7 +6152,12 @@
                 }
               }
             },
-            "description": "Invalid namespace or snapshot ID"
+            "description": "Invalid namespace or snapshot ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -5921,7 +6167,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -5931,7 +6182,12 @@
                 }
               }
             },
-            "description": "Namespace or snapshot not found"
+            "description": "Namespace or snapshot not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -5986,7 +6242,12 @@
                 }
               }
             },
-            "description": "Maintenance job completed"
+            "description": "Maintenance job completed",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -5996,7 +6257,12 @@
                 }
               }
             },
-            "description": "Invalid pool ID or options"
+            "description": "Invalid pool ID or options",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6006,7 +6272,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -6016,7 +6287,12 @@
                 }
               }
             },
-            "description": "Pool not found"
+            "description": "Pool not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -6026,7 +6302,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6061,8 +6342,8 @@
               }
             }
           },
-          "description": "The probe options. Send `{}` to use the defaults.",
-          "required": true
+          "description": "The probe options. Omit the body or send `{}` to use the defaults.",
+          "required": false
         },
         "responses": {
           "200": {
@@ -6073,7 +6354,12 @@
                 }
               }
             },
-            "description": "The probe completed, and the body reports each check's outcome"
+            "description": "The probe completed, and the body reports each check's outcome",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -6083,7 +6369,12 @@
                 }
               }
             },
-            "description": "Malformed request body"
+            "description": "Malformed request body",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6093,7 +6384,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -6103,7 +6399,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6162,7 +6463,12 @@
                 }
               }
             },
-            "description": "Namespaces"
+            "description": "Namespaces",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -6172,7 +6478,12 @@
                 }
               }
             },
-            "description": "Invalid limit or cursor"
+            "description": "Invalid limit or cursor",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6182,7 +6493,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6216,7 +6532,7 @@
               }
             }
           },
-          "required": true
+          "required": false
         },
         "responses": {
           "200": {
@@ -6227,7 +6543,12 @@
                 }
               }
             },
-            "description": "Namespace created"
+            "description": "Namespace created",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -6237,7 +6558,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID"
+            "description": "Invalid namespace ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6247,7 +6573,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -6257,7 +6588,12 @@
                 }
               }
             },
-            "description": "Namespace already exists"
+            "description": "Namespace already exists",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -6267,7 +6603,12 @@
                 }
               }
             },
-            "description": "The namespace ID was deleted and can't be used again (`namespace_deleted`)"
+            "description": "The namespace ID was deleted and can't be used again (`namespace_deleted`)",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -6277,7 +6618,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6332,7 +6678,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -6342,7 +6693,12 @@
                 }
               }
             },
-            "description": "Invalid request"
+            "description": "Invalid request",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6352,7 +6708,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -6362,7 +6723,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -6372,7 +6738,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -6382,7 +6753,12 @@
                 }
               }
             },
-            "description": "Delete conflict"
+            "description": "Delete conflict",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -6392,7 +6768,12 @@
                 }
               }
             },
-            "description": "Namespace already deleted"
+            "description": "Namespace already deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6458,7 +6839,12 @@
                 }
               }
             },
-            "description": "Namespace"
+            "description": "Namespace",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -6468,7 +6854,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID or consistency"
+            "description": "Invalid namespace ID or consistency",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6478,7 +6869,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -6488,7 +6884,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -6498,7 +6899,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6615,7 +7021,12 @@
                 }
               }
             },
-            "description": "Committed changes"
+            "description": "Committed changes",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -6625,7 +7036,12 @@
                 }
               }
             },
-            "description": "Invalid change cursor, limit, snapshot ID, consistency, or after_seq above the head that the request reads"
+            "description": "Invalid change cursor, limit, snapshot ID, consistency, or after_seq above the head that the request reads",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6635,7 +7051,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -6645,7 +7066,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -6655,7 +7081,12 @@
                 }
               }
             },
-            "description": "Namespace or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -6665,7 +7096,12 @@
                 }
               }
             },
-            "description": "The cursor is older than the retained change history. Rebuild state from a fresh listing or snapshot, and follow the feed from that state's head."
+            "description": "The cursor is older than the retained change history. Rebuild state from a fresh listing or snapshot, and follow the feed from that state's head.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -6675,7 +7111,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6729,7 +7170,12 @@
                 }
               }
             },
-            "description": "Commit applied"
+            "description": "Commit applied",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -6739,7 +7185,12 @@
                 }
               }
             },
-            "description": "Invalid commit"
+            "description": "Invalid commit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6749,7 +7200,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -6759,7 +7215,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -6769,7 +7230,12 @@
                 }
               }
             },
-            "description": "Namespace or path not found"
+            "description": "Namespace or path not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -6779,7 +7245,12 @@
                 }
               }
             },
-            "description": "Operation conflict"
+            "description": "Operation conflict",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -6789,7 +7260,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -6799,7 +7275,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit, or an append contains more than 256 KiB"
+            "description": "JSON body exceeds the 2 MiB limit, or an append contains more than 256 KiB",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -6809,7 +7290,12 @@
                 }
               }
             },
-            "description": "Inline content is disabled"
+            "description": "Inline content is disabled",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -6945,7 +7431,12 @@
                 }
               }
             },
-            "description": "A page of the diff"
+            "description": "A page of the diff",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -6955,7 +7446,12 @@
                 }
               }
             },
-            "description": "Invalid sequence, path, limit, or consistency, a `to_seq` above the head that the request reads, or an `after_seq` outside `from_seq` through `to_seq`"
+            "description": "Invalid sequence, path, limit, or consistency, a `to_seq` above the head that the request reads, or an `after_seq` outside `from_seq` through `to_seq`",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -6965,7 +7461,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -6975,7 +7476,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -6985,7 +7491,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -6995,7 +7506,12 @@
                 }
               }
             },
-            "description": "`from_seq` is below the retention floor, so the namespace no longer has the history after it. Rebuild state from a fresh listing or snapshot, and diff from that state's head."
+            "description": "`from_seq` is below the retention floor, so the namespace no longer has the history after it. Rebuild state from a fresh listing or snapshot, and diff from that state's head.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -7005,7 +7521,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7114,6 +7635,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -7139,6 +7663,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -7150,7 +7677,12 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot ID, consistency, or `Range` header, or revision_no combined with snapshot_id"
+            "description": "Invalid path, revision, snapshot ID, consistency, or `Range` header, or revision_no combined with snapshot_id",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -7160,7 +7692,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -7170,7 +7707,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -7180,7 +7722,12 @@
                 }
               }
             },
-            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -7190,7 +7737,12 @@
                 }
               }
             },
-            "description": "Path isn't a file"
+            "description": "Path isn't a file",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -7200,7 +7752,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -7210,7 +7767,12 @@
                 }
               }
             },
-            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "416": {
             "content": {
@@ -7227,6 +7789,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -7282,7 +7847,12 @@
                 }
               }
             },
-            "description": "Download authorized"
+            "description": "Download authorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -7292,7 +7862,12 @@
                 }
               }
             },
-            "description": "Invalid path, revision, snapshot ID, revision_no combined with snapshot_id, or start_offset at or past the file's size"
+            "description": "Invalid path, revision, snapshot ID, revision_no combined with snapshot_id, or start_offset at or past the file's size",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -7302,7 +7877,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -7312,7 +7892,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -7322,7 +7907,12 @@
                 }
               }
             },
-            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -7332,7 +7922,12 @@
                 }
               }
             },
-            "description": "Path isn't a file"
+            "description": "Path isn't a file",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -7342,7 +7937,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -7352,7 +7952,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -7362,7 +7967,12 @@
                 }
               }
             },
-            "description": "Direct download is unsupported"
+            "description": "Direct download is unsupported",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7486,7 +8096,12 @@
                 }
               }
             },
-            "description": "Directory listing page"
+            "description": "Directory listing page",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -7496,7 +8111,12 @@
                 }
               }
             },
-            "description": "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, or consistency"
+            "description": "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, or consistency",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -7506,7 +8126,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -7516,7 +8141,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -7526,7 +8156,12 @@
                 }
               }
             },
-            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -7536,7 +8171,12 @@
                 }
               }
             },
-            "description": "Path isn't a directory"
+            "description": "Path isn't a directory",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -7546,7 +8186,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7644,7 +8289,12 @@
                 }
               }
             },
-            "description": "Path entry"
+            "description": "Path entry",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -7654,7 +8304,12 @@
                 }
               }
             },
-            "description": "Invalid path, include_attributes, snapshot ID, or consistency"
+            "description": "Invalid path, include_attributes, snapshot ID, or consistency",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -7664,7 +8319,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -7674,7 +8334,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -7684,7 +8349,12 @@
                 }
               }
             },
-            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -7694,7 +8364,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7790,7 +8465,12 @@
                 }
               }
             },
-            "description": "File revisions"
+            "description": "File revisions",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -7800,7 +8480,12 @@
                 }
               }
             },
-            "description": "Invalid path"
+            "description": "Invalid path",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -7810,7 +8495,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -7820,7 +8510,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -7830,7 +8525,12 @@
                 }
               }
             },
-            "description": "Namespace or path not found"
+            "description": "Namespace or path not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -7840,7 +8540,12 @@
                 }
               }
             },
-            "description": "Path isn't a file"
+            "description": "Path isn't a file",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -7850,7 +8555,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7942,7 +8652,12 @@
                 }
               }
             },
-            "description": "Trash entries"
+            "description": "Trash entries",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -7952,7 +8667,12 @@
                 }
               }
             },
-            "description": "Invalid limit or cursor"
+            "description": "Invalid limit or cursor",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -7962,7 +8682,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -7972,7 +8697,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -7982,7 +8712,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -7992,7 +8727,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8040,7 +8780,7 @@
               }
             }
           },
-          "required": true
+          "required": false
         },
         "responses": {
           "200": {
@@ -8051,7 +8791,12 @@
                 }
               }
             },
-            "description": "Namespace forked"
+            "description": "Namespace forked",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -8061,7 +8806,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID"
+            "description": "Invalid namespace ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -8071,7 +8821,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -8081,7 +8836,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -8091,7 +8851,12 @@
                 }
               }
             },
-            "description": "Source namespace not found, or the snapshot is missing or expired. A fork that folds the source's WAL tail also returns `snapshot_not_found` once 5 minutes have passed since its first call started."
+            "description": "Source namespace not found, or the snapshot is missing or expired. A fork that folds the source's WAL tail also returns `snapshot_not_found` once 5 minutes have passed since its first call started.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -8101,7 +8866,12 @@
                 }
               }
             },
-            "description": "Fork conflict"
+            "description": "Fork conflict",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -8111,7 +8881,12 @@
                 }
               }
             },
-            "description": "The source or target namespace ID was deleted and can't be used again (`namespace_deleted`)"
+            "description": "The source or target namespace ID was deleted and can't be used again (`namespace_deleted`)",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -8121,7 +8896,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8270,7 +9050,12 @@
                 }
               }
             },
-            "description": "One page of matches"
+            "description": "One page of matches",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -8280,7 +9065,12 @@
                 }
               }
             },
-            "description": "Invalid pattern, cursor, scope, or consistency, both scopes, or an unindexable pattern without allow_scan"
+            "description": "Invalid pattern, cursor, scope, or consistency, both scopes, or an unindexable pattern without allow_scan",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -8290,7 +9080,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -8300,7 +9095,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -8310,7 +9110,12 @@
                 }
               }
             },
-            "description": "Namespace, scope path, or scope inode not found"
+            "description": "Namespace, scope path, or scope inode not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -8320,7 +9125,12 @@
                 }
               }
             },
-            "description": "The cursor's sequence is older than the retention floor. Run the search again from its first page."
+            "description": "The cursor's sequence is older than the retention floor. Run the search again from its first page.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -8330,7 +9140,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "500": {
             "content": {
@@ -8340,7 +9155,12 @@
                 }
               }
             },
-            "description": "The grep index is corrupt or its backing store is unavailable"
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -8350,7 +9170,12 @@
                 }
               }
             },
-            "description": "This deployment doesn't serve grep queries, the grep index isn't enabled, or its backfill hasn't completed on this namespace"
+            "description": "This deployment doesn't serve grep queries, the grep index isn't enabled, or its backfill hasn't completed on this namespace",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8448,7 +9273,12 @@
                 }
               }
             },
-            "description": "Path entry for the inode"
+            "description": "Path entry for the inode",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -8458,7 +9288,12 @@
                 }
               }
             },
-            "description": "Invalid inode ID, include_attributes, snapshot ID, or consistency"
+            "description": "Invalid inode ID, include_attributes, snapshot ID, or consistency",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -8468,7 +9303,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -8478,7 +9318,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -8488,7 +9333,12 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -8498,7 +9348,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8623,7 +9478,12 @@
                 }
               }
             },
-            "description": "One page of directory children"
+            "description": "One page of directory children",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -8633,7 +9493,12 @@
                 }
               }
             },
-            "description": "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, or consistency"
+            "description": "Invalid inode ID, limit, cursor, include_attributes, recursive, snapshot ID, or consistency",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -8643,7 +9508,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -8653,7 +9523,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -8663,7 +9538,12 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -8673,7 +9553,12 @@
                 }
               }
             },
-            "description": "Inode isn't a directory"
+            "description": "Inode isn't a directory",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -8683,7 +9568,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8788,6 +9678,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -8813,6 +9706,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -8824,7 +9720,12 @@
                 }
               }
             },
-            "description": "Invalid inode ID, snapshot ID, consistency, or `Range` header"
+            "description": "Invalid inode ID, snapshot ID, consistency, or `Range` header",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -8834,7 +9735,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -8844,7 +9750,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -8854,7 +9765,12 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -8864,7 +9780,12 @@
                 }
               }
             },
-            "description": "Inode isn't a file"
+            "description": "Inode isn't a file",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -8874,7 +9795,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -8884,7 +9810,12 @@
                 }
               }
             },
-            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "416": {
             "content": {
@@ -8901,6 +9832,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -8954,7 +9888,7 @@
               }
             }
           },
-          "required": true
+          "required": false
         },
         "responses": {
           "200": {
@@ -8965,7 +9899,12 @@
                 }
               }
             },
-            "description": "Download authorized"
+            "description": "Download authorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -8975,7 +9914,12 @@
                 }
               }
             },
-            "description": "Invalid inode ID, snapshot ID, or start_offset, or start_offset at or past the file's size"
+            "description": "Invalid inode ID, snapshot ID, or start_offset, or start_offset at or past the file's size",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -8985,7 +9929,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -8995,7 +9944,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -9005,7 +9959,12 @@
                 }
               }
             },
-            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -9015,7 +9974,12 @@
                 }
               }
             },
-            "description": "Inode isn't a file"
+            "description": "Inode isn't a file",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -9025,7 +9989,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -9035,7 +10004,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -9045,7 +10019,12 @@
                 }
               }
             },
-            "description": "Direct download is unsupported"
+            "description": "Direct download is unsupported",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -9140,7 +10119,12 @@
                 }
               }
             },
-            "description": "File revisions"
+            "description": "File revisions",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -9150,7 +10134,12 @@
                 }
               }
             },
-            "description": "Invalid inode ID, limit, or cursor"
+            "description": "Invalid inode ID, limit, or cursor",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -9160,7 +10149,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -9170,7 +10164,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -9180,7 +10179,12 @@
                 }
               }
             },
-            "description": "Namespace or inode not found"
+            "description": "Namespace or inode not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -9190,7 +10194,12 @@
                 }
               }
             },
-            "description": "Inode isn't a file"
+            "description": "Inode isn't a file",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -9200,7 +10209,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -9314,6 +10328,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -9339,6 +10356,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -9350,7 +10370,12 @@
                 }
               }
             },
-            "description": "Invalid inode ID, revision number, snapshot ID, consistency, or `Range` header"
+            "description": "Invalid inode ID, revision number, snapshot ID, consistency, or `Range` header",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -9360,7 +10385,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -9370,7 +10400,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -9380,7 +10415,12 @@
                 }
               }
             },
-            "description": "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -9390,7 +10430,12 @@
                 }
               }
             },
-            "description": "Inode isn't a file"
+            "description": "Inode isn't a file",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -9400,7 +10445,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -9410,7 +10460,12 @@
                 }
               }
             },
-            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit"
+            "description": "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "416": {
             "content": {
@@ -9427,6 +10482,9 @@
                 "schema": {
                   "type": "string"
                 }
+              },
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
               }
             }
           },
@@ -9489,7 +10547,7 @@
               }
             }
           },
-          "required": true
+          "required": false
         },
         "responses": {
           "200": {
@@ -9500,7 +10558,12 @@
                 }
               }
             },
-            "description": "Download authorized"
+            "description": "Download authorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -9510,7 +10573,12 @@
                 }
               }
             },
-            "description": "Invalid inode ID, revision number, snapshot ID, consistency, or start_offset, or start_offset at or past the revision's size"
+            "description": "Invalid inode ID, revision number, snapshot ID, consistency, or start_offset, or start_offset at or past the revision's size",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -9520,7 +10588,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -9530,7 +10603,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -9540,7 +10618,12 @@
                 }
               }
             },
-            "description": "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+            "description": "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -9550,7 +10633,12 @@
                 }
               }
             },
-            "description": "Inode isn't a file"
+            "description": "Inode isn't a file",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -9560,7 +10648,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -9570,7 +10663,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -9580,7 +10678,12 @@
                 }
               }
             },
-            "description": "Direct download is unsupported"
+            "description": "Direct download is unsupported",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -9653,7 +10756,12 @@
                 }
               }
             },
-            "description": "The fork's next merge range"
+            "description": "The fork's next merge range",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -9663,7 +10771,12 @@
                 }
               }
             },
-            "description": "Invalid request or consistency, or the source isn't a fork of this namespace"
+            "description": "Invalid request or consistency, or the source isn't a fork of this namespace",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -9673,7 +10786,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -9683,7 +10801,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -9693,7 +10816,12 @@
                 }
               }
             },
-            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which"
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -9703,7 +10831,12 @@
                 }
               }
             },
-            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which"
+            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -9713,7 +10846,12 @@
                 }
               }
             },
-            "description": "Merges are disabled"
+            "description": "Merges are disabled",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -9765,7 +10903,12 @@
                 }
               }
             },
-            "description": "Fork merged"
+            "description": "Fork merged",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -9775,7 +10918,12 @@
                 }
               }
             },
-            "description": "Invalid request, or the namespace isn't a fork of this namespace"
+            "description": "Invalid request, or the namespace isn't a fork of this namespace",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -9785,7 +10933,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -9795,7 +10948,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -9805,7 +10963,12 @@
                 }
               }
             },
-            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which"
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -9815,7 +10978,12 @@
                 }
               }
             },
-            "description": "Merge conflict, range conflict, or history below a retention floor"
+            "description": "Merge conflict, range conflict, or history below a retention floor",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -9825,7 +10993,12 @@
                 }
               }
             },
-            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which"
+            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -9835,7 +11008,12 @@
                 }
               }
             },
-            "description": "The merge is too large, or the JSON body exceeds the 2 MiB limit"
+            "description": "The merge is too large, or the JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -9845,7 +11023,12 @@
                 }
               }
             },
-            "description": "Merges are disabled"
+            "description": "Merges are disabled",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -9899,7 +11082,12 @@
                 }
               }
             },
-            "description": "New fork created"
+            "description": "New fork created",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -9909,7 +11097,12 @@
                 }
               }
             },
-            "description": "Invalid request, or the source isn't a fork of this namespace"
+            "description": "Invalid request, or the source isn't a fork of this namespace",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -9919,7 +11112,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -9929,7 +11127,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -9939,7 +11142,12 @@
                 }
               }
             },
-            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which. A new fork that folds this namespace's WAL tail returns `snapshot_not_found` once 5 minutes have passed since its first call started."
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which. A new fork that folds this namespace's WAL tail returns `snapshot_not_found` once 5 minutes have passed since its first call started.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -9949,7 +11157,12 @@
                 }
               }
             },
-            "description": "The new fork already exists, or history is below a retention floor"
+            "description": "The new fork already exists, or history is below a retention floor",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -9959,7 +11172,12 @@
                 }
               }
             },
-            "description": "The namespace or the fork was deleted, or the new fork's ID was deleted and can't be used again, and `details.namespace_id` identifies which"
+            "description": "The namespace or the fork was deleted, or the new fork's ID was deleted and can't be used again, and `details.namespace_id` identifies which",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -9969,7 +11187,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -9979,7 +11202,12 @@
                 }
               }
             },
-            "description": "Merges are disabled"
+            "description": "Merges are disabled",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10036,7 +11264,12 @@
                 }
               }
             },
-            "description": "Fork replayed"
+            "description": "Fork replayed",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10046,7 +11279,12 @@
                 }
               }
             },
-            "description": "Invalid request, or the namespace isn't a rebase's new fork for the fork"
+            "description": "Invalid request, or the namespace isn't a rebase's new fork for the fork",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10056,7 +11294,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10066,7 +11309,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -10076,7 +11324,12 @@
                 }
               }
             },
-            "description": "The new fork or the fork doesn't exist, and `details.namespace_id` identifies which"
+            "description": "The new fork or the fork doesn't exist, and `details.namespace_id` identifies which",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -10086,7 +11339,12 @@
                 }
               }
             },
-            "description": "Range conflict, or history below a retention floor"
+            "description": "Range conflict, or history below a retention floor",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -10096,7 +11354,12 @@
                 }
               }
             },
-            "description": "The new fork or the fork was deleted, and `details.namespace_id` identifies which"
+            "description": "The new fork or the fork was deleted, and `details.namespace_id` identifies which",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -10106,7 +11369,12 @@
                 }
               }
             },
-            "description": "The replay commit is too large, or the JSON body exceeds the 2 MiB limit"
+            "description": "The replay commit is too large, or the JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -10116,7 +11384,12 @@
                 }
               }
             },
-            "description": "Merges are disabled"
+            "description": "Merges are disabled",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10182,7 +11455,12 @@
                 }
               }
             },
-            "description": "Snapshots"
+            "description": "Snapshots",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10192,7 +11470,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID, limit, or cursor"
+            "description": "Invalid namespace ID, limit, or cursor",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10202,7 +11485,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10212,7 +11500,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -10222,7 +11515,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -10232,7 +11530,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10278,7 +11581,7 @@
               }
             }
           },
-          "required": true
+          "required": false
         },
         "responses": {
           "200": {
@@ -10289,7 +11592,12 @@
                 }
               }
             },
-            "description": "Snapshot created"
+            "description": "Snapshot created",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10299,7 +11607,12 @@
                 }
               }
             },
-            "description": "Invalid namespace ID, name, or ttl"
+            "description": "Invalid namespace ID, name, or ttl",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10309,7 +11622,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10319,7 +11637,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -10329,7 +11652,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -10339,7 +11667,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -10349,7 +11682,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10404,7 +11742,12 @@
                 }
               }
             },
-            "description": "Snapshot deleted, or already absent"
+            "description": "Snapshot deleted, or already absent",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10414,7 +11757,12 @@
                 }
               }
             },
-            "description": "Invalid namespace or snapshot ID"
+            "description": "Invalid namespace or snapshot ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10424,7 +11772,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10434,7 +11787,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -10444,7 +11802,12 @@
                 }
               }
             },
-            "description": "Namespace not found, or the ID belongs to a fork snapshot"
+            "description": "Namespace not found, or the ID belongs to a fork snapshot",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10495,7 +11858,12 @@
                 }
               }
             },
-            "description": "Snapshot"
+            "description": "Snapshot",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10505,7 +11873,12 @@
                 }
               }
             },
-            "description": "Invalid namespace or snapshot ID"
+            "description": "Invalid namespace or snapshot ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10515,7 +11888,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10525,7 +11903,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -10535,7 +11918,12 @@
                 }
               }
             },
-            "description": "Namespace or snapshot not found"
+            "description": "Namespace or snapshot not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -10545,7 +11933,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10608,7 +12001,12 @@
                 }
               }
             },
-            "description": "Snapshot extended"
+            "description": "Snapshot extended",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10618,7 +12016,12 @@
                 }
               }
             },
-            "description": "Invalid ID or ttl"
+            "description": "Invalid ID or ttl",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10628,7 +12031,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10638,7 +12046,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -10648,7 +12061,12 @@
                 }
               }
             },
-            "description": "Snapshot not found or expired"
+            "description": "Snapshot not found or expired",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -10658,7 +12076,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -10668,7 +12091,12 @@
                 }
               }
             },
-            "description": "JSON body exceeds the 2 MiB limit"
+            "description": "JSON body exceeds the 2 MiB limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10721,7 +12149,12 @@
                 }
               }
             },
-            "description": "Upload session started"
+            "description": "Upload session started",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10731,7 +12164,12 @@
                 }
               }
             },
-            "description": "Invalid upload request"
+            "description": "Invalid upload request",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10741,7 +12179,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10751,7 +12194,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -10761,7 +12209,12 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "Namespace not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -10771,7 +12224,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -10781,7 +12239,12 @@
                 }
               }
             },
-            "description": "Body exceeds the 1 MiB upload-control limit"
+            "description": "Body exceeds the 1 MiB upload-control limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -10791,7 +12254,12 @@
                 }
               }
             },
-            "description": "Requested upload mode is unsupported"
+            "description": "Requested upload mode is unsupported",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10848,7 +12316,12 @@
                 }
               }
             },
-            "description": "Upload session state"
+            "description": "Upload session state",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10858,7 +12331,12 @@
                 }
               }
             },
-            "description": "Invalid upload ID"
+            "description": "Invalid upload ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10868,7 +12346,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10878,7 +12361,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -10888,7 +12376,12 @@
                 }
               }
             },
-            "description": "Namespace or upload not found"
+            "description": "Namespace or upload not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -10898,7 +12391,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -10908,7 +12406,12 @@
                 }
               }
             },
-            "description": "Direct upload presigning is unsupported"
+            "description": "Direct upload presigning is unsupported",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10962,7 +12465,12 @@
                 }
               }
             },
-            "description": "Upload aborted"
+            "description": "Upload aborted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -10972,7 +12480,12 @@
                 }
               }
             },
-            "description": "Invalid upload ID"
+            "description": "Invalid upload ID",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -10982,7 +12495,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -10992,7 +12510,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -11002,7 +12525,12 @@
                 }
               }
             },
-            "description": "Namespace or upload not found"
+            "description": "Namespace or upload not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -11012,7 +12540,12 @@
                 }
               }
             },
-            "description": "Upload already completed"
+            "description": "Upload already completed",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -11022,7 +12555,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -11087,7 +12625,12 @@
                 }
               }
             },
-            "description": "Upload completed"
+            "description": "Upload completed",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -11097,7 +12640,12 @@
                 }
               }
             },
-            "description": "Invalid completion request"
+            "description": "Invalid completion request",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -11107,7 +12655,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -11117,7 +12670,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -11127,7 +12685,12 @@
                 }
               }
             },
-            "description": "Namespace or upload not found"
+            "description": "Namespace or upload not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -11137,7 +12700,12 @@
                 }
               }
             },
-            "description": "Upload completion conflict"
+            "description": "Upload completion conflict",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -11147,7 +12715,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -11157,7 +12730,12 @@
                 }
               }
             },
-            "description": "Completion body exceeds the advertised `upload.complete.max_request_body_bytes` limit"
+            "description": "Completion body exceeds the advertised `upload.complete.max_request_body_bytes` limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -11222,7 +12800,12 @@
                 }
               }
             },
-            "description": "Open session with the staged content reference"
+            "description": "Open session with the staged content reference",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -11232,7 +12815,12 @@
                 }
               }
             },
-            "description": "Invalid upload content"
+            "description": "Invalid upload content",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -11242,7 +12830,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -11252,7 +12845,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -11262,7 +12860,12 @@
                 }
               }
             },
-            "description": "Namespace or upload not found"
+            "description": "Namespace or upload not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -11272,7 +12875,12 @@
                 }
               }
             },
-            "description": "Upload content conflict"
+            "description": "Upload content conflict",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -11282,7 +12890,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -11292,7 +12905,12 @@
                 }
               }
             },
-            "description": "Body exceeds the advertised `upload.service_proxied.max_content_bytes` limit"
+            "description": "Body exceeds the advertised `upload.service_proxied.max_content_bytes` limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -11355,7 +12973,12 @@
                 }
               }
             },
-            "description": "Part capabilities issued"
+            "description": "Part capabilities issued",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "400": {
             "content": {
@@ -11365,7 +12988,12 @@
                 }
               }
             },
-            "description": "Invalid part request"
+            "description": "Invalid part request",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "content": {
@@ -11375,7 +13003,12 @@
                 }
               }
             },
-            "description": "Unauthorized"
+            "description": "Unauthorized",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "403": {
             "content": {
@@ -11385,7 +13018,12 @@
                 }
               }
             },
-            "description": "Forbidden"
+            "description": "Forbidden",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "404": {
             "content": {
@@ -11395,7 +13033,12 @@
                 }
               }
             },
-            "description": "Namespace or upload not found"
+            "description": "Namespace or upload not found",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "409": {
             "content": {
@@ -11405,7 +13048,12 @@
                 }
               }
             },
-            "description": "Upload already completed"
+            "description": "Upload already completed",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "410": {
             "content": {
@@ -11415,7 +13063,12 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "Namespace deleted",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "413": {
             "content": {
@@ -11425,7 +13078,12 @@
                 }
               }
             },
-            "description": "Body exceeds the 1 MiB upload-control limit"
+            "description": "Body exceeds the 1 MiB upload-control limit",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "501": {
             "content": {
@@ -11435,7 +13093,12 @@
                 }
               }
             },
-            "description": "Direct multipart upload is unsupported"
+            "description": "Direct multipart upload is unsupported",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"

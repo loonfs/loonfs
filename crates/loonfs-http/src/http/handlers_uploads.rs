@@ -173,7 +173,7 @@ async fn fill_direct_put_access(
                 presign_time(),
             )
             .await
-            .map_err(presign_issuer_error)?;
+            .map_err(|error| presign_issuer_error(error, None))?;
         *transfer = Some(signed.into());
     }
     Ok(())
@@ -291,7 +291,7 @@ async fn sign_parts(
                 signing_time,
             )
             .await
-            .map_err(presign_issuer_error)?;
+            .map_err(|error| presign_issuer_error(error, Some("/parts")))?;
         signed_parts.push(SignedUploadPart {
             part_number: part.part_number,
             transfer: signed.into(),
@@ -300,10 +300,16 @@ async fn sign_parts(
     Ok(signed_parts)
 }
 
-pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError {
+pub(super) fn presign_issuer_error(
+    error: ObjectStoreError,
+    param: Option<&str>,
+) -> ApiResponseError {
     if let ObjectStoreError::InvalidRequest { .. } = &error {
-        return ApiResponseError::new(ErrorCode::InvalidRequest, &error.public_message())
-            .with_param("/content");
+        let response = ApiResponseError::new(ErrorCode::InvalidRequest, &error.public_message());
+        return match param {
+            Some(param) => response.with_param(param),
+            None => response,
+        };
     }
     ApiResponseError::new(
         loonfs::classify_store_failure(error.kind()),

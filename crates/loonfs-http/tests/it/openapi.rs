@@ -842,6 +842,29 @@ fn content_routes_publish_the_range_header_and_its_responses() {
         spec["components"]["responses"]["UnavailableResponse"]["headers"]["Retry-After"]
             .is_object()
     );
+    assert_eq!(
+        spec["components"]["responses"]["UnavailableResponse"]["headers"]["x-request-id"]["$ref"],
+        "#/components/headers/RequestId"
+    );
+    assert!(spec["components"]["headers"]["RequestId"].is_object());
+    for path in [
+        "/v0/namespaces",
+        "/v0/namespaces/{namespace_id}/forks",
+        "/v0/namespaces/{namespace_id}/snapshots",
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/downloads",
+        "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/downloads",
+        "/v0/maintenance/store/probe",
+    ] {
+        let request_body = &spec["paths"][path]["post"]["requestBody"];
+        assert_eq!(
+            request_body["required"], false,
+            "all-optional POST {path} must mark requestBody.required = false"
+        );
+        assert!(
+            request_body["content"]["application/json"]["schema"]["$ref"].is_string(),
+            "all-optional POST {path} must keep a direct $ref schema"
+        );
+    }
 }
 
 #[test]

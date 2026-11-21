@@ -118,6 +118,9 @@ limit_keys! {
     LIMIT_NAMESPACE_DEFAULT_RETENTION_WINDOW_MS = "namespace.default_retention_window_ms";
     /// Advisory capability key for the default page size applied when callers omit `limit`.
     LIMIT_PAGINATION_DEFAULT_LIMIT = "pagination.default_limit";
+    /// Advisory capability key for the default page size of namespace listing
+    /// when callers omit `limit`.
+    LIMIT_PAGINATION_NAMESPACES_DEFAULT_LIMIT = "pagination.namespaces_default_limit";
     /// Advisory capability key for the largest page size accepted by a deployment.
     LIMIT_PAGINATION_MAX_LIMIT = "pagination.max_limit";
     /// Advisory limit: files a plan-less `allow_scan` grep will scan before
@@ -223,6 +226,10 @@ pub fn pagination_capability_limits() -> BTreeMap<String, u64> {
             u64::from(DEFAULT_PAGE_LIMIT),
         ),
         (
+            LIMIT_PAGINATION_NAMESPACES_DEFAULT_LIMIT.to_owned(),
+            u64::from(crate::DEFAULT_NAMESPACE_PAGE_LIMIT),
+        ),
+        (
             LIMIT_PAGINATION_MAX_LIMIT.to_owned(),
             u64::from(MAX_PAGE_LIMIT),
         ),
@@ -260,6 +267,10 @@ mod tests {
         assert_eq!(
             limits.get("pagination.default_limit"),
             Some(&u64::from(DEFAULT_PAGE_LIMIT))
+        );
+        assert_eq!(
+            limits.get("pagination.namespaces_default_limit"),
+            Some(&u64::from(crate::DEFAULT_NAMESPACE_PAGE_LIMIT))
         );
         assert_eq!(
             limits.get("pagination.max_limit"),
