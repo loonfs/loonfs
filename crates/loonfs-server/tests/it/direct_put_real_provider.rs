@@ -520,7 +520,10 @@ fn optional_env(name: &'static str) -> Option<String> {
     }
 }
 
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "live-provider key prefixes use wall-clock timestamps for uniqueness"
+)]
 fn direct_put_prefix(provider: &str, base_prefix: Option<String>) -> String {
     // Unique live-provider key prefixes need wall-clock entropy; nothing
     // replays this path.

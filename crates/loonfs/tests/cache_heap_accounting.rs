@@ -9,7 +9,10 @@
 //! overhead is outside every budget.
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
-#![allow(clippy::print_stdout)]
+#![allow(
+    clippy::print_stdout,
+    reason = "accounting test prints measured heap ratios"
+)]
 
 use bytes::Bytes;
 use loonfs::engine::{

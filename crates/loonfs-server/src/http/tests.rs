@@ -128,8 +128,10 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::disallowed_methods)]
-// The sleeping handler keeps one connection in flight past the drain budget.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "sleeping handler keeps one connection in flight past the drain budget"
+)]
 async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_writer() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -554,8 +556,10 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::disallowed_methods)]
-// Monotonic time is used only to bound this shutdown check.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "monotonic time bounds only this shutdown test check"
+)]
 async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_active_request_finishes(
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -463,8 +463,10 @@ async fn foreign_references_require_a_layout_and_uploaded_downloads_do_not_write
     assert_eq!(inode_target.ranges[0].object_key, stored.object_key());
 }
 
-// This test inserts a checksum mismatch through the WAL codec.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "this test inserts a checksum mismatch through the WAL codec"
+)]
 #[tokio::test]
 async fn inline_checksum_failures_match_object_validation() {
     let (_directory, store, mut publisher, writer) = setup().await;

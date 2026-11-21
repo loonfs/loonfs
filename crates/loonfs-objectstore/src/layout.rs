@@ -435,9 +435,6 @@ fn parsed<'a>(
 
 #[cfg(test)]
 mod tests {
-    // The key builder is tested where it is defined.
-    #![allow(clippy::disallowed_methods)]
-
     use super::{parse_object_key, DurableObjectFamily, KeyPrefix};
     use crate::keys::{
         boundary, content_blob, extension_segment, metadata_manifest_object, metadata_segment,
@@ -477,6 +474,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "verifies layout key parsing against the WAL key builder"
+    )]
     fn built_keys_parse_to_their_family_prefix_and_identifier() {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
         let pool_id = numbered_pool_id(1);

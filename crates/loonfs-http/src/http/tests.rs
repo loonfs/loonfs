@@ -698,8 +698,10 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
 }
 
 #[tokio::test]
-#[allow(clippy::disallowed_methods)]
-// The sleeping handler is the controlled work the deadline cancels.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the sleeping handler is the controlled work the deadline cancels"
+)]
 async fn request_deadline_answers_503_and_leaves_fast_handlers_untouched() {
     use tower::ServiceExt;
 
@@ -1479,8 +1481,10 @@ fn expect_enveloped(
 
 /// Checks that malformed requests return JSON API errors and that
 /// authentication runs before request parsing.
-// The request closures return ureq's large error type.
-#[allow(clippy::result_large_err)]
+#[allow(
+    clippy::result_large_err,
+    reason = "request closures return ureq's large error type"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
     let temp_dir = tempdir().expect("tempdir");
@@ -2145,8 +2149,10 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     server.abort();
 }
 
-// The request closures return ureq's large error type.
-#[allow(clippy::result_large_err)]
+#[allow(
+    clippy::result_large_err,
+    reason = "request closures return ureq's large error type"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let temp_dir = tempdir().expect("tempdir");

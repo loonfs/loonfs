@@ -221,7 +221,10 @@ mod tests {
     #[async_trait]
     impl HttpService for ScriptedService {
         async fn call(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
-            #[allow(clippy::disallowed_methods)]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "simulates response latency under paused Tokio time"
+            )]
             tokio::time::sleep(self.response_delay).await;
             let frames = self
                 .frames
@@ -256,7 +259,10 @@ mod tests {
                 let Some((delay, bytes)) = this.frames.pop_front() else {
                     return Poll::Ready(None);
                 };
-                #[allow(clippy::disallowed_methods)]
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "simulates inter-frame delay under paused Tokio time"
+                )]
                 let sleep = Box::pin(tokio::time::sleep(delay));
                 this.armed = Some((sleep, bytes));
             }
@@ -322,7 +328,10 @@ mod tests {
                 .expect("script lock")
                 .pop_front()
                 .expect("two attempts");
-            #[allow(clippy::disallowed_methods)]
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "simulates a slow conditional put under paused Tokio time"
+            )]
             tokio::time::sleep(Duration::from_secs(115)).await;
             Ok(Response::builder()
                 .status(status)
@@ -333,7 +342,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "measures elapsed paused Tokio time across a single put"
+    )]
     async fn a_conditional_payload_put_is_one_request() {
         use crate::provider_limits::{
             PROVIDER_MAX_RETRY_BACKOFF, PROVIDER_PUBLICATION_REQUEST_BOUND,

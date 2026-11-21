@@ -1,3 +1,5 @@
+//! Garbage collection tests for layouts with shared base extents.
+
 use super::*;
 use crate::manifest::tests::{
     build_namespace_manifest_from_metadata_state, write_namespace_manifest, ManifestMetadataSource,
