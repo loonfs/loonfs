@@ -159,13 +159,14 @@ impl NamespacePublisher {
             .iter()
             .map(|candidate| candidate.commit_id.clone())
             .collect::<Vec<_>>();
-        if let Ok(waiting) = AssertUnwindSafe(self.publish_taken_batch(candidates))
+        let payload = match AssertUnwindSafe(self.publish_taken_batch(candidates))
             .catch_unwind()
             .await
         {
-            return waiting;
-        }
-        self.record_panic();
+            Ok(waiting) => return waiting,
+            Err(payload) => payload,
+        };
+        self.record_panic("publish", payload);
         // A panic can follow the WAL put, so the position's tail may omit
         // committed bytes.
         if let Some(engine) = self.lock_engine().await.engine.as_mut() {

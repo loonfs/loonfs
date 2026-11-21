@@ -243,10 +243,13 @@ impl ProviderObjectStore {
         match self.inner.get_opts(path, options).await {
             Ok(result) => match result.bytes().await {
                 Ok(bytes) => RangedGet::Bytes(bytes),
-                Err(err) => RangedGet::Refused(err),
+                // The provider already accepted the range, so a body error is
+                // a transport failure and never needs a sizing HEAD.
+                Err(err) => RangedGet::Failed(err),
             },
             Err(err) if provider_not_found(&err) => RangedGet::NotFound,
-            Err(err) => RangedGet::Refused(err),
+            Err(err) if may_be_range_refusal(&err) => RangedGet::Refused(err),
+            Err(err) => RangedGet::Failed(err),
         }
     }
 
@@ -473,6 +476,7 @@ impl ObjectStore for ProviderObjectStore {
         {
             RangedGet::Bytes(bytes) => Ok(Some(bytes)),
             RangedGet::NotFound => Ok(None),
+            RangedGet::Failed(err) => Err(map_provider_error(key, err, ProviderClient::Retrying)),
             RangedGet::Refused(err) => {
                 // The provider refused; one HEAD determines whether the range
                 // was the problem, matching the reference semantics.
@@ -495,7 +499,7 @@ impl ObjectStore for ProviderObjectStore {
                         {
                             RangedGet::Bytes(bytes) => Ok(Some(bytes)),
                             RangedGet::NotFound => Ok(None),
-                            RangedGet::Refused(err) => {
+                            RangedGet::Refused(err) | RangedGet::Failed(err) => {
                                 Err(map_provider_error(key, err, ProviderClient::Retrying))
                             }
                         }
@@ -788,10 +792,22 @@ enum RangedGet {
     Bytes(Bytes),
     NotFound,
     Refused(provider_store::Error),
+    Failed(provider_store::Error),
 }
 
 fn provider_not_found(error: &provider_store::Error) -> bool {
     matches!(error, provider_store::Error::NotFound { .. })
+}
+
+/// Returns whether a provider error from a ranged GET might be an HTTP 416 or
+/// range rejection rather than a definite non-range failure (auth, timeout, or
+/// unsupported operation).
+fn may_be_range_refusal(error: &provider_store::Error) -> bool {
+    match error {
+        // Local timeout wrappers embed `ObjectStoreError` inside `Generic`.
+        provider_store::Error::Generic { source, .. } => !source.is::<ObjectStoreError>(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

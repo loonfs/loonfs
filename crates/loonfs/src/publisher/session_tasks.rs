@@ -81,8 +81,8 @@ impl NamespacePublisher {
                 match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
                     Ok(true) => publisher.start_compaction(),
                     Ok(false) => return,
-                    Err(_) => {
-                        publisher.record_panic();
+                    Err(payload) => {
+                        publisher.record_panic("fold", payload);
                         return;
                     }
                 }
@@ -109,12 +109,11 @@ impl NamespacePublisher {
         }
         let publisher = self.clone();
         let compaction = self.spawn_session_task(&mut state, async move {
-            if AssertUnwindSafe(publisher.run_compaction())
+            if let Err(payload) = AssertUnwindSafe(publisher.run_compaction())
                 .catch_unwind()
                 .await
-                .is_err()
             {
-                publisher.record_panic();
+                publisher.record_panic("compaction", payload);
             }
         });
         state.compaction = Some(compaction);

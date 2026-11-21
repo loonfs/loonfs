@@ -211,10 +211,13 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         basis: Option<PublicationBasis>,
     ) -> Result<(CompactorEpoch, Option<PublicationBasis>)> {
-        // Keep the claim lock locked across publication so concurrent groups share one epoch.
-        let mut epochs = self.writer.compactor_epochs.lock().await;
-        if let Some(epoch) = epochs.get(namespace_id) {
-            return Ok((*epoch, basis));
+        // Keep only this namespace's claim slot locked across publication so
+        // concurrent groups on one namespace share a single claim without
+        // blocking other namespaces.
+        let slot = self.writer.compactor_epochs.slot(namespace_id);
+        let mut guard = slot.lock().await;
+        if let Some(epoch) = *guard {
+            return Ok((epoch, basis));
         }
         let claimed = self
             .engine(namespace_id)
@@ -227,7 +230,7 @@ impl Maintenance {
                 .await;
         }
         let epoch = claimed.response.manifest.compactor_epoch();
-        epochs.insert(namespace_id.clone(), epoch);
+        *guard = Some(epoch);
         Ok((epoch, Some(claimed.response)))
     }
 
@@ -338,11 +341,10 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         fenced_epoch: CompactorEpoch,
     ) {
-        let mut epochs = self.writer.compactor_epochs.lock().await;
-        // An older attempt can finish after another request has claimed again.
-        if epochs.get(namespace_id) == Some(&fenced_epoch) {
-            epochs.remove(namespace_id);
-        }
+        self.writer
+            .compactor_epochs
+            .forget_if_matches(namespace_id, fenced_epoch)
+            .await;
     }
 
     /// Runs one compaction unit under this runtime's compactor epoch and the
@@ -375,13 +377,7 @@ impl Maintenance {
                 namespace_id
             )) => turn,
         };
-        let claimed = self
-            .writer
-            .compactor_epochs
-            .lock()
-            .await
-            .get(namespace_id)
-            .copied();
+        let claimed = self.writer.compactor_epochs.get(namespace_id).await;
         let basis = match self.planning_basis(namespace_id, claimed, observed).await? {
             ControlFlow::Continue(basis) => basis,
             ControlFlow::Break(outcome) => return Ok(outcome),

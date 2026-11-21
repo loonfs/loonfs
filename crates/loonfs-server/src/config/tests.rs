@@ -240,6 +240,26 @@ root = "/tmp/loonfs-server"
     }
 }
 
+#[test]
+fn validate_rejects_invalid_inline_content_settings() {
+    let source = r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+content_token_secret = "test-secret"
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+
+[inline_content]
+inline_content_tail_limit_bytes = 0
+"#;
+    assert_invalid_field(
+        parse_server_config(source).expect_err("zero inline content tail limit"),
+        "runtime",
+    );
+}
+
 pub(super) fn assert_invalid_field(error: ServerError, field: &'static str) {
     match error {
         ServerError::Config(ConfigFieldError::Invalid { field: actual, .. }) => {

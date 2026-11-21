@@ -56,7 +56,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
     assert_eq!(refused_polls.load(Ordering::SeqCst), 0);
 
-    for path in ["/health", "/readiness?probe=1"] {
+    for path in ["/health", "/readiness?probe=1", "/metrics"] {
         let response = router.clone().oneshot(request(path)).await.expect("probe");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(limit.in_flight(), 1);

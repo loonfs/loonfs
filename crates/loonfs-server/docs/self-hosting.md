@@ -387,7 +387,7 @@ This section describes the limits on the server's requests, connections, memory,
 
 The server applies the request cap before authentication and before it reads the request body. A request over the cap receives `503 server_busy` with `Retry-After: 1`, the usual error envelope, and a request ID, and the server doesn't read its body or make any store call. Each admitted request keeps its slot until its response body yields its last frame, fails, or is dropped. Downloads, JSON pages, and error envelopes all use data frames of at most 64 KiB. Uploads and downloads also count against their existing transfer caps.
 
-`GET` and `HEAD` requests to `/health` and `/readiness` are exempt from the request cap, including requests with probe query parameters. `/metrics` is subject to the request cap.
+`GET` and `HEAD` requests to `/health`, `/readiness`, and `/metrics` are exempt from the request cap, including requests with probe query parameters. `/metrics` still requires authentication.
 
 After a request releases its permit, the HTTP transport can still keep response data in memory, up to its write threshold plus one frame for each response in flight. At the library defaults, HTTP/1 keeps at most 408 KiB + 64 KiB = 472 KiB per connection, and HTTP/2 keeps at most 400 KiB + 64 KiB = 464 KiB per stream. Both are about 480 KiB. The default 200 HTTP/2 streams add up to 90.625 MiB per connection. At `max_connections = 1024`, the totals are 472 MiB for HTTP/1 or 90.625 GiB for HTTP/2. This retained response data is the one memory cost that the request cap doesn't cover. (These figures count response data, not total connection memory.)
 
@@ -406,7 +406,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Completed upload sessions | None | 32 MiB | The content ID and completion time of each completed upload session, which garbage collection keeps between collections | Steady |
 | Content object cache | `metadata_cache.max_content_object_bytes` | Derived: 10%. 96 MiB without a memory limit | Verified content objects of up to 1 MiB that reads keep for later reads | Steady |
 | Publication queue | `max_admitted_bytes` | Derived: 10%. 64 MiB without a memory limit | Estimated bytes of admitted commit requests, other than a merge | Steady |
-| HTTP requests | `max_in_flight_requests` | 256 | Requests until their responses complete, excluding health and readiness probes | Concurrency |
+| HTTP requests | `max_in_flight_requests` | 256 | Requests until their responses complete, excluding health, readiness, and metrics routes | Concurrency |
 | Connections | `max_connections` | 1,024 | Accepted TCP connections, including TLS handshakes and idle keep-alive connections | Concurrency |
 | Proxied uploads | `max_concurrent_uploads` | 8 uploads | At most one 8 MiB transfer part per upload body | Per request |
 | Proxied downloads | `max_concurrent_downloads` | 16 streams | One 8 MiB read chunk per content stream | Per request |

@@ -69,7 +69,7 @@ pub(super) async fn admit_request(
         && request
             .extensions()
             .get::<MatchedPath>()
-            .is_some_and(|path| matches!(path.as_str(), "/health" | "/readiness"))
+            .is_some_and(|path| matches!(path.as_str(), "/health" | "/readiness" | "/metrics"))
     {
         return next.run(request).await;
     }
