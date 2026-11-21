@@ -271,7 +271,7 @@ impl LoonFsBuilder<Writable> {
         let core = self.core.open()?;
         let writer = Arc::new(WriterState {
             writer_id,
-            compactor_epochs: tokio::sync::Mutex::default(),
+            compactor_epochs: Default::default(),
         });
         let publisher = PublisherRegistry::new(core.clone(), Arc::downgrade(&writer), runtime);
         core.set_head_positions(publisher.head_positions());

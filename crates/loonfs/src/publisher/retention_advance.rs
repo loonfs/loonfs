@@ -26,11 +26,11 @@ impl NamespacePublisher {
             .await
         {
             Ok(outcome) => outcome,
-            Err(_) => {
+            Err(payload) => {
                 // A panic can follow the floor object's put, so the position
                 // may omit the floor object. The callers get the error, and
                 // the next sweep tries the advance again.
-                self.record_panic();
+                self.record_panic("retention_advance", payload);
                 if let Some(engine) = self.lock_engine().await.engine.as_mut() {
                     engine.invalidate_projection();
                 }

@@ -120,18 +120,26 @@ fn render_scrape_gauges(
     }
 }
 
-/// Reads the Linux-only resident-page count for this process.
+/// Parses `VmRSS:` (always reported in KiB) from Linux `/proc/self/status`,
+/// avoiding assumptions about the host page size.
+fn parse_proc_status_vm_rss_bytes(status: &str) -> Option<u64> {
+    status.lines().find_map(|line| {
+        let rest = line.strip_prefix("VmRSS:")?;
+        let kib = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+        Some(kib.saturating_mul(1024))
+    })
+}
+
+/// Reads the Linux resident set size for this process.
 #[cfg(target_os = "linux")]
 fn process_resident_bytes() -> Option<u64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let resident_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
-    // Neither rustix nor libc is a direct dependency. Every deployment
-    // target shipped by this project uses 4 KiB pages.
-    Some(resident_pages.saturating_mul(4096))
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_proc_status_vm_rss_bytes(&status)
 }
 
 #[cfg(not(target_os = "linux"))]
 fn process_resident_bytes() -> Option<u64> {
+    let _ = parse_proc_status_vm_rss_bytes;
     None
 }
 

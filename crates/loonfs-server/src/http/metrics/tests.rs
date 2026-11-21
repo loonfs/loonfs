@@ -8,6 +8,16 @@ use loonfs::metrics::{DefaultMetricsRecorder, MetricsRecorder, LATENCY_SECONDS_B
 use loonfs::{MetadataCacheStats, SegmentFilterStats, SsdSegmentBlocksStats};
 
 #[test]
+fn proc_status_vm_rss_is_parsed_in_bytes_independent_of_page_size() {
+    let status = "Name:\tloonfs-server\nVmPeak:\t  123456 kB\nVmRSS:\t   49152 kB\nThreads:\t8\n";
+    assert_eq!(parse_proc_status_vm_rss_bytes(status), Some(49_152 * 1024));
+    assert_eq!(
+        parse_proc_status_vm_rss_bytes("Name:\tloonfs-server\n"),
+        None
+    );
+}
+
+#[test]
 fn a_counter_renders_with_the_total_suffix_and_its_labels() {
     let recorder = DefaultMetricsRecorder::new();
     recorder

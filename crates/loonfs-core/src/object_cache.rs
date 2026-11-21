@@ -141,16 +141,13 @@ impl ObjectCache {
             return;
         }
         let key = self.content_key(object_key);
-        let content_objects = &self.shared.content_objects;
-        if content_objects
-            .peek(&key)
-            .is_some_and(|cached| cached.len() >= bytes.len())
-        {
-            return;
-        }
         // A copy keeps the entry's allocation exactly as large as its
         // weight, whatever buffer the store returned the bytes in.
-        content_objects.insert(key, Bytes::copy_from_slice(bytes));
+        self.shared
+            .content_objects
+            .insert_if(key, Bytes::copy_from_slice(bytes), None, |cached| {
+                cached.len() < bytes.len()
+            });
     }
 }
 

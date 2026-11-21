@@ -146,6 +146,12 @@ impl ServerConfig {
             validate_non_empty("metadata_cache.ssd.directory", &ssd.directory)?;
         }
         self.store.validate()?;
+        self.runtime_config().validate().map_err(|error| {
+            ServerError::Config(ConfigFieldError::Invalid {
+                field: "runtime",
+                reason: error.to_string(),
+            })
+        })?;
         let maintenance_writer_id = WriterId::parse(format!("{}-maintenance", self.writer_id))
             .map_err(|error| {
                 ServerError::Config(ConfigFieldError::Invalid {

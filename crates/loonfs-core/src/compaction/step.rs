@@ -300,10 +300,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 basis,
                 &clock,
                 |mut payload: NamespaceManifestPayload| async move {
-                    payload.compactor_epoch =
-                        CompactorEpoch(payload.compactor_epoch.0.checked_add(1).expect(
-                            "compactor epoch should be bounded by the manifest number write stop",
-                        ));
+                    let next_epoch = payload.compactor_epoch.0.checked_add(1).ok_or_else(|| {
+                        crate::CoreError::NamespaceCorrupt(format!(
+                            "namespace {} compactor epoch overflowed u64",
+                            payload.namespace_id
+                        ))
+                    })?;
+                    payload.compactor_epoch = CompactorEpoch(next_epoch);
                     Ok(ManifestChange::Next(Box::new(payload), ()))
                 },
             )
