@@ -17,7 +17,6 @@ use loonfs_core::limits::SSD_WRITE_QUEUE_BYTES;
 use loonfs_objectstore::StoreIdentity;
 use loonfs_types::format::hex::{hex_decode_bytes, hex_encode_bytes};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::io::{self, Read};
 use std::mem::size_of;
 use std::num::NonZeroUsize;
@@ -214,9 +213,6 @@ impl QueuedWrite {
 struct SsdBlockFiles {
     directory: PathBuf,
     index: DecodedBlockCache<SsdBlockKey, SsdBlockFile>,
-    /// Keys currently queued for the writer so concurrent misses don't queue
-    /// duplicate copies of the same block.
-    pending_writes: Mutex<HashSet<SsdBlockKey>>,
     queued_bytes: AtomicUsize,
     max_queued_bytes: usize,
     /// Whether a failed read, write, or delete has been logged at `warn`.
@@ -331,7 +327,6 @@ impl SsdSegmentBlocks {
         let files = Arc::new(SsdBlockFiles {
             directory,
             index: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_segment_bytes.get())),
-            pending_writes: Mutex::new(HashSet::new()),
             queued_bytes: AtomicUsize::new(0),
             max_queued_bytes,
             failure_logged: AtomicBool::new(false),
@@ -409,16 +404,6 @@ impl SsdSegmentBlocks {
         if self.files.index.touch(&key) {
             return;
         }
-        {
-            let mut pending = self
-                .files
-                .pending_writes
-                .lock()
-                .expect("the ssd tier's pending set lock should not be poisoned");
-            if !pending.insert(key) {
-                return;
-            }
-        }
         let charge = QueuedWrite::charge(stored.len());
         let max_queued_bytes = self.files.max_queued_bytes;
         let reserved =
@@ -430,7 +415,6 @@ impl SsdSegmentBlocks {
                         .filter(|queued| *queued <= max_queued_bytes)
                 });
         if reserved.is_err() {
-            self.files.clear_pending(&key);
             self.files.index.record_rejection(stored.len());
             return;
         }
@@ -445,7 +429,6 @@ impl SsdSegmentBlocks {
             .as_ref()
             .is_some_and(|queue| queue.send(write).is_ok());
         if !sent {
-            self.files.clear_pending(&key);
             self.files.queued_bytes.fetch_sub(charge, Ordering::SeqCst);
             self.files.index.record_rejection(stored.len());
         }
@@ -478,7 +461,7 @@ impl SsdSegmentBlocks {
             self.files.index.record_miss();
             return None;
         };
-        let Ok(_read_permit) = Arc::clone(&self.read_permits).acquire_owned().await else {
+        let Ok(read_permit) = Arc::clone(&self.read_permits).acquire_owned().await else {
             self.files.index.record_miss();
             return None;
         };
@@ -486,6 +469,9 @@ impl SsdSegmentBlocks {
         let path = self.files.path(key, file.stored_bytes, FileName::Block);
         let stored_bytes = file.stored_bytes;
         let read = tokio::task::spawn_blocking(move || {
+            // Keep the permit inside the blocking task so cancelling the async
+            // caller does not free a slot while the disk read is still running.
+            let _read_permit = read_permit;
             let decoded = match read_block_file(&path, stored_bytes) {
                 Ok(stored) => decode(stored).map_err(|error| Some(error.to_string())),
                 // The writer evicted the block after the lookup above, or an
@@ -631,17 +617,10 @@ impl SsdBlockFiles {
         Ok(())
     }
 
-    fn clear_pending(&self, key: &SsdBlockKey) {
-        self.pending_writes
-            .lock()
-            .expect("the ssd tier's pending set lock should not be poisoned")
-            .remove(key);
-    }
-
     /// Writes one queued block to its file, and adds the file to the index.
     fn write(&self, write: QueuedWrite) {
         let QueuedWrite { key, stored } = write;
-        // The index has the block already if it was written concurrently.
+        // The index has the block already if it was queued twice.
         if self.index.peek(&key).is_none() {
             let stored_bytes = u32::try_from(stored.len())
                 .expect("a block's stored length comes from its handle, which records it as u32");
@@ -654,9 +633,6 @@ impl SsdBlockFiles {
                 }
             }
         }
-        // Remove from `pending_writes` after `add` inserts into `index` so a
-        // concurrent insert sees the key in at least one of the two.
-        self.clear_pending(&key);
         self.queued_bytes
             .fetch_sub(QueuedWrite::charge(stored.len()), Ordering::SeqCst);
     }
