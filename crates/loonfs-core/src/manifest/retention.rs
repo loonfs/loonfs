@@ -16,11 +16,11 @@ use crate::segment::cache::MetadataSegmentCache;
 use crate::time::Observation;
 use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
 use futures::{stream, StreamExt, TryStreamExt};
-use loonfs_objectstore::keys::metadata_segment_object_key;
+use loonfs_objectstore::keys::{metadata_segment_object_key, metadata_segment_prefix};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{CommitSeq, SetRetentionWindowResponse};
-use std::collections::BTreeSet;
+use loonfs_types::{CommitSeq, NamespaceId, SetRetentionWindowResponse};
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -58,19 +58,66 @@ pub enum RetentionTarget {
     Window,
 }
 
-/// Checks that every segment that `manifest` lists exists, with one HEAD
-/// request for each segment.
+/// Owners referencing more than this many metadata segments in one manifest are
+/// verified by listing their segment prefix rather than issuing one HEAD per
+/// segment.
+const SEGMENT_VERIFY_LIST_THRESHOLD: usize = 100;
+
+/// Maximum commits scanned per page while walking the commit history to find
+/// the retention cutoff.
+const RETENTION_COMMIT_SCAN_PAGE_LIMIT: usize = 256;
+
+/// Heap byte budget for each page scanned while finding the retention cutoff,
+/// keeping memory bounded even when individual commit rows are large.
+const RETENTION_COMMIT_SCAN_PAGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Checks that every segment that `manifest` lists exists.
+///
+/// Owners with up to [`SEGMENT_VERIFY_LIST_THRESHOLD`] segments are verified
+/// with parallel HEAD requests; larger owners are verified by streaming their
+/// `metadata/segments/` prefix once so multi-thousand-segment manifests avoid
+/// an O(segments) HEAD storm.
 pub(crate) async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &NamespaceManifestPayload,
 ) -> std::result::Result<(), ManifestLoadError> {
-    let object_keys = manifest
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .map(metadata_segment_object_key)
-        .collect::<BTreeSet<_>>();
-    stream::iter(object_keys)
+    let mut by_owner: BTreeMap<&NamespaceId, BTreeSet<String>> = BTreeMap::new();
+    for segment in manifest.runs.iter().flat_map(|run| &run.segments) {
+        by_owner
+            .entry(&segment.owner_namespace_id)
+            .or_default()
+            .insert(metadata_segment_object_key(segment));
+    }
+    let mut head_keys = Vec::new();
+    for (owner, mut keys) in by_owner {
+        if keys.len() <= SEGMENT_VERIFY_LIST_THRESHOLD {
+            head_keys.extend(keys);
+            continue;
+        }
+        let prefix = metadata_segment_prefix(owner);
+        let mut entries = std::pin::pin!(store.list_entries_from_stream(&prefix, None));
+        while let Some(entry) =
+            entries
+                .try_next()
+                .await
+                .map_err(|error| ManifestLoadError::ReadSegment {
+                    object_key: prefix.clone(),
+                    message: error.public_message().into_owned(),
+                    kind: error.kind(),
+                })?
+        {
+            keys.remove(&entry.key);
+            if keys.is_empty() {
+                break;
+            }
+        }
+        if let Some(missing) = keys.into_iter().next() {
+            return Err(ManifestLoadError::MissingSegment {
+                object_key: missing,
+            });
+        }
+    }
+    stream::iter(head_keys)
         .map(|object_key| async move {
             match store
                 .head(&object_key)
@@ -317,19 +364,28 @@ async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
 ) -> Result<CommitSeq> {
     let basis = metadata_basis_from_manifest(store, Some(segment_cache), current);
     let mut last = current.retention_floor_seq();
-    // One commit per scan: a commit row can be large, and the memo keeps the
-    // block for the next call within the caller's read budget.
     while last < through {
-        let Some(commit) = commits_after_page(&basis.segments, last, 1, usize::MAX)
-            .await?
-            .pop()
-        else {
-            break;
-        };
-        if commit.committed_at_ms > cutoff_at_ms {
+        let page = commits_after_page(
+            &basis.segments,
+            last,
+            RETENTION_COMMIT_SCAN_PAGE_LIMIT,
+            RETENTION_COMMIT_SCAN_PAGE_BYTES,
+        )
+        .await?;
+        if page.is_empty() {
             break;
         }
-        last = commit.committed_seq;
+        let mut done = false;
+        for commit in page {
+            if commit.committed_seq > through || commit.committed_at_ms > cutoff_at_ms {
+                done = true;
+                break;
+            }
+            last = commit.committed_seq;
+        }
+        if done {
+            break;
+        }
     }
     Ok(last)
 }

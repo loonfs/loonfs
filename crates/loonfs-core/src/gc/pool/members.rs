@@ -9,6 +9,7 @@ use crate::gc::charged_set::{ChargedMap, ChargedQueue, ChargedSet, CollectionMem
 use crate::gc::live_set::{retirement_deadline_ms, RetirementStatus};
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::gc::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::POOL_ROOTS_READ_BUDGET_MS;
 use crate::namespace::basis::PublicationBasis;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
@@ -16,7 +17,8 @@ use crate::namespace::read_anchor::project_anchor_tail;
 use crate::namespace::store::NamespaceStore;
 use crate::pool_store::PoolStore;
 use crate::time::{Observation, OperationClock};
-use futures::TryStreamExt;
+use futures::stream::FuturesOrdered;
+use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{metadata_segment_object_key, pool_member, pool_members_prefix};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStore;
@@ -156,17 +158,17 @@ impl PoolRoots {
         Ok(roots)
     }
 
-    /// Lists the pool's member list once, and reads the roots of each listed
-    /// member as the listing yields its entry.
+    /// Lists the pool's member list once, and reads the roots of up to
+    /// [`STORE_READS_IN_FLIGHT`] listed members concurrently as the listing
+    /// yields their entries.
     ///
-    /// The collection reads each member once, one member at a time. It stops
-    /// at a member whose roots can't be read, and before a member that it
-    /// would start after [`POOL_ROOTS_READ_BUDGET_MS`] has passed since the
-    /// collection's clock started. Either way the collection skips the content
-    /// sweep and continues. A charge to the collection's budget that fails
-    /// ends the collection, and so does a listing that fails. A key under the
-    /// member list's prefix that isn't a member entry is logged and left
-    /// alone.
+    /// The collection reads each member once. It stops at a member whose roots
+    /// can't be read, and before a member that it would start after
+    /// [`POOL_ROOTS_READ_BUDGET_MS`] has passed since the collection's clock
+    /// started. Either way the collection skips the content sweep and
+    /// continues. A charge to the collection's budget that fails ends the
+    /// collection, and so does a listing that fails. A key under the member
+    /// list's prefix that isn't a member entry is logged and left alone.
     async fn load_members<S: ObjectStore>(
         &mut self,
         pool: &PoolStore<S>,
@@ -174,30 +176,47 @@ impl PoolRoots {
     ) -> Result<()> {
         let prefix = pool_members_prefix(&pool.pool_id);
         let mut entries = std::pin::pin!(pool.store.list_entries_from_stream(&prefix, None));
-        while let Some(entry) = entries
-            .try_next()
-            .await
-            .map_err(|error| CoreError::store(&prefix, &error))?
-        {
-            self.listed_objects += 1;
-            self.member_list_bytes += entry.size_bytes;
-            let namespace_id = parse_object_key(&entry.key)
-                .filter(|parsed| parsed.family() == DurableObjectFamily::PoolMember)
-                .and_then(|parsed| parsed.identifier())
-                .and_then(|identifier| NamespaceId::parse(identifier).ok());
-            let Some(member_id) = namespace_id else {
-                tracing::warn!(pool_id = %pool.pool_id, key = %entry.key,
-                    "left alone a key under the pool's member list that isn't a member entry");
-                continue;
-            };
-            self.member_read.members += 1;
-            if clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
-                self.member_read.outcome = MemberReadOutcome::BudgetExceeded;
-                return Ok(());
+        let mut in_flight = FuturesOrdered::new();
+        let mut listing_done = false;
+        loop {
+            while !listing_done && in_flight.len() < STORE_READS_IN_FLIGHT {
+                let Some(entry) = entries
+                    .try_next()
+                    .await
+                    .map_err(|error| CoreError::store(&prefix, &error))?
+                else {
+                    listing_done = true;
+                    break;
+                };
+                self.listed_objects += 1;
+                self.member_list_bytes += entry.size_bytes;
+                let namespace_id = parse_object_key(&entry.key)
+                    .filter(|parsed| parsed.family() == DurableObjectFamily::PoolMember)
+                    .and_then(|parsed| parsed.identifier())
+                    .and_then(|identifier| NamespaceId::parse(identifier).ok());
+                let Some(member_id) = namespace_id else {
+                    tracing::warn!(pool_id = %pool.pool_id, key = %entry.key,
+                        "left alone a key under the pool's member list that isn't a member entry");
+                    continue;
+                };
+                self.member_read.members += 1;
+                if clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
+                    self.member_read.outcome = MemberReadOutcome::BudgetExceeded;
+                    return Ok(());
+                }
+                let member = pool.member(member_id.clone());
+                let pool_id = pool.pool_id.clone();
+                let now_ms = self.now_ms;
+                in_flight.push_back(async move {
+                    let result = load_member_roots(&member, &pool_id, now_ms).await;
+                    (member_id, result)
+                });
             }
-            let member = pool.member(member_id.clone());
-            match self.load_member(&member, &pool.pool_id).await {
-                Ok(Some(state)) => self.members.insert(member_id, state)?,
+            let Some((member_id, result)) = in_flight.next().await else {
+                break;
+            };
+            match result {
+                Ok(Some(loaded)) => self.record_member(member_id, loaded)?,
                 Ok(None) => {}
                 Err(error @ CoreError::LiveSetExceedsCollectionMemory { .. }) => return Err(error),
                 Err(error) => {
@@ -211,139 +230,27 @@ impl PoolRoots {
                 }
             }
             self.member_read.members_read += 1;
-        }
-        // A member read that ends after the budget is as late as one that
-        // starts after it.
-        if self.member_read.members_read > 0 && clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
-            self.member_read.outcome = MemberReadOutcome::BudgetExceeded;
+            // A member read that ends after the budget is as late as one that
+            // starts after it.
+            if clock.elapsed_ms() > POOL_ROOTS_READ_BUDGET_MS {
+                self.member_read.outcome = MemberReadOutcome::BudgetExceeded;
+                return Ok(());
+            }
         }
         Ok(())
     }
 
-    /// Reads the roots of `member`, a namespace that the pool's member list
-    /// lists, and returns the member's state, or `None` for a namespace that
-    /// isn't a member.
-    ///
-    /// An initializing namespace has no roots, and the collection reads
-    /// nothing of it beyond its newest manifest: LoonFS refuses commits to it,
-    /// and a fork's manifest lists the source's segments, which the source's
-    /// snapshot keeps. A retired namespace, an ID without a manifest, and a
-    /// namespace whose manifest records another pool aren't members. The
-    /// collection deletes their entries as the listing yields them and keeps
-    /// nothing of them, so stale entries take none of the collection's budget.
-    async fn load_member<S: ObjectStore>(
-        &mut self,
-        member: &NamespaceStore<S>,
-        pool_id: &PoolId,
-    ) -> Result<Option<MemberState>> {
-        let observed = Observation::now(Arc::clone(&member.timer));
-        let reason = match member.find_newest_manifest().await? {
-            NewestManifest::Manifest(current) if current.manifest.payload().pool_id == *pool_id => {
-                if let NamespaceStatus::Initializing {} = current.manifest.payload().status {
-                    return Ok(Some(MemberState::NoRoots));
-                }
-                let status = self.read_member(member, current, observed).await?;
-                return Ok(Some(MemberState::Read { status }));
-            }
-            NewestManifest::Manifest(_) => "other_pool",
-            NewestManifest::Retired => "retired",
-            NewestManifest::Absent => "absent",
-        };
-        let key = pool_member(pool_id, &member.namespace_id);
-        member
-            .store
-            .delete(&key)
-            .await
-            .map_err(|error| CoreError::store(&key, &error))?;
-        tracing::info!(pool_id = %pool_id, namespace_id = %member.namespace_id, reason,
-            "deleted the member entry of a namespace that isn't a member");
-        Ok(None)
-    }
-
-    /// Adds the content IDs of the WAL tail above `current`, the layout
-    /// segments of the current manifest while its view is a root, and the
-    /// layout segments of the manifests that the member's snapshots keep, and
-    /// returns the member's retirement status.
-    ///
-    /// A deleted member stays a member until its boundary is retired, so its
-    /// status is retained, with its retirement deadline while the deadline is
-    /// in the future. The tombstone's own view stops being a root at the
-    /// deadline, and the manifests that the member's snapshots keep stay roots
-    /// until the snapshots are deleted.
-    ///
-    /// A snapshot whose manifest is missing makes the member's roots unreadable,
-    /// because only the member's own collection decides about its snapshots.
-    async fn read_member<S: ObjectStore>(
-        &mut self,
-        member: &NamespaceStore<S>,
-        current: PublicationBasis,
-        observed: Observation,
-    ) -> Result<RetirementStatus> {
-        let anchor = member
-            .load_read_anchor_from_manifest(current.manifest, current.boundary, observed, None)
-            .await?;
-        let head = anchor.manifest.payload();
-        // A tombstone's runs cover its whole WAL, so it has no tail.
-        if head.status.is_active() {
-            let tail = project_anchor_tail(&member.store, &member.segment_cache, &anchor)?;
-            for revision in tail.revisions() {
-                self.content_ids
-                    .insert(revision.content_ref.content_id.clone())?;
-            }
-            for row in tail.content_layouts() {
-                for extent in &row.layout.extents {
-                    self.content_ids.insert(extent.content_id.clone())?;
-                }
-            }
+    /// Merges one member's collected roots into this pool's charged live sets.
+    fn record_member(&mut self, member_id: NamespaceId, loaded: LoadedMemberRoots) -> Result<()> {
+        for content_id in loaded.content_ids {
+            self.content_ids.insert(content_id)?;
         }
-        let mut snapshots = member.list_snapshot_manifests(head.manifest_no);
-        while let Some(listed) = snapshots.try_next().await? {
-            let ListedSnapshotKey::Snapshot(snapshot, ()) = listed else {
-                continue;
-            };
-            match &snapshot.manifest {
-                SnapshotManifest::Loaded(manifest) => self.protect_layout_segments(manifest)?,
-                SnapshotManifest::Rooted => {}
-                SnapshotManifest::Missing(manifest_no) => {
-                    return Err(missing_root_manifest(
-                        &member.namespace_id,
-                        *manifest_no,
-                        &snapshot.key,
-                    ));
-                }
-            }
-        }
-        drop(snapshots);
-        let status = if head.status.is_deleted() {
-            RetirementStatus::Retained {
-                retires_at_ms: Some(retirement_deadline_ms(head))
-                    .filter(|deadline_ms| self.now_ms < *deadline_ms),
-            }
-        } else {
-            RetirementStatus::Active
-        };
-        if status.current_view_is_root() {
-            self.protect_layout_segments(&anchor.manifest)?;
-        }
-        Ok(status)
-    }
-
-    /// Keeps the layout segments that `manifest` lists, whose extent filters
-    /// root the content that the manifest's layout view refers to.
-    fn protect_layout_segments(&mut self, manifest: &LoadedManifest) -> Result<()> {
-        for segment in manifest
-            .payload()
-            .runs
-            .iter()
-            .flat_map(|run| &run.segments)
-            .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
-        {
-            let key = metadata_segment_object_key(segment);
+        for (key, segment) in loaded.layout_segments {
             if self.layout_segments.get(&key).is_none() {
-                self.layout_segments.insert(key, segment.clone())?;
+                self.layout_segments.insert(key, segment)?;
             }
         }
-        Ok(())
+        self.members.insert(member_id, loaded.state)
     }
 
     /// Returns the retirement status of `namespace_id`, the namespace of an
@@ -375,5 +282,133 @@ impl PoolRoots {
                 MemberReadOutcome::BudgetExceeded | MemberReadOutcome::UnreadableMember => None,
             },
         }
+    }
+}
+
+/// Roots collected from one pool member before merging into [`PoolRoots`].
+struct LoadedMemberRoots {
+    state: MemberState,
+    content_ids: Vec<ContentId>,
+    layout_segments: Vec<(String, MetadataSegmentRef)>,
+}
+
+/// Reads the roots of `member`, a namespace that the pool's member list lists,
+/// and returns its roots, or `None` for a namespace that isn't a member.
+///
+/// An initializing namespace has no roots, and the collection reads nothing of
+/// it beyond its newest manifest: LoonFS refuses commits to it, and a fork's
+/// manifest lists the source's segments, which the source's snapshot keeps. A
+/// retired namespace, an ID without a manifest, and a namespace whose manifest
+/// records another pool aren't members. The collection deletes their entries
+/// as the listing yields them and keeps nothing of them, so stale entries take
+/// none of the collection's budget.
+async fn load_member_roots<S: ObjectStore>(
+    member: &NamespaceStore<S>,
+    pool_id: &PoolId,
+    now_ms: u64,
+) -> Result<Option<LoadedMemberRoots>> {
+    let observed = Observation::now(Arc::clone(&member.timer));
+    let reason = match member.find_newest_manifest().await? {
+        NewestManifest::Manifest(current) if current.manifest.payload().pool_id == *pool_id => {
+            if let NamespaceStatus::Initializing {} = current.manifest.payload().status {
+                return Ok(Some(LoadedMemberRoots {
+                    state: MemberState::NoRoots,
+                    content_ids: Vec::new(),
+                    layout_segments: Vec::new(),
+                }));
+            }
+            return read_member_roots(member, current, observed, now_ms)
+                .await
+                .map(Some);
+        }
+        NewestManifest::Manifest(_) => "other_pool",
+        NewestManifest::Retired => "retired",
+        NewestManifest::Absent => "absent",
+    };
+    let key = pool_member(pool_id, &member.namespace_id);
+    member
+        .store
+        .delete(&key)
+        .await
+        .map_err(|error| CoreError::store(&key, &error))?;
+    tracing::info!(pool_id = %pool_id, namespace_id = %member.namespace_id, reason,
+        "deleted the member entry of a namespace that isn't a member");
+    Ok(None)
+}
+
+/// Collects the content IDs of the WAL tail above `current`, the layout
+/// segments of the current manifest while its view is a root, and the layout
+/// segments of the manifests that the member's snapshots keep.
+async fn read_member_roots<S: ObjectStore>(
+    member: &NamespaceStore<S>,
+    current: PublicationBasis,
+    observed: Observation,
+    now_ms: u64,
+) -> Result<LoadedMemberRoots> {
+    let mut content_ids = Vec::new();
+    let mut layout_segments = Vec::new();
+    let anchor = member
+        .load_read_anchor_from_manifest(current.manifest, current.boundary, observed, None)
+        .await?;
+    let head = anchor.manifest.payload();
+    // A tombstone's runs cover its whole WAL, so it has no tail.
+    if head.status.is_active() {
+        let tail = project_anchor_tail(&member.store, &member.segment_cache, &anchor)?;
+        for revision in tail.revisions() {
+            content_ids.push(revision.content_ref.content_id.clone());
+        }
+        for row in tail.content_layouts() {
+            for extent in &row.layout.extents {
+                content_ids.push(extent.content_id.clone());
+            }
+        }
+    }
+    let mut snapshots = member.list_snapshot_manifests(head.manifest_no);
+    while let Some(listed) = snapshots.try_next().await? {
+        let ListedSnapshotKey::Snapshot(snapshot, ()) = listed else {
+            continue;
+        };
+        match &snapshot.manifest {
+            SnapshotManifest::Loaded(manifest) => {
+                collect_layout_segments(manifest, &mut layout_segments);
+            }
+            SnapshotManifest::Rooted => {}
+            SnapshotManifest::Missing(manifest_no) => {
+                return Err(missing_root_manifest(
+                    &member.namespace_id,
+                    *manifest_no,
+                    &snapshot.key,
+                ));
+            }
+        }
+    }
+    drop(snapshots);
+    let status = if head.status.is_deleted() {
+        RetirementStatus::Retained {
+            retires_at_ms: Some(retirement_deadline_ms(head))
+                .filter(|deadline_ms| now_ms < *deadline_ms),
+        }
+    } else {
+        RetirementStatus::Active
+    };
+    if status.current_view_is_root() {
+        collect_layout_segments(&anchor.manifest, &mut layout_segments);
+    }
+    Ok(LoadedMemberRoots {
+        state: MemberState::Read { status },
+        content_ids,
+        layout_segments,
+    })
+}
+
+fn collect_layout_segments(manifest: &LoadedManifest, out: &mut Vec<(String, MetadataSegmentRef)>) {
+    for segment in manifest
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
+    {
+        out.push((metadata_segment_object_key(segment), segment.clone()));
     }
 }
