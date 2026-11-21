@@ -19,7 +19,7 @@ use tokio::time::MissedTickBehavior;
 /// store maintenance.
 #[derive(Clone)]
 pub(crate) struct SessionReaper {
-    namespaces: Arc<Namespaces<SchedulerState>>,
+    pub(super) namespaces: Arc<Namespaces<SchedulerState>>,
     interval_ms: u64,
     idle_session_close_after_ms: u64,
     stop: MaintenanceCancellation,

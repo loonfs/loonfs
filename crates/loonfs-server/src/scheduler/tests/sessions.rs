@@ -1072,8 +1072,12 @@ async fn session_reaper_closes_idle_and_ended_sessions_without_store_requests() 
     );
     server.runtime.shutdown().await.expect("shutdown");
 
-    // Verify `app` attaches the reaper (and no scheduler) in non-maintaining modes.
-    for mode in [JobMode::ServeOnly, JobMode::Disabled] {
+    // Verify `app` attaches the reaper (and no scheduler) in non-maintaining
+    // modes, and that embedded hosts can drive it via `AppState::run_due_steps`.
+    for (index, mode) in [JobMode::ServeOnly, JobMode::Disabled]
+        .into_iter()
+        .enumerate()
+    {
         let mut app_config = scheduler_config(None);
         app_config.maintenance = mode;
         let (_, state) = crate::app(
@@ -1086,7 +1090,41 @@ async fn session_reaper_closes_idle_and_ended_sessions_without_store_requests() 
         .await
         .expect("build app");
         assert!(state.scheduler.is_none());
-        assert!(state.session_reaper.is_some());
+        let reaper = state
+            .session_reaper
+            .as_ref()
+            .expect("session reaper attached");
+
+        let embedded_ns = namespace_id(&format!("reaper-embedded-{index}"));
+        state
+            .http
+            .runtime
+            .create_namespace(&embedded_ns, &test_actor())
+            .await
+            .expect("create namespace");
+        let handle = state
+            .http
+            .namespaces
+            .open(&embedded_ns)
+            .await
+            .expect("open session");
+        handle.close().await.expect("close session");
+        assert_eq!(held_ids(&reaper.namespaces), vec![embedded_ns.clone()]);
+
+        store.take();
+        let opened_ms = state.http.runtime.monotonic_timer().monotonic_now_ms();
+        while state.http.runtime.monotonic_timer().monotonic_now_ms() == opened_ms {
+            tokio::task::yield_now().await;
+        }
+        state.run_due_steps().await;
+        assert!(
+            held_ids(&reaper.namespaces).is_empty(),
+            "AppState::run_due_steps must reap ended sessions in {mode:?} mode"
+        );
+        assert!(
+            store.take().is_empty(),
+            "AppState::run_due_steps must make no store requests when maintenance is off"
+        );
         state.http.runtime.shutdown().await.expect("shutdown");
     }
 }

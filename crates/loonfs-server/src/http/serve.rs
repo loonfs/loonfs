@@ -36,6 +36,19 @@ pub struct AppState {
     pub(crate) session_reaper: Option<SessionReaper>,
 }
 
+impl AppState {
+    /// Runs one pass of the per-session background work this configuration
+    /// calls for: the maintenance scheduler's due steps when maintenance runs
+    /// in this process, or idle- and ended-session reaping otherwise.
+    pub async fn run_due_steps(&self) {
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.run_due_steps().await;
+        } else if let Some(reaper) = &self.session_reaper {
+            reaper.reap_once().await;
+        }
+    }
+}
+
 /// Optional inputs for building the HTTP application.
 #[derive(Default)]
 pub struct AppConfig {
@@ -48,8 +61,10 @@ pub struct AppConfig {
 /// Builds the router and returns its state.
 ///
 /// The state contains the maintenance scheduler when the config maintains,
-/// and this does not start it. [`serve_with_shutdown`] starts it. After an
-/// embedded listener drains, the host must shut down the HTTP API's runtime,
+/// and this does not start it or the non-maintaining session reaper.
+/// [`serve_with_shutdown`] starts whichever one the config calls for; embedded
+/// hosts can drive one pass at a time with [`AppState::run_due_steps`]. After
+/// an embedded listener drains, the host must shut down the HTTP API's runtime,
 /// which [`serve_with_shutdown`] does automatically.
 pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(Router, AppState)> {
     let ValidatedServerConfig {
