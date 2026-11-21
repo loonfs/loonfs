@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct StoreProbeRequest {}
+pub struct ProbeStoreRequest {}
 
 /// The results of one store contract probe, in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct StoreProbeResponse {
+pub struct ProbeStoreResponse {
     /// The ID of this probe run. The server generates the ID and writes the probe's temporary
     /// objects under it.
     pub probe_id: ProbeId,
@@ -20,7 +20,7 @@ pub struct StoreProbeResponse {
     pub checks: Vec<StoreProbeCheck>,
 }
 
-impl StoreProbeResponse {
+impl ProbeStoreResponse {
     /// Returns true when every check passed or reported an unsupported option.
     pub fn all_passed(&self) -> bool {
         self.checks.iter().all(|check| {
@@ -87,9 +87,9 @@ mod tests {
     fn store_probe_requests_are_strict() {
         // The probe body carries no options yet, so an unknown one is the
         // only thing it can be sent.
-        serde_json::from_value::<StoreProbeRequest>(serde_json::json!({}))
+        serde_json::from_value::<ProbeStoreRequest>(serde_json::json!({}))
             .expect("an empty probe body decodes");
-        serde_json::from_value::<StoreProbeRequest>(serde_json::json!({"deep": true}))
+        serde_json::from_value::<ProbeStoreRequest>(serde_json::json!({"deep": true}))
             .expect_err("an unknown probe field should be rejected");
     }
 }

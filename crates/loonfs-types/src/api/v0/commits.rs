@@ -245,7 +245,7 @@ pub struct ListChangesResponse {
 /// last commit in the range that changed it, so an inode appears on one page only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DiffResponse {
+pub struct ListDiffResponse {
     /// The namespace that was read.
     pub namespace_id: NamespaceId,
     /// The sequence that the diff starts after. Each entry compares an inode's state at this

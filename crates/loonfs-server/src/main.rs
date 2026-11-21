@@ -59,7 +59,7 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         if args.probe_store {
             let report =
-                loonfs_types::StoreProbeResponse::from(loonfs_server::probe_store(&config).await?);
+                loonfs_types::ProbeStoreResponse::from(loonfs_server::probe_store(&config).await?);
             let mut stdout = std::io::stdout().lock();
             for check in &report.checks {
                 writeln!(stdout, "{}", check.check_line())?;

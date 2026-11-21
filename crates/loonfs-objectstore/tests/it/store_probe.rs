@@ -7,7 +7,7 @@ use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreExtension, PutM
 use loonfs_test_support::stores::{
     FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
 };
-use loonfs_types::{ProbeId, StoreProbeResponse};
+use loonfs_types::{ProbeId, ProbeStoreResponse};
 use std::assert_matches;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -147,7 +147,7 @@ async fn a_store_that_ignores_compare_and_swap_fails_only_the_checks_about_it() 
     let report = run_store_contract_probe(&store, &ProbeId::generate()).await;
 
     assert!(accepted_a_stale_swap.load(Ordering::SeqCst));
-    assert!(!StoreProbeResponse::from(report.clone()).all_passed());
+    assert!(!ProbeStoreResponse::from(report.clone()).all_passed());
     assert_matches!(
         outcome(&report, "compare_and_swap_rejects_stale"),
         StoreProbeOutcome::Failed { message } if message.contains("does not enforce")
@@ -184,7 +184,7 @@ async fn a_store_that_stamps_every_object_at_the_epoch_fails_loudly() {
 
     let report = run_store_contract_probe(&store, &ProbeId::generate()).await;
 
-    assert!(!StoreProbeResponse::from(report.clone()).all_passed());
+    assert!(!ProbeStoreResponse::from(report.clone()).all_passed());
     assert_matches!(
         outcome(&report, "head_reports_last_modified"),
         StoreProbeOutcome::Failed { message } if message.contains("unix epoch")
@@ -212,5 +212,5 @@ async fn a_present_object_without_a_stored_checksum_fails_the_probe() {
         outcome(&report, "stored_checksum_readback"),
         StoreProbeOutcome::Failed { .. }
     );
-    assert!(!StoreProbeResponse::from(report).all_passed());
+    assert!(!ProbeStoreResponse::from(report).all_passed());
 }

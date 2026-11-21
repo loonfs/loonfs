@@ -228,7 +228,7 @@ async fn run_maintenance_store_probe(
     let response = context
         .target
         .client
-        .probe_store(&loonfs_types::StoreProbeRequest {})
+        .probe_store(&loonfs_types::ProbeStoreRequest {})
         .await
         .map_err(|error| context.fail(error))?;
 

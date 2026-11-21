@@ -11,8 +11,8 @@ use crate::read_view::{validate_view_directory_cursor, ReadSource, ReadView};
 use crate::runtime_core::classify_read_result;
 use crate::trace::{self, operation_span};
 use crate::{
-    CommitSeq, Consistency, ContentRef, CoreError, DiffOptions, DiffResponse, DownloadOptions,
-    Error, FileBytes, FileContentStream, ListChangesOptions, ListChangesResponse, ListOptions,
+    CommitSeq, Consistency, ContentRef, CoreError, DiffOptions, DownloadOptions, Error, FileBytes,
+    FileContentStream, ListChangesOptions, ListChangesResponse, ListDiffResponse, ListOptions,
     ListPathEntriesResponse, ListTrashOptions, LiveReadOptions, Namespace, PathEntry, ReadAt,
     ReadFileOptions, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, SnapshotId,
     StatOptions,
@@ -626,7 +626,7 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Returns the first page of the diff of the whole namespace from
     /// `from_seq` to the head that the page reads.
-    pub async fn diff(&self, from_seq: CommitSeq) -> Result<DiffResponse> {
+    pub async fn diff(&self, from_seq: CommitSeq) -> Result<ListDiffResponse> {
         self.diff_with_options(from_seq, &DiffOptions::default())
             .await
     }
@@ -647,7 +647,7 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         from_seq: CommitSeq,
         options: &DiffOptions,
-    ) -> Result<DiffResponse> {
+    ) -> Result<ListDiffResponse> {
         trace::in_operation(
             operation_span!(self.core, "diff", self.namespace_id),
             async {

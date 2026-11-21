@@ -16,8 +16,8 @@ use loonfs_test_support::provider_detail::{
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     AbsolutePath, AttributeValue, AttributesProjection, CommitSeq, DisplayName, InodeId,
-    NamespaceId, PathEntry, PathEntryKind, StoreProbeCheck, StoreProbeCheckOutcome,
-    StoreProbeResponse,
+    NamespaceId, PathEntry, PathEntryKind, ProbeStoreResponse, StoreProbeCheck,
+    StoreProbeCheckOutcome,
 };
 
 fn poison_permission_error() -> loonfs::Error {
@@ -125,7 +125,7 @@ fn provider_failure_is_safe_on_embedded_remote_and_doctor_surfaces() {
                 message: "store probe probe_00000000000000000000000001: 4 of 4 checks failed"
                     .to_owned(),
                 request_id: None,
-                store_probe: Some(StoreProbeResponse {
+                store_probe: Some(ProbeStoreResponse {
                     probe_id: loonfs_types::ProbeId::parse("probe_00000000000000000000000001")
                         .expect("probe run id"),
                     checks: checks.clone(),
