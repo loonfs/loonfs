@@ -153,8 +153,12 @@ impl GrepService {
             namespace_id: namespace_reads.namespace_id(),
             block_cache: Some(&self.block_cache),
         };
-        let (candidates, cut_seq, tail_scanned) =
-            plan_candidates(request, gram_plan, &snapshot, &index, &page, scope.as_ref()).await?;
+        let (candidates, cut_seq, tail_scanned) = page
+            .reads
+            .classify_index_result(
+                plan_candidates(request, gram_plan, &snapshot, &index, &page, scope.as_ref()).await,
+            )
+            .await?;
         let PageReads {
             reads,
             resume,
@@ -201,8 +205,9 @@ impl GrepService {
     ) -> Result<GrepResponse> {
         // A query reads through views that pin the manifest its head was read
         // above. When a collection removes that manifest's segments after a
-        // newer manifest replaced it, the query runs again from a reloaded
-        // head, as an ordinary read does.
+        // newer manifest replaced it, core's segments and grep's index
+        // segments both return `ManifestReplaced`, and the query runs again
+        // from a reloaded head, as an ordinary read does.
         reads
             .namespace()
             .read_through_views(|| {
@@ -234,7 +239,10 @@ impl GrepService {
         let plan = self
             .plan_query(request, page.cursor.as_deref(), reads, store)
             .await?;
-        let page = walk_page(&plan, page.limit.as_usize()).await?;
+        let page = plan
+            .reads
+            .classify_index_result(walk_page(&plan, page.limit.as_usize()).await)
+            .await?;
         Ok(GrepResponse {
             namespace_id: plan.reads.namespace_id().clone(),
             head_seq: plan.read_seq,
