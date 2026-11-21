@@ -66,12 +66,13 @@ pub(super) struct UploadPathParams {
         tag = "uploads",
         summary = "Begin upload",
         description = "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned URL for the upload.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         request_body = CreateUploadBody,
         responses(
             (status = 200, description = "Upload session started", body = UploadSession),
             (status = 400, description = "Invalid upload request", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "Body exceeds the 1 MiB upload-control limit", body = ErrorResponse),
@@ -223,14 +224,15 @@ async fn begin_direct_multipart_upload(
         summary = "Sign multipart parts",
         description = "Returns one short-lived presigned URL for each requested part of an open `direct_multipart` session. Each presigned URL is bound to the part's checksum. To retry a part, a client asks for its presigned URL again.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("upload_id" = String, Path, description = "The upload session ID.")
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
+            ("upload_id" = loonfs_types::UploadId, Path, description = "The upload session ID.")
         ),
         request_body = SignUploadPartsRequest,
         responses(
             (status = 200, description = "Part capabilities issued", body = SignUploadPartsResponse),
             (status = 400, description = "Invalid part request", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
             (status = 409, description = "Upload already completed", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -432,14 +434,15 @@ fn with_content_token(
         summary = "Upload content",
         description = "Uploads bytes into a service-proxied upload session and returns the open session with the staged content reference.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("upload_id" = String, Path, description = "The upload session ID.")
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
+            ("upload_id" = loonfs_types::UploadId, Path, description = "The upload session ID.")
         ),
-        request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+        request_body(content = inline(crate::http::openapi::BinaryPayload), content_type = "application/octet-stream"),
         responses(
             (status = 200, description = "Open session with the staged content reference", body = UploadSession),
             (status = 400, description = "Invalid upload content", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
             (status = 409, description = "Upload content conflict", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -489,8 +492,8 @@ pub(super) async fn put_upload_content(
         summary = "Complete upload",
         description = "Completes an upload. The request mode must match the mode that started the session. A direct upload includes a content claim, and a multipart upload also includes the completed parts.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("upload_id" = String, Path, description = "The upload session ID.")
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
+            ("upload_id" = loonfs_types::UploadId, Path, description = "The upload session ID.")
         ),
         request_body(
             content = CompleteUploadBody,
@@ -500,6 +503,7 @@ pub(super) async fn put_upload_content(
             (status = 200, description = "Upload completed", body = UploadSession),
             (status = 400, description = "Invalid completion request", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
             (status = 409, description = "Upload completion conflict", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -549,15 +553,17 @@ pub(super) async fn complete_upload(
         summary = "Get upload session",
         description = "Returns an upload session. An open `direct_put` session includes a new presigned URL for the upload. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("upload_id" = String, Path, description = "The upload session ID.")
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
+            ("upload_id" = loonfs_types::UploadId, Path, description = "The upload session ID.")
         ),
         responses(
             (status = 200, description = "Upload session state", body = UploadSession),
             (status = 400, description = "Invalid upload ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 501, description = "Direct upload presigning is unsupported", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -611,13 +617,14 @@ pub(super) async fn get_upload(
         summary = "Abort upload",
         description = "Aborts an open upload session and deletes the object that the session was writing. Repeating the request succeeds, but a completed session can't be aborted.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("upload_id" = String, Path, description = "The upload session ID.")
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
+            ("upload_id" = loonfs_types::UploadId, Path, description = "The upload session ID.")
         ),
         responses(
             (status = 200, description = "Upload aborted", body = UploadSession),
             (status = 400, description = "Invalid upload ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or upload not found", body = ErrorResponse),
             (status = 409, description = "Upload already completed", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
