@@ -781,7 +781,7 @@ Any process can fold as the namespace's [maintainer](glossary.md#maintainer) und
 
 Every manifest publication starts from a basis manifest in memory (checking `boundary.json` first if reloaded from storage, or running cold discovery if no basis exists) and puts `basis + 1` directly:
 
-- **Lost put (collision):** Probe `basis + 1` with HEAD, then probe windows of `MANIFEST_PROBE_WINDOW` (8) manifests until finding the highest existing manifest, then read `boundary.json` (falling back to cold discovery if `<= boundary`).
+- **Lost put (collision):** Probe `basis + 1` with HEAD, then probe an initial window of `MANIFEST_PROBE_WINDOW` (8) manifests and, if all exist, gallop exponentially and narrow the bracket in parallel batches until finding the highest existing manifest, then read `boundary.json` (falling back to cold discovery if `<= boundary`).
 - **Succeeded put:** Read `boundary.json` conditionally (plain read for manifest 1). This final check catches any put that raced into a manifest number GC had already emptied:
   1. If `manifest_no > boundary` (or no boundary exists), publication succeeded.
   2. If `manifest_no <= boundary`, treat the put as lost and run cold discovery (a `retired` boundary returns `namespace_deleted`).
