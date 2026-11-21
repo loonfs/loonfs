@@ -131,8 +131,10 @@ pub use loonfs_types::{
 /// The `loonfs-grep` crate is the example. A host does not need them.
 pub mod engine {
     pub use loonfs_core::cache::{
+        arc_bytes, data_block_heap_bytes, filter_block_heap_bytes, index_block_heap_bytes,
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
-        DecodedBlockKey, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
+        DecodedBlockKey, DecodedSegmentBlock, HeapBytes, Recency, SegmentBlockKind,
+        SegmentCacheKey,
     };
     pub use loonfs_core::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
     pub use loonfs_core::{

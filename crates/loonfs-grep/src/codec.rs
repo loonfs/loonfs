@@ -4,6 +4,7 @@
 //! index's three row families are specified in
 //! [`docs/specs/format.md` Appendix D](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#appendix-d-grep-extension-format).
 
+use loonfs::engine::HeapBytes;
 use loonfs_types::format::segment_blocks::{read_varint, write_varint, SegmentBlockCodecError};
 use loonfs_types::{CommitSeq, ContentId, ContentRef, InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
@@ -423,6 +424,48 @@ impl IndexRow {
             Self::Value(_) => lookup::VALUE_FILTER_KEY.to_owned(),
             Self::Filter(_) => lookup::FILTER_ROWS_FILTER_KEY.to_owned(),
         }
+    }
+}
+
+impl HeapBytes for IndexRow {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::GramPostings(row) => row.heap_bytes(),
+            Self::Text(row) => row.heap_bytes(),
+            Self::ContentRevision(row) => row.heap_bytes(),
+            Self::Value(row) => row.heap_bytes(),
+            Self::Filter(row) => row.heap_bytes(),
+        }
+    }
+}
+
+impl HeapBytes for GramPostingsRow {
+    fn heap_bytes(&self) -> usize {
+        self.postings.capacity()
+    }
+}
+
+impl HeapBytes for TextRow {
+    fn heap_bytes(&self) -> usize {
+        self.content_id.heap_bytes()
+    }
+}
+
+impl HeapBytes for ContentRevisionRow {
+    fn heap_bytes(&self) -> usize {
+        self.content_id.heap_bytes()
+    }
+}
+
+impl HeapBytes for ValueRow {
+    fn heap_bytes(&self) -> usize {
+        self.content_id.heap_bytes()
+    }
+}
+
+impl HeapBytes for FilterRow {
+    fn heap_bytes(&self) -> usize {
+        self.payload.capacity()
     }
 }
 

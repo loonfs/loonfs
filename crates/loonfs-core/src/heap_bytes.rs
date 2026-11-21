@@ -22,7 +22,7 @@ use loonfs_types::format::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord,
     TombstoneRowAction, TrashRecord, TrashRowAction,
 };
-use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
+use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_types::format::wal::{
     MergeRecord, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
 };
@@ -40,18 +40,18 @@ use std::mem::size_of;
 
 /// Heap a value owns outside its own inline size. Whatever contains the value
 /// charges that inline size itself.
-pub(crate) trait HeapBytes {
+pub trait HeapBytes {
     fn heap_bytes(&self) -> usize;
 }
 
 /// One `Arc` allocation: two reference counts, then the value.
-pub(crate) const fn arc_bytes<T>() -> usize {
+pub const fn arc_bytes<T>() -> usize {
     2 * size_of::<usize>() + size_of::<T>()
 }
 
 /// A decoded data block behind the `Arc` the caches share.
-pub(crate) fn data_block_heap_bytes(block: &DecodedDataBlock) -> usize {
-    arc_bytes::<DecodedDataBlock>() + block.row_keys.heap_bytes() + block.rows.heap_bytes()
+pub fn data_block_heap_bytes<R: HeapBytes>(block: &DecodedDataBlock<R>) -> usize {
+    arc_bytes::<DecodedDataBlock<R>>() + block.row_keys.heap_bytes() + block.rows.heap_bytes()
 }
 
 /// A decoded manifest behind the `Arc` that its loaders share.
@@ -60,8 +60,13 @@ pub(crate) fn manifest_heap_bytes(envelope: &NamespaceManifestEnvelope) -> usize
 }
 
 /// A decoded index block behind the `Arc` the caches share.
-pub(crate) fn index_block_heap_bytes(entries: &Vec<SegmentIndexEntry>) -> usize {
+pub fn index_block_heap_bytes(entries: &Vec<SegmentIndexEntry>) -> usize {
     arc_bytes::<Vec<SegmentIndexEntry>>() + entries.heap_bytes()
+}
+
+/// A decoded filter block behind the `Arc` the caches share.
+pub fn filter_block_heap_bytes(filter: &SegmentFilter) -> usize {
+    filter.decoded_bytes() + arc_bytes::<()>()
 }
 
 /// The table `std`'s hash map allocates for its capacity. The map keeps
