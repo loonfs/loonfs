@@ -386,6 +386,57 @@ async fn health_and_capabilities_omit_principal_context_headers() {
     }
 }
 
+/// Checks that a retry waits the whole `Retry-After` the server asked for,
+/// even above the policy's backoff cap, and that a wait the operation's
+/// deadline can't fit returns the error without sending again.
+#[tokio::test(start_paused = true)]
+async fn retries_wait_the_whole_retry_after_or_stop_when_the_deadline_cannot_fit_it() {
+    let transport = scripted_transport::script([
+        scripted_transport::Outcome::RefusedRetryAfter(ErrorCode::ServerBusy, 10),
+        scripted_transport::Outcome::Success(b"{}".to_vec()),
+    ]);
+    let mut client = scripted_transport::client(&transport);
+    client.transport_retry = TransportRetryPolicy {
+        initial_backoff_ms: 0,
+        max_backoff_ms: 2_000,
+        ..DEFAULT
+    };
+    let request = client.request(
+        Operation::retry(Method::GET),
+        "http://example.invalid/control",
+    );
+    let mut call = std::pin::pin!(client.call(&request));
+    assert!(futures::poll!(&mut call).is_pending());
+    assert_eq!(transport.attempts(), 1);
+    tokio::time::advance(Duration::from_millis(9_999)).await;
+    assert!(
+        futures::poll!(&mut call).is_pending(),
+        "the retry waits the whole Retry-After, not the backoff cap"
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    call.now_or_never()
+        .expect("the wait is over")
+        .expect("the second attempt succeeds");
+    assert_eq!(transport.attempts(), 2);
+
+    let transport = scripted_transport::script([scripted_transport::Outcome::RefusedRetryAfter(
+        ErrorCode::ServerBusy,
+        DEFAULT.operation_deadline_ms / 1_000 + 1,
+    )]);
+    let client = scripted_transport::client(&transport);
+    let request = client.request(
+        Operation::retry(Method::GET),
+        "http://example.invalid/control",
+    );
+    let error = client
+        .call(&request)
+        .now_or_never()
+        .expect("a wait past the deadline returns at once")
+        .expect_err("the refusal is returned");
+    assert_eq!(error.code(), Some(ErrorCode::ServerBusy));
+    assert_eq!(transport.attempts(), 1);
+}
+
 #[test]
 fn retry_after_parses_delta_seconds() {
     let mut headers = http::HeaderMap::new();

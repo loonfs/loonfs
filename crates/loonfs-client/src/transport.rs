@@ -278,15 +278,22 @@ impl Client {
             else {
                 return Err(failed.error);
             };
+            // A `Retry-After` is the server's own wait, so the client waits
+            // the whole of it, or returns the error when the operation's
+            // deadline can't fit the wait, instead of sending again earlier
+            // than the server asked.
             let wait_ms = match failed.retry_after_ms {
                 Some(retry_after_ms) => {
-                    let capped = retry_after_ms
-                        .max(backoff_ms)
-                        .min(self.transport_retry.max_backoff_ms);
-                    match deadline.as_ref().and_then(OperationDeadline::remaining_ms) {
-                        Some(remaining_ms) => capped.min(remaining_ms),
-                        None => capped,
+                    let wait_ms = retry_after_ms.max(backoff_ms);
+                    if let Some(deadline) = deadline.as_ref() {
+                        if deadline
+                            .remaining_ms()
+                            .is_none_or(|remaining_ms| remaining_ms <= wait_ms)
+                        {
+                            return Err(failed.error);
+                        }
                     }
+                    wait_ms
                 }
                 None => backoff_ms,
             };
@@ -465,8 +472,8 @@ pub(crate) struct FailedAttempt {
     /// transport failure.
     pub(crate) source: FailureSource,
     pub(crate) error: ClientError,
-    /// Server-suggested retry delay from `Retry-After`, in milliseconds, when
-    /// the failed response included a delta-seconds header.
+    /// The wait that the failed response's `Retry-After` header asks for, in
+    /// milliseconds, when the header is in delta seconds.
     pub(crate) retry_after_ms: Option<u64>,
 }
 
