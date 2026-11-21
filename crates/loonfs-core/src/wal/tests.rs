@@ -1,7 +1,9 @@
 //! Numbered WAL verification and fence reclamation contracts.
 
-// This module is the physical WAL boundary.
-#![allow(clippy::disallowed_methods)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "this module tests the physical WAL boundary directly"
+)]
 
 use crate::commit::engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::test_support::WriterAt;

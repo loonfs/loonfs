@@ -545,7 +545,10 @@ fn standalone_publisher_with(
     standalone_publisher(namespace_id, &runtime)
 }
 
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "waits past wall-clock publish pacing interval in a race test"
+)]
 async fn wait_past_publish_pacing() {
     // Deliberate wall-clock wait past the per-namespace CAS pacing
     // interval. A work loop that were not single-flight would let a

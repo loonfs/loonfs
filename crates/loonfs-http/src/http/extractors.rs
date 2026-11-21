@@ -673,13 +673,19 @@ impl FromRequest<Arc<HttpState>> for NoBody {
 mod tests {
     use super::*;
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "fields exist only for serde deserialization error path tests"
+    )]
     #[derive(Debug, serde::Deserialize)]
     struct Request {
         operations: Vec<Operation>,
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "fields exist only for serde deserialization error path tests"
+    )]
     #[derive(Debug, serde::Deserialize)]
     struct Operation {
         path: u64,
@@ -852,7 +858,10 @@ mod tests {
 
     #[test]
     fn json_pointer_escapes_object_keys() {
-        #[allow(dead_code)]
+        #[allow(
+            dead_code,
+            reason = "field exists only for serde deserialization error path test"
+        )]
         #[derive(Debug, serde::Deserialize)]
         struct MapRequest {
             values: std::collections::BTreeMap<String, u64>,

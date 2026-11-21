@@ -1389,7 +1389,10 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
 }
 
 #[tokio::test]
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "verifies physical WAL object preservation and deletion under GC"
+)]
 async fn gc_preserves_unfolded_data_then_collects_the_retired_prefix() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(

@@ -1,5 +1,3 @@
-// The WAL key is built here to exercise the metrics wrapper, not the log.
-#![allow(clippy::disallowed_methods)]
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
@@ -273,6 +271,10 @@ async fn instrumented_store_forwards_start_after_listing() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "builds a WAL key to exercise key-family metrics classification"
+)]
 async fn classifies_durable_key_families() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());

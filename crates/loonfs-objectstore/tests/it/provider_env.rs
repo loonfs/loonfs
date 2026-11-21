@@ -183,7 +183,10 @@ fn optional_env(name: &'static str) -> Option<String> {
     }
 }
 
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "live-provider conformance prefixes use wall-clock timestamps for uniqueness"
+)]
 fn default_prefix(provider: &str) -> String {
     // Provider conformance prefixes need to be unique per ad hoc test run.
     let stamp = SystemTime::now()

@@ -341,8 +341,10 @@ mod tests {
         (temp_dir, store, namespace_id)
     }
 
-    // This corruption test deliberately rewrites physical WAL bytes.
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this corruption test deliberately rewrites physical WAL bytes"
+    )]
     #[tokio::test]
     async fn a_tail_that_replays_to_another_head_is_refused_by_reads_and_publishes_alike() {
         let (_temp_dir, store, namespace_id) = namespace_with_annotated_children().await;

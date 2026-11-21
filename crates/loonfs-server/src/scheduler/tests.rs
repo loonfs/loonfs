@@ -1186,7 +1186,10 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
 const RETIRED_SWEEP_REQUESTS: (usize, usize) = (3, 1);
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "drives paused Tokio timers during scheduler sweep test"
+)]
 async fn a_retired_namespace_costs_a_sweep_a_fixed_number_of_requests_and_no_failure() {
     for grep in [Grep::NotMaintained, Grep::Maintained] {
         let directory = tempdir().expect("tempdir");

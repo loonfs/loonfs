@@ -1,3 +1,5 @@
+//! Unit tests for the ambient AWS credential cache.
+
 use super::CredentialCache;
 use aws_credential_types::provider::{error::CredentialsError, future, ProvideCredentials};
 use aws_credential_types::Credentials;

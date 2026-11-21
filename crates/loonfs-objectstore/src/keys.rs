@@ -261,9 +261,6 @@ pub fn probe_run_prefix(probe_id: &ProbeId) -> String {
 
 #[cfg(test)]
 mod tests {
-    // The key builder is tested where it is defined.
-    #![allow(clippy::disallowed_methods)]
-
     use super::{
         boundary, content_blob, content_blob_name, content_prefix, content_span, content_span_name,
         extension_segment, metadata_manifest_object, metadata_segment, metadata_segment_object_key,
@@ -317,6 +314,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "tests the WAL key builder where it is defined"
+    )]
     fn standard_key_patterns_match_format_spec_table() {
         let spec = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -433,6 +434,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "tests the WAL key builder against wal_prefix"
+    )]
     fn listing_prefixes_match_their_keys() {
         assert_eq!(wal_prefix(&namespace_id()), "namespaces/ns-1/wal/");
         assert!(wal_object(&namespace_id(), &WalNo(42)).starts_with(&wal_prefix(&namespace_id())));

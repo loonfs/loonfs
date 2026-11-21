@@ -319,8 +319,10 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
         .build()
         .expect("runtime b");
 
-    #[allow(clippy::disallowed_methods)]
-    // Wall-clock bounds a live-provider stall check; no protocol time depends on it.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "bounds a live-provider stall check outside protocol time"
+    )]
     let started = std::time::Instant::now();
     let run_id = loonfs_types::generated_id("runtime");
     for round in 0..5u32 {
@@ -341,9 +343,10 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
             .block_on(store.delete(&key))
             .expect("delete on runtime b");
     }
-    #[allow(clippy::disallowed_methods)]
-    // Same wall-clock boundary as above; 20 rounds of small ops complete in
-    // seconds unless a request parks until the 30s client timeout.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "bounds a live-provider stall check outside protocol time"
+    )]
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(25),

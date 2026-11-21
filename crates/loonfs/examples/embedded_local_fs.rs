@@ -7,7 +7,10 @@ use loonfs::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 
-#[allow(clippy::print_stdout)]
+#[allow(
+    clippy::print_stdout,
+    reason = "example binary prints the file content it reads"
+)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This example intentionally prints the file content it just read.
