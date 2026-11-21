@@ -28,7 +28,7 @@ pub(crate) fn sends_again(error: &ClientError) -> bool {
             code.kind() == ErrorKind::OutcomeUnknown || code.retryable_without_operator_action()
         }),
         ClientError::Http(_) | ClientError::Io(_) => true,
-        ClientError::HttpStatus { status, .. } => *status == 429 || *status >= 500,
+        ClientError::HttpStatus { status, .. } => matches!(*status, 408 | 429) || *status >= 500,
         ClientError::ConfigIo(_)
         | ClientError::ConfigDecode(_)
         | ClientError::ConfigField(_)
@@ -91,6 +91,11 @@ mod tests {
             status: 502,
             provider_code: None,
             detail: "bad gateway".to_owned(),
+        }));
+        assert!(sends_again(&ClientError::HttpStatus {
+            status: 408,
+            provider_code: None,
+            detail: "request timeout".to_owned(),
         }));
         assert!(sends_again(&ClientError::HttpStatus {
             status: 429,
