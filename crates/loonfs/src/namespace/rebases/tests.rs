@@ -170,7 +170,10 @@ async fn a_retried_replay_commit_returns_its_conflict_report() {
         .map(|conflict| conflict.kind)
         .collect();
     assert_eq!(kinds, [MergeConflictKind::Content]);
+    assert_eq!(replayed.commit.committed_seq, replayed.namespace.head_seq);
+    assert_eq!(replayed.commit.namespace_id, rebase_id);
     let retried = replay(&runtime, &fork_id, &rebase_id).await;
+    assert_eq!(retried.commit, replayed.commit);
     assert_eq!(retried.conflicts, replayed.conflicts);
     assert_eq!(retried.namespace.head_seq, replayed.namespace.head_seq);
 }

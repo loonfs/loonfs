@@ -3472,6 +3472,10 @@
             "$ref": "#/components/schemas/CommitSeq",
             "description": "The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of\nthe namespace that the rebase forked."
           },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that the fork merges into (or, for a rebase, the rebase's new fork)."
+          },
           "outcome": {
             "description": "Whether the retention floors allow the fork's next merge, and where that merge starts.",
             "enum": [
@@ -3486,11 +3490,17 @@
           "source_head_seq": {
             "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's head sequence when the server read it."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose next merge range was queried."
           }
         },
         "required": [
           "retention_floor_seq",
           "outcome",
+          "namespace_id",
+          "source_namespace_id",
           "fork_point_seq",
           "source_head_seq"
         ],
@@ -3507,6 +3517,10 @@
             "$ref": "#/components/schemas/Merge",
             "description": "The fork's newest merge into the namespace, which the next merge continues. It's\nabsent before the fork's first merge. In a rebase's new fork, it's the fork's newest\nreplay commit, never a merge that the new fork inherited."
           },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that the fork merges into (or, for a rebase, the rebase's new fork)."
+          },
           "next_after_seq": {
             "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork sequence that the next merge starts after: the newest merge's\n`source_through_seq`, or the fork point before the fork's first merge. In a rebase's\nnew fork, it's the new fork's `resume_after_seq` before the first replay commit."
@@ -3521,11 +3535,17 @@
           "source_head_seq": {
             "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's head sequence when the server read it."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose next merge range was queried."
           }
         },
         "required": [
           "next_after_seq",
           "outcome",
+          "namespace_id",
+          "source_namespace_id",
           "fork_point_seq",
           "source_head_seq"
         ],
@@ -3541,6 +3561,10 @@
           "merge": {
             "$ref": "#/components/schemas/Merge",
             "description": "The fork's newest merge into the namespace, as for `open`. It's absent before the\nfork's first merge."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that the fork merges into (or, for a rebase, the rebase's new fork)."
           },
           "next_after_seq": {
             "$ref": "#/components/schemas/CommitSeq",
@@ -3560,12 +3584,18 @@
           "source_head_seq": {
             "$ref": "#/components/schemas/CommitSeq",
             "description": "The fork's head sequence when the server read it."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose next merge range was queried."
           }
         },
         "required": [
           "next_after_seq",
           "retention_floor_seq",
           "outcome",
+          "namespace_id",
+          "source_namespace_id",
           "fork_point_seq",
           "source_head_seq"
         ],
@@ -3979,8 +4009,12 @@
         "type": "object"
       },
       "ReplayForkResponse": {
-        "description": "The result of a replay commit: the new fork, and the changes that the replay commit left out.",
+        "description": "The result of a replay commit: the new fork, the replay commit, and the\nchanges that the replay commit left out.",
         "properties": {
+          "commit": {
+            "$ref": "#/components/schemas/Commit",
+            "description": "The replay commit applied to the new fork. A retry with the same commit\nID returns the same commit."
+          },
           "conflicts": {
             "description": "The replay commit's conflict report, with one entry for each inode whose change the replay\ncommit didn't apply. It's empty when the replay commit left nothing out. The replay\ncommit's merge record stores the report, so a retry with the same commit ID returns the\nsame report.",
             "items": {
@@ -3995,6 +4029,7 @@
         },
         "required": [
           "namespace",
+          "commit",
           "conflicts"
         ],
         "type": "object"

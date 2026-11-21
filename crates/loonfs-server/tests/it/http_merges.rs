@@ -404,6 +404,8 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
     assert_eq!(
         range,
         NextMergeRangeResponse {
+            namespace_id: family.main.clone(),
+            source_namespace_id: family.fork.clone(),
             fork_point_seq: fork_point,
             source_head_seq: written.committed_seq,
             outcome: NextMergeRangeOutcome::Open {

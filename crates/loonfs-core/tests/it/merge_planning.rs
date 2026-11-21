@@ -2244,6 +2244,8 @@ async fn a_merge_through_a_sequence_below_the_head_leaves_the_rest() {
     assert_eq!(
         family.next_range().await,
         NextMergeRangeResponse {
+            namespace_id: family.main.clone(),
+            source_namespace_id: family.fork.clone(),
             fork_point_seq: fork_point,
             source_head_seq: second.committed_seq,
             outcome: NextMergeRangeOutcome::Open {

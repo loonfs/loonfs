@@ -63,6 +63,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 },
             };
         Ok(NextMergeRangeResponse {
+            namespace_id: main.head().namespace_id.clone(),
+            source_namespace_id: fork_id.clone(),
             fork_point_seq,
             source_head_seq: fork_head.seq,
             outcome,

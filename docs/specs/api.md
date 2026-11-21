@@ -2584,6 +2584,8 @@ Representative request and response:
 
 ```json
 {
+  "namespace_id": "demo",
+  "source_namespace_id": "demo-branch",
   "fork_point_seq": 418,
   "source_head_seq": 440,
   "outcome": "open",
@@ -2603,6 +2605,8 @@ Representative request and response:
 
 | Response field | Meaning |
 | --- | --- |
+| `namespace_id` | Namespace that the fork merges into (or the rebase fork being queried). |
+| `source_namespace_id` | Fork whose next merge range was queried. |
 | `fork_point_seq` | Fork point sequence in the parent namespace. |
 | `source_head_seq` | Fork's head sequence when read (default end of a merge without `through_seq`). |
 | `outcome` | Floor status: `open`, `range_start_below_floor`, or `fork_point_below_floor` (clients MUST tolerate other values). |
@@ -2618,7 +2622,7 @@ Rather than returning `below_retention_floor` when steps 3 to 5 of [`POST /merge
 Example when the parent's floor has passed the fork point:
 
 ```json
-{"fork_point_seq":418,"source_head_seq":440,"outcome":"fork_point_below_floor","retention_floor_seq":450}
+{"namespace_id":"demo","source_namespace_id":"demo-branch","fork_point_seq":418,"source_head_seq":440,"outcome":"fork_point_below_floor","retention_floor_seq":450}
 ```
 
 When queried on a rebase fork with `source_namespace_id` set to its `fork_basis.rebased_from.source_namespace_id`, the route inspects replay progress for [`POST /replays`](#617-post-replays): `merge` is the newest replay commit in the rebase fork (ignoring inherited merges from the parent namespace), `next_after_seq` starts at `resume_after_seq`, `fork_point_seq` is the source fork's fork point in the parent namespace, and `outcome` is `fork_point_below_floor` if the rebase fork's floor passed its own fork point.
@@ -2737,6 +2741,19 @@ Loonfs-Context: service
     "head_seq": 432,
     "retention_floor_seq": 431
   },
+  "commit": {
+    "namespace_id": "demo-branch-2",
+    "commit_id": "c_rebase_demo_branch_1",
+    "committed_seq": 432,
+    "committed_at_ms": 1752625201000,
+    "actor_id": "usr_8f3c",
+    "merge": {
+      "source_namespace_id": "demo-branch",
+      "source_after_seq": 418,
+      "source_through_seq": 425
+    },
+    "events": []
+  },
   "conflicts": [
     {
       "inode_id": "ino_000000r0000013kje0d47gc8kw",
@@ -2756,16 +2773,16 @@ Loonfs-Context: service
 | `commit_id` | Idempotency key for the replay commit. |
 | `message` | Optional annotation included in the replay commit's identity. |
 
-The response returns the updated rebase fork (`namespace`, matching [`GET /v0/namespaces/{ns}`](#62-get-v0namespacesns)) and its conflict report (`conflicts`, empty when nothing conflicted).
+The response returns the updated rebase fork (`namespace`, matching [`GET /v0/namespaces/{ns}`](#62-get-v0namespacesns)), the replay commit (`commit`, matching [`POST /merges`](#614-post-merges)), and its conflict report (`conflicts`, empty when nothing conflicted).
 
 To execute a replay commit, the server (reading one view of each namespace across steps 1 to 5, reloading once if GC removes a replaced manifest's segments):
 
-1. Checks the commit receipt for `commit_id` in the rebase fork, returning the rebase fork and the persisted conflict report immediately if already committed.
+1. Checks the commit receipt for `commit_id` in the rebase fork, returning the rebase fork, the replay commit, and the persisted conflict report immediately if already committed.
 2. Reserves merge memory allowance as in [`POST /merges`](#614-post-merges).
 3. Verifies `rebased_from` matches `source_namespace_id` and determines the range start (after the previous replay commit, or after `resume_after_seq` for the first replay). Returns `below_retention_floor` if the range start is below the source fork's floor or if the rebase fork's floor passed its own fork point.
 4. Snapshots the source fork's manifest (folding only when a merge would), computes the net change and planned size (including the serialized conflict report), and returns `merge_too_large` with `split_at_seq` if it doesn't fit.
 5. Classifies conflicts against the rebase fork's head (reading parent history up to the rebase fork's fork point through `fork_point_snapshot_id`) and materializes any needed source WAL tail pieces.
-6. Commits non-conflicting operations into the rebase fork (storing the conflict report in the merge record, see [WAL records](format.md#a5-wal-records)) and returns `namespace` and `conflicts`. On concurrent-change precondition failures, keeps the reservation and restarts from step 1 up to 3 times (reporting intervening foreign changes in `conflicts`).
+6. Commits non-conflicting operations into the rebase fork (storing the conflict report in the merge record, see [WAL records](format.md#a5-wal-records)) and returns `namespace`, `commit`, and `conflicts`. On concurrent-change precondition failures, keeps the reservation and restarts from step 1 up to 3 times (reporting intervening foreign changes in `conflicts`).
 
 A failed replay leaves the rebase fork intact for follow-up calls. Because the conflict report is persisted in the merge record, retrying with the same `commit_id` always replays the exact same conflict report. Large ranges split across multiple replay calls using `split_at_seq` and `through_seq`, just like merges. Authorization checks the net change against the rebase fork's access rows (inherited from the parent namespace) and requires `read` on touched source-fork inodes.
 

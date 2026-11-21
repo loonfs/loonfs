@@ -130,17 +130,18 @@ impl Namespace<Writable> {
                     message: options.message.clone(),
                 };
                 let planned = self.plan_replay(&request, None).await?;
-                let conflicts = match self
+                let (commit, conflicts) = match self
                     .commit_merge(&request, planned, |request, reservation| {
                         Box::pin(async move { self.plan_replay(&request, Some(reservation)).await })
                     })
                     .await?
                 {
-                    MergeOutcome::Found { conflicts, .. } => conflicts,
-                    MergeOutcome::Committed { report, .. } => report,
+                    MergeOutcome::Found { commit, conflicts } => (commit, conflicts),
+                    MergeOutcome::Committed { commit, report } => (commit, report),
                 };
                 Ok(ReplayForkResponse {
                     namespace: self.metadata().await?,
+                    commit,
                     conflicts,
                 })
             },

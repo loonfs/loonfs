@@ -219,6 +219,20 @@ impl Mechanics for ScriptedMechanics {
         match self.answer(sent) {
             Answer::Replayed(conflicts) => Ok(ReplayForkResponse {
                 namespace: namespace(namespace_id, &main(), Some(source_namespace_id)),
+                commit: Commit {
+                    namespace_id: namespace_id.clone(),
+                    commit_id: options.commit_id.clone().expect("a replay has a commit ID"),
+                    committed_seq: CommitSeq(1),
+                    committed_by: _actor.clone(),
+                    committed_at_ms: 0,
+                    message: options.message.clone(),
+                    merge: Some(Merge {
+                        source_namespace_id: source_namespace_id.clone(),
+                        source_after_seq: CommitSeq(0),
+                        source_through_seq: options.through_seq.unwrap_or(CommitSeq(1)),
+                    }),
+                    events: Vec::new(),
+                },
                 conflicts,
             }),
             Answer::Refused(code, details) => Err(refused(code, details)),
@@ -228,7 +242,7 @@ impl Mechanics for ScriptedMechanics {
 
     async fn next_merge_range(
         &self,
-        _namespace_id: &NamespaceId,
+        namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
     ) -> Result<NextMergeRangeResponse> {
         let sent = Sent::NextMergeRange {
@@ -240,6 +254,8 @@ impl Mechanics for ScriptedMechanics {
                 source_head_seq,
                 merged,
             } => Ok(NextMergeRangeResponse {
+                namespace_id: namespace_id.clone(),
+                source_namespace_id: source_namespace_id.clone(),
                 fork_point_seq: CommitSeq(0),
                 source_head_seq: CommitSeq(source_head_seq),
                 outcome: NextMergeRangeOutcome::Open {
@@ -255,6 +271,8 @@ impl Mechanics for ScriptedMechanics {
                 source_head_seq,
                 outcome,
             } => Ok(NextMergeRangeResponse {
+                namespace_id: namespace_id.clone(),
+                source_namespace_id: source_namespace_id.clone(),
                 fork_point_seq: CommitSeq(0),
                 source_head_seq: CommitSeq(source_head_seq),
                 outcome,
