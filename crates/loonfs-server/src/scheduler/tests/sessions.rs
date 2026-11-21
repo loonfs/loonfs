@@ -996,3 +996,97 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     );
     server.runtime.shutdown().await.expect("shutdown");
 }
+
+/// Checks that when the maintenance scheduler is off (`serve_only` or
+/// `disabled`), `SessionReaper` still closes sessions that pass
+/// `idle_session_close_after_ms` or end early, without making any store
+/// requests or folding the WAL tail.
+#[tokio::test]
+async fn session_reaper_closes_idle_and_ended_sessions_without_store_requests() {
+    use crate::config::JobMode;
+    use crate::scheduler::SessionReaper;
+
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let config = scheduler_config(None);
+    let server = SchedulerServer::start(store.clone(), &config, 0).await;
+    let namespaces = &server.scheduler.inner.namespaces;
+    let reaper = SessionReaper::new(
+        Arc::clone(namespaces),
+        config.maintenance_interval_ms.get(),
+        config.idle_session_close_after_ms.get(),
+    );
+
+    let idle_ns = namespace_id("reaper-idle");
+    let ended_ns = namespace_id("reaper-ended");
+    for ns in [&idle_ns, &ended_ns] {
+        server
+            .runtime
+            .create_namespace(ns, &test_actor())
+            .await
+            .expect("create namespace");
+        let handle = namespaces.open(ns).await.expect("open session");
+        handle
+            .put_file("/a.txt", b"hello", &test_actor())
+            .await
+            .expect("write file");
+        if ns == &ended_ns {
+            handle.close().await.expect("close ended session");
+        }
+    }
+    store.take();
+
+    // Ended sessions close as soon as the clock ticks past their open time,
+    // while active sessions stay open until past `idle_session_close_after_ms`.
+    server.clock.advance_ms(1);
+    reaper.reap_once().await;
+    assert_eq!(held_ids(namespaces), vec![idle_ns.clone()]);
+    assert!(
+        store.take().is_empty(),
+        "reaping ended sessions must make no store requests"
+    );
+
+    server
+        .clock
+        .advance_ms(config.idle_session_close_after_ms.get() - 1);
+    reaper.reap_once().await;
+    assert_eq!(held_ids(namespaces), vec![idle_ns.clone()]);
+
+    server.clock.advance_ms(1);
+    reaper.reap_once().await;
+    assert!(
+        held_ids(namespaces).is_empty(),
+        "idle session closes once past `idle_session_close_after_ms`"
+    );
+    assert!(
+        store.take().is_empty(),
+        "reaping idle sessions must make no store requests"
+    );
+    assert_eq!(
+        server.wal_tail_objects(&idle_ns).await,
+        2,
+        "reaping must not fold the WAL tail (fence + commit remain)"
+    );
+    server.runtime.shutdown().await.expect("shutdown");
+
+    // Verify `app` attaches the reaper (and no scheduler) in non-maintaining modes.
+    for mode in [JobMode::ServeOnly, JobMode::Disabled] {
+        let mut app_config = scheduler_config(None);
+        app_config.maintenance = mode;
+        let (_, state) = crate::app(
+            app_config.validate().expect("validate config"),
+            crate::AppConfig {
+                store: Some(store.clone()),
+                direct_transfers: None,
+            },
+        )
+        .await
+        .expect("build app");
+        assert!(state.scheduler.is_none());
+        assert!(state.session_reaper.is_some());
+        state.http.runtime.shutdown().await.expect("shutdown");
+    }
+}
