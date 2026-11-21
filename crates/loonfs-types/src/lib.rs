@@ -161,11 +161,12 @@ pub use metadata_rows::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;
 pub use pagination::{
     decode_cursor, decode_token, decode_token_bytes, encode_cursor, encode_token,
-    encode_token_bytes, ChangeFeedPosition, DirectoryPageCursor, DirectoryTreeFrame,
-    DirectoryTreePageCursor, EffectiveLimit, FileRevisionsPageCursor, GrepCursorPosition,
-    GrepPageCursor, LimitError, ListPageCursor, NamespaceListPageCursor, OpaqueToken,
-    OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse, Pager, TrashPageCursor,
-    DEFAULT_NAMESPACE_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
+    encode_token_bytes, ChangeFeedPosition, DiffPagePosition, DirectoryPageCursor,
+    DirectoryTreeFrame, DirectoryTreePageCursor, EffectiveLimit, FileRevisionsPageCursor,
+    GrepCursorPosition, GrepPageCursor, LimitError, ListPageCursor, NamespaceListPageCursor,
+    OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse, Pager,
+    TrashPageCursor, DEFAULT_NAMESPACE_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, InodeKind, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES,

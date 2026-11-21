@@ -312,9 +312,26 @@ impl PagedResponse for crate::ListChangesResponse {
     }
 }
 
+/// Where the next page of a diff resumes, pinned to the first page's `to_seq`.
+///
+/// Resumes after `after_seq`, or inside `after_seq` at `event_index` when above
+/// zero, so later pages evaluate the same range even if new commits land in
+/// between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffPagePosition {
+    /// The inclusive upper sequence bound pinned by the first page of the diff.
+    pub to_seq: CommitSeq,
+    /// The sequence that the next page starts after, or the commit that it
+    /// resumes.
+    pub after_seq: CommitSeq,
+    /// The index of the first event that the page returns from the commit at
+    /// `after_seq`, or 0 to start after that commit.
+    pub event_index: u32,
+}
+
 impl PagedResponse for crate::DiffResponse {
     type Item = crate::DiffEntry;
-    type Cursor = ChangeFeedPosition;
+    type Cursor = DiffPagePosition;
 
     fn items_mut(&mut self) -> &mut Vec<Self::Item> {
         &mut self.entries
@@ -325,14 +342,14 @@ impl PagedResponse for crate::DiffResponse {
     }
 
     fn next_cursor(&self) -> Option<Self::Cursor> {
-        self.next_after_seq.map(|after_seq| ChangeFeedPosition {
+        self.next_after_seq.map(|after_seq| DiffPagePosition {
+            to_seq: self.to_seq,
             after_seq,
             event_index: self.next_event_index.unwrap_or(0),
         })
     }
 
     fn absorb(&mut self, mut later: Self) {
-        self.after_seq = later.after_seq;
         self.next_after_seq = later.next_after_seq;
         self.next_event_index = later.next_event_index;
         self.retention_floor_seq = later.retention_floor_seq;
@@ -1212,7 +1229,8 @@ mod tests {
         };
         assert_eq!(
             first.next_cursor(),
-            Some(ChangeFeedPosition {
+            Some(DiffPagePosition {
+                to_seq: CommitSeq(5),
                 after_seq: CommitSeq(3),
                 event_index: 2,
             })
@@ -1226,7 +1244,8 @@ mod tests {
         };
         first.absorb(second);
         assert_eq!(first.next_cursor(), None);
-        assert_eq!(first.after_seq, CommitSeq(3));
+        assert_eq!(first.after_seq, CommitSeq(1));
+        assert_eq!(first.to_seq, CommitSeq(5));
         assert_eq!(first.retention_floor_seq, CommitSeq(1));
     }
 }
