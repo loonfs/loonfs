@@ -3,8 +3,7 @@
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::ContextHeaders;
-use super::handlers_filesystem::LivePageQuery;
-use super::query_params::{effective_page_limit, live_consistency, read_at};
+use super::query_params::{effective_page_limit, read_at};
 use super::{acquire_download_permit, AppPath, AppQuery, HttpState, NamespaceIdPath};
 use axum::extract::State;
 use axum::response::Response;
@@ -248,6 +247,34 @@ pub(super) async fn list_inode_children(
     Ok(super::page_response::page_response(listing))
 }
 
+/// The query of a listing of a file's revisions by inode.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[serde(deny_unknown_fields)]
+pub(super) struct ListInodeRevisionsQuery {
+    /// The maximum page size.
+    #[cfg_attr(
+        feature = "openapi",
+        param(minimum = 1, maximum = 1000, default = 1000)
+    )]
+    limit: Option<u32>,
+    /// The opaque cursor that the previous page returned.
+    cursor: Option<String>,
+    /// The snapshot whose state to list the file's revisions in. The listing starts at the
+    /// revision that the snapshot captured.
+    snapshot_id: Option<SnapshotId>,
+    /// How recently the read confirms the namespace head. `eventual` (the default, unless the
+    /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
+    /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
+    /// head before the read. It can't be combined with `snapshot_id`.
+    consistency: Option<ReadConsistency>,
+    /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
+    /// milliseconds. The default is the server's `max_staleness_ms`.
+    #[cfg_attr(feature = "openapi", param(maximum = 1200000))]
+    max_staleness_ms: Option<u64>,
+}
+
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -268,14 +295,14 @@ pub(super) async fn list_inode_children(
         params(
             ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ("inode_id" = loonfs_types::InodeId, Path, description = "The file's inode ID."),
-            LivePageQuery
+            ListInodeRevisionsQuery
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
-            (status = 400, description = "Invalid inode ID, limit, or cursor", body = ErrorResponse),
+            (status = 400, description = "Invalid inode ID, limit, cursor, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
-            (status = 404, description = "Namespace or inode not found", body = ErrorResponse),
+            (status = 404, description = "Namespace, inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -287,13 +314,13 @@ pub(super) async fn list_file_revisions_by_inode(
     ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
-    AppQuery(query): AppQuery<LivePageQuery>,
+    AppQuery(query): AppQuery<ListInodeRevisionsQuery>,
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     let runtime = state.runtime_for(context);
     let namespace = runtime.namespace(&namespace_id);
     let inode_id = path.inode_id;
     let options = ListFileRevisionsOptions {
-        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
     };
     let response = namespace
         .list_file_revisions_by_inode_with_options(inode_id, &options)
