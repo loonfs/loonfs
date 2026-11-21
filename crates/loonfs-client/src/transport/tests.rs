@@ -341,6 +341,115 @@ async fn a_client_sends_the_header_of_the_context_it_was_built_with() {
     }
 }
 
+#[tokio::test]
+async fn health_and_capabilities_omit_principal_context_headers() {
+    use loonfs_types::{Context, PrincipalSet};
+    use std::sync::Mutex;
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let service = tower::service_fn(move |request: Request<Body>| {
+        recorded
+            .lock()
+            .expect("requests lock")
+            .push(request.headers().clone());
+        let body = if request.uri().path() == "/v0/capabilities" {
+            br#"{"protocol_version":"v0","api_groups":["filesystem/v0"]}"#.as_slice()
+        } else {
+            b"{}".as_slice()
+        };
+        async move { Ok(Response::new(Body::from(Bytes::from_static(body)))) }
+    });
+    let principals: PrincipalSet = "usr_ada".parse().expect("principals");
+    let client = Client::with_transport(
+        ClientConfig {
+            server_url: "http://127.0.0.1".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+            ca_cert_path: None,
+        },
+        service,
+        Context::Principals(principals),
+    )
+    .expect("valid config");
+    client.get_health().await.expect("health");
+    client.get_capabilities().await.expect("capabilities");
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 2);
+    for headers in requests.iter() {
+        assert!(
+            !headers.contains_key("loonfs-context") && !headers.contains_key("loonfs-principals"),
+            "deployment endpoints should not carry context headers: {headers:?}"
+        );
+    }
+}
+
+/// Checks that a retry waits the whole `Retry-After` the server asked for,
+/// even above the policy's backoff cap, and that a wait the operation's
+/// deadline can't fit returns the error without sending again.
+#[tokio::test(start_paused = true)]
+async fn retries_wait_the_whole_retry_after_or_stop_when_the_deadline_cannot_fit_it() {
+    let transport = scripted_transport::script([
+        scripted_transport::Outcome::RefusedRetryAfter(ErrorCode::ServerBusy, 10),
+        scripted_transport::Outcome::Success(b"{}".to_vec()),
+    ]);
+    let mut client = scripted_transport::client(&transport);
+    client.transport_retry = TransportRetryPolicy {
+        initial_backoff_ms: 0,
+        max_backoff_ms: 2_000,
+        ..DEFAULT
+    };
+    let request = client.request(
+        Operation::retry(Method::GET),
+        "http://example.invalid/control",
+    );
+    let mut call = std::pin::pin!(client.call(&request));
+    assert!(futures::poll!(&mut call).is_pending());
+    assert_eq!(transport.attempts(), 1);
+    tokio::time::advance(Duration::from_millis(9_999)).await;
+    assert!(
+        futures::poll!(&mut call).is_pending(),
+        "the retry waits the whole Retry-After, not the backoff cap"
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    call.now_or_never()
+        .expect("the wait is over")
+        .expect("the second attempt succeeds");
+    assert_eq!(transport.attempts(), 2);
+
+    let transport = scripted_transport::script([scripted_transport::Outcome::RefusedRetryAfter(
+        ErrorCode::ServerBusy,
+        DEFAULT.operation_deadline_ms / 1_000 + 1,
+    )]);
+    let client = scripted_transport::client(&transport);
+    let request = client.request(
+        Operation::retry(Method::GET),
+        "http://example.invalid/control",
+    );
+    let error = client
+        .call(&request)
+        .now_or_never()
+        .expect("a wait past the deadline returns at once")
+        .expect_err("the refusal is returned");
+    assert_eq!(error.code(), Some(ErrorCode::ServerBusy));
+    assert_eq!(transport.attempts(), 1);
+}
+
+#[test]
+fn retry_after_parses_delta_seconds() {
+    let mut headers = http::HeaderMap::new();
+    assert_eq!(parse_retry_after_ms(&headers), None);
+    headers.insert(http::header::RETRY_AFTER, "5".parse().expect("header"));
+    assert_eq!(parse_retry_after_ms(&headers), Some(5_000));
+    headers.insert(
+        http::header::RETRY_AFTER,
+        "Wed, 21 Oct 2015 07:28:00 GMT".parse().expect("header"),
+    );
+    assert_eq!(parse_retry_after_ms(&headers), None);
+}
+
 fn timed_client<S>(service: S, timeout: Option<u64>) -> (Client, Arc<ManualClock>)
 where
     S: tower::Service<Request<Body>, Response = Response<Body>, Error = TransportError>

@@ -1,7 +1,7 @@
 //! The `mv` and `cp` commands.
 
 use super::mutate::{commit_options, destination_behavior};
-use crate::args::{FilesystemTransferArgs, RuntimeBehavior};
+use crate::args::{FilesystemCopyArgs, FilesystemTransferArgs, RuntimeBehavior};
 use crate::commands::context::{
     destination_user_path, directory_intent, namespace_path, render_target, Invocation,
     NamespaceContext, RootPath,
@@ -21,15 +21,22 @@ pub(crate) async fn run_filesystem_mv(
 
 pub(crate) async fn run_filesystem_cp(
     invocation: &Invocation,
-    args: FilesystemTransferArgs,
+    args: FilesystemCopyArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(invocation, args, TransferKind::Copy).await
+    run_filesystem_transfer(
+        invocation,
+        args.transfer,
+        TransferKind::Copy {
+            recursive: args.recursive,
+        },
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransferKind {
     Move,
-    Copy,
+    Copy { recursive: bool },
 }
 
 /// Applies the `cp`/`mv` habit for a destination that is an existing
@@ -72,12 +79,6 @@ async fn run_filesystem_transfer(
     transfer_kind: TransferKind,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
-    if args.recursive && transfer_kind == TransferKind::Move {
-        return Err(context.fail(
-            CliError::invalid_request("mv moves a directory in one commit; -r is not needed")
-                .with_param("-r"),
-        ));
-    }
     let root = RootPath::Refused;
     let from = namespace_path(context.namespace(), "source_path", &args.source_path, root)
         .map_err(|error| context.fail(error))?;
@@ -112,7 +113,9 @@ async fn run_filesystem_transfer(
     };
 
     match transfer_kind {
-        TransferKind::Copy => run_copy(&context, &from, &to, &args, invocation.behavior).await,
+        TransferKind::Copy { recursive } => {
+            run_copy(&context, &from, &to, &args, recursive, invocation.behavior).await
+        }
         TransferKind::Move => run_move(&context, &from, &to, &args).await,
     }
 }
@@ -123,6 +126,7 @@ async fn run_copy(
     from: &NamespacePath,
     to: &NamespacePath,
     args: &FilesystemTransferArgs,
+    recursive: bool,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let entry = context
@@ -131,7 +135,7 @@ async fn run_copy(
         .stat_without_attributes(from)
         .await
         .map_err(|error| context.fail(error))?;
-    if args.recursive {
+    if recursive {
         if entry.inode_kind() != EntryInodeKind::Directory {
             return Err(context.fail(
                 CliError::invalid_request(format!(

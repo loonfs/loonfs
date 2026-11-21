@@ -19,6 +19,9 @@ pub(crate) enum Outcome {
     PartialContent(String, Vec<u8>),
     /// A 503 error envelope with this code.
     Refused(ErrorCode),
+    /// A 503 error envelope with this code and a `Retry-After` of this many
+    /// seconds.
+    RefusedRetryAfter(ErrorCode, u64),
     /// A storage provider's XML error with this status and code.
     ProviderRefused(http::StatusCode, &'static str),
 }
@@ -172,21 +175,8 @@ impl Service<Request<Body>> for ScriptedTransport {
                     .header(http::header::CONTENT_RANGE, content_range)
                     .body(Body::from(Bytes::from(bytes)))
                     .expect("a content range should be a valid header value")),
-                Outcome::Refused(code) => {
-                    let body = serde_json::to_vec(&ErrorResponse {
-                        code: code.as_str().to_owned(),
-                        feature: None,
-                        message: "scripted refusal".to_owned(),
-                        param: None,
-                        request_id: None,
-                        details: None,
-                    })
-                    .expect("serialize error envelope");
-                    Ok(Response::builder()
-                        .status(http::StatusCode::SERVICE_UNAVAILABLE)
-                        .body(Body::from(Bytes::from(body)))
-                        .expect("a 503 response should build"))
-                }
+                Outcome::Refused(code) => Ok(refusal(code, None)),
+                Outcome::RefusedRetryAfter(code, seconds) => Ok(refusal(code, Some(seconds))),
                 Outcome::ProviderRefused(status, code) => Ok(Response::builder()
                     .status(status)
                     .body(Body::from(Bytes::from(format!(
@@ -196,4 +186,25 @@ impl Service<Request<Body>> for ScriptedTransport {
             }
         })
     }
+}
+
+/// Builds a 503 error envelope with `code`, with a `Retry-After` header when
+/// `retry_after_seconds` is set.
+fn refusal(code: ErrorCode, retry_after_seconds: Option<u64>) -> Response<Body> {
+    let body = serde_json::to_vec(&ErrorResponse {
+        code: code.as_str().to_owned(),
+        feature: None,
+        message: "scripted refusal".to_owned(),
+        param: None,
+        request_id: None,
+        details: None,
+    })
+    .expect("serialize error envelope");
+    let mut response = Response::builder().status(http::StatusCode::SERVICE_UNAVAILABLE);
+    if let Some(seconds) = retry_after_seconds {
+        response = response.header(http::header::RETRY_AFTER, seconds.to_string());
+    }
+    response
+        .body(Body::from(Bytes::from(body)))
+        .expect("a 503 response should build")
 }

@@ -195,7 +195,7 @@ impl Client {
         }
         let url = format!("{}/v0/capabilities", self.base_url);
         let mut document: CapabilityDocument = self
-            .send_json(self.request(operations::GET_CAPABILITIES, &url))
+            .send_json(self.request_without_context(operations::GET_CAPABILITIES, &url))
             .await?;
         document.retain_well_formed();
         // If a racing clone fetched first, keep its copy; both came from the
@@ -211,7 +211,7 @@ impl Client {
     /// Checks the server's health endpoint.
     pub async fn get_health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
-        self.call(&self.request(operations::GET_HEALTH, &url))
+        self.call(&self.request_without_context(operations::GET_HEALTH, &url))
             .await?;
         Ok(())
     }

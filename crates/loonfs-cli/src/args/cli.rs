@@ -3,9 +3,9 @@
 
 use super::filesystem::{
     AccessCommand, ChangesArgs, FilesystemAnnotateArgs, FilesystemAppendArgs, FilesystemCatArgs,
-    FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs, FilesystemMkdirArgs,
-    FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs,
-    FilesystemStatArgs, FilesystemTransferArgs, TrashArgs,
+    FilesystemCopyArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
+    FilesystemMkdirArgs, FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs,
+    FilesystemRmArgs, FilesystemStatArgs, FilesystemTransferArgs, TrashArgs,
 };
 use super::flags::PageLimitArgs;
 use super::maintenance::{MaintenanceCommand, MaintenanceSnapshotCommand};
@@ -28,6 +28,7 @@ Filesystem:
   grep          Search file content through the grep index
   get           Download a file or directory tree
   put           Upload a file or directory tree
+  append        Append bytes to a file
   restore       Restore a prior file revision or a deleted item
   mkdir         Create a directory
   rm            Delete a file or directory
@@ -255,7 +256,7 @@ pub(crate) enum Command {
     /// Move or rename a path.
     Mv(FilesystemTransferArgs),
     /// Copy a file (or directory tree with -r) to another path.
-    Cp(FilesystemTransferArgs),
+    Cp(FilesystemCopyArgs),
     /// List the trash: what was deleted, when, and the exact
     /// handle `restore` needs.
     Trash(TrashArgs),
