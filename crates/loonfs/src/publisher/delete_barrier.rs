@@ -19,10 +19,10 @@ impl NamespacePublisher {
             .await
         {
             Ok(outcome) => outcome,
-            Err(_) => {
+            Err(payload) => {
                 // Contain deletion panics so the worker can continue. Deletion has no commit
                 // receipt for reconciliation, so report the task failure to its callers.
-                self.record_panic();
+                self.record_panic("delete", payload);
                 Err(Error::RuntimeTask(
                     "delete task aborted mid-delete".to_owned(),
                 ))

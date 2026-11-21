@@ -164,6 +164,7 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
             requests: None,
             runtime: writer.clone(),
             scheduler: None,
+            session_reaper: None,
             deadline_ms: shutdown_deadline_ms,
         },
         async move {
@@ -318,6 +319,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),
             scheduler: state.scheduler.clone(),
+            session_reaper: state.session_reaper.clone(),
             deadline_ms: 60_000,
         },
         async move {
@@ -397,6 +399,7 @@ async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtim
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),
             scheduler: state.scheduler.clone(),
+            session_reaper: state.session_reaper.clone(),
             deadline_ms: shutdown_deadline_ms,
         },
         async move {
@@ -612,6 +615,7 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),
             scheduler: state.scheduler.clone(),
+            session_reaper: state.session_reaper.clone(),
             deadline_ms: shutdown_deadline_ms,
         },
         async move {

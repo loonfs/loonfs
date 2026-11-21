@@ -25,8 +25,11 @@ use tokio::time::Sleep;
 
 mod calls;
 mod metrics;
+mod reaper;
 mod retries;
 mod steps;
+
+pub(crate) use reaper::SessionReaper;
 
 /// The largest number of grep steps, build or reorganize, that one index
 /// step runs while each grep step does some work.

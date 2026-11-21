@@ -206,15 +206,26 @@ impl Maintenance {
     /// it returns `basis` unchanged.
     ///
     /// [`NamespaceEngine::claim_compactor`]: loonfs_core::NamespaceEngine::claim_compactor
+    #[cfg(test)]
     pub(crate) async fn compactor_epoch(
         &self,
         namespace_id: &NamespaceId,
         basis: Option<PublicationBasis>,
     ) -> Result<(CompactorEpoch, Option<PublicationBasis>)> {
-        // Keep the claim lock locked across publication so concurrent groups share one epoch.
-        let mut epochs = self.writer.compactor_epochs.lock().await;
-        if let Some(epoch) = epochs.get(namespace_id) {
-            return Ok((*epoch, basis));
+        let turns = self.publisher.namespace_turns(namespace_id);
+        let turn = turns.compaction.lock().await;
+        self.compactor_epoch_with_turn(namespace_id, basis, &turn)
+            .await
+    }
+
+    async fn compactor_epoch_with_turn(
+        &self,
+        namespace_id: &NamespaceId,
+        basis: Option<PublicationBasis>,
+        _turn: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> Result<(CompactorEpoch, Option<PublicationBasis>)> {
+        if let Some(epoch) = self.claimed_compactor_epoch(namespace_id) {
+            return Ok((epoch, basis));
         }
         let claimed = self
             .engine(namespace_id)
@@ -227,8 +238,21 @@ impl Maintenance {
                 .await;
         }
         let epoch = claimed.response.manifest.compactor_epoch();
-        epochs.insert(namespace_id.clone(), epoch);
+        self.writer
+            .compactor_epochs
+            .lock()
+            .expect("compactor epochs lock should not be poisoned")
+            .insert(namespace_id.clone(), epoch);
         Ok((epoch, Some(claimed.response)))
+    }
+
+    fn claimed_compactor_epoch(&self, namespace_id: &NamespaceId) -> Option<CompactorEpoch> {
+        self.writer
+            .compactor_epochs
+            .lock()
+            .expect("compactor epochs lock should not be poisoned")
+            .get(namespace_id)
+            .copied()
     }
 
     /// Returns the manifest that a unit plans from (`None` when the unit
@@ -265,11 +289,11 @@ impl Maintenance {
                 None if claimed.is_some() => return Ok(ControlFlow::Continue(None)),
                 None => {
                     let current = self.load_live_basis(namespace_id).await?;
-                    return Ok(self.screen(namespace_id, claimed, current).await);
+                    return Ok(self.screen(namespace_id, claimed, current));
                 }
             },
         };
-        let basis = match self.screen(namespace_id, claimed, basis).await {
+        let basis = match self.screen(namespace_id, claimed, basis) {
             ControlFlow::Continue(Some(basis)) => basis,
             screened => return Ok(screened),
         };
@@ -304,7 +328,7 @@ impl Maintenance {
                 }
             }
         };
-        Ok(self.screen(namespace_id, claimed, basis).await)
+        Ok(self.screen(namespace_id, claimed, basis))
     }
 
     /// Returns how a unit that plans from `basis` ends before it runs, or
@@ -313,15 +337,14 @@ impl Maintenance {
     /// The unit is fenced when `basis` has a compactor epoch other than
     /// `claimed` (this runtime's claim), and the call then forgets that
     /// claim. The unit isn't needed when no unit is due on `basis`.
-    async fn screen(
+    fn screen(
         &self,
         namespace_id: &NamespaceId,
         claimed: Option<CompactorEpoch>,
         basis: PublicationBasis,
     ) -> ControlFlow<MetadataCompactionOutcome, Option<PublicationBasis>> {
         if let Some(epoch) = claimed.filter(|epoch| *epoch != basis.manifest.compactor_epoch()) {
-            self.forget_fenced_compactor_epoch(namespace_id, epoch)
-                .await;
+            self.forget_fenced_compactor_epoch(namespace_id, epoch);
             return ControlFlow::Break(MetadataCompactionOutcome::Fenced);
         }
         if !self
@@ -333,13 +356,16 @@ impl Maintenance {
         ControlFlow::Continue(Some(basis))
     }
 
-    async fn forget_fenced_compactor_epoch(
+    fn forget_fenced_compactor_epoch(
         &self,
         namespace_id: &NamespaceId,
         fenced_epoch: CompactorEpoch,
     ) {
-        let mut epochs = self.writer.compactor_epochs.lock().await;
-        // An older attempt can finish after another request has claimed again.
+        let mut epochs = self
+            .writer
+            .compactor_epochs
+            .lock()
+            .expect("compactor epochs lock should not be poisoned");
         if epochs.get(namespace_id) == Some(&fenced_epoch) {
             epochs.remove(namespace_id);
         }
@@ -366,7 +392,7 @@ impl Maintenance {
             return Ok(MetadataCompactionOutcome::Cancelled);
         }
         let turns = self.publisher.namespace_turns(namespace_id);
-        let _turn = tokio::select! {
+        let turn = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Ok(MetadataCompactionOutcome::Cancelled),
             turn = turns.compaction.lock().instrument(phase_span!(
@@ -375,13 +401,7 @@ impl Maintenance {
                 namespace_id
             )) => turn,
         };
-        let claimed = self
-            .writer
-            .compactor_epochs
-            .lock()
-            .await
-            .get(namespace_id)
-            .copied();
+        let claimed = self.claimed_compactor_epoch(namespace_id);
         let basis = match self.planning_basis(namespace_id, claimed, observed).await? {
             ControlFlow::Continue(basis) => basis,
             ControlFlow::Break(outcome) => return Ok(outcome),
@@ -395,7 +415,9 @@ impl Maintenance {
                 namespace_id
             )) => permit,
         };
-        let (compactor_epoch, basis) = self.compactor_epoch(namespace_id, basis).await?;
+        let (compactor_epoch, basis) = self
+            .compactor_epoch_with_turn(namespace_id, basis, &turn)
+            .await?;
         // A claim that this call made returns its own manifest, which the
         // unit plans from. A claim that another call made while this call
         // waited for its permit is newer than the manifest the call planned
@@ -435,8 +457,7 @@ impl Maintenance {
                     .await;
             }
             Ok(loonfs_core::CompactionUnitOutcome::Fenced) => {
-                self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch)
-                    .await;
+                self.forget_fenced_compactor_epoch(namespace_id, compactor_epoch);
             }
             Ok(_) | Err(_) => {}
         }

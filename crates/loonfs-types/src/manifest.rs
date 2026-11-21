@@ -40,6 +40,9 @@ pub const MAX_NAMESPACE_MANIFEST_BYTES: usize = 512 * 1024 * 1024;
 /// Version 1 uses the [block layout](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding).
 pub const METADATA_SEGMENT_ENCODING: u32 = 1;
 
+/// Version 1 of the extension segment block layout (shared with metadata segments).
+pub const EXTENSION_SEGMENT_ENCODING: u32 = 1;
+
 /// Identifies the durable payload family in a namespace-manifest envelope.
 ///
 /// See [durable object families](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a8-object-keys).
@@ -210,6 +213,12 @@ pub struct ExtensionSegmentRef {
     pub owner_namespace_id: NamespaceId,
     /// The immutable segment ID used in the durable object key.
     pub segment_id: IndexSegmentId,
+    /// The full-object checksum that the store keeps for the segment object,
+    /// in the store's algorithm, so a read of the whole segment can be
+    /// checked against it.
+    pub checksum: Checksum,
+    /// Version of the segment's block layout and row encoding.
+    pub encoding: u32,
     /// The number of rows in the segment.
     pub row_count: u64,
     /// The inclusive least row key.

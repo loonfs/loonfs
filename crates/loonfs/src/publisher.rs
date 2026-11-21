@@ -459,7 +459,18 @@ impl NamespacePublisher {
         }
     }
 
-    pub(super) fn record_panic(&self) {
+    pub(super) fn record_panic(&self, unit: &'static str, payload: Box<dyn std::any::Any + Send>) {
+        let panic_message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic payload");
+        tracing::error!(
+            namespace_id = %self.namespace_id,
+            unit,
+            panic = panic_message,
+            "publisher task panicked"
+        );
         if let Some(shared) = self.shared.upgrade() {
             shared.panicked_units.fetch_add(1, Ordering::SeqCst);
         }

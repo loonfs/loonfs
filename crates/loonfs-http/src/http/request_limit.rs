@@ -23,6 +23,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub struct RequestLimit {
     capacity: u32,
     permits: Arc<Semaphore>,
+    /// One independent scrape slot for `/metrics` so operators can still
+    /// observe a busy server without letting concurrent scrapes pile up.
+    metrics_permits: Arc<Semaphore>,
     draining: Arc<AtomicBool>,
 }
 
@@ -34,6 +37,7 @@ impl RequestLimit {
         Self {
             capacity,
             permits: Arc::new(Semaphore::new(capacity as usize)),
+            metrics_permits: Arc::new(Semaphore::new(1)),
             draining: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -46,10 +50,11 @@ impl RequestLimit {
     /// the admitted ones have sent their last frame.
     pub async fn settle(&self) {
         self.draining.store(true, Ordering::Release);
-        // The semaphore is never closed, so the acquire cannot fail.
+        // The semaphores are never closed, so the acquires cannot fail.
         let _ = Arc::clone(&self.permits)
             .acquire_many_owned(self.capacity)
             .await;
+        let _ = Arc::clone(&self.metrics_permits).acquire_owned().await;
     }
 
     fn is_draining(&self) -> bool {
@@ -65,17 +70,22 @@ pub(super) async fn admit_request(
     let Some(limit) = state.request_limit() else {
         return next.run(request).await;
     };
-    if matches!(*request.method(), Method::GET | Method::HEAD)
-        && request
-            .extensions()
-            .get::<MatchedPath>()
-            .is_some_and(|path| matches!(path.as_str(), "/health" | "/readiness"))
-    {
+    let is_read = matches!(*request.method(), Method::GET | Method::HEAD);
+    let matched_path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str);
+    if is_read && matches!(matched_path, Some("/health" | "/readiness")) {
         return next.run(request).await;
     }
+    let permits = if is_read && matched_path == Some("/metrics") {
+        &limit.metrics_permits
+    } else {
+        &limit.permits
+    };
     // The permit is taken before the flag is read, so a request that sees
     // no drain holds a permit the drain waits for.
-    let permit = Arc::clone(&limit.permits).try_acquire_owned();
+    let permit = Arc::clone(permits).try_acquire_owned();
     if limit.is_draining() {
         return super::response_frames::split_response(
             ApiResponseError::new(

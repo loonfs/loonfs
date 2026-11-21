@@ -781,7 +781,7 @@ Any process can fold as the namespace's [maintainer](glossary.md#maintainer) und
 
 Every manifest publication starts from a basis manifest in memory (checking `boundary.json` first if reloaded from storage, or running cold discovery if no basis exists) and puts `basis + 1` directly:
 
-- **Lost put (collision):** Probe `basis + 1` with HEAD, then probe windows of `MANIFEST_PROBE_WINDOW` (8) manifests until finding the highest existing manifest, then read `boundary.json` (falling back to cold discovery if `<= boundary`).
+- **Lost put (collision):** Probe `basis + 1` with HEAD, then probe an initial window of `MANIFEST_PROBE_WINDOW` (8) manifests and, if all exist, gallop exponentially and narrow the bracket in parallel batches until finding the highest existing manifest, then read `boundary.json` (falling back to cold discovery if `<= boundary`).
 - **Succeeded put:** Read `boundary.json` conditionally (plain read for manifest 1). This final check catches any put that raced into a manifest number GC had already emptied:
   1. If `manifest_no > boundary` (or no boundary exists), publication succeeded.
   2. If `manifest_no <= boundary`, treat the put as lost and run cold discovery (a `retired` boundary returns `namespace_deleted`).
@@ -1674,6 +1674,8 @@ Each [extension entry](#124-extensions) lists its `runs` in order (`run_no`, `le
 | --- | --- |
 | `owner_namespace_id` | Namespace whose prefix stores the segment. |
 | `segment_id` | Immutable generated segment ID (`idx_` prefix). |
+| `checksum` | Full-object checksum in the store's algorithm (see [Content references and checksums](#a3-content-references-and-checksums)). |
+| `encoding` | Required unsigned integer segment version covering block layout and row schemas (currently `1`). |
 | `row_count` | Positive number of stored rows. |
 | `min_row_key`, `max_row_key` | Inclusive key range. |
 | `index_block`, `filter_block` | Index and Bloom filter block handles. |

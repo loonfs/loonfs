@@ -51,13 +51,7 @@ impl Scheduler {
 
     /// Walks the IDs of the held sessions, without cloning writer handles.
     fn held_ids(&self) -> impl Iterator<Item = NamespaceId> + '_ {
-        let namespaces = &self.inner.namespaces;
-        let mut after = None;
-        std::iter::from_fn(move || {
-            let namespace_id = namespaces.next_held_id(after.as_ref())?;
-            after = Some(namespace_id.clone());
-            Some(namespace_id)
-        })
+        held_ids(&self.inner.namespaces)
     }
 
     /// Runs the session's due steps, then the retention advance that a sweep
@@ -295,6 +289,18 @@ impl Scheduler {
         // The running steps see the stop at their next check and return.
         while runs.next().await.is_some() {}
     }
+}
+
+/// Walks the IDs of the held sessions, without cloning writer handles.
+pub(super) fn held_ids(
+    namespaces: &loonfs_http::Namespaces<SchedulerState>,
+) -> impl Iterator<Item = NamespaceId> + '_ {
+    let mut after = None;
+    std::iter::from_fn(move || {
+        let namespace_id = namespaces.next_held_id(after.as_ref())?;
+        after = Some(namespace_id.clone());
+        Some(namespace_id)
+    })
 }
 
 /// Returns whether a held session's metadata step is due at `now_ms`: its

@@ -4,7 +4,9 @@
 
 use super::error::GrepEntryError;
 use super::status::{GrepIndexStatus, GrepReorganizeState};
-use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef};
+use loonfs_types::format::manifest::{
+    ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef, EXTENSION_SEGMENT_ENCODING,
+};
 use loonfs_types::{ExtensionName, IndexSegmentId, NamespaceId, RunNo};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -236,6 +238,15 @@ impl GrepEntry {
         let mut run_nos = BTreeSet::new();
         if let Some(run) = self.runs.iter().find(|run| !run_nos.insert(run.run_no)) {
             return Err(GrepEntryError::DuplicateRunNo { run_no: run.run_no });
+        }
+        if let Some(segment) = self
+            .segments()
+            .find(|segment| segment.encoding != EXTENSION_SEGMENT_ENCODING)
+        {
+            return Err(GrepEntryError::UnsupportedSegmentEncoding {
+                segment_id: segment.segment_id.clone(),
+                encoding: segment.encoding,
+            });
         }
         if let Some(reorganize) = &self.reorganize {
             let runs_by_segment: BTreeMap<&IndexSegmentId, &ExtensionRunRef> = self

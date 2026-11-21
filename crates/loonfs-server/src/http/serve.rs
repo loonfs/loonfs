@@ -4,7 +4,7 @@
 use super::host_routes::router;
 use super::tls::{self, TlsListener};
 use crate::config::{MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig};
-use crate::scheduler::{GrepIndexing, Scheduler, SchedulerState};
+use crate::scheduler::{GrepIndexing, Scheduler, SchedulerState, SessionReaper};
 use crate::{Result, ServerError};
 use axum::serve::ListenerExt as _;
 use axum::Router;
@@ -32,6 +32,21 @@ pub struct AppState {
     /// The maintenance scheduler of a config that maintains. [`app`] does not
     /// start it.
     pub scheduler: Option<Scheduler>,
+    /// Reaps idle and ended sessions when the maintenance scheduler is off.
+    pub(crate) session_reaper: Option<SessionReaper>,
+}
+
+impl AppState {
+    /// Runs one pass of the per-session background work this configuration
+    /// calls for: the maintenance scheduler's due steps when maintenance runs
+    /// in this process, or idle- and ended-session reaping otherwise.
+    pub async fn run_due_steps(&self) {
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.run_due_steps().await;
+        } else if let Some(reaper) = &self.session_reaper {
+            reaper.reap_once().await;
+        }
+    }
 }
 
 /// Optional inputs for building the HTTP application.
@@ -46,8 +61,10 @@ pub struct AppConfig {
 /// Builds the router and returns its state.
 ///
 /// The state contains the maintenance scheduler when the config maintains,
-/// and this does not start it. [`serve_with_shutdown`] starts it. After an
-/// embedded listener drains, the host must shut down the HTTP API's runtime,
+/// and this does not start it or the non-maintaining session reaper.
+/// [`serve_with_shutdown`] starts whichever one the config calls for; embedded
+/// hosts can drive one pass at a time with [`AppState::run_due_steps`]. After
+/// an embedded listener drains, the host must shut down the HTTP API's runtime,
 /// which [`serve_with_shutdown`] does automatically.
 pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(Router, AppState)> {
     let ValidatedServerConfig {
@@ -121,6 +138,14 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             metrics.recorder().as_ref(),
         )
     });
+    let session_reaper = scheduler.is_none().then(|| {
+        let scheduler_config = config.scheduler_config();
+        SessionReaper::new(
+            Arc::clone(&namespaces),
+            scheduler_config.maintenance_interval_ms,
+            scheduler_config.idle_session_close_after_ms,
+        )
+    });
     let http = HttpState::new(
         HttpConfig {
             serves_maintenance: config.maintenance.serves(),
@@ -144,7 +169,11 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             usage_recorder: None,
         },
     );
-    let state = AppState { http, scheduler };
+    let state = AppState {
+        http,
+        scheduler,
+        session_reaper,
+    };
     Ok((router(state.clone()), state))
 }
 
@@ -352,6 +381,7 @@ where
         requests: state.http.request_limit().cloned(),
         runtime: state.http.runtime,
         scheduler: state.scheduler,
+        session_reaper: state.session_reaper,
         deadline_ms,
     };
     serve_and_settle(listener, router, settlement, shutdown).await
@@ -365,11 +395,13 @@ pub(super) struct Settlement {
     pub(super) requests: Option<RequestLimit>,
     pub(super) runtime: LoonFs<Writable>,
     pub(super) scheduler: Option<Scheduler>,
+    pub(super) session_reaper: Option<SessionReaper>,
     pub(super) deadline_ms: u64,
 }
 
-/// Starts `scheduler`, serves until the shutdown trigger fires, then settles
-/// what this process owns, in the order it has to be settled in.
+/// Starts `scheduler` (or `session_reaper` when maintenance is off), serves
+/// until the shutdown trigger fires, then settles what this process owns, in
+/// the order it has to be settled in.
 ///
 /// Kept apart from [`serve_on`] so the settling order is a thing a test can
 /// drive with handles it keeps.
@@ -390,9 +422,14 @@ where
         requests,
         runtime,
         scheduler,
+        session_reaper,
         deadline_ms,
     } = settlement;
-    let scheduler = scheduler.map(|scheduler| scheduler.start());
+    let scheduler = match (scheduler, session_reaper) {
+        (Some(scheduler), _) => Some(scheduler.start()),
+        (None, Some(reaper)) => Some(reaper.start()),
+        (None, None) => None,
+    };
     let (listener_close_tx, listener_close_rx) = tokio::sync::oneshot::channel();
     let mut server = Box::pin(
         axum::serve(listener, router)

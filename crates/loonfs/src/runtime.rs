@@ -91,11 +91,10 @@ pub struct Writable {
 pub(crate) struct WriterState {
     /// The writer ID that the runtime's sessions commit as.
     pub(crate) writer_id: WriterId,
-    /// The compactor epoch this runtime has for each namespace. Its
-    /// sessions and every `Maintenance` value share it, so they never fence
-    /// each other. It's a `tokio` mutex because a first claim keeps it locked
-    /// across the claim's publication, so concurrent groups share one epoch.
-    pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
+    /// The compactor epoch this runtime has for each namespace. Claims run
+    /// under the namespace's compaction lock (`turns.compaction`), so this map
+    /// is never locked across I/O and only stores succeeded claims.
+    pub(crate) compactor_epochs: std::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
 }
 
 impl fmt::Debug for Writable {

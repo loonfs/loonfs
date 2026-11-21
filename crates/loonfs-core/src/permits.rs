@@ -60,11 +60,11 @@ impl Permits {
             .acquire()
             .await
             .expect("the permits should remain open");
+        permit.permit = Some(acquired);
         self.update(|counts| {
             counts.waiting -= 1;
             counts.running += 1;
         });
-        permit.permit = Some(acquired);
         permit
     }
 

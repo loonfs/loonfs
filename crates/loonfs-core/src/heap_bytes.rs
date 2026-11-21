@@ -666,6 +666,7 @@ impl HeapBytes for ExtensionSegmentRef {
     fn heap_bytes(&self) -> usize {
         self.owner_namespace_id.heap_bytes()
             + self.segment_id.heap_bytes()
+            + self.checksum.heap_bytes()
             + self.min_row_key.heap_bytes()
             + self.max_row_key.heap_bytes()
             + self.filter_inline.heap_bytes()
