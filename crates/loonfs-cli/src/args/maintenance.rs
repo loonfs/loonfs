@@ -22,7 +22,7 @@ pub(crate) enum MaintenanceCommand {
         #[command(subcommand)]
         command: MaintenanceSnapshotCommand,
     },
-    /// Inspect and manage the gram content index.
+    /// Inspect and manage the grep index.
     Index {
         #[command(subcommand)]
         command: MaintenanceIndexCommand,
@@ -32,7 +32,7 @@ pub(crate) enum MaintenanceCommand {
         #[command(subcommand)]
         command: MaintenanceRetentionCommand,
     },
-    /// Collect aged, unreferenced objects, including gram index objects when the deployment
+    /// Collect aged, unreferenced objects, including grep index objects when the deployment
     /// maintains the index.
     Gc,
     /// Collect a pool's content objects, upload records, and temporary objects.
@@ -57,12 +57,12 @@ pub(crate) enum MaintenanceSnapshotCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceIndexCommand {
-    /// Enable the gram content index and wait for its backfill to reach the
+    /// Enable the grep index and wait for its backfill to reach the
     /// sequence the namespace was at when this command started.
     Enable(MaintenanceIndexEnableArgs),
-    /// Disable the gram content index.
+    /// Disable the grep index.
     Disable,
-    /// Show whether the gram content index is disabled, backfilling, or active.
+    /// Show whether the grep index is disabled, backfilling, or active.
     Status,
 }
 

@@ -266,26 +266,34 @@ pub(crate) struct FilesystemTransferArgs {
     pub source_path: String,
     #[arg(value_hint = ValueHint::Other)]
     pub destination_path: String,
-    /// Copy the directory tree rooted at `source_path`. Only cp accepts -r
-    /// (mv moves a directory in one commit without it).
-    #[arg(short, long)]
-    pub recursive: bool,
     /// Replace the destination if it already exists.
     #[arg(long)]
     pub force: bool,
     /// Replacement requires that the destination still points to this inode. This precondition implies --force.
-    #[arg(long, value_parser = parse_public_inode_id, conflicts_with = "recursive")]
+    #[arg(long, value_parser = parse_public_inode_id)]
     pub expected_destination_inode_id: Option<InodeId>,
     /// Replacement requires that the destination still has this revision and inode. This precondition implies --force.
     #[arg(
         long,
-        conflicts_with = "recursive",
         requires = "expected_destination_inode_id",
         value_parser = parse_revision_no
     )]
     pub expected_destination_revision: Option<RevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FilesystemCopyArgs {
+    #[command(flatten)]
+    pub transfer: FilesystemTransferArgs,
+    /// Copy the directory tree rooted at `source_path`.
+    #[arg(
+        short,
+        long,
+        conflicts_with_all = ["expected_destination_inode_id", "expected_destination_revision"]
+    )]
+    pub recursive: bool,
 }
 
 #[derive(Debug, Args)]

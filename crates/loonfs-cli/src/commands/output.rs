@@ -256,6 +256,7 @@ pub(crate) enum CommandData {
     FileRevisions {
         target: String,
         revisions: Vec<FileRevision>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
     },
     FileTransfer {

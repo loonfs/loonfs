@@ -341,6 +341,64 @@ async fn a_client_sends_the_header_of_the_context_it_was_built_with() {
     }
 }
 
+#[tokio::test]
+async fn health_and_capabilities_omit_principal_context_headers() {
+    use loonfs_types::{Context, PrincipalSet};
+    use std::sync::Mutex;
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let service = tower::service_fn(move |request: Request<Body>| {
+        recorded
+            .lock()
+            .expect("requests lock")
+            .push(request.headers().clone());
+        let body = if request.uri().path() == "/v0/capabilities" {
+            br#"{"protocol_version":"v0","api_groups":["filesystem/v0"]}"#.as_slice()
+        } else {
+            b"{}".as_slice()
+        };
+        async move { Ok(Response::new(Body::from(Bytes::from_static(body)))) }
+    });
+    let principals: PrincipalSet = "usr_ada".parse().expect("principals");
+    let client = Client::with_transport(
+        ClientConfig {
+            server_url: "http://127.0.0.1".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+            ca_cert_path: None,
+        },
+        service,
+        Context::Principals(principals),
+    )
+    .expect("valid config");
+    client.get_health().await.expect("health");
+    client.get_capabilities().await.expect("capabilities");
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 2);
+    for headers in requests.iter() {
+        assert!(
+            !headers.contains_key("loonfs-context") && !headers.contains_key("loonfs-principals"),
+            "deployment endpoints should not carry context headers: {headers:?}"
+        );
+    }
+}
+
+#[test]
+fn retry_after_parses_delta_seconds() {
+    let mut headers = http::HeaderMap::new();
+    assert_eq!(parse_retry_after_ms(&headers), None);
+    headers.insert(http::header::RETRY_AFTER, "5".parse().expect("header"));
+    assert_eq!(parse_retry_after_ms(&headers), Some(5_000));
+    headers.insert(
+        http::header::RETRY_AFTER,
+        "Wed, 21 Oct 2015 07:28:00 GMT".parse().expect("header"),
+    );
+    assert_eq!(parse_retry_after_ms(&headers), None);
+}
+
 fn timed_client<S>(service: S, timeout: Option<u64>) -> (Client, Arc<ManualClock>)
 where
     S: tower::Service<Request<Body>, Response = Response<Body>, Error = TransportError>

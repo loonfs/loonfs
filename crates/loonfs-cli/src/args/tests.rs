@@ -477,7 +477,7 @@ fn management_command_model_uses_noun_families() {
 
 #[test]
 fn provider_create_commands_only_expose_applicable_flags() {
-    let command = Cli::command();
+    let mut command = Cli::command();
     let create = subcommand(subcommand(&command, "profile"), "create");
     let s3 = subcommand(create, "s3");
     assert!(has_argument(s3, "credential_source"));
@@ -505,6 +505,18 @@ fn provider_create_commands_only_expose_applicable_flags() {
     let init = subcommand(&command, "init");
     assert!(!has_argument(init, "mode"));
     assert!(!has_argument(init, "store_kind"));
+
+    let mv = subcommand(&command, "mv");
+    assert!(!has_argument(mv, "recursive"));
+    let cp = subcommand(&command, "cp");
+    assert!(has_argument(cp, "recursive"));
+
+    let help = command.render_help().to_string();
+    assert!(help.contains("append"), "top-level help must list append");
+    assert!(
+        Cli::try_parse_from(["loonfs", "mv", "-r", "/a", "/b"]).is_err(),
+        "mv must reject -r at clap parse time"
+    );
 }
 
 fn subcommand<'a>(command: &'a clap::Command, name: &str) -> &'a clap::Command {

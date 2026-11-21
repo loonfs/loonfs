@@ -170,7 +170,10 @@ impl Client {
         job_response!(response, RunPoolMaintenanceJobResponse::Gc)
     }
 
-    async fn run_pool_maintenance_job(
+    /// Runs one pool maintenance job on `pool_id`.
+    ///
+    /// Retrying this request starts a distinct attempt.
+    pub async fn run_pool_maintenance_job(
         &self,
         pool_id: &PoolId,
         request: &RunPoolMaintenanceJobRequest,

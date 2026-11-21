@@ -55,19 +55,26 @@ impl Client {
     /// Starts the request for `operation` at `url`, with the header of the
     /// client's context.
     pub(crate) fn request(&self, operation: Operation, url: &str) -> WireRequest {
-        let request = WireRequest {
+        let request = self.request_without_context(operation, url);
+        match &self.context {
+            Context::Service => request.header(headers::CONTEXT, headers::SERVICE_CONTEXT),
+            Context::Principals(principals) => {
+                request.header(headers::PRINCIPALS, principals.to_string())
+            }
+        }
+    }
+
+    /// Starts an authenticated request without `Loonfs-Context` or
+    /// `Loonfs-Principals`, for deployment endpoints (`/health`,
+    /// `/v0/capabilities`) that don't take a principal context.
+    pub(crate) fn request_without_context(&self, operation: Operation, url: &str) -> WireRequest {
+        WireRequest {
             method: operation.method,
             url: url.to_owned(),
             headers: Vec::new(),
             authenticate: true,
             policy: operation.policy,
             body: None,
-        };
-        match &self.context {
-            Context::Service => request.header(headers::CONTEXT, headers::SERVICE_CONTEXT),
-            Context::Principals(principals) => {
-                request.header(headers::PRINCIPALS, principals.to_string())
-            }
         }
     }
 
@@ -177,9 +184,11 @@ impl Client {
             .map_err(|error| FailedAttempt {
                 source: FailureSource::Network,
                 error,
+                retry_after_ms: None,
             })?;
         let response = self.send(built, attempt_timeout).await?;
         if !response.status.is_success() {
+            let retry_after_ms = parse_retry_after_ms(&response.headers);
             let bytes = response
                 .body
                 .collect()
@@ -189,6 +198,7 @@ impl Client {
             return Err(FailedAttempt {
                 source: FailureSource::Response,
                 error: map_status_error(response.status.as_u16(), &bytes),
+                retry_after_ms,
             });
         }
         Ok(StreamedResponse {
@@ -268,7 +278,19 @@ impl Client {
             else {
                 return Err(failed.error);
             };
-            transport_delay(Duration::from_millis(backoff_ms)).await;
+            let wait_ms = match failed.retry_after_ms {
+                Some(retry_after_ms) => {
+                    let capped = retry_after_ms
+                        .max(backoff_ms)
+                        .min(self.transport_retry.max_backoff_ms);
+                    match deadline.as_ref().and_then(OperationDeadline::remaining_ms) {
+                        Some(remaining_ms) => capped.min(remaining_ms),
+                        None => capped,
+                    }
+                }
+                None => backoff_ms,
+            };
+            transport_delay(Duration::from_millis(wait_ms)).await;
             attempt_timeout = match deadline.as_ref() {
                 Some(deadline) => match deadline.remaining_ms() {
                     Some(remaining_ms) => Some(Duration::from_millis(remaining_ms)),
@@ -292,6 +314,7 @@ impl Client {
         let built = self.build(request, body).map_err(|error| FailedAttempt {
             source: FailureSource::Network,
             error,
+            retry_after_ms: None,
         })?;
         self.send(built, attempt_timeout)
             .await?
@@ -388,12 +411,25 @@ impl WireResponse {
                 bytes: bytes.to_vec(),
             })
         } else {
+            let retry_after_ms = parse_retry_after_ms(&self.headers);
             Err(FailedAttempt {
                 source: FailureSource::Response,
                 error: map_status_error(self.status.as_u16(), &bytes),
+                retry_after_ms,
             })
         }
     }
+}
+
+/// Parses an HTTP `Retry-After` delta-seconds header into milliseconds.
+fn parse_retry_after_ms(headers: &http::HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get(http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let seconds: u64 = raw.parse().ok()?;
+    Some(seconds.saturating_mul(1_000))
 }
 
 #[derive(Debug)]
@@ -417,6 +453,7 @@ fn failed_attempt(url: &str, error: TransportError) -> FailedAttempt {
             error.is_connect(),
             error.is_timeout(),
         )),
+        retry_after_ms: None,
     }
 }
 
@@ -428,6 +465,9 @@ pub(crate) struct FailedAttempt {
     /// transport failure.
     pub(crate) source: FailureSource,
     pub(crate) error: ClientError,
+    /// Server-suggested retry delay from `Retry-After`, in milliseconds, when
+    /// the failed response included a delta-seconds header.
+    pub(crate) retry_after_ms: Option<u64>,
 }
 
 /// Where a failed request attempt's error came from.
@@ -487,8 +527,8 @@ fn render_send_error(
     }
     if connect_failure {
         format!(
-            "cannot connect to `{url}`: {detail}; check that the server is running and that the \
-             profile's `server_url` points at it"
+            "cannot connect to `{url}`: {detail}; check that the server is running and that \
+             `server_url` points at it"
         )
     } else if timed_out {
         format!("request to `{url}` timed out: {detail}")
