@@ -121,7 +121,7 @@ impl utoipa::ToSchema for BinaryPayload {}
 #[response(
     description = "The server can't complete the request now. Check `code` to find whether the outcome is unknown (after a deadline or a lost acknowledgment), or the cause is shutdown, load, writer session admission, store contention, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying.",
     headers(
-        ("Retry-After" = String, description = "Seconds to wait before retrying when `code` is `server_busy`.")
+        ("Retry-After" = String, description = "Seconds to wait before retrying when `code` is `commit_queue_full`, `server_busy`, or `shutting_down`.")
     )
 )]
 #[expect(

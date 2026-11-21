@@ -47,7 +47,7 @@ impl SchedulerMetrics {
             }),
             panics: recorder.register_counter(
                 "loonfs.maintenance.sweep_panics",
-                "Maintenance calls and idle-session closes that panicked",
+                "Maintenance calls that panicked",
                 &[],
             ),
             namespaces: recorder.register_gauge(

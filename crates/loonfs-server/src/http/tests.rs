@@ -163,8 +163,15 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
         Settlement {
             requests: None,
             runtime: writer.clone(),
-            scheduler: None,
-            session_reaper: None,
+            scheduler: crate::scheduler::Scheduler::new(
+                test_config(temp_dir.path(), "shutdown-deadline-writer").scheduler_config(),
+                writer.object_store(),
+                None,
+                Arc::new(loonfs_http::Namespaces::new(writer.clone())),
+                writer.monotonic_timer(),
+                None,
+                &loonfs::metrics::DefaultMetricsRecorder::new(),
+            ),
             deadline_ms: shutdown_deadline_ms,
         },
         async move {
@@ -319,7 +326,6 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),
             scheduler: state.scheduler.clone(),
-            session_reaper: state.session_reaper.clone(),
             deadline_ms: 60_000,
         },
         async move {
@@ -399,7 +405,6 @@ async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtim
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),
             scheduler: state.scheduler.clone(),
-            session_reaper: state.session_reaper.clone(),
             deadline_ms: shutdown_deadline_ms,
         },
         async move {
@@ -471,7 +476,6 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     )
     .await
     .expect("build app");
-    assert!(state.scheduler.is_some());
 
     let capabilities_response = router
         .clone()
@@ -615,7 +619,6 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),
             scheduler: state.scheduler.clone(),
-            session_reaper: state.session_reaper.clone(),
             deadline_ms: shutdown_deadline_ms,
         },
         async move {

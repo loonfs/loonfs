@@ -181,7 +181,7 @@ impl RetryLoop<'_> {
     /// Grants one retry under the shared count and deadline budgets.
     fn next_backoff(&mut self, retry: &TransportRetry) -> Option<Duration> {
         let (key, operation, payload_bytes) = (self.key, self.operation, self.payload_bytes);
-        let backoff_ms = match DEFAULT.next_backoff(&mut self.retries, Some(&self.deadline)) {
+        let backoff_ms = match DEFAULT.next_backoff(&mut self.retries, Some(&self.deadline), None) {
             TransportRetryOutcome::Wait { backoff_ms } => backoff_ms,
             TransportRetryOutcome::RetriesExhausted => {
                 tracing::warn!(

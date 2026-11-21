@@ -609,6 +609,8 @@ In the reference server, a namespace's writer session opens on the first write r
 - Metadata (and the grep index, if enabled) is caught up with the session's published sequence (a session that never published still waits for an enabled index to finish building).
 - No collection step is due.
 
+A server whose maintenance mode is `serve_only` or `disabled` runs no metadata, collection, or index step and no sweep, because folds, compactions, sweeps, and collections are another process's work. Its scheduler still checks its sessions at every maintenance interval and closes a session on the first two conditions alone, so a session that can't write anymore closes as soon as no request keeps its handle, and an idle session closes after `idle_session_close_after_ms` whether or not its metadata is caught up. The close writes nothing and sends no store requests. The session's unfolded WAL tail stays in the store for the maintaining process to fold.
+
 While the scheduler is closing a session, a new open for the same namespace waits for the drain and then opens a fresh session (never failing with `writer_session_closed` on this path), while opens for other namespaces don't wait.
 
 The server also drops a session when the namespace is deleted through that server, or on the next open after a session records that it was fenced or found its namespace deleted or missing. When a session is fenced:
@@ -908,7 +910,7 @@ Recording deletion in `deleted_at_ms` instead of overwriting `expires_at_ms` avo
 
 Even after expiry or deletion, the snapshot record stays in storage until GC removes it after the grace window (`deleted_at_ms + grace` or `expires_at_ms + grace`, whichever comes first). Keeping the record through the grace window leaves operations that validated the snapshot right before deletion with the same completion margin as before expiry, and keeps the [snapshot inventory](#snapshot-inventory) accurate about what still pins old manifests.
 
-Deleting a missing or already-deleted user snapshot returns the same success response without writing, making retries safe. Deleting a fork snapshot returns `snapshot_not_found` because only garbage collection deletes fork snapshots. Snapshot deletion stays available after the namespace itself is deleted ([`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
+Deleting a missing or already-deleted user snapshot returns the same success response without writing, making retries safe. Deleting a fork snapshot returns `snapshot_not_found` because only garbage collection deletes fork snapshots. In the service context, snapshot deletion stays available after the namespace itself is deleted ([`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
 
 Creating, retrieving, listing, extending, and deleting snapshots require an administrator or the service context. Reading through a snapshot requires `read` and `history` on the historical inode, evaluated at the current head.
 
@@ -1300,7 +1302,7 @@ Deletes a namespace. Requires an administrator or the service context.
 
 Deletion runs in the namespace's writer session as a fenced manifest publication ([Deleting a namespace](format.md#94-deleting-a-namespace)), except for an `initializing` namespace, whose tombstone is published without opening a writer session. Deletion linearizes at the manifest put, so commits acknowledged beforehand stay committed. Once observed, reads, user snapshot listings and retrievals, commits, forks from the ID, status queries, repeat deletions, and creating or forking into the same ID all return `410 namespace_deleted` (and continue to do so after [retirement](format.md#95-retirement)).
 
-The snapshot inventory and snapshot deletion remain available after namespace deletion until retirement, allowing callers to inspect and delete user snapshots while they still exist before GC cleans them up after the grace window ([Snapshot cleanup](format.md#117-snapshot-cleanup)). Deleting a fork snapshot ID through the user snapshot route still returns `snapshot_not_found`.
+The snapshot inventory remains available after namespace deletion until retirement. The service context can still delete user snapshots during this period. A deletion request with principals returns `410 namespace_deleted` ([Snapshot cleanup](format.md#117-snapshot-cleanup)). Deleting a fork snapshot ID through the user snapshot route still returns `snapshot_not_found`.
 
 Deletion itself reclaims no storage. Space is reclaimed asynchronously by namespace retirement ([Retirement](format.md#95-retirement), [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)) and pool GC ([Garbage collection jobs](#garbage-collection-jobs)). Deployments should run GC repeatedly to catch late writes, keep provider lifecycle rules for incomplete multipart uploads, and account for bucket versioning or retention locks.
 
@@ -2748,7 +2750,7 @@ Loonfs-Context: service
     "commit_id": "c_rebase_demo_branch_1",
     "committed_seq": 432,
     "committed_at_ms": 1752625201000,
-    "actor_id": "usr_8f3c",
+    "committed_by": "usr_8f3c",
     "merge": {
       "source_namespace_id": "demo-branch",
       "source_after_seq": 418,

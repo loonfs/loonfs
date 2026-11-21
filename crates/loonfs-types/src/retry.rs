@@ -20,14 +20,17 @@ impl TransportRetryPolicy {
     /// Grants one retry under the policy's retry count and the operation's
     /// deadline, and counts it in `retries` when it is granted.
     ///
-    /// Positive backoffs use equal jitter (`[cap / 2, cap]`) drawn from the
-    /// process [`Entropy`] source so concurrent callers don't retry in
-    /// lockstep while seeded runs stay repeatable. The backoff never runs past
-    /// the deadline.
+    /// The policy applies equal jitter to its own backoff before comparing it with
+    /// the requested wait. Its own backoff is cut short at the deadline. A wait the
+    /// server asked for in `requested_ms` is never cut short: the retry waits
+    /// the longer of that wait and the backoff, or returns
+    /// [`TransportRetryOutcome::DeadlinePassed`] without counting the retry
+    /// when the deadline can't fit the wait.
     pub fn next_backoff(
         &self,
         retries: &mut u32,
         deadline: Option<&OperationDeadline<'_>>,
+        requested_ms: Option<u64>,
     ) -> TransportRetryOutcome {
         if *retries >= self.max_retries {
             return TransportRetryOutcome::RetriesExhausted;
@@ -39,21 +42,29 @@ impl TransportRetryPolicy {
             },
             None => u64::MAX,
         };
-        *retries += 1;
-        let cap_ms = self.backoff_ms(*retries);
+        let cap_ms = self.backoff_ms(*retries + 1);
         let backoff_ms = if cap_ms == 0 {
             0
         } else {
             let entropy = installed_entropy();
             equal_jitter_ms(cap_ms, entropy.as_ref())
         };
-        TransportRetryOutcome::Wait {
-            backoff_ms: backoff_ms.min(remaining_ms),
-        }
+        let backoff_ms = match requested_ms {
+            None => backoff_ms.min(remaining_ms),
+            Some(requested_ms) => {
+                let wait_ms = backoff_ms.max(requested_ms);
+                if deadline.is_some() && remaining_ms <= wait_ms {
+                    return TransportRetryOutcome::DeadlinePassed;
+                }
+                wait_ms
+            }
+        };
+        *retries += 1;
+        TransportRetryOutcome::Wait { backoff_ms }
     }
 
-    /// Returns the capped exponential backoff ceiling before retry number
-    /// `retry`, counting from one, in milliseconds.
+    /// Returns the capped exponential backoff ceiling before retry number `retry`,
+    /// counting from one, in milliseconds.
     pub fn backoff_ms(&self, retry: u32) -> u64 {
         doubling_backoff_ms(self.initial_backoff_ms, retry, self.max_backoff_ms)
     }
@@ -131,22 +142,4 @@ impl<'timer> OperationDeadline<'timer> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::SeededEntropy;
-
-    #[test]
-    fn equal_jitter_stays_in_half_to_cap_and_is_repeatable_with_seeded_entropy() {
-        let first = SeededEntropy::from_seed(42);
-        let second = SeededEntropy::from_seed(42);
-        for cap_ms in [1, 2, 100, 1_000, 10_000] {
-            let a = equal_jitter_ms(cap_ms, &first);
-            let b = equal_jitter_ms(cap_ms, &second);
-            assert_eq!(a, b);
-            assert!(
-                (cap_ms / 2..=cap_ms).contains(&a),
-                "jittered {a} out of range for cap {cap_ms}"
-            );
-        }
-    }
-}
+mod tests;

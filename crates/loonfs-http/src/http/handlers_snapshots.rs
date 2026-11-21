@@ -229,7 +229,7 @@ pub(super) async fn get_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "namespaces",
         summary = "Delete snapshot",
-        description = "Deletes a snapshot by recording the server's current time as its delete time. From then on, the snapshot can't be read, forked, extended, or retrieved, and the snapshot listing leaves it out. Garbage collection can then reclaim its unreferenced manifest and runs after the grace window. Deleting a missing or deleted snapshot succeeds without a write, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
+        description = "Deletes a snapshot by recording the server's current time as its delete time. From then on, the snapshot can't be read, forked, extended, or retrieved, and the snapshot listing leaves it out. Garbage collection can then reclaim its unreferenced manifest and runs after the grace window. Deleting a missing or deleted snapshot succeeds without a write, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted, except to a request with principals, which returns `namespace_deleted`.",
         params(
             ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
@@ -240,6 +240,7 @@ pub(super) async fn get_snapshot(
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace not found, or the ID belongs to a fork snapshot", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted, returned only to a request with principals", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )

@@ -36,7 +36,10 @@ pub struct ClientConfig {
     /// `commit_queue_full`, and `shutting_down`, which a draining process
     /// returns so that the caller retries against the next one) and
     /// network-level transport errors (connect failures, timeouts, resets).
-    /// Off by default. The retry
+    /// Off by default. When a refused response includes a `Retry-After`
+    /// header, the retry waits that long (the reference server asks for one
+    /// second), or returns the error when the 90-second limit can't fit the
+    /// wait. The retry
     /// applies only to reads, commits (which include a durable replay
     /// identity), and operations whose repeat semantics are idempotent;
     /// lifecycle mutations
