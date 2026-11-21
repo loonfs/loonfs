@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
 /// A request to create a namespace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateNamespaceRequest {
@@ -33,7 +33,7 @@ pub struct CreateNamespaceRequest {
 const _: () = assert!(crate::limits::GC_GRACE_WINDOW_MS == 86_400_000);
 
 /// A request to fork a namespace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ForkNamespaceRequest {

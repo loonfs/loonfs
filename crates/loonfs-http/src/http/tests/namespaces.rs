@@ -95,6 +95,23 @@ async fn two_commits_to_one_namespace_use_one_writer_epoch() {
 }
 
 #[tokio::test]
+async fn all_optional_post_routes_accept_an_empty_body() {
+    let (_directory, router, _state, _) = host("empty-body-host").await;
+    let (status, body) = send(&router, Method::POST, "/v0/namespaces", String::new()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let created: loonfs_types::NamespaceMetadata =
+        serde_json::from_slice(&body).expect("created namespace");
+
+    let fork_uri = format!("/v0/namespaces/{}/forks", created.namespace_id);
+    let (status, body) = send(&router, Method::POST, &fork_uri, String::new()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let snapshot_uri = format!("/v0/namespaces/{}/snapshots", created.namespace_id);
+    let (status, body) = send(&router, Method::POST, &snapshot_uri, String::new()).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+}
+
+#[tokio::test]
 async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
     let (_directory, router, state, namespaces) = host("delete-host").await;
     let deleted = namespace_id("deleted");

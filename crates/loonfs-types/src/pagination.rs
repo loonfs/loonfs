@@ -312,6 +312,34 @@ impl PagedResponse for crate::ListChangesResponse {
     }
 }
 
+impl PagedResponse for crate::DiffResponse {
+    type Item = crate::DiffEntry;
+    type Cursor = ChangeFeedPosition;
+
+    fn items_mut(&mut self) -> &mut Vec<Self::Item> {
+        &mut self.entries
+    }
+
+    fn items(&self) -> &[Self::Item] {
+        &self.entries
+    }
+
+    fn next_cursor(&self) -> Option<Self::Cursor> {
+        self.next_after_seq.map(|after_seq| ChangeFeedPosition {
+            after_seq,
+            event_index: self.next_event_index.unwrap_or(0),
+        })
+    }
+
+    fn absorb(&mut self, mut later: Self) {
+        self.after_seq = later.after_seq;
+        self.next_after_seq = later.next_after_seq;
+        self.next_event_index = later.next_event_index;
+        self.retention_floor_seq = later.retention_floor_seq;
+        self.entries.append(&mut later.entries);
+    }
+}
+
 /// Contract page size for endpoints that omit a caller-supplied limit.
 ///
 /// This value is deliberately fixed and advertised through capabilities.
@@ -1168,5 +1196,37 @@ mod tests {
                 actual: PAGE_CURSOR_FORMAT_VERSION + 1,
             })
         );
+    }
+
+    #[test]
+    fn diff_response_implements_paged_response() {
+        let mut first = crate::DiffResponse {
+            namespace_id: crate::NamespaceId::parse("diff-ns").expect("namespace id"),
+            from_seq: CommitSeq(1),
+            to_seq: CommitSeq(5),
+            after_seq: CommitSeq(1),
+            next_after_seq: Some(CommitSeq(3)),
+            next_event_index: Some(2),
+            retention_floor_seq: CommitSeq(0),
+            entries: vec![],
+        };
+        assert_eq!(
+            first.next_cursor(),
+            Some(ChangeFeedPosition {
+                after_seq: CommitSeq(3),
+                event_index: 2,
+            })
+        );
+        let second = crate::DiffResponse {
+            after_seq: CommitSeq(3),
+            next_after_seq: None,
+            next_event_index: None,
+            retention_floor_seq: CommitSeq(1),
+            ..first.clone()
+        };
+        first.absorb(second);
+        assert_eq!(first.next_cursor(), None);
+        assert_eq!(first.after_seq, CommitSeq(3));
+        assert_eq!(first.retention_floor_seq, CommitSeq(1));
     }
 }
