@@ -897,7 +897,7 @@ fn builders_require_identity_and_a_runtime() {
 #[test]
 fn builders_reject_a_read_interval_above_the_revalidation_bound() {
     let temp_dir = tempdir().expect("tempdir");
-    let bound = loonfs::engine::READ_REVALIDATION_BOUND_MS;
+    let bound = loonfs::READ_REVALIDATION_BOUND_MS;
     let builder = || {
         LoonFs::builder(store_config(temp_dir.path()), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("interval-test"))
@@ -1053,7 +1053,7 @@ async fn namespace_deletion_drops_cached_reads_even_when_its_answer_is_lost() {
         let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("delete-lost-answer"))
             .config(loonfs::RuntimeConfig {
-                manifest_revalidation_interval_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+                manifest_revalidation_interval_ms: loonfs::READ_REVALIDATION_BOUND_MS,
                 ..loonfs::RuntimeConfig::default()
             })
             .build()

@@ -7,7 +7,7 @@ use super::fixtures::{self, test_app, test_options, TestAppOptions};
 use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use loonfs::engine::READ_REVALIDATION_BOUND_MS;
+use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs::{ReadConsistency, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::DirectTransferIssuers;

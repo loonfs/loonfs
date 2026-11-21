@@ -84,20 +84,21 @@ mod runtime_core;
 pub mod test_support;
 mod trace;
 
-pub use loonfs_core::cache::SegmentFilterStats;
+pub use loonfs_core::cache::{DecodedBlockCacheConfig, DecodedBlockCacheStats, SegmentFilterStats};
 pub use loonfs_core::limits::{
     DIRECT_TRANSFER_URL_TTL_MS, GC_GRACE_WINDOW_MS, MAX_BLOCK_MEMO_BYTES, MAX_COLLECTION_BYTES,
     MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES, MAX_SCAN_DECODED_BYTES,
-    MAX_SIGNED_PARTS_PER_REQUEST, PUBLICATION_COMPLETION_BOUND_MS, SSD_WRITE_QUEUE_BYTES,
+    MAX_SIGNED_PARTS_PER_REQUEST, PUBLICATION_COMPLETION_BOUND_MS, READ_REVALIDATION_BOUND_MS,
+    SSD_WRITE_QUEUE_BYTES,
 };
 pub use loonfs_core::time::WallClock;
 pub use loonfs_core::{
     classify_store_failure, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
     DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream, FoldWalOutcome,
-    FoldWalResponse, ListSnapshotFilesOptions, RetainedRevisionsPage, RetainedRevisionsPageCursor,
-    RetentionTarget, SnapshotFile, SnapshotFilesPage, SnapshotFilesPageCursor, SnapshotPageCursor,
-    SnapshotRecordPageCursor, StreamRange, WriterFence, CONTENT_READ_CHUNK_BYTES,
-    MAX_CURRENT_FILES_PER_STAT,
+    FoldWalResponse, ListSnapshotFilesOptions, PermitCounts, RetainedRevisionsPage,
+    RetainedRevisionsPageCursor, RetentionTarget, SnapshotFile, SnapshotFilesPage,
+    SnapshotFilesPageCursor, SnapshotPageCursor, SnapshotRecordPageCursor, StreamRange,
+    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::{
     AbsolutePath, AccessRevisionNo, ActorId, AdvanceRetentionResponse, AttributeKey,
@@ -134,7 +135,7 @@ pub mod engine {
         DecodedBlock, DecodedBlockCache, DecodedBlockCacheConfig, DecodedBlockCacheStats,
         DecodedBlockKey, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
     };
-    pub use loonfs_core::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
+    pub use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
     pub use loonfs_core::{
         refill_iterators, select_next_iterator, BudgetPermit, ExtensionBasis, ExtensionPublication,
         PermitCounts, Permits, SegmentBlockLoader, SegmentRowIterator,

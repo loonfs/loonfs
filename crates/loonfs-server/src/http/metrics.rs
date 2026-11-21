@@ -8,7 +8,7 @@ use self::caches::{
 };
 use self::prometheus::{render_snapshot, write_counter, write_gauge};
 use super::AppState;
-use loonfs::engine::PermitCounts;
+use loonfs::PermitCounts;
 use loonfs_grep::GrepPublicationStats;
 use loonfs_http::RequestLimit;
 

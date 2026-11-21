@@ -4,9 +4,9 @@
 //! maximum staleness.
 
 use crate::writer_position_reads::{self, Parked};
-use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::{counter, writer};
+use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs::{
     CommitSeq, Consistency, CoreError, DiffOptions, DownloadOptions, Error, ListChangesOptions,
     ListFileRevisionsOptions, ListOptions, ListTrashOptions, LoonFs, MetadataCache, Namespace,

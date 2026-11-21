@@ -2,8 +2,8 @@
 //! cache, its SSD tier, and the grep block cache.
 
 use super::prometheus::{write_counter, write_gauge, SeriesLabels, NO_LABELS};
-use loonfs::engine::DecodedBlockCacheStats;
 use loonfs::metrics::{RESULT_HIT, RESULT_MISS};
+use loonfs::DecodedBlockCacheStats;
 use loonfs::{MetadataCacheStats, SegmentFilterStats, SsdSegmentBlocksStats};
 
 /// Returns the `hit` and `miss` series of a lookup counter.

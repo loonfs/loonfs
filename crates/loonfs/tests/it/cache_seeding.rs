@@ -337,7 +337,7 @@ async fn every_head_stays_cached_past_sixty_four_namespaces_under_the_default_bu
     let reader = loonfs::LoonFs::builder_with_store(object_store, loonfs::Context::Service)
         .read_only()
         .config(loonfs::RuntimeConfig {
-            max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+            max_staleness_ms: loonfs::READ_REVALIDATION_BOUND_MS,
             ..loonfs::RuntimeConfig::default()
         })
         .build()
@@ -392,7 +392,7 @@ fn runtime_wal_tail_cache_skips_oversized_projection() {
         loonfs::LoonFs::builder_with_store(object_store, loonfs::Context::Service)
             .read_only()
             .config(loonfs::RuntimeConfig {
-                max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+                max_staleness_ms: loonfs::READ_REVALIDATION_BOUND_MS,
                 ..loonfs::RuntimeConfig::default()
             })
             .metadata_cache(MetadataCache::builder().max_wal_tail_bytes(budget).build())
@@ -449,7 +449,7 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
     let recording = Arc::new(RecordingStore::new(raw_store.store(), KeyPredicate::any()));
     let fs = open_runtime_with(recording.clone(), "tail-cache-stale-test", |builder| {
         builder.config(loonfs::RuntimeConfig {
-            max_staleness_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+            max_staleness_ms: loonfs::READ_REVALIDATION_BOUND_MS,
             ..loonfs::RuntimeConfig::default()
         })
     });
@@ -640,7 +640,7 @@ fn a_cached_head_anchor_probes_the_wal_after_an_external_commit() {
     let raw_store = Arc::new(RuntimeStoreProbe::new(temp_dir.path(), &namespace_id));
     let reader = open_runtime_with(raw_store.store(), "control-cache-reader", |builder| {
         builder.config(loonfs::RuntimeConfig {
-            manifest_revalidation_interval_ms: loonfs::engine::READ_REVALIDATION_BOUND_MS,
+            manifest_revalidation_interval_ms: loonfs::READ_REVALIDATION_BOUND_MS,
             max_staleness_ms: 0,
             ..loonfs::RuntimeConfig::default()
         })

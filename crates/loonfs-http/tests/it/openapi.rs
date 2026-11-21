@@ -957,7 +957,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         assert_eq!(schema.get("minimum").and_then(Value::as_u64), Some(0));
         assert_eq!(
             schema.get("maximum").and_then(Value::as_u64),
-            Some(loonfs::engine::READ_REVALIDATION_BOUND_MS)
+            Some(loonfs::READ_REVALIDATION_BOUND_MS)
         );
     }
 
@@ -978,7 +978,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
         assert_eq!(max_staleness["minimum"], json!(0), "{request_name}");
         assert_eq!(
             max_staleness["maximum"],
-            json!(loonfs::engine::READ_REVALIDATION_BOUND_MS),
+            json!(loonfs::READ_REVALIDATION_BOUND_MS),
             "{request_name}"
         );
     }
