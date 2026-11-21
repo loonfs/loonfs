@@ -23,6 +23,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use tokio::sync::Semaphore;
 use tokio::task::{JoinError, JoinHandle};
 
 /// The heap that the index allocates for each block on disk.
@@ -64,6 +65,10 @@ const SUBDIRECTORIES: usize = 256;
 /// The suffix of a file that the writer hasn't renamed into place yet.
 const TEMPORARY_SUFFIX: &str = ".tmp";
 
+/// Maximum blocking disk reads running at once, keeping SSD stalls from
+/// saturating Tokio's blocking thread pool.
+const MAX_CONCURRENT_SSD_READS: usize = 64;
+
 /// The SSD tier of the segment block cache, which keeps the stored bytes of
 /// metadata segment blocks in a directory on local disk.
 ///
@@ -85,6 +90,8 @@ pub struct SsdSegmentBlocks {
     queue: Mutex<Option<mpsc::Sender<QueuedWrite>>>,
     /// The writer's task, until [`Self::close`] waits for it.
     writer: Mutex<Option<JoinHandle<()>>>,
+    /// Bounds concurrent blocking-pool file reads.
+    read_permits: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for SsdSegmentBlocks {
@@ -281,6 +288,7 @@ impl SsdSegmentBlocks {
             files,
             queue: Mutex::new(Some(queue)),
             writer: Mutex::new(Some(writer)),
+            read_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SSD_READS)),
         })
     }
 
@@ -302,6 +310,7 @@ impl SsdSegmentBlocks {
             files,
             queue: Mutex::new(Some(queue)),
             writer: Mutex::new(None),
+            read_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SSD_READS)),
         };
         Ok((tier, writer))
     }
@@ -452,10 +461,17 @@ impl SsdSegmentBlocks {
             self.files.index.record_miss();
             return None;
         };
+        let Ok(read_permit) = Arc::clone(&self.read_permits).acquire_owned().await else {
+            self.files.index.record_miss();
+            return None;
+        };
         let files = Arc::clone(&self.files);
         let path = self.files.path(key, file.stored_bytes, FileName::Block);
         let stored_bytes = file.stored_bytes;
         let read = tokio::task::spawn_blocking(move || {
+            // Keep the permit inside the blocking task so cancelling the async
+            // caller does not free a slot while the disk read is still running.
+            let _read_permit = read_permit;
             let decoded = match read_block_file(&path, stored_bytes) {
                 Ok(stored) => decode(stored).map_err(|error| Some(error.to_string())),
                 // The writer evicted the block after the lookup above, or an

@@ -4,7 +4,7 @@ use aws_credential_types::provider::{error::CredentialsError, ProvideCredentials
 use aws_credential_types::Credentials;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 // Refresh before expiry, without a background task or another provider timeout.
 const REFRESH_WINDOW: Duration = Duration::from_secs(60);
@@ -15,6 +15,10 @@ const REFRESH_RETRY_DELAY: Duration = Duration::from_secs(1);
 #[derive(Default)]
 pub(super) struct CredentialCache {
     entry: RwLock<Option<Entry>>,
+    /// Serializes provider refreshes without holding `entry`'s write lock
+    /// across network I/O, so concurrent readers keep using still-valid
+    /// credentials during the proactive refresh window.
+    refreshing: Mutex<()>,
     // Once observed, preserve uncached lookup behavior for this source's lifetime.
     uncached: AtomicBool,
 }
@@ -32,6 +36,14 @@ impl Entry {
         (now < self.expires_at
             && ((now < self.refresh_at && sufficient_lifetime) || now < self.retry_after))
             .then(|| self.credentials.clone())
+    }
+
+    /// Returns credentials that are still unexpired and cover `valid_until`,
+    /// even inside the proactive refresh window, so readers don't stall while
+    /// another task is already refreshing.
+    fn unexpired(&self, now: SystemTime, valid_until: Option<SystemTime>) -> Option<Credentials> {
+        let sufficient_lifetime = valid_until.is_none_or(|until| until <= self.expires_at);
+        (now < self.expires_at && sufficient_lifetime).then(|| self.credentials.clone())
     }
 
     fn defer_refresh(&mut self, now: SystemTime) {
@@ -52,7 +64,7 @@ impl CredentialCache {
         now: impl Fn() -> SystemTime + Send,
         valid_until: Option<SystemTime>,
     ) -> Result<Credentials, CredentialsError> {
-        let entry = if self.uncached.load(Ordering::Acquire) {
+        let _refresh_guard = if self.uncached.load(Ordering::Acquire) {
             None
         } else {
             if let Some(credentials) = self
@@ -65,19 +77,36 @@ impl CredentialCache {
                 return Ok(credentials);
             }
 
+            let guard = match self.refreshing.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    if let Some(credentials) = self
+                        .entry
+                        .read()
+                        .await
+                        .as_ref()
+                        .and_then(|entry| entry.unexpired(now(), valid_until))
+                    {
+                        return Ok(credentials);
+                    }
+                    self.refreshing.lock().await
+                }
+            };
             // A cancelled refresh preserves the previous value. Recheck both
             // cache and mode after waiting: discovery may have disabled caching.
-            let entry = self.entry.write().await;
             if self.uncached.load(Ordering::Acquire) {
                 None
             } else {
-                if let Some(credentials) = entry
+                if let Some(credentials) = self
+                    .entry
+                    .read()
+                    .await
                     .as_ref()
                     .and_then(|entry| entry.cached(now(), valid_until))
                 {
                     return Ok(credentials);
                 }
-                Some(entry)
+                Some(guard)
             }
         };
         let loaded = provider.provide_credentials().await;
@@ -92,9 +121,10 @@ impl CredentialCache {
             }
         });
 
-        let Some(mut entry) = entry else {
+        if _refresh_guard.is_none() || self.uncached.load(Ordering::Acquire) {
             return loaded;
-        };
+        }
+        let mut entry = self.entry.write().await;
         match loaded {
             Ok(credentials) => {
                 // Preserve the existing lookup/rotation behavior of ambient
