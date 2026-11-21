@@ -493,8 +493,9 @@ fn revision_numbers(listing: &ListFileRevisionsResponse) -> Vec<u64> {
 /// Checks that both revision listings at a snapshot list the revisions that
 /// the snapshot captured, newest first, across pages, while later revisions
 /// stay out of the listing. Also checks that `snapshot_id` can't be combined
-/// with `consistency`, and that a deleted or unknown snapshot returns
-/// `snapshot_not_found`.
+/// with `consistency`, that a snapshot listing's cursor resumes only
+/// against the same snapshot, and that a deleted or unknown snapshot
+/// returns `snapshot_not_found`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_revision_listings_stop_at_the_captured_revision() {
     let temp_dir = tempdir().expect("tempdir");
@@ -523,6 +524,12 @@ async fn snapshot_revision_listings_stop_at_the_captured_revision() {
             .await
             .expect("put a revision after the snapshot");
     }
+    let later_snapshot = create_snapshot(
+        &harness.server_url,
+        namespace.as_str(),
+        "later-revisions",
+        10_000,
+    );
     let inode_id = harness
         .client
         .stat(&keep)
@@ -563,6 +570,30 @@ async fn snapshot_revision_listings_stop_at_the_captured_revision() {
         assert_eq!(revision_numbers(&second), [1], "{route}");
         assert_eq!(second.head_seq, snapshot.captured_seq, "{route}");
         assert_eq!(second.next_cursor, None, "{route}");
+
+        let live_first = get_json::<ListFileRevisionsResponse>(&url(&[("limit", "1")]))
+            .expect("first live page");
+        let live_cursor = live_first.next_cursor.expect("a second live page");
+        let later_snapshot_id = later_snapshot.snapshot_id.as_str();
+        for params in [
+            vec![("limit", "1"), ("cursor", cursor.as_str())],
+            vec![
+                ("snapshot_id", snapshot_id),
+                ("limit", "1"),
+                ("cursor", live_cursor.as_str()),
+            ],
+            vec![
+                ("snapshot_id", later_snapshot_id),
+                ("limit", "1"),
+                ("cursor", cursor.as_str()),
+            ],
+        ] {
+            let (status, error) = get_json::<ListFileRevisionsResponse>(&url(&params))
+                .expect_err("a cursor resumes only against the snapshot that issued it");
+            assert_eq!(status, 400, "{route} {params:?}");
+            assert_eq!(error.code, "invalid_request", "{route} {params:?}");
+            assert_eq!(error.param.as_deref(), Some("cursor"), "{route} {params:?}");
+        }
 
         let (status, error) = get_json::<ListFileRevisionsResponse>(&url(&[
             ("snapshot_id", snapshot_id),

@@ -594,11 +594,18 @@ impl ListPageCursor {
 }
 
 /// A cursor that resumes a newest-first revision listing for one file.
+///
+/// A cursor from a read of a snapshot resumes only against the same
+/// snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileRevisionsPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: CommitSeq,
+    /// The snapshot whose read issued this cursor, or `None` for a live
+    /// read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<crate::SnapshotId>,
     /// File inode whose revisions are being listed.
     pub inode_id: InodeId,
     /// Last revision number returned to the client.
@@ -1025,6 +1032,9 @@ mod tests {
         });
         assert_cursor_round_trips(FileRevisionsPageCursor {
             head_seq: CommitSeq(11),
+            snapshot_id: Some(
+                crate::SnapshotId::parse("snp_0000000000000g000000000001").expect("snapshot id"),
+            ),
             inode_id: InodeId(7),
             last_revision_no: RevisionNo(5),
             last_committed_seq: CommitSeq(10),
@@ -1086,6 +1096,28 @@ mod tests {
     }
 
     #[test]
+    fn a_live_revision_cursor_omits_the_snapshot_field_and_decodes_without_it() {
+        let cursor = FileRevisionsPageCursor {
+            head_seq: CommitSeq(11),
+            snapshot_id: None,
+            inode_id: InodeId(7),
+            last_revision_no: RevisionNo(5),
+            last_committed_seq: CommitSeq(10),
+            last_revision_delta_index: 3,
+        };
+
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let bytes = decode_token_bytes(&encoded).expect("decode base64url");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("decode JSON");
+
+        assert!(json["token"].get("snapshot_id").is_none());
+        assert_eq!(
+            decode_cursor::<FileRevisionsPageCursor>(&encoded).expect("decode cursor"),
+            cursor
+        );
+    }
+
+    #[test]
     fn a_namespace_list_cursor_round_trips_and_decodes_only_as_its_own_kind() {
         let cursor = NamespaceListPageCursor {
             last_key: "namespaces/bravo/".to_owned(),
@@ -1109,6 +1141,7 @@ mod tests {
     fn cursor_kind_must_match_decoder() {
         let cursor = FileRevisionsPageCursor {
             head_seq: CommitSeq(11),
+            snapshot_id: None,
             inode_id: InodeId(7),
             last_revision_no: RevisionNo(5),
             last_committed_seq: CommitSeq(10),

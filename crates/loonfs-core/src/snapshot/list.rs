@@ -269,6 +269,7 @@ mod cursor_tests {
                 "file_revisions.txt",
                 encode_cursor(&FileRevisionsPageCursor {
                     head_seq: CommitSeq(12),
+                    snapshot_id: None,
                     inode_id: InodeId(42),
                     last_revision_no: RevisionNo(3),
                     last_committed_seq: CommitSeq(9),

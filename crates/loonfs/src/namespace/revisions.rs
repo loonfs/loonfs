@@ -2,6 +2,7 @@
 //! history, one revision's bytes, and revision download targets.
 
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
+use crate::namespace::reads::{reject_snapshot_cursor, validate_snapshot_cursor};
 use crate::pagers::{decode_page_request, file_revisions_page_response, FileRevisionsPager};
 use crate::trace::{self, operation_span};
 use crate::{
@@ -124,13 +125,17 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_file_revisions", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
+                if matches!(at, ReadAt::Live(_)) {
+                    reject_snapshot_cursor(request.cursor.as_ref())?;
+                }
                 let absolute_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
                 let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-                self.read_at_least(at, cursor_head_seq, |pinned, _| {
+                self.read_at_least(at, cursor_head_seq, |pinned, source| {
                     let request = request.clone();
                     let absolute_path = absolute_path.clone();
                     async move {
-                        let revisions = pinned
+                        validate_snapshot_cursor(&request, &pinned, &source)?;
+                        let mut revisions = pinned
                             .engine
                             .list_file_revisions_page(
                                 absolute_path.as_str(),
@@ -138,6 +143,9 @@ impl<M: crate::Mode> Namespace<M> {
                                 &pinned.context,
                             )
                             .await?;
+                        if let Some(cursor) = revisions.page.next_cursor.as_mut() {
+                            cursor.snapshot_id = source.snapshot_id().cloned();
+                        }
                         Ok(file_revisions_page_response(
                             self.namespace_id.clone(),
                             pinned.head_seq(),
@@ -191,14 +199,21 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_file_revisions_by_inode", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
+                if matches!(at, ReadAt::Live(_)) {
+                    reject_snapshot_cursor(request.cursor.as_ref())?;
+                }
                 let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-                self.read_at_least(at, cursor_head_seq, |pinned, _| {
+                self.read_at_least(at, cursor_head_seq, |pinned, source| {
                     let request = request.clone();
                     async move {
-                        let page = pinned
+                        validate_snapshot_cursor(&request, &pinned, &source)?;
+                        let mut page = pinned
                             .engine
                             .list_file_revisions_by_inode_page(inode_id, request, &pinned.context)
                             .await?;
+                        if let Some(cursor) = page.next_cursor.as_mut() {
+                            cursor.snapshot_id = source.snapshot_id().cloned();
+                        }
                         Ok(file_revisions_page_response(
                             self.namespace_id.clone(),
                             pinned.head_seq(),
