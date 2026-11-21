@@ -171,6 +171,41 @@ async fn a_plaintext_request_to_the_tls_port_loses_only_its_own_connection() {
     shut_down(harness).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_that_never_starts_its_handshake_is_closed_after_the_idle_timeout() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-tls",
+        "http-tls-silent",
+    );
+    config.connection_idle_timeout_ms = std::num::NonZeroU64::new(200).expect("nonzero");
+    let harness = start_tls_server(config).await;
+
+    let mut silent = tokio::net::TcpStream::connect(harness.addr)
+        .await
+        .expect("connect to the tls port");
+    let mut received = Vec::new();
+    let read = loonfs_test_support::clock::bounded(
+        std::time::Duration::from_secs(10),
+        tokio::io::AsyncReadExt::read_to_end(&mut silent, &mut received),
+    )
+    .await
+    .expect("the server closes a connection that never starts its handshake");
+    crate::http_connections::assert_closed(read, &received);
+
+    harness
+        .client
+        .create_namespace(
+            &namespace_id("after-silent"),
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("the server still serves tls clients");
+
+    shut_down(harness).await;
+}
+
 async fn shut_down(harness: TlsTestServer) {
     let TlsTestServer {
         client,

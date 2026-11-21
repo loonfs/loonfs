@@ -14,6 +14,7 @@ mod http_attributes;
 mod http_attribution;
 mod http_auth;
 mod http_commits;
+mod http_connections;
 mod http_inodes;
 mod http_limits;
 mod http_maintenance;

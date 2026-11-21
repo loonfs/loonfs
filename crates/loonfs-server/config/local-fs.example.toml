@@ -73,6 +73,10 @@ memory_limit_bytes = 4294967296
 # A full connection cap pauses TCP accept; TLS handshakes hold a slot too.
 #max_connections = 1024
 # The memory formula reserves 472 KiB per configured connection.
+# How long a connection may wait for its TLS handshake and first request, or
+# for the head of its next request, before the server closes it. Defaults to
+# 60000 ms.
+#connection_idle_timeout_ms = 60000
 
 # How many proxied upload bodies the server will stream at once and how many
 # content streams it will serve at once. Requests past a cap answer 503

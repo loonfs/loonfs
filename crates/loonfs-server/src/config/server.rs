@@ -135,6 +135,12 @@ pub struct ServerConfig {
     /// Streamed content and long-running operator work are exempt.
     #[serde(default = "default_request_deadline_ms")]
     pub request_deadline_ms: NonZeroU64,
+    /// Maximum time, in milliseconds, that a connection may wait for its TLS
+    /// handshake and its first request, or for the head of its next request,
+    /// before the server closes it. It doesn't apply while a request is in
+    /// flight. Defaults to 60000.
+    #[serde(default = "default_connection_idle_timeout_ms")]
+    pub connection_idle_timeout_ms: NonZeroU64,
     /// Maximum time graceful shutdown waits for accepted requests to drain
     /// and then for the maintenance scheduler to stop, in milliseconds,
     /// counted from the shutdown signal. Requests and maintenance steps still
@@ -290,6 +296,10 @@ fn default_min_publish_interval_ms() -> u64 {
 
 fn default_request_deadline_ms() -> NonZeroU64 {
     const { NonZeroU64::new(loonfs_http::DEFAULT_REQUEST_DEADLINE_MS).unwrap() }
+}
+
+fn default_connection_idle_timeout_ms() -> NonZeroU64 {
+    const { NonZeroU64::new(60_000).unwrap() }
 }
 
 /// Default for `shutdown_deadline_ms`, so a graceful shutdown waits at most
