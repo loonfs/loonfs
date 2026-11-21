@@ -38,8 +38,11 @@ impl NamespacePublisher {
             let queued = {
                 let mut state = self.lock_state();
                 state.admission = PublisherAdmissionStatus::Deleted;
-                take_queued_waiters(&mut state)
+                let queued = take_queued_waiters(&mut state);
+                self.count_queued(&mut state);
+                queued
             };
+            self.report_queue_depth();
             self.compaction_cancellation.cancel();
             // A deleted session has ended. It leaves the table before the
             // delete's callers hear the outcome, so an open after that

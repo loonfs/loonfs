@@ -5,6 +5,7 @@ use crate::metrics::{
     seconds_from_ms, CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder,
     LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_OK, SMALL_COUNT_BOUNDARIES,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// The closed outcome vocabulary for a publication delivered to its caller.
@@ -43,7 +44,11 @@ pub(crate) struct PublisherInstruments {
     tail_replays: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
+    /// The candidates queued at every namespace publisher of the runtime,
+    /// which `queue_depth` reports.
+    queued_candidates: AtomicUsize,
     sessions_open: Arc<dyn GaugeHandle>,
+    panics: Arc<dyn CounterHandle>,
     publishes: LabeledCounters<PublishOutcome>,
 }
 
@@ -93,17 +98,20 @@ impl PublisherInstruments {
                 &[],
                 SMALL_COUNT_BOUNDARIES,
             ),
-            // Sampled rather than totalled: one process serves many
-            // namespaces and each has its own queue, so this reads as the
-            // depth of whichever publisher last admitted or took work.
             queue_depth: recorder.register_gauge(
                 "loonfs.publisher.queue_depth",
-                "Candidates queued at the namespace publisher that last admitted or took work",
+                "Candidates queued at every namespace publisher and not yet taken",
                 &[],
             ),
+            queued_candidates: AtomicUsize::new(0),
             sessions_open: recorder.register_gauge(
                 "loonfs.publisher.sessions_open",
                 "Namespace writer sessions that a handle holds or whose admitted work is still running",
+                &[],
+            ),
+            panics: recorder.register_counter(
+                "loonfs.publisher.panics",
+                "Publisher tasks that panicked",
                 &[],
             ),
             publishes: LabeledCounters::register(
@@ -116,15 +124,35 @@ impl PublisherInstruments {
         }
     }
 
-    /// Reports the candidates a namespace has admitted but not yet taken.
-    pub(crate) fn queue_depth(&self, queue_depth: usize) {
+    /// Moves one namespace's share of the queued candidates from `before`
+    /// to `after`. The caller holds the namespace's state lock, so the
+    /// namespace's changes apply in order and the total never falls below
+    /// zero.
+    pub(crate) fn move_queued_candidates(&self, before: usize, after: usize) {
+        if after >= before {
+            self.queued_candidates
+                .fetch_add(after - before, Ordering::SeqCst);
+        } else {
+            self.queued_candidates
+                .fetch_sub(before - after, Ordering::SeqCst);
+        }
+    }
+
+    /// Reports the candidates queued at every namespace and not yet taken.
+    pub(crate) fn queue_depth(&self) {
+        let queued = self.queued_candidates.load(Ordering::SeqCst);
         self.queue_depth
-            .set(i64::try_from(queue_depth).unwrap_or(i64::MAX));
+            .set(i64::try_from(queued).unwrap_or(i64::MAX));
     }
 
     pub(crate) fn sessions(&self, open: usize) {
         self.sessions_open
             .set(i64::try_from(open).unwrap_or(i64::MAX));
+    }
+
+    /// Reports one publisher task that panicked.
+    pub(crate) fn panic(&self) {
+        self.panics.increment(1);
     }
 
     /// Reports one batch taken for publication.

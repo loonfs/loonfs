@@ -108,6 +108,12 @@ fn render_segment_cache(
             "Bytes currently charged to metadata segment blocks on the SSD tier, at least 4 KiB for each block, including per-entry bookkeeping",
             ssd.stored_bytes,
         );
+        write_gauge(
+            rendered,
+            "loonfs_segment_cache_queued_bytes",
+            "Bytes currently charged to metadata segment blocks waiting in the SSD tier's write queue, including per-write bookkeeping",
+            ssd.queued_bytes,
+        );
     }
 }
 
