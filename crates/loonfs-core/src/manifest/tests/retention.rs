@@ -202,6 +202,11 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
         .runs
         .iter()
         .flat_map(|run| &run.segments);
+    let referenced_segment_count = referenced
+        .clone()
+        .map(metadata_segment_object_key)
+        .collect::<BTreeSet<_>>()
+        .len();
     let commit_segments = referenced
         .filter(|segment| segment.family == ApiMetadataRowFamily::Commits)
         .map(metadata_segment_object_key)
@@ -229,8 +234,8 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     assert_eq!(advanced.retention_floor_seq, head_seq);
     assert_eq!(
         store.count(OperationSelector::Head),
-        0,
-        "retention checks that the segments exist with a listing, not a HEAD request per segment"
+        referenced_segment_count,
+        "retention should verify each distinct referenced segment"
     );
     assert_eq!(
         store.take_get_keys().into_iter().collect::<BTreeSet<_>>(),
@@ -932,20 +937,38 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         .await
         .expect("create snapshot");
 
-    // The check lists the namespace's segment prefix, so the listing is the
-    // request that fails.
-    let segment_prefix = loonfs_objectstore::keys::metadata_segment_prefix(&namespace_id);
-    let failed_key = segment_prefix.clone();
+    let manifest = crate::test_support::namespace_store(&setup_store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load metadata manifest");
+    let segments = load_manifest_segments_for_inspection(
+        &setup_store,
+        None,
+        &namespace_id,
+        &manifest.manifest().manifest_no,
+    )
+    .await
+    .expect("load current manifest");
+    let selected_key = segments
+        .manifest()
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .next()
+        .map(metadata_segment_object_key)
+        .expect("current manifest references a segment");
+    let failed_key = selected_key.clone();
     let store = FailStore::matching(
         setup_store,
         move |operation| {
-            operation.key() == segment_prefix
+            operation.key() == selected_key
                 && matches!(
                     operation.kind(),
-                    loonfs_test_support::stores::OperationKind::List
+                    loonfs_test_support::stores::OperationKind::Head
                 )
         },
-        InjectedError::Transport("injected segment listing failure".to_owned()),
+        InjectedError::Transport("injected segment probe failure".to_owned()),
     );
     store.fail_next(1);
 
@@ -3022,62 +3045,4 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
     for key in &only_snapshot {
         assert!(store.head(key).await.expect("deleted segment").is_none());
     }
-}
-
-/// Checks that an advance checks that the segments of its planning manifest
-/// exist with one listing of the namespace's segment prefix and no HEAD
-/// request.
-#[tokio::test]
-async fn an_advance_checks_that_the_segments_exist_with_one_listing_and_no_head() {
-    use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
-
-    let temp_dir = tempdir().expect("tempdir");
-    let store = RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
-        .await
-        .expect("write hello");
-    create_snapshot(&store, &namespace_id, &context)
-        .await
-        .expect("create snapshot");
-
-    store.reset();
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(context.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance the floor");
-    let prefix = loonfs_objectstore::keys::metadata_segment_prefix(&namespace_id);
-    let operations = store.take();
-    assert_eq!(
-        operations
-            .iter()
-            .filter(|operation| {
-                matches!(operation, RecordedOperation::List { prefix: listed } if *listed == prefix)
-            })
-            .count(),
-        1,
-        "one listing of the segment prefix"
-    );
-    assert!(
-        operations.iter().all(|operation| {
-            !matches!(operation, RecordedOperation::Head { key } if key.starts_with(&prefix))
-        }),
-        "no HEAD request for a segment"
-    );
 }
