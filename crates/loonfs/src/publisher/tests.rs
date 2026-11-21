@@ -2275,6 +2275,118 @@ async fn the_queue_depth_gauge_sums_the_queues_of_every_namespace() {
     writer.shutdown().await.expect("shutdown");
 }
 
+/// A recorder whose publisher queue depth gauge reads the namespace's
+/// session status each time it is set, as a host's recorder may.
+struct SessionStatusRecorder {
+    inner: DefaultMetricsRecorder,
+    namespace: Arc<std::sync::Mutex<Option<crate::Namespace<crate::Writable>>>>,
+}
+
+struct SessionStatusGauge {
+    inner: Arc<dyn crate::metrics::GaugeHandle>,
+    namespace: Arc<std::sync::Mutex<Option<crate::Namespace<crate::Writable>>>>,
+}
+
+impl crate::metrics::GaugeHandle for SessionStatusGauge {
+    fn set(&self, value: i64) {
+        if let Some(namespace) = self.namespace.lock().expect("namespace lock").as_ref() {
+            let _ = namespace.session_status();
+        }
+        self.inner.set(value);
+    }
+}
+
+impl crate::metrics::MetricsRecorder for SessionStatusRecorder {
+    fn register_counter(
+        &self,
+        name: &'static str,
+        description: &'static str,
+        labels: &[(&'static str, &'static str)],
+    ) -> Arc<dyn crate::metrics::CounterHandle> {
+        self.inner.register_counter(name, description, labels)
+    }
+
+    fn register_gauge(
+        &self,
+        name: &'static str,
+        description: &'static str,
+        labels: &[(&'static str, &'static str)],
+    ) -> Arc<dyn crate::metrics::GaugeHandle> {
+        let inner = self.inner.register_gauge(name, description, labels);
+        if name != "loonfs.publisher.queue_depth" {
+            return inner;
+        }
+        Arc::new(SessionStatusGauge {
+            inner,
+            namespace: Arc::clone(&self.namespace),
+        })
+    }
+
+    fn register_histogram(
+        &self,
+        name: &'static str,
+        description: &'static str,
+        labels: &[(&'static str, &'static str)],
+        boundaries: &'static [f64],
+    ) -> Arc<dyn crate::metrics::HistogramHandle> {
+        self.inner
+            .register_histogram(name, description, labels, boundaries)
+    }
+}
+
+/// Checks that a commit completes when the host's recorder reads the
+/// namespace's session status while the publisher reports its queue depth.
+/// The report runs after the publisher releases its state lock and its
+/// writer-session lock, which the status read takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorder_may_read_the_session_status_while_the_queue_depth_is_reported() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_slot = Arc::new(std::sync::Mutex::new(None));
+    let recorder = Arc::new(SessionStatusRecorder {
+        inner: DefaultMetricsRecorder::new(),
+        namespace: Arc::clone(&namespace_slot),
+    });
+    let writer = crate::LoonFs::builder_with_store(store, crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            trace_mode: TraceMode::Remote,
+            ..crate::RuntimeConfig::default()
+        })
+        .metrics_recorder(recorder)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
+        .build()
+        .await
+        .expect("build writer");
+    let namespace_id = NamespaceId::parse("status-read").expect("valid namespace id");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("bootstrap");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    *namespace_slot.lock().expect("namespace lock") = Some(namespace.clone());
+
+    // The commit runs in its own task, so a report that still held a lock
+    // the status read takes would block that task, and the bound fails the
+    // test instead of hanging it.
+    let commit = tokio::spawn(async move {
+        namespace
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                "reported", "reported",
+            )))
+            .await
+    });
+    bounded(Duration::from_secs(10), commit)
+        .await
+        .expect("the commit is admitted and published while the recorder reads the session status")
+        .expect("commit task")
+        .expect("the commit publishes");
+    writer.shutdown().await.expect("shutdown");
+}
+
 /// Checks that a session's fold, in a runtime whose read cache keeps
 /// nothing, folds the tail that the session keeps and moves the session's
 /// position to the fold's manifest.
