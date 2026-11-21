@@ -33,11 +33,13 @@ struct OwnedRuntime {
 impl StoreIoRuntime {
     /// Starts the IO runtime for one configured store.
     ///
-    /// One worker thread multiplexes every request for the store; HTTP IO is
-    /// reactor-driven, so request concurrency does not need more threads.
+    /// Scales worker threads with host parallelism (clamped to `2..=8`) so TLS
+    /// and HTTP/2 framing don't bottleneck on a single core under high store
+    /// throughput.
     pub(crate) fn new() -> Result<Self> {
+        let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8));
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+            .worker_threads(workers)
             .thread_name("loonfs-store-io")
             .enable_all()
             .build()
