@@ -1223,6 +1223,15 @@ const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
     ("UploadSession", &["mode", "namespace_id", "upload_id"]),
     ("GrepIndex", &["namespace_id", "reorganize_pending"]),
     ("StoreProbeCheck", &["name"]),
+    (
+        "NextMergeRangeResponse",
+        &[
+            "namespace_id",
+            "source_namespace_id",
+            "fork_point_seq",
+            "source_head_seq",
+        ],
+    ),
 ];
 
 #[test]

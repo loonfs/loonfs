@@ -608,6 +608,8 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
     assert_eq!(
         family.next_range().await,
         NextMergeRangeResponse {
+            namespace_id: family.rebase.clone(),
+            source_namespace_id: family.fork.clone(),
             fork_point_seq: CommitSeq(2),
             source_head_seq: last.committed_seq,
             outcome: NextMergeRangeOutcome::Open {

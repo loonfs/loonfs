@@ -3,8 +3,8 @@
 //! a rebase's conflict report.
 
 use crate::{
-    AbsolutePath, CommitId, CommitSeq, ContentRef, InodeId, Merge, NamespaceId, NamespaceMetadata,
-    RevisionNo,
+    AbsolutePath, Commit, CommitId, CommitSeq, ContentRef, InodeId, Merge, NamespaceId,
+    NamespaceMetadata, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,12 +66,16 @@ pub struct ReplayForkRequest {
     pub message: Option<String>,
 }
 
-/// The result of a replay commit: the new fork, and the changes that the replay commit left out.
+/// The result of a replay commit: the new fork, the replay commit, and the
+/// changes that the replay commit left out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ReplayForkResponse {
     /// The new fork after the replay commit.
     pub namespace: NamespaceMetadata,
+    /// The replay commit applied to the new fork. A retry with the same commit
+    /// ID returns the same commit.
+    pub commit: Commit,
     /// The replay commit's conflict report, with one entry for each inode whose change the replay
     /// commit didn't apply. It's empty when the replay commit left nothing out. The replay
     /// commit's merge record stores the report, so a retry with the same commit ID returns the
@@ -83,6 +87,10 @@ pub struct ReplayForkResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct NextMergeRangeResponse {
+    /// The namespace that the fork merges into (or, for a rebase, the rebase's new fork).
+    pub namespace_id: NamespaceId,
+    /// The fork whose next merge range was queried.
+    pub source_namespace_id: NamespaceId,
     /// The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of
     /// the namespace that the rebase forked.
     pub fork_point_seq: CommitSeq,
@@ -316,10 +324,14 @@ mod tests {
         ];
         for (outcome, mut expected) in cases {
             let response = NextMergeRangeResponse {
+                namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+                source_namespace_id: NamespaceId::parse("demo-branch").expect("source id"),
                 fork_point_seq: CommitSeq(418),
                 source_head_seq: CommitSeq(440),
                 outcome,
             };
+            expected["namespace_id"] = serde_json::json!("demo");
+            expected["source_namespace_id"] = serde_json::json!("demo-branch");
             expected["fork_point_seq"] = serde_json::json!(418);
             expected["source_head_seq"] = serde_json::json!(440);
             let encoded = serde_json::to_value(&response).expect("serialize the next range");
@@ -335,6 +347,8 @@ mod tests {
     #[test]
     fn a_next_range_outcome_from_a_newer_server_decodes_as_unknown() {
         let response: NextMergeRangeResponse = serde_json::from_value(serde_json::json!({
+            "namespace_id": "demo",
+            "source_namespace_id": "demo-branch",
             "fork_point_seq": 418,
             "source_head_seq": 440,
             "outcome": "paused",
@@ -342,6 +356,8 @@ mod tests {
         }))
         .expect("a newer outcome decodes");
         assert_eq!(response.outcome, NextMergeRangeOutcome::Unknown);
+        assert_eq!(response.namespace_id.as_str(), "demo");
+        assert_eq!(response.source_namespace_id.as_str(), "demo-branch");
         assert_eq!(response.source_head_seq, CommitSeq(440));
     }
 }
