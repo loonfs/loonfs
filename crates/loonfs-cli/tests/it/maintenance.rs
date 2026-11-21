@@ -405,9 +405,9 @@ fn changes_snapshots_and_grep_jsonl_follow_across_pages() {
     assert_success(&changes);
     assert_eq!(stdout_string(&changes).lines().count(), 2);
 
-    assert_success(&harness.run(&["snapshot", "create", "demo", "--name", "first"]));
+    assert_success(&harness.run(&["snapshot", "create", "--name", "first"]));
     let dated = harness.run(&[
-        "snapshot", "create", "demo", "--name", "second", "--ttl-ms", "600000",
+        "snapshot", "create", "--name", "second", "--ttl-ms", "600000",
     ]);
     assert_success(&dated);
     let created_line = stdout_string(&dated);
@@ -769,7 +769,6 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "--json",
             "snapshot",
             "create",
-            "demo",
             "--name",
             "nightly",
             "--profile",
@@ -795,7 +794,6 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "--json",
             "snapshot",
             "create",
-            "demo",
             "--name",
             "nightly",
             "--profile",
@@ -913,7 +911,6 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "--json",
             "snapshot",
             "delete",
-            "demo",
             &second_snapshot_id,
             "--profile",
             profile,
@@ -952,7 +949,6 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
                 "--json",
                 "snapshot",
                 "delete",
-                "demo",
                 &snapshot_id,
                 "--profile",
                 profile,

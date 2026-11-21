@@ -45,6 +45,44 @@ fn global_selectors_work_before_between_and_after_subcommands() {
 }
 
 #[test]
+fn snapshot_commands_select_the_namespace_with_the_global_flag() {
+    for arguments in [
+        vec!["loonfs", "snapshot", "create", "--namespace", "demo"],
+        vec!["loonfs", "snapshot", "list", "--namespace", "demo"],
+        vec![
+            "loonfs",
+            "snapshot",
+            "extend",
+            "snp_00000000000010000000000002",
+            "--ttl-ms",
+            "1000",
+            "--namespace",
+            "demo",
+        ],
+        vec![
+            "loonfs",
+            "snapshot",
+            "delete",
+            "snp_00000000000010000000000002",
+            "--namespace",
+            "demo",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(&arguments).expect("snapshot command parses");
+        validate_cli(&cli).expect("snapshot commands accept --namespace");
+        let selectors = cli.selectors();
+        assert_eq!(
+            selectors.namespace.as_ref().map(NamespaceId::as_str),
+            Some("demo")
+        );
+    }
+
+    let positional = Cli::try_parse_from(["loonfs", "snapshot", "list", "demo"])
+        .expect_err("snapshot list takes no namespace positional");
+    assert_eq!(positional.kind(), clap::error::ErrorKind::UnknownArgument);
+}
+
+#[test]
 fn stat_help_and_parser_show_both_exclusive_target_forms() {
     let mut command = Cli::command();
     let help = command
@@ -112,6 +150,16 @@ fn restore_takes_either_a_revision_or_a_deleted_item() {
 #[test]
 fn revision_preconditions_require_matching_inode_preconditions() {
     for arguments in [
+        vec![
+            "loonfs",
+            "access",
+            "set",
+            "/docs",
+            "--grant",
+            "prn_team=read",
+            "--expected-access-revision",
+            "1",
+        ],
         vec![
             "loonfs",
             "annotate",
@@ -272,7 +320,6 @@ fn every_paginated_listing_accepts_the_shared_flags() {
             "loonfs",
             "snapshot",
             "list",
-            "demo",
             "--limit",
             "5",
             "--page-size",
@@ -305,7 +352,7 @@ fn all_json_is_rejected_for_every_paginated_listing() {
             "5",
         ],
         &[
-            "loonfs", "--json", "snapshot", "list", "demo", "--all", "--limit", "5",
+            "loonfs", "--json", "snapshot", "list", "--all", "--limit", "5",
         ],
         &["loonfs", "--json", "trash", "--all", "--limit", "5"],
         &[

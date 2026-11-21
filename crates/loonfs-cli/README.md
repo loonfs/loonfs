@@ -191,13 +191,14 @@ Namespace management
     Deleted namespaces and namespaces whose creation hasn't finished are
     left out. Without --page-size, each request lists up to 100 namespaces
 
-  loonfs namespace fork <source> [new-namespace] [--snapshot <id>] [--actor-id <stable-id>]
+  loonfs namespace fork <source> [new-namespace] [--snapshot-id <id>]
+                        [--actor-id <stable-id>]
     Fork a namespace into a new one. Without a new namespace ID, the CLI
     generates an ID, prints it on stderr before it sends the request, and
     shows it with the new namespace. With --json, the ID appears only in the
     result. The fork shares the source's existing content and metadata
     objects without copying the filesystem. Forking the current head might
-    first fold the source's outstanding WAL tail. Use --snapshot to fork
+    first fold the source's outstanding WAL tail. Use --snapshot-id to fork
     from an unexpired snapshot instead of the current head.
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
@@ -235,23 +236,23 @@ Namespace management
     Show the selected profile and namespace
 
 Snapshot management
-  loonfs snapshot create <namespace> [--name <label>] [--ttl-ms <ms>]
-    Save the namespace's current state as a new snapshot. Every call
+  loonfs snapshot create [--name <label>] [--ttl-ms <ms>]
+    Save the selected namespace's current state as a new snapshot. Every call
     creates a new snapshot. The name is an optional label, not a key, and
     a snapshot created without --name has no label. --ttl-ms sets
     an expiry. Without it, the snapshot lasts until it's deleted. An
     expired snapshot can't be read or forked
 
-  loonfs snapshot list <namespace> [--limit <n>] [--page-size <n>]
-                                   [--cursor <cursor>] [--all] [--jsonl]
+  loonfs snapshot list [--limit <n>] [--page-size <n>]
+                       [--cursor <cursor>] [--all] [--jsonl]
     List snapshots in snapshot ID order. Expired and deleted snapshots
     are left out
 
-  loonfs snapshot extend <namespace> <snapshot-id> --ttl-ms <ms>
+  loonfs snapshot extend <snapshot-id> --ttl-ms <ms>
     Keep an unexpired snapshot available for longer. The expiry never
     moves earlier
 
-  loonfs snapshot delete <namespace> <snapshot-id>
+  loonfs snapshot delete <snapshot-id>
     Delete the snapshot. Deleting a missing snapshot succeeds, so the
     command can be repeated
 
@@ -351,7 +352,7 @@ Writing
     changed
 
   loonfs access set <path> --grant <principal>=<right>[,<right>...]... [--boundary]
-                    [--expected-inode-id <id> --expected-revision <n>]
+                    [--expected-inode-id <id> --expected-access-revision <n>]
 
   loonfs rm <path> [-r] [--actor-id <id>]
     Delete a file, or with -r a directory and everything under it, as one

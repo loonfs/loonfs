@@ -12,7 +12,7 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/report.txt"]));
 
     let created = harness.run(&[
-        "--json", "snapshot", "create", "demo", "--name", "report", "--ttl-ms", "5000",
+        "--json", "snapshot", "create", "--name", "report", "--ttl-ms", "5000",
     ]);
     assert_success(&created);
     let created_data = json_data(&created);
@@ -28,7 +28,7 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
         .as_u64()
         .expect("snapshot expiry");
 
-    let listed = harness.run(&["--json", "snapshot", "list", "demo"]);
+    let listed = harness.run(&["--json", "snapshot", "list"]);
     assert_success(&listed);
     let listed_data = json_data(&listed);
     assert_eq!(listed_data["kind"], "snapshots_listed");
@@ -38,7 +38,6 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
         "--json",
         "snapshot",
         "extend",
-        "demo",
         &snapshot_id,
         "--ttl-ms",
         "60000",
@@ -64,11 +63,11 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
     assert_success(&captured);
     assert_eq!(captured.stdout, b"captured\n");
 
-    let deleted = harness.run(&["--json", "snapshot", "delete", "demo", &snapshot_id]);
+    let deleted = harness.run(&["--json", "snapshot", "delete", &snapshot_id]);
     assert_success(&deleted);
     assert_eq!(json_data(&deleted)["kind"], "snapshot_deleted");
 
-    let empty = harness.run(&["--json", "snapshot", "list", "demo"]);
+    let empty = harness.run(&["--json", "snapshot", "list"]);
     assert_success(&empty);
     assert!(json_data(&empty)["snapshots"]
         .as_array()
@@ -86,12 +85,17 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
     let error = json_error(&gone);
     assert_eq!(error["code"], "snapshot_not_found");
 
-    let unnamed = harness.run(&["--json", "snapshot", "create", "demo"]);
+    assert_success(&harness.run(&["namespace", "create", "other"]));
+    let other = harness.run(&["--json", "snapshot", "list", "--namespace", "other"]);
+    assert_success(&other);
+    assert_eq!(json_data(&other)["namespace_id"], "other");
+
+    let unnamed = harness.run(&["--json", "snapshot", "create"]);
     assert_success(&unnamed);
     let unnamed_data = json_data(&unnamed);
     assert_eq!(unnamed_data["kind"], "snapshot_created");
     assert!(unnamed_data.get("name").is_none(), "{unnamed_data}");
-    let listed = harness.run(&["snapshot", "list", "demo"]);
+    let listed = harness.run(&["snapshot", "list"]);
     assert_success(&listed);
     let unnamed_id = unnamed_data["snapshot_id"].as_str().expect("snapshot id");
     assert!(
