@@ -74,6 +74,8 @@ The scheduler runs maintenance in "steps". A step is one bounded unit of mainten
 
 When a call fails, the entry records the failure, and the scheduler waits for the call's failure backoff before it makes that call again. The backoff is one maintenance interval after the first failure, and each failure in a row doubles it, up to one hour. A success ends the backoff, and a call that panics counts as a failure.
 
+A server whose maintenance mode is `serve_only` or `disabled` has no scheduler and runs no steps. It still closes sessions every `maintenance_interval_ms`, with the idle age and ownership checks of the close step and without the metadata condition, because folding the tail is the maintaining process's work in those modes. A session that can't write anymore closes as soon as no caller has its handle, as under the scheduler.
+
 A closing entry stores a shared close future. Only opens of that namespace wait for its drain, and opens of other namespaces continue. Table reads and updates take a short synchronous lock, which is released before the drain. A cancelled close leaves the shared future in place, so the next open can finish it. When the close completes, it removes only its original entry. A later session's first publish acquires a new writer epoch.
 
 Each open session keeps its publisher, engine state, head position, and allocated queue capacities. Closing the session releases them after admitted work ends. Shared caches keep their own limits.

@@ -8,8 +8,10 @@
 
 use super::steps::held_ids;
 use super::{lock, RunningScheduler, SchedulerState};
+use futures::FutureExt as _;
 use loonfs::{MaintenanceCancellation, NamespaceSessionStatus};
-use loonfs_http::Namespaces;
+use loonfs_http::{panic_message, Namespaces};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
@@ -41,7 +43,8 @@ impl SessionReaper {
 
     /// Walks every held session once and closes any session that's ended or
     /// has been idle longer than `idle_session_close_after_ms`, costing zero
-    /// store requests.
+    /// store requests. A close that panics is logged and skipped, so one
+    /// session can't stop the reaping of the others, as under the scheduler.
     pub(crate) async fn reap_once(&self) {
         for namespace_id in held_ids(&self.namespaces) {
             if self.stop.is_cancelled() {
@@ -62,12 +65,24 @@ impl SessionReaper {
             } else {
                 0
             };
-            if let Err(error) = self
-                .namespaces
-                .close_if_idle(&namespace_id, seq, idle_after_ms, |_| true)
-                .await
-            {
-                tracing::warn!(%namespace_id, error = %error, "session close failed");
+            let closing = AssertUnwindSafe(self.namespaces.close_if_idle(
+                &namespace_id,
+                seq,
+                idle_after_ms,
+                |_| true,
+            ));
+            match closing.catch_unwind().await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%namespace_id, error = %error, "session close failed");
+                }
+                Err(payload) => {
+                    tracing::error!(
+                        %namespace_id,
+                        panic = panic_message(payload.as_ref()),
+                        "closing a session panicked; the next interval tries again"
+                    );
+                }
             }
         }
     }
@@ -79,6 +94,7 @@ impl SessionReaper {
     pub(crate) fn start(&self) -> RunningScheduler {
         let reaper = self.clone();
         RunningScheduler {
+            name: "session reaper",
             stop: self.stop.clone(),
             task: tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_millis(reaper.interval_ms));

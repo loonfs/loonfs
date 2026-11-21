@@ -427,8 +427,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .expect("a maintenance scheduler lock should not be poisoned")
 }
 
-/// A started scheduler. Stop it before the runtime shuts down.
+/// A started scheduler or session reaper. Stop it before the runtime shuts
+/// down.
 pub(crate) struct RunningScheduler {
+    /// What the task is, for the shutdown error and warning.
+    name: &'static str,
     stop: MaintenanceCancellation,
     task: JoinHandle<()>,
 }
@@ -451,11 +454,12 @@ impl RunningScheduler {
         shutdown_deadline_ms: u64,
     ) -> loonfs::Result<()> {
         self.stop.cancel();
+        let name = self.name;
         let mut task = self.task;
         tokio::select! {
             biased;
             joined = &mut task => joined.map_err(|error| {
-                loonfs::Error::RuntimeTask(format!("maintenance scheduler failed: {error}"))
+                loonfs::Error::RuntimeTask(format!("{name} failed: {error}"))
             }),
             () = deadline => {
                 task.abort();
@@ -463,8 +467,9 @@ impl RunningScheduler {
                 let _ = task.await;
                 tracing::warn!(
                     shutdown_deadline_ms,
-                    "shutdown deadline passed before the maintenance scheduler stopped; \
-                     its running steps are abandoned"
+                    task = name,
+                    "shutdown deadline passed before the task stopped; its running steps \
+                     are abandoned"
                 );
                 Ok(())
             }

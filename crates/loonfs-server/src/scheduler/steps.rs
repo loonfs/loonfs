@@ -227,6 +227,7 @@ impl Scheduler {
         );
         let scheduler = self.clone();
         RunningScheduler {
+            name: "maintenance scheduler",
             stop: inner.stop.clone(),
             task: tokio::spawn(async move {
                 tokio::join!(scheduler.run_sweeps(), scheduler.run_sessions());
