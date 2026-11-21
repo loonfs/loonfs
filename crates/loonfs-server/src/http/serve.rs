@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
+use tokio::task::{JoinError, JoinSet};
 use tower::ServiceExt as _;
 
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
@@ -451,7 +452,8 @@ where
             deadline
         }
     };
-    // Dropping the server cancels requests left behind by an expired drain.
+    // Dropping the server aborts the connection tasks that a passed deadline
+    // left behind, and with them their requests.
     drop(server);
     // The scheduler waits under the same deadline, and is aborted when the
     // deadline ends.
@@ -500,6 +502,7 @@ async fn drain_with_deadline<S>(
 ///
 /// When the listener closes, a connection without a request in flight
 /// closes at once, and a connection with one closes after the response.
+/// Dropping the returned future aborts every connection task.
 async fn serve_connections<L>(
     mut listener: L,
     router: Router,
@@ -524,10 +527,15 @@ async fn serve_connections<L>(
         .keep_alive_interval(idle_timeout)
         .keep_alive_timeout(idle_timeout);
     let graceful = GracefulShutdown::new();
+    let mut tasks = JoinSet::new();
     let mut close_listener = pin!(close_listener);
     loop {
         let (io, _address) = tokio::select! {
             accepted = listener.accept() => accepted,
+            Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                log_connection_panic(joined);
+                continue;
+            }
             () = close_listener.as_mut() => break,
         };
         let first_request = Arc::new(Notify::new());
@@ -540,7 +548,7 @@ async fn serve_connections<L>(
         }));
         let builder = builder.clone();
         let watcher = graceful.watcher();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             let connection =
                 watcher.watch(builder.serve_connection_with_upgrades(TokioIo::new(io), service));
             serve_connection(
@@ -553,6 +561,15 @@ async fn serve_connections<L>(
     }
     drop(listener);
     graceful.shutdown().await;
+    while let Some(joined) = tasks.join_next().await {
+        log_connection_panic(joined);
+    }
+}
+
+fn log_connection_panic(joined: std::result::Result<(), JoinError>) {
+    if let Err(error) = joined {
+        tracing::error!(%error, "connection task panicked");
+    }
 }
 
 /// Drives one connection to its end, and closes it if no request arrives

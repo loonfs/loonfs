@@ -189,10 +189,8 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
             .await
             .expect("send slow request");
         let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .expect("read slow response");
+        let read = stream.read_to_end(&mut response).await;
+        (read, response)
     });
     loonfs_test_support::clock::bounded(
         std::time::Duration::from_secs(1),
@@ -212,7 +210,17 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
     .expect("shutdown settles the writer");
     assert!(writer.is_shutting_down(), "writer shutdown completed");
 
-    client.abort();
+    // The abandoned request's connection closes without a response, either
+    // at end of stream or with a reset.
+    let (_read, response) =
+        loonfs_test_support::clock::bounded(std::time::Duration::from_secs(5), client)
+            .await
+            .expect("connection closes once serve_and_settle returns")
+            .expect("join client task");
+    assert!(
+        !String::from_utf8_lossy(&response).contains("200"),
+        "abandoned request got a response: {response:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
