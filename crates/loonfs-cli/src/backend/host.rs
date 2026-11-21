@@ -103,13 +103,15 @@ pub(crate) fn client(
         ClientConfig {
             server_url: "http://embedded.invalid".to_owned(),
             auth_token: None,
+            actor: None,
             request_timeout_ms: None,
             disable_transient_retry: transient_retry == TransientRetry::NoRetry,
             ca_cert_path: None,
         },
         service,
         // A profile-level command acts in the service context, and a
-        // command that acts for a subject switches with `with_context`.
+        // command that acts for a subject switches with `with_context`. A
+        // command that mutates sets its actor with `with_actor`.
         loonfs_types::Context::Service,
     )?)
 }

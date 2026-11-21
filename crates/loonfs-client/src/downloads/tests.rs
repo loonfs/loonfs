@@ -386,6 +386,7 @@ async fn a_held_next_range_does_not_time_out_while_the_current_one_is_read() {
         ClientConfig {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,

@@ -6,10 +6,9 @@ use crate::{Client, ClientError, PayloadSource, Result};
 use crate::uploads::staging::multipart::MultipartPayload;
 use futures::StreamExt as _;
 use loonfs_types::{
-    ActorId, CapabilityDocument, Checksum, ChecksumAlgorithm, ChecksumDigest, CommitRequest,
-    ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
-    LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
+    CapabilityDocument, Checksum, ChecksumAlgorithm, ChecksumDigest, CommitRequest, ContentRef,
+    NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
 use loonfs_types::{
     CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransfer,
@@ -62,7 +61,8 @@ pub trait PutFileJournal: Send + Sync {
     fn part_completed(&self, part: &CompletedUploadPart) -> std::io::Result<()>;
     /// Persists the complete request before any attempt to submit its commit.
     /// Includes the upload id when content was staged, so a caller can renew its token.
-    /// Replay this request and actor with [`Client::commit`] after an interruption.
+    /// After an interruption, replay this request with [`Client::commit`] on a
+    /// client with this actor.
     fn commit_prepared(
         &self,
         request: &CommitRequest,
@@ -249,7 +249,6 @@ impl Client {
     pub(crate) async fn stage_bytes_as_content_ref(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         // The exact size is known, so transport limits can reject it now.
@@ -257,20 +256,16 @@ impl Client {
             UploadTransport::Multipart => {
                 self.stage_via_multipart(
                     namespace_id,
-                    actor,
                     MultipartPayload::Held(bytes),
                     UploadContinuity::default(),
                 )
                 .await
             }
             UploadTransport::DirectPut => {
-                self.direct_put_transfer(namespace_id, actor, DirectPutBody::Held(bytes))
+                self.direct_put_transfer(namespace_id, DirectPutBody::Held(bytes))
                     .await
             }
-            UploadTransport::Proxied => {
-                self.stage_bytes_via_server(namespace_id, actor, bytes)
-                    .await
-            }
+            UploadTransport::Proxied => self.stage_bytes_via_server(namespace_id, bytes).await,
         }
     }
 
@@ -280,7 +275,6 @@ impl Client {
     pub(crate) async fn stage_source_as_content_ref(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         source: PayloadSource,
         continuity: UploadContinuity<'_>,
     ) -> Result<PreparedContent> {
@@ -291,21 +285,17 @@ impl Client {
                 let (stream, _) = source.into_stream();
                 self.stage_via_multipart(
                     namespace_id,
-                    actor,
                     MultipartPayload::Streamed(stream),
                     continuity,
                 )
                 .await
             }
             UploadTransport::DirectPut => {
-                self.direct_put_transfer(namespace_id, actor, DirectPutBody::Streamed(source))
+                self.direct_put_transfer(namespace_id, DirectPutBody::Streamed(source))
                     .await
             }
             // Proxied uploads are one request and have no resumable parts.
-            UploadTransport::Proxied => {
-                self.stage_source_via_server(namespace_id, actor, source)
-                    .await
-            }
+            UploadTransport::Proxied => self.stage_source_via_server(namespace_id, source).await,
         }
     }
 
@@ -405,11 +395,10 @@ impl Client {
     async fn direct_put_transfer(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         body: DirectPutBody<'_>,
     ) -> Result<PreparedContent> {
         let begin = self
-            .create_direct_put_upload_target(namespace_id, actor, body.size_hint())
+            .create_direct_put_upload_target(namespace_id, body.size_hint())
             .await?;
         let staged = async {
             if begin.mode != UploadMode::DirectPut {
@@ -449,7 +438,6 @@ impl Client {
             let response = self
                 .complete_upload(
                     namespace_id,
-                    actor,
                     &begin.upload_id,
                     &CompleteUploadBody::DirectPut { content },
                 )
@@ -457,27 +445,25 @@ impl Client {
             Self::staged_from_completion(response)
         }
         .await;
-        self.abort_if_failed(namespace_id, actor, &begin.upload_id, staged)
+        self.abort_if_failed(namespace_id, &begin.upload_id, staged)
             .await
     }
 
     async fn stage_bytes_via_server(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         let upload = self
-            .create_upload(namespace_id, actor, &CreateUploadBody::ServiceProxied {})
+            .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
             .await?;
         let staged = async {
-            self.put_upload_content(namespace_id, actor, &upload.upload_id, bytes)
+            self.put_upload_content(namespace_id, &upload.upload_id, bytes)
                 .await?;
-            self.complete_staged(namespace_id, actor, &upload.upload_id)
-                .await
+            self.complete_staged(namespace_id, &upload.upload_id).await
         }
         .await;
-        self.abort_if_failed(namespace_id, actor, &upload.upload_id, staged)
+        self.abort_if_failed(namespace_id, &upload.upload_id, staged)
             .await
     }
 
@@ -488,20 +474,18 @@ impl Client {
     async fn stage_source_via_server(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         source: PayloadSource,
     ) -> Result<PreparedContent> {
         let upload = self
-            .create_upload(namespace_id, actor, &CreateUploadBody::ServiceProxied {})
+            .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
             .await?;
         let staged = async {
-            self.put_upload_content_stream(namespace_id, actor, &upload.upload_id, source)
+            self.put_upload_content_stream(namespace_id, &upload.upload_id, source)
                 .await?;
-            self.complete_staged(namespace_id, actor, &upload.upload_id)
-                .await
+            self.complete_staged(namespace_id, &upload.upload_id).await
         }
         .await;
-        self.abort_if_failed(namespace_id, actor, &upload.upload_id, staged)
+        self.abort_if_failed(namespace_id, &upload.upload_id, staged)
             .await
     }
 
@@ -511,12 +495,11 @@ impl Client {
     async fn abort_if_failed(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
         staged: Result<PreparedContent>,
     ) -> Result<PreparedContent> {
         if staged.is_err() {
-            let _ = self.abort_upload(namespace_id, actor, upload_id).await;
+            let _ = self.abort_upload(namespace_id, upload_id).await;
         }
         staged
     }
@@ -524,13 +507,11 @@ impl Client {
     pub(crate) async fn complete_staged(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
     ) -> Result<PreparedContent> {
         let response = self
             .complete_upload(
                 namespace_id,
-                actor,
                 upload_id,
                 &CompleteUploadBody::ServiceProxied {},
             )

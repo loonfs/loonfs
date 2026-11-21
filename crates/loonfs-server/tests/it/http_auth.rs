@@ -88,7 +88,7 @@ async fn path_puts_without_a_proof_for_their_content_fail_content_not_prepared()
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let bad = stage_uploaded_content(&harness.client, &namespace, b"token rejected").await;
@@ -157,7 +157,7 @@ async fn committed_path_put_replays_after_content_token_is_absent_rejected_or_ga
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token replay").await;
@@ -226,7 +226,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let first = stage_uploaded_content(&harness.client, &namespace, b"first").await;

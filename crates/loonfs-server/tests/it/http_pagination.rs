@@ -48,7 +48,7 @@ async fn http_paginates_the_snapshot_inventory_and_rejects_invalid_requests() {
     for namespace_id in [&demo, &other] {
         harness
             .client
-            .create_namespace(namespace_id, &loonfs_test_support::test_actor())
+            .create_namespace(Some(namespace_id))
             .await
             .expect("create namespace");
     }
@@ -238,31 +238,26 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
     let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
     let other = NamespacePath::parse("demo", "/other").expect("other path");
     harness
         .client
-        .create_directory(&docs, &loonfs_test_support::test_actor())
+        .create_directory(&docs)
         .await
         .expect("create docs dir");
     harness
         .client
-        .create_directory(&other, &loonfs_test_support::test_actor())
+        .create_directory(&other)
         .await
         .expect("create other dir");
     for name in ["a.txt", "b.txt", "c.txt"] {
         let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("file path");
         harness
             .client
-            .put_file_with_options(
-                &path,
-                name.as_bytes(),
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&path, name.as_bytes(), &replace_file_options())
             .await
             .expect("write file");
     }
@@ -365,17 +360,14 @@ async fn http_recursive_listing_round_trips_by_path_and_by_inode() {
     let demo = namespace_id("demo");
     harness
         .client
-        .create_namespace(&demo, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&demo))
         .await
         .expect("create namespace");
     let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
     for directory in ["/docs", "/docs/a"] {
         harness
             .client
-            .create_directory(
-                &NamespacePath::parse("demo", directory).expect("directory path"),
-                &loonfs_test_support::test_actor(),
-            )
+            .create_directory(&NamespacePath::parse("demo", directory).expect("directory path"))
             .await
             .expect("create directory");
     }
@@ -385,7 +377,6 @@ async fn http_recursive_listing_round_trips_by_path_and_by_inode() {
             .put_file_with_options(
                 &NamespacePath::parse("demo", file).expect("file path"),
                 b"body",
-                &loonfs_test_support::test_actor(),
                 &replace_file_options(),
             )
             .await
@@ -494,7 +485,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -503,7 +494,6 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .put_file_with_options(
             &target,
             b"first bytes\n",
-            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 commit: loonfs_types::options::CommitOptions {
                     commit_id: Some(
@@ -532,7 +522,6 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .put_file_with_options(
             &target,
             b"second bytes\n",
-            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: loonfs_types::options::CommitOptions {
@@ -553,7 +542,6 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .restore_revision_with_options(
             &target,
             RevisionNo(1),
-            &loonfs_test_support::test_actor(),
             &loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: Some(CommitId::parse("req-restore-restore").expect("valid commit id")),
@@ -650,23 +638,18 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/rev.txt").expect("target");
     harness
         .client
-        .put_file(&target, b"one", &loonfs_test_support::test_actor())
+        .put_file(&target, b"one")
         .await
         .expect("create file");
     harness
         .client
-        .put_file_with_options(
-            &target,
-            b"two",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, b"two", &replace_file_options())
         .await
         .expect("replace file");
 
@@ -694,7 +677,6 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         .move_path_with_options(
             &target,
             &moved,
-            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_types::options::CommitOptions {
@@ -724,7 +706,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
 
     harness
         .client
-        .restore_revision(&moved, RevisionNo(1), &loonfs_test_support::test_actor())
+        .restore_revision(&moved, RevisionNo(1))
         .await
         .expect("path restore");
     assert_eq!(
@@ -752,17 +734,13 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
     harness
         .client
-        .put_file(
-            &target,
-            b"first bytes\n",
-            &loonfs_test_support::test_actor(),
-        )
+        .put_file(&target, b"first bytes\n")
         .await
         .expect("create file");
 
@@ -771,7 +749,6 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
         .restore_revision_with_options(
             &target,
             RevisionNo(99),
-            &loonfs_test_support::test_actor(),
             &loonfs_types::options::CommitOptions {
                 preconditions: Vec::new(),
                 commit_id: Some(
@@ -807,10 +784,9 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
     ))
     .await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &actor)
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let directories = ["/a", "/b", "/c"];
@@ -818,7 +794,6 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
         .client
         .commit(
             &namespace,
-            &actor,
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: CommitId::parse("three-directories").expect("valid commit id"),

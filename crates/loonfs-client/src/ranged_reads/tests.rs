@@ -77,6 +77,46 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
     assert_eq!(sent[1].header("range"), Some("bytes=7-"));
 }
 
+/// Checks that a ranged read of a numbered revision, by path and by inode,
+/// sends the `Range` header to the revision's route.
+#[tokio::test]
+async fn a_ranged_read_of_a_revision_sends_one_range_to_the_revision() {
+    let transport = scripted_transport::script([
+        Outcome::PartialContent("bytes 0-2/10".to_owned(), b"abc".to_vec()),
+        Outcome::PartialContent("bytes 7-9/10".to_owned(), b"hij".to_vec()),
+    ]);
+    let client = scripted_transport::client(&transport);
+    let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
+
+    let by_path = client
+        .read_file_revision_range_stream(&spec, RevisionNo(3), range(0, Some(3)))
+        .await
+        .expect("ranged read of a revision by path");
+    assert_eq!(body_bytes(by_path.body).await.expect("body"), b"abc");
+    let by_inode = client
+        .read_file_revision_range_stream_by_inode(
+            spec.namespace(),
+            InodeId(42),
+            RevisionNo(3),
+            range(7, None),
+        )
+        .await
+        .expect("ranged read of a revision by inode");
+    assert_eq!(body_bytes(by_inode.body).await.expect("body"), b"hij");
+
+    let sent = transport.sent();
+    assert_eq!(
+        sent[0].url,
+        "http://example.invalid/v0/namespaces/demo/filesystem/content?path=%2Ffile.txt&revision_no=3"
+    );
+    assert_eq!(sent[0].header("range"), Some("bytes=0-2"));
+    assert_eq!(
+        sent[1].url,
+        "http://example.invalid/v0/namespaces/demo/inodes/ino_0000000000000000000000001a/revisions/3/content"
+    );
+    assert_eq!(sent[1].header("range"), Some("bytes=7-"));
+}
+
 /// Checks that a ranged read refuses a response that isn't the requested
 /// range (a whole file, a different range, or a body of the wrong length),
 /// instead of returning bytes from the wrong offset.

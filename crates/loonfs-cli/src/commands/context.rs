@@ -121,11 +121,14 @@ impl ProfileContext {
             .map_err(|error| self.fail(error))
     }
 
+    /// Narrows this context to one namespace, with a client whose mutations
+    /// record `actor_id`.
     pub(crate) fn for_namespace(
-        self,
+        mut self,
         namespace: NamespaceId,
         actor_id: ActorId,
     ) -> NamespaceContext {
+        self.target.act_as(actor_id.clone());
         NamespaceContext {
             profile: self,
             namespace,
@@ -210,7 +213,7 @@ pub(crate) async fn create_directory_tolerating_existing(
         .profile
         .target
         .client
-        .create_directory_with_options(spec, context.actor(), options)
+        .create_directory_with_options(spec, options)
         .await
         .map_err(CliError::from)
     {

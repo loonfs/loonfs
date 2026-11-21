@@ -10,36 +10,37 @@ use loonfs_types::options::{
     MergeForkOptions, ReadAt,
 };
 use loonfs_types::{
-    headers, ActorId, Commit, CommitId, CreateNamespaceRequest, DeleteNamespaceResponse,
-    EffectiveLimit, ErrorCode, ForkNamespaceForRebaseRequest, ForkNamespaceRequest,
-    ListNamespacesResponse, MergeForkRequest, NamespaceId, NamespaceMetadata,
-    NextMergeRangeResponse, PageRequest, Pager, ReplayForkRequest, ReplayForkResponse,
+    headers, Commit, CommitId, CreateNamespaceRequest, DeleteNamespaceResponse, EffectiveLimit,
+    ErrorCode, ForkNamespaceForRebaseRequest, ForkNamespaceRequest, ListNamespacesResponse,
+    MergeForkRequest, NamespaceId, NamespaceMetadata, NextMergeRangeResponse, PageRequest, Pager,
+    ReplayForkRequest, ReplayForkResponse,
 };
 
 /// A pager over the namespaces in a store.
 pub type NamespacesPager = Pager<ListNamespacesResponse, ClientError>;
 
 impl Client {
-    /// Creates an empty namespace with the given ID and returns
-    /// its genesis state.
+    /// Creates an empty namespace and returns its genesis state.
+    ///
+    /// Without `namespace_id`, the server generates an ID, and the returned
+    /// state's `namespace_id` is the new namespace's ID.
     pub async fn create_namespace(
         &self,
-        namespace_id: &NamespaceId,
-        actor: &ActorId,
+        namespace_id: Option<&NamespaceId>,
     ) -> Result<NamespaceMetadata> {
-        self.create_namespace_with_options(namespace_id, actor, &CreateNamespaceOptions::default())
+        self.create_namespace_with_options(namespace_id, &CreateNamespaceOptions::default())
             .await
     }
 
-    /// Creates an empty namespace with the given ID and options and returns
-    /// its genesis state.
+    /// Creates an empty namespace with the given options and returns its
+    /// genesis state.
     ///
-    /// With `options.allow_existing`, a namespace that already exists isn't
-    /// an error, and the call returns that namespace's current state.
+    /// Without `namespace_id`, the server generates an ID. With
+    /// `options.allow_existing`, a namespace that already exists isn't an
+    /// error, and the call returns that namespace's current state.
     pub async fn create_namespace_with_options(
         &self,
-        namespace_id: &NamespaceId,
-        actor: &ActorId,
+        namespace_id: Option<&NamespaceId>,
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = format!("{}/v0/namespaces", self.base_url);
@@ -47,20 +48,20 @@ impl Client {
         let created = self
             .send_json(
                 self.request(operations::CREATE_NAMESPACE, &url)
-                    .header(headers::ACTOR, actor.as_str())
+                    .header(headers::ACTOR, self.mutation_actor()?.as_str())
                     .json(&CreateNamespaceRequest {
-                        namespace_id: Some(namespace_id.clone()),
+                        namespace_id: namespace_id.cloned(),
                         retention_window_ms: options.retention_window_ms,
                     })?,
             )
             .await;
-        match created {
-            Err(error)
+        match (created, namespace_id) {
+            (Err(error), Some(namespace_id))
                 if options.allow_existing && error.code() == Some(ErrorCode::NamespaceExists) =>
             {
                 self.get_namespace(namespace_id).await
             }
-            created => created,
+            (created, _) => created,
         }
     }
 
@@ -143,16 +144,17 @@ impl Client {
 
     /// Creates a new namespace from the source's current head and returns the
     /// target's state at the fork point.
+    ///
+    /// Without `new_namespace_id`, the server generates an ID, and the
+    /// returned state's `namespace_id` is the new namespace's ID.
     pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
-        actor: &ActorId,
+        new_namespace_id: Option<&NamespaceId>,
     ) -> Result<NamespaceMetadata> {
         self.fork_namespace_with_options(
             source_namespace_id,
             new_namespace_id,
-            actor,
             &ForkNamespaceOptions::default(),
         )
         .await
@@ -163,17 +165,16 @@ impl Client {
     pub async fn fork_namespace_with_options(
         &self,
         source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
-        actor: &ActorId,
+        new_namespace_id: Option<&NamespaceId>,
         options: &ForkNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = self.namespace_url(source_namespace_id, "/forks");
         // Namespace forks have no durable request identity to replay after an ambiguous success.
         self.send_json(
             self.request(operations::FORK_NAMESPACE, &url)
-                .header(headers::ACTOR, actor.as_str())
+                .header(headers::ACTOR, self.mutation_actor()?.as_str())
                 .json(&ForkNamespaceRequest {
-                    new_namespace_id: Some(new_namespace_id.clone()),
+                    new_namespace_id: new_namespace_id.cloned(),
                     snapshot_id: options.snapshot_id.clone(),
                 })?,
         )
@@ -186,12 +187,10 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.merge_fork_with_options(
             namespace_id,
             source_namespace_id,
-            actor,
             &MergeForkOptions::default(),
         )
         .await
@@ -204,7 +203,6 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
-        actor: &ActorId,
         options: &MergeForkOptions,
     ) -> Result<Commit> {
         let url = self.namespace_url(namespace_id, "/merges");
@@ -212,7 +210,7 @@ impl Client {
         // merge's durable receipt.
         self.send_json(
             self.request(operations::MERGE_FORK, &url)
-                .header(headers::ACTOR, actor.as_str())
+                .header(headers::ACTOR, self.mutation_actor()?.as_str())
                 .json(&MergeForkRequest {
                     source_namespace_id: source_namespace_id.clone(),
                     through_seq: options.through_seq,
@@ -256,25 +254,27 @@ impl Client {
             .await
     }
 
-    /// Creates `new_namespace_id` as a rebase's new fork of `namespace_id`'s
-    /// head for the fork `source_namespace_id`, and returns the new fork's
-    /// state at its fork point. A `new_namespace_id` that already exists
-    /// returns `namespace_exists`.
+    /// Creates a rebase's new fork of `namespace_id`'s head for the fork
+    /// `source_namespace_id`, and returns the new fork's state at its fork
+    /// point.
+    ///
+    /// Without `new_namespace_id`, the server generates an ID, and the
+    /// returned state's `namespace_id` is the new fork's ID. A
+    /// `new_namespace_id` that already exists returns `namespace_exists`.
     pub async fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
-        new_namespace_id: &NamespaceId,
-        actor: &ActorId,
+        new_namespace_id: Option<&NamespaceId>,
     ) -> Result<NamespaceMetadata> {
         let url = self.namespace_url(namespace_id, "/rebases");
         // Namespace forks have no durable request identity to replay after an ambiguous success.
         self.send_json(
             self.request(operations::FORK_NAMESPACE_FOR_REBASE, &url)
-                .header(headers::ACTOR, actor.as_str())
+                .header(headers::ACTOR, self.mutation_actor()?.as_str())
                 .json(&ForkNamespaceForRebaseRequest {
                     source_namespace_id: source_namespace_id.clone(),
-                    new_namespace_id: Some(new_namespace_id.clone()),
+                    new_namespace_id: new_namespace_id.cloned(),
                 })?,
         )
         .await
@@ -287,12 +287,10 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
-        actor: &ActorId,
     ) -> Result<ReplayForkResponse> {
         self.replay_fork_with_options(
             namespace_id,
             source_namespace_id,
-            actor,
             &MergeForkOptions::default(),
         )
         .await
@@ -308,7 +306,6 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
-        actor: &ActorId,
         options: &MergeForkOptions,
     ) -> Result<ReplayForkResponse> {
         let url = self.namespace_url(namespace_id, "/replays");
@@ -316,7 +313,7 @@ impl Client {
         // replay commit's durable receipt.
         self.send_json(
             self.request(operations::REPLAY_FORK, &url)
-                .header(headers::ACTOR, actor.as_str())
+                .header(headers::ACTOR, self.mutation_actor()?.as_str())
                 .json(&ReplayForkRequest {
                     source_namespace_id: source_namespace_id.clone(),
                     through_seq: options.through_seq,

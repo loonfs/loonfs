@@ -8,9 +8,9 @@ use loonfs::test_support::maintenance_past_the_grace_window;
 use loonfs_client::{ClientError, MergeForkOptions, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    ActorId, Commit, CommitId, CommitSeq, ErrorDetails, MergeConflictKind, NamespaceId,
-    NamespaceMetadata, NamespaceRebasedFrom, NextMergeRangeOutcome, NextMergeRangeResponse,
-    ReplayForkResponse, FEATURE_MERGES,
+    Commit, CommitId, CommitSeq, ErrorDetails, MergeConflictKind, NamespaceId, NamespaceMetadata,
+    NamespaceRebasedFrom, NextMergeRangeOutcome, NextMergeRangeResponse, ReplayForkResponse,
+    FEATURE_MERGES,
 };
 use tempfile::{tempdir, TempDir};
 
@@ -21,10 +21,6 @@ struct Family {
     harness: TestServer,
     main: NamespaceId,
     fork: NamespaceId,
-}
-
-fn actor() -> ActorId {
-    loonfs_test_support::test_actor()
 }
 
 fn path(namespace: &NamespaceId, path: &str) -> NamespacePath {
@@ -47,19 +43,19 @@ impl Family {
         let fork = namespace_id("fork");
         harness
             .client
-            .create_namespace(&main, &actor())
+            .create_namespace(Some(&main))
             .await
             .expect("create main");
         for file in ["/docs/a.txt", "/docs/b.txt", "/old/x.txt"] {
             harness
                 .client
-                .put_file(&path(&main, file), file.as_bytes(), &actor())
+                .put_file(&path(&main, file), file.as_bytes())
                 .await
                 .expect("seed main");
         }
         harness
             .client
-            .fork_namespace(&main, &fork, &actor())
+            .fork_namespace(&main, Some(&fork))
             .await
             .expect("fork");
         Self {
@@ -76,7 +72,6 @@ impl Family {
             .merge_fork_with_options(
                 &self.main,
                 &self.fork,
-                &actor(),
                 &MergeForkOptions {
                     commit_id: Some(CommitId::parse(commit_id).expect("commit id")),
                     ..MergeForkOptions::default()
@@ -91,7 +86,7 @@ impl Family {
     ) -> loonfs_client::Result<NamespaceMetadata> {
         self.harness
             .client
-            .fork_namespace_for_rebase(&self.main, &self.fork, new_fork, &actor())
+            .fork_namespace_for_rebase(&self.main, &self.fork, Some(new_fork))
             .await
     }
 
@@ -105,7 +100,6 @@ impl Family {
             .replay_fork_with_options(
                 new_fork,
                 &self.fork,
-                &actor(),
                 &MergeForkOptions {
                     commit_id: Some(CommitId::parse(commit_id).expect("commit id")),
                     ..MergeForkOptions::default()
@@ -170,30 +164,24 @@ async fn a_merge_commits_the_forks_change_and_a_retry_returns_it() {
     assert!(capabilities.supports(FEATURE_MERGES));
     let fork = &family.fork;
     client
-        .put_file(&path(fork, "/new/c.txt"), b"c", &actor())
+        .put_file(&path(fork, "/new/c.txt"), b"c")
         .await
         .expect("create");
     client
         .put_file_with_options(
             &path(fork, "/docs/a.txt"),
             b"edited",
-            &actor(),
             &crate::common::http_split_support::replace_file_options(),
         )
         .await
         .expect("edit");
     client
-        .move_path(
-            &path(fork, "/docs/b.txt"),
-            &path(fork, "/new/b.txt"),
-            &actor(),
-        )
+        .move_path(&path(fork, "/docs/b.txt"), &path(fork, "/new/b.txt"))
         .await
         .expect("move");
     client
         .delete_path_with_options(
             &path(fork, "/old"),
-            &actor(),
             &loonfs_client::DeleteOptions {
                 behavior: loonfs_types::DeleteDirectoryBehavior::Recursive,
                 ..loonfs_client::DeleteOptions::default()
@@ -254,7 +242,7 @@ async fn a_zero_allowance_turns_the_merge_routes_and_their_key_off() {
         family
             .harness
             .client
-            .replay_fork(&family.main, &family.fork, &actor())
+            .replay_fork(&family.main, &family.fork)
             .await
             .map(drop)
             .expect_err("replays are off"),
@@ -295,7 +283,7 @@ async fn a_conflict_returns_the_first_conflict_and_commits_nothing() {
     for (namespace, bytes) in [(&family.main, &b"theirs"[..]), (&family.fork, &b"ours"[..])] {
         for file in ["/docs/a.txt", "/docs/b.txt"] {
             client
-                .put_file_with_options(&path(namespace, file), bytes, &actor(), &replace)
+                .put_file_with_options(&path(namespace, file), bytes, &replace)
                 .await
                 .expect("edit");
         }
@@ -347,11 +335,11 @@ async fn a_merge_below_either_floor_returns_below_retention_floor() {
     let client = &family.harness.client;
     let fork_point = family.fork_point().await;
     client
-        .put_file(&path(&family.fork, "/f.txt"), b"f", &actor())
+        .put_file(&path(&family.fork, "/f.txt"), b"f")
         .await
         .expect("fork");
     client
-        .put_file(&path(&family.main, "/m.txt"), b"m", &actor())
+        .put_file(&path(&family.main, "/m.txt"), b"m")
         .await
         .expect("main");
     let floor = family.advance_floor(&family.main).await;
@@ -367,7 +355,7 @@ async fn a_merge_below_either_floor_returns_below_retention_floor() {
     let fork_point = family.fork_point().await;
     for file in ["/f.txt", "/g.txt"] {
         client
-            .put_file(&path(&family.fork, file), b"f", &actor())
+            .put_file(&path(&family.fork, file), b"f")
             .await
             .expect("fork");
     }
@@ -394,7 +382,7 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
     let client = &family.harness.client;
     let fork_point = family.fork_point().await;
     let written = client
-        .put_file(&path(&family.fork, "/f.txt"), b"f", &actor())
+        .put_file(&path(&family.fork, "/f.txt"), b"f")
         .await
         .expect("fork");
     let range = client
@@ -472,7 +460,6 @@ async fn a_merge_past_the_fork_head_names_the_through_seq_field() {
         .merge_fork_with_options(
             &family.main,
             &family.fork,
-            &actor(),
             &MergeForkOptions {
                 through_seq: Some(CommitSeq(1_000)),
                 ..MergeForkOptions::default()
@@ -502,7 +489,7 @@ async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
     let client = &family.harness.client;
     let other = namespace_id("other");
     client
-        .create_namespace(&other, &actor())
+        .create_namespace(Some(&other))
         .await
         .expect("create other");
     client
@@ -520,10 +507,7 @@ async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
         let errors = [
             (
                 "/source_namespace_id",
-                client
-                    .merge_fork(&family.main, source, &actor())
-                    .await
-                    .map(|_| ()),
+                client.merge_fork(&family.main, source).await.map(|_| ()),
             ),
             (
                 "source_namespace_id",
@@ -535,7 +519,7 @@ async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
             (
                 "/source_namespace_id",
                 client
-                    .fork_namespace_for_rebase(&family.main, source, &rebased, &actor())
+                    .fork_namespace_for_rebase(&family.main, source, Some(&rebased))
                     .await
                     .map(|_| ()),
             ),
@@ -562,7 +546,7 @@ async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
         }
     }
     client
-        .put_file(&path(&family.main, "/after.txt"), b"after", &actor())
+        .put_file(&path(&family.main, "/after.txt"), b"after")
         .await
         .expect("main still takes writes");
     assert_eq!(
@@ -596,17 +580,12 @@ async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_the_report() {
     let replace = crate::common::http_split_support::replace_file_options();
     let fork_point = family.fork_point().await;
     client
-        .put_file_with_options(
-            &path(&family.main, "/docs/a.txt"),
-            b"theirs",
-            &actor(),
-            &replace,
-        )
+        .put_file_with_options(&path(&family.main, "/docs/a.txt"), b"theirs", &replace)
         .await
         .expect("main's edit");
     for file in ["/docs/a.txt", "/docs/b.txt"] {
         client
-            .put_file_with_options(&path(&family.fork, file), b"ours", &actor(), &replace)
+            .put_file_with_options(&path(&family.fork, file), b"ours", &replace)
             .await
             .expect("the fork's edit");
     }
@@ -660,7 +639,7 @@ async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_the_report() {
     assert_eq!(code, "namespace_exists");
 
     let (code, details) = match client
-        .replay_fork(&family.main, &family.fork, &actor())
+        .replay_fork(&family.main, &family.fork)
         .await
         .expect_err("main isn't a rebase of the fork")
     {
@@ -671,7 +650,7 @@ async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_the_report() {
     assert_eq!(details.as_deref(), Some("/source_namespace_id"));
 
     let merged = client
-        .merge_fork(&family.main, &new_fork, &actor())
+        .merge_fork(&family.main, &new_fork)
         .await
         .expect("the new fork merges into main");
     assert_eq!(

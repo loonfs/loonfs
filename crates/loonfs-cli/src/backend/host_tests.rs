@@ -17,7 +17,7 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
         .expect("runtime without a networking driver");
     runtime.block_on(async {
         let directory = tempfile::tempdir().expect("store directory");
-        let target = ResolvedTarget::embedded(
+        let mut target = ResolvedTarget::embedded(
             &StoreConfig::LocalFs(LocalFsStoreConfig {
                 root: directory.path().display().to_string(),
                 key_prefix: None,
@@ -27,11 +27,11 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
         )
         .await
         .expect("embedded profile without credentials");
+        target.act_as(loonfs_test_support::test_actor());
         let path = NamespacePath::parse("demo", "/large.bin").expect("path");
-        let actor = loonfs_test_support::test_actor();
         target
             .client
-            .create_namespace(path.namespace(), &actor)
+            .create_namespace(Some(path.namespace()))
             .await
             .expect("namespace without a listener");
         let chunk = Bytes::from(vec![42; 1024 * 1024]);
@@ -40,7 +40,7 @@ fn embedded_requests_need_no_socket_or_token_and_stream_past_the_server_body_lim
         );
         target
             .client
-            .put_file_stream(&path, source, &actor)
+            .put_file_stream(&path, source)
             .await
             .expect("upload past 256 MiB");
         let mut stream = target
@@ -68,17 +68,18 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
         key_prefix: None,
     });
     let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
-    let actor = loonfs_test_support::test_actor();
     let open = || async {
-        ResolvedTarget::embedded(&config, None, TransientRetry::NoRetry)
+        let mut target = ResolvedTarget::embedded(&config, None, TransientRetry::NoRetry)
             .await
-            .expect("embedded profile")
+            .expect("embedded profile");
+        target.act_as(loonfs_test_support::test_actor());
+        target
     };
     run_command(async {
         let target = open().await;
         target
             .client
-            .create_namespace(&namespace_id, &actor)
+            .create_namespace(Some(&namespace_id))
             .await
             .expect("namespace");
         let store = embedded_host(&target).runtime.object_store();
@@ -101,7 +102,6 @@ fn an_embedded_command_finishes_the_fold_it_started_before_returning() {
             .put_file(
                 &NamespacePath::parse("demo", "/file").expect("file path"),
                 b"payload",
-                &actor,
             )
             .await
             .expect("a write past the fold threshold");
@@ -144,40 +144,41 @@ async fn an_embedded_fence_fails_the_request_and_a_later_request_starts_a_new_se
         root: directory.path().display().to_string(),
         key_prefix: None,
     });
-    let first = ResolvedTarget::embedded(&config, None, TransientRetry::Retry)
+    let mut first = ResolvedTarget::embedded(&config, None, TransientRetry::Retry)
         .await
         .expect("first embedded host");
-    let second = ResolvedTarget::embedded(&config, None, TransientRetry::Retry)
+    let mut second = ResolvedTarget::embedded(&config, None, TransientRetry::Retry)
         .await
         .expect("second embedded host");
-    let actor = loonfs_test_support::test_actor();
+    first.act_as(loonfs_test_support::test_actor());
+    second.act_as(loonfs_test_support::test_actor());
     let path = NamespacePath::parse("demo", "/first").expect("path");
     first
         .client
-        .create_namespace(path.namespace(), &actor)
+        .create_namespace(Some(path.namespace()))
         .await
         .expect("create namespace");
     first
         .client
-        .create_directory(&path, &actor)
+        .create_directory(&path)
         .await
         .expect("first write");
     let path = NamespacePath::parse("demo", "/second").expect("path");
     second
         .client
-        .create_directory(&path, &actor)
+        .create_directory(&path)
         .await
         .expect("take over");
     let path = NamespacePath::parse("demo", "/after").expect("path");
     let error = first
         .client
-        .create_directory(&path, &actor)
+        .create_directory(&path)
         .await
         .expect_err("fenced request");
     assert_eq!(error.code(), Some(loonfs_types::ErrorCode::WriterFenced));
     first
         .client
-        .create_directory(&path, &actor)
+        .create_directory(&path)
         .await
         .expect("later request");
 }

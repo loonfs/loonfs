@@ -20,17 +20,13 @@ fn path(absolute_path: &str) -> NamespacePath {
 async fn served_namespace(harness: &crate::common::TestServer) {
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
     for absolute_path in ["/docs/report.txt", "/docs/notes.txt"] {
         harness
             .client
-            .put_file(
-                &path(absolute_path),
-                b"body",
-                &loonfs_test_support::test_actor(),
-            )
+            .put_file(&path(absolute_path), b"body")
             .await
             .expect("put file");
     }
@@ -38,7 +34,6 @@ async fn served_namespace(harness: &crate::common::TestServer) {
         .client
         .update_attributes(
             &path("/docs/report.txt"),
-            &loonfs_test_support::test_actor(),
             AttributeChanges {
                 set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
                 ..Default::default()

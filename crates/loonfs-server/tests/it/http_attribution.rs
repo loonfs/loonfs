@@ -52,7 +52,7 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -70,7 +70,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let creator = actor("creator");
     let create = harness
         .client
-        .put_file(&path("/implicit/parent/report.txt"), b"v1", &creator)
+        .with_actor(creator.clone())
+        .put_file(&path("/implicit/parent/report.txt"), b"v1")
         .await
         .expect("create file and implicit parents");
     assert_eq!(create.committed_by, creator);
@@ -97,10 +98,10 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let replacer = actor("replacer");
     harness
         .client
+        .with_actor(replacer.clone())
         .put_file_with_options(
             &path("/implicit/parent/report.txt"),
             b"v2",
-            &replacer,
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 ..Default::default()
@@ -120,11 +121,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let restorer = actor("restorer");
     harness
         .client
-        .restore_revision(
-            &path("/implicit/parent/report.txt"),
-            RevisionNo(1),
-            &restorer,
-        )
+        .with_actor(restorer.clone())
+        .restore_revision(&path("/implicit/parent/report.txt"), RevisionNo(1))
         .await
         .expect("restore first revision");
     let revisions = harness
@@ -148,11 +146,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let copier = actor("copier");
     let copy = harness
         .client
-        .copy_path(
-            &path("/implicit/parent/report.txt"),
-            &path("/copy.txt"),
-            &copier,
-        )
+        .with_actor(copier.clone())
+        .copy_path(&path("/implicit/parent/report.txt"), &path("/copy.txt"))
         .await
         .expect("copy file");
     let copy_change = change_at(&harness, copy.committed_seq).await;
@@ -168,7 +163,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let before_move = copied.clone();
     harness
         .client
-        .move_path(&path("/copy.txt"), &path("/moved.txt"), &actor("mover"))
+        .with_actor(actor("mover"))
+        .move_path(&path("/copy.txt"), &path("/moved.txt"))
         .await
         .expect("move file");
     let after_move = harness
@@ -186,9 +182,9 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let updater = actor("updater");
     let update = harness
         .client
+        .with_actor(updater.clone())
         .update_attributes(
             &path("/moved.txt"),
-            &updater,
             AttributeChanges {
                 set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
                 ..Default::default()
@@ -213,7 +209,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let deleter = actor("deleter");
     let delete = harness
         .client
-        .delete_path(&path("/moved.txt"), &deleter)
+        .with_actor(deleter.clone())
+        .delete_path(&path("/moved.txt"))
         .await
         .expect("delete file");
     let delete_change = change_at(&harness, delete.committed_seq).await;
@@ -233,12 +230,8 @@ async fn http_rows_project_the_commit_that_created_each_retained_fact() {
     let restore_actor = actor("deletion-restorer");
     let restore_deleted = harness
         .client
-        .restore_deleted(
-            &namespace,
-            deleted.inode_id,
-            deleted.deletion_seq,
-            &restore_actor,
-        )
+        .with_actor(restore_actor.clone())
+        .restore_deleted(&namespace, deleted.inode_id, deleted.deletion_seq)
         .await
         .expect("restore file");
     assert_eq!(

@@ -7,7 +7,7 @@ use loonfs_types::options::{
 };
 use loonfs_types::Commit;
 use loonfs_types::{
-    ActorId, BindingVersion, DisplayName, FilesystemOperation, InodeId, NamespaceId, RevisionNo,
+    BindingVersion, DisplayName, FilesystemOperation, InodeId, NamespaceId, RevisionNo,
 };
 
 impl Client {
@@ -19,14 +19,12 @@ impl Client {
         parent_inode_id: InodeId,
         display_name: &DisplayName,
         bytes: &[u8],
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.create_file_by_inode_with_options(
             namespace_id,
             parent_inode_id,
             display_name,
             bytes,
-            actor,
             &CommitOptions::default(),
         )
         .await
@@ -44,24 +42,16 @@ impl Client {
         parent_inode_id: InodeId,
         display_name: &DisplayName,
         bytes: &[u8],
-        actor: &ActorId,
         options: &CommitOptions,
     ) -> Result<Commit> {
-        let prepared_content = self.prepare_content(namespace_id, actor, bytes).await?;
-        self.commit_prepared_operation(
-            namespace_id,
-            prepared_content,
-            actor,
-            options,
-            None,
-            |content| {
-                FilesystemOperation::create_file_by_inode(
-                    parent_inode_id,
-                    display_name.clone(),
-                    content,
-                )
-            },
-        )
+        let prepared_content = self.prepare_content(namespace_id, bytes).await?;
+        self.commit_prepared_operation(namespace_id, prepared_content, options, None, |content| {
+            FilesystemOperation::create_file_by_inode(
+                parent_inode_id,
+                display_name.clone(),
+                content,
+            )
+        })
         .await
     }
 
@@ -73,14 +63,12 @@ impl Client {
         inode_id: InodeId,
         expected_revision_no: RevisionNo,
         bytes: &[u8],
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.put_file_by_inode_with_options(
             namespace_id,
             inode_id,
             expected_revision_no,
             bytes,
-            actor,
             &CommitOptions::default(),
         )
         .await
@@ -98,24 +86,12 @@ impl Client {
         inode_id: InodeId,
         expected_revision_no: RevisionNo,
         bytes: &[u8],
-        actor: &ActorId,
         options: &CommitOptions,
     ) -> Result<Commit> {
-        let prepared_content = self.prepare_content(namespace_id, actor, bytes).await?;
-        self.commit_prepared_operation(
-            namespace_id,
-            prepared_content,
-            actor,
-            options,
-            None,
-            |content| {
-                FilesystemOperation::put_file_revision_by_inode(
-                    inode_id,
-                    content,
-                    expected_revision_no,
-                )
-            },
-        )
+        let prepared_content = self.prepare_content(namespace_id, bytes).await?;
+        self.commit_prepared_operation(namespace_id, prepared_content, options, None, |content| {
+            FilesystemOperation::put_file_revision_by_inode(inode_id, content, expected_revision_no)
+        })
         .await
     }
 
@@ -126,13 +102,11 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         bytes: &[u8],
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.append_file_by_inode_with_options(
             namespace_id,
             inode_id,
             bytes,
-            actor,
             &AppendFileByInodeOptions::default(),
         )
         .await
@@ -145,12 +119,10 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         bytes: &[u8],
-        actor: &ActorId,
         options: &AppendFileByInodeOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             &options.commit,
             FilesystemOperation::append_file_by_inode(inode_id, bytes.to_vec(), options),
         )
@@ -163,13 +135,11 @@ impl Client {
         namespace_id: &NamespaceId,
         parent_inode_id: InodeId,
         display_name: &DisplayName,
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.create_directory_by_inode_with_options(
             namespace_id,
             parent_inode_id,
             display_name,
-            actor,
             &CommitOptions::default(),
         )
         .await
@@ -182,12 +152,10 @@ impl Client {
         namespace_id: &NamespaceId,
         parent_inode_id: InodeId,
         display_name: &DisplayName,
-        actor: &ActorId,
         options: &CommitOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             options,
             FilesystemOperation::create_directory_by_inode(parent_inode_id, display_name.clone()),
         )
@@ -201,13 +169,11 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         expected_binding_version: &BindingVersion,
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.delete_by_inode_with_options(
             namespace_id,
             inode_id,
             expected_binding_version,
-            actor,
             &DeleteByInodeOptions::default(),
         )
         .await
@@ -220,12 +186,10 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         expected_binding_version: &BindingVersion,
-        actor: &ActorId,
         options: &DeleteByInodeOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             &options.commit,
             FilesystemOperation::delete_by_inode(
                 inode_id,
@@ -241,13 +205,11 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        actor: &ActorId,
         changes: AttributeChanges,
     ) -> Result<Commit> {
         self.update_attributes_by_inode_with_options(
             namespace_id,
             inode_id,
-            actor,
             changes,
             &UpdateAttributesByInodeOptions::default(),
         )
@@ -260,13 +222,11 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        actor: &ActorId,
         changes: AttributeChanges,
         options: &UpdateAttributesByInodeOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             &options.commit,
             FilesystemOperation::update_attributes_by_inode(inode_id, changes, options),
         )
@@ -278,13 +238,11 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        actor: &ActorId,
         access: AccessState,
     ) -> Result<Commit> {
         self.update_access_by_inode_with_options(
             namespace_id,
             inode_id,
-            actor,
             access,
             &UpdateAccessByInodeOptions::default(),
         )
@@ -297,13 +255,11 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        actor: &ActorId,
         access: AccessState,
         options: &UpdateAccessByInodeOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             &options.commit,
             FilesystemOperation::update_access_by_inode(inode_id, access, options),
         )
@@ -320,7 +276,6 @@ impl Client {
         expected_binding_version: &BindingVersion,
         destination_parent_inode_id: InodeId,
         destination_display_name: &DisplayName,
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.move_by_inode_with_options(
             namespace_id,
@@ -328,7 +283,6 @@ impl Client {
             expected_binding_version,
             destination_parent_inode_id,
             destination_display_name,
-            actor,
             &MoveOptions::default(),
         )
         .await
@@ -336,10 +290,6 @@ impl Client {
 
     /// Moves an inode to a name under a parent inode while
     /// `expected_binding_version` is still its binding.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "a move names its inode, binding version, and destination, as the wire operation does"
-    )]
     pub async fn move_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -347,12 +297,10 @@ impl Client {
         expected_binding_version: &BindingVersion,
         destination_parent_inode_id: InodeId,
         destination_display_name: &DisplayName,
-        actor: &ActorId,
         options: &MoveOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             &options.commit,
             FilesystemOperation::move_by_inode(
                 inode_id,
@@ -373,14 +321,12 @@ impl Client {
         inode_id: InodeId,
         destination_parent_inode_id: InodeId,
         destination_display_name: &DisplayName,
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.copy_by_inode_with_options(
             namespace_id,
             inode_id,
             destination_parent_inode_id,
             destination_display_name,
-            actor,
             &CopyOptions::default(),
         )
         .await
@@ -393,12 +339,10 @@ impl Client {
         inode_id: InodeId,
         destination_parent_inode_id: InodeId,
         destination_display_name: &DisplayName,
-        actor: &ActorId,
         options: &CopyOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             &options.commit,
             FilesystemOperation::copy_by_inode(
                 inode_id,
@@ -416,13 +360,11 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         source_revision_no: RevisionNo,
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.restore_revision_by_inode_with_options(
             namespace_id,
             inode_id,
             source_revision_no,
-            actor,
             &CommitOptions::default(),
         )
         .await
@@ -435,12 +377,10 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         source_revision_no: RevisionNo,
-        actor: &ActorId,
         options: &CommitOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             options,
             FilesystemOperation::restore_revision_by_inode(inode_id, source_revision_no),
         )

@@ -29,7 +29,7 @@ async fn http_upload_content_rejects_invalid_upload_id() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
 
@@ -68,7 +68,7 @@ async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
 
@@ -116,16 +116,12 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let begin = harness
         .client
-        .create_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &CreateUploadBody::ServiceProxied {},
-        )
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
 
@@ -161,12 +157,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
 
     let staged = harness
         .client
-        .put_upload_content(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &begin.upload_id,
-            b"hello",
-        )
+        .put_upload_content(&namespace, &begin.upload_id, b"hello")
         .await
         .expect("stage content");
     assert_eq!(staged.namespace_id, namespace);
@@ -186,11 +177,7 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
     );
     let read = harness
         .client
-        .get_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &begin.upload_id,
-        )
+        .get_upload(&namespace, &begin.upload_id)
         .await
         .expect("read staged session");
     assert_eq!(read, staged);
@@ -198,7 +185,6 @@ async fn stored_proxied_mode_rejects_a_completion_tagged_for_another_mode() {
         .client
         .complete_upload(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &begin.upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )
@@ -219,16 +205,12 @@ async fn completion_body_one_under_reaches_session_validation_and_one_over_answe
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let begin = harness
         .client
-        .create_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &CreateUploadBody::ServiceProxied {},
-        )
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
     let limit = harness
@@ -313,48 +295,29 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     let target = NamespacePath::parse("demo", "/uploaded.txt").expect("target");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
     let begin = harness
         .client
-        .create_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &CreateUploadBody::ServiceProxied {},
-        )
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
     let first_content = harness
         .client
-        .put_upload_content(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &begin.upload_id,
-            file_bytes,
-        )
+        .put_upload_content(&namespace, &begin.upload_id, file_bytes)
         .await
         .expect("upload content");
     let repeated_content = harness
         .client
-        .put_upload_content(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &begin.upload_id,
-            file_bytes,
-        )
+        .put_upload_content(&namespace, &begin.upload_id, file_bytes)
         .await
         .expect("repeat upload content");
     assert_eq!(first_content, repeated_content);
     match harness
         .client
-        .put_upload_content(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &begin.upload_id,
-            b"different bytes",
-        )
+        .put_upload_content(&namespace, &begin.upload_id, b"different bytes")
         .await
     {
         Err(ClientError::Api { response, .. }) => {
@@ -471,17 +434,13 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
     let open = harness
         .client
-        .create_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &CreateUploadBody::ServiceProxied {},
-        )
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
     let status = get_upload(&harness.server_url, &open.upload_id);
@@ -515,7 +474,6 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .client
         .complete_upload(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &open.upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )
@@ -530,7 +488,6 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .client
         .complete_upload(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )
@@ -604,28 +561,18 @@ async fn complete_upload_session(
 ) -> (loonfs_types::UploadId, ContentRef, u64) {
     let begin = harness
         .client
-        .create_upload(
-            namespace,
-            &loonfs_test_support::test_actor(),
-            &CreateUploadBody::ServiceProxied {},
-        )
+        .create_upload(namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin upload");
     harness
         .client
-        .put_upload_content(
-            namespace,
-            &loonfs_test_support::test_actor(),
-            &begin.upload_id,
-            bytes,
-        )
+        .put_upload_content(namespace, &begin.upload_id, bytes)
         .await
         .expect("upload content");
     let completed = harness
         .client
         .complete_upload(
             namespace,
-            &loonfs_test_support::test_actor(),
             &begin.upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )

@@ -12,8 +12,8 @@ use loonfs_types::options::{
     UpdateAccessOptions, UpdateAttributesOptions,
 };
 use loonfs_types::{
-    headers, ActorId, CommitRequest, CommitSeq, ContentRef, FileContent, FilesystemOperation,
-    InodeId, NamespaceId, RevisionNo,
+    headers, CommitRequest, CommitSeq, ContentRef, FileContent, FilesystemOperation, InodeId,
+    NamespaceId, RevisionNo,
 };
 use loonfs_types::{Commit, ContentToken};
 
@@ -27,14 +27,13 @@ impl Client {
     pub async fn commit(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         request: &CommitRequest,
     ) -> Result<Commit> {
         let url = self.namespace_url(namespace_id, "/commits");
         // The request's commit id resolves an ambiguous resend through a durable receipt.
         self.send_json(
             self.request(operations::CREATE_COMMIT, &url)
-                .header(headers::ACTOR, actor.as_str())
+                .header(headers::ACTOR, self.mutation_actor()?.as_str())
                 .json(request)?,
         )
         .await
@@ -44,26 +43,19 @@ impl Client {
     pub(crate) async fn commit_one(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         commit: &CommitOptions,
         operation: FilesystemOperation,
     ) -> Result<Commit> {
         self.commit(
             namespace_id,
-            actor,
             &CommitRequest::with_operations(commit, vec![operation]),
         )
         .await
     }
 
     /// Writes file bytes to a path, refusing to replace an existing file.
-    pub async fn put_file(
-        &self,
-        spec: &NamespacePath,
-        bytes: &[u8],
-        actor: &ActorId,
-    ) -> Result<Commit> {
-        self.put_file_with_options(spec, bytes, actor, &PutFileOptions::default())
+    pub async fn put_file(&self, spec: &NamespacePath, bytes: &[u8]) -> Result<Commit> {
+        self.put_file_with_options(spec, bytes, &PutFileOptions::default())
             .await
     }
 
@@ -79,11 +71,10 @@ impl Client {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        actor: &ActorId,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        let prepared = self.prepare_content(spec.namespace(), actor, bytes).await?;
-        self.put_file_prepared_with_options(spec, prepared, actor, options)
+        let prepared = self.prepare_content(spec.namespace(), bytes).await?;
+        self.put_file_prepared_with_options(spec, prepared, options)
             .await
     }
 
@@ -93,9 +84,8 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source: PayloadSource,
-        actor: &ActorId,
     ) -> Result<Commit> {
-        self.put_file_stream_with_options(spec, source, actor, &PutFileOptions::default())
+        self.put_file_stream_with_options(spec, source, &PutFileOptions::default())
             .await
     }
 
@@ -116,10 +106,9 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source: PayloadSource,
-        actor: &ActorId,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        self.put_file_stream_continuing(spec, source, actor, options, UploadContinuity::default())
+        self.put_file_stream_continuing(spec, source, options, UploadContinuity::default())
             .await
     }
 
@@ -127,8 +116,9 @@ impl Client {
     ///
     /// The journal records the complete commit request before submission for
     /// every transport. Multipart uploads also record session geometry and parts.
-    /// Save the request and actor and replay them with [`Self::commit`] after an
-    /// interruption; it includes the inline bytes or uploaded reference and commit ID.
+    /// Save the request and actor, and after an interruption replay the request
+    /// with [`Self::commit`] on a client with that actor; the request includes the
+    /// inline bytes or uploaded reference and commit ID.
     ///
     /// A resumed multipart attempt still receives the source from the
     /// beginning because the final checksum covers the complete object.
@@ -136,7 +126,6 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source: PayloadSource,
-        actor: &ActorId,
         options: &PutFileOptions,
         journal: &dyn PutFileJournal,
         resume: Option<&MultipartUploadResume>,
@@ -144,7 +133,6 @@ impl Client {
         self.put_file_stream_continuing(
             spec,
             source,
-            actor,
             options,
             UploadContinuity {
                 resume,
@@ -158,14 +146,13 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source: PayloadSource,
-        actor: &ActorId,
         options: &PutFileOptions,
         continuity: UploadContinuity<'_>,
     ) -> Result<Commit> {
         let prepared_content = self
-            .prepare_file_source(spec.namespace(), actor, source, continuity)
+            .prepare_file_source(spec.namespace(), source, continuity)
             .await?;
-        self.commit_prepared_file(spec, prepared_content, actor, options, continuity.journal)
+        self.commit_prepared_file(spec, prepared_content, options, continuity.journal)
             .await
     }
 
@@ -178,9 +165,11 @@ impl Client {
     pub async fn prepare_content(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
+        // Prepared content is committed by this client, so a missing actor
+        // fails here, before any request.
+        self.mutation_actor()?;
         if self
             .inline_content_limit()
             .await?
@@ -190,8 +179,7 @@ impl Client {
                 kind: PreparedContentKind::Inline(bytes.to_vec()),
             });
         }
-        self.stage_bytes_as_content_ref(namespace_id, actor, bytes)
-            .await
+        self.stage_bytes_as_content_ref(namespace_id, bytes).await
     }
 
     /// Prepares a stream, buffering up to the advertised inline limit plus one byte.
@@ -200,10 +188,9 @@ impl Client {
     pub async fn prepare_content_stream(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         source: PayloadSource,
     ) -> Result<PreparedContent> {
-        self.prepare_file_source(namespace_id, actor, source, UploadContinuity::default())
+        self.prepare_file_source(namespace_id, source, UploadContinuity::default())
             .await
     }
 
@@ -213,15 +200,9 @@ impl Client {
         &self,
         spec: &NamespacePath,
         prepared_content: PreparedContent,
-        actor: &ActorId,
     ) -> Result<Commit> {
-        self.put_file_prepared_with_options(
-            spec,
-            prepared_content,
-            actor,
-            &PutFileOptions::default(),
-        )
-        .await
+        self.put_file_prepared_with_options(spec, prepared_content, &PutFileOptions::default())
+            .await
     }
 
     /// Publishes already-prepared content without uploading it again.
@@ -235,10 +216,9 @@ impl Client {
         &self,
         spec: &NamespacePath,
         prepared_content: PreparedContent,
-        actor: &ActorId,
         options: &PutFileOptions,
     ) -> Result<Commit> {
-        self.commit_prepared_file(spec, prepared_content, actor, options, None)
+        self.commit_prepared_file(spec, prepared_content, options, None)
             .await
     }
 
@@ -252,7 +232,6 @@ impl Client {
         spec: &NamespacePath,
         content_ref: ContentRef,
         content_token: Option<ContentToken>,
-        actor: &ActorId,
         options: &PutFileOptions,
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<Commit> {
@@ -263,7 +242,7 @@ impl Client {
                 content_token,
             },
         };
-        self.commit_prepared_file(spec, staged, actor, options, journal)
+        self.commit_prepared_file(spec, staged, options, journal)
             .await
     }
 
@@ -271,14 +250,12 @@ impl Client {
         &self,
         spec: &NamespacePath,
         prepared_content: PreparedContent,
-        actor: &ActorId,
         options: &PutFileOptions,
         journal: Option<&dyn PutFileJournal>,
     ) -> Result<Commit> {
         self.commit_prepared_operation(
             spec.namespace(),
             prepared_content,
-            actor,
             &options.commit,
             journal,
             |content| FilesystemOperation::put_file(spec.absolute_path().clone(), content, options),
@@ -292,7 +269,6 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         prepared_content: PreparedContent,
-        actor: &ActorId,
         commit: &CommitOptions,
         journal: Option<&dyn PutFileJournal>,
         operation: impl FnOnce(FileContent) -> FilesystemOperation,
@@ -309,7 +285,7 @@ impl Client {
         request.content_tokens = content_token.into_iter().collect();
         if let Some(journal) = journal {
             journal
-                .commit_prepared(&request, actor, upload_id.as_ref())
+                .commit_prepared(&request, self.mutation_actor()?, upload_id.as_ref())
                 .map_err(|error| {
                     ClientError::Io(format!(
                         "could not record file commit `{}` before submission: {error}",
@@ -317,17 +293,12 @@ impl Client {
                     ))
                 })?;
         }
-        self.commit(namespace_id, actor, &request).await
+        self.commit(namespace_id, &request).await
     }
 
     /// Adds bytes to the end of a file as its next revision.
-    pub async fn append_file(
-        &self,
-        spec: &NamespacePath,
-        bytes: &[u8],
-        actor: &ActorId,
-    ) -> Result<Commit> {
-        self.append_file_with_options(spec, bytes, actor, &AppendFileOptions::default())
+    pub async fn append_file(&self, spec: &NamespacePath, bytes: &[u8]) -> Result<Commit> {
+        self.append_file_with_options(spec, bytes, &AppendFileOptions::default())
             .await
     }
 
@@ -339,12 +310,10 @@ impl Client {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        actor: &ActorId,
         options: &AppendFileOptions,
     ) -> Result<Commit> {
         self.commit_one(
             spec.namespace(),
-            actor,
             &options.commit,
             FilesystemOperation::append_file(spec.absolute_path().clone(), bytes.to_vec(), options),
         )
@@ -353,8 +322,8 @@ impl Client {
 
     /// Creates a directory at the requested path, failing when its parent is
     /// missing.
-    pub async fn create_directory(&self, spec: &NamespacePath, actor: &ActorId) -> Result<Commit> {
-        self.create_directory_with_options(spec, actor, &CreateDirectoryOptions::default())
+    pub async fn create_directory(&self, spec: &NamespacePath) -> Result<Commit> {
+        self.create_directory_with_options(spec, &CreateDirectoryOptions::default())
             .await
     }
 
@@ -362,12 +331,10 @@ impl Client {
     pub async fn create_directory_with_options(
         &self,
         spec: &NamespacePath,
-        actor: &ActorId,
         options: &CreateDirectoryOptions,
     ) -> Result<Commit> {
         self.commit_one(
             spec.namespace(),
-            actor,
             &options.commit,
             FilesystemOperation::create_directory(spec.absolute_path().clone(), options),
         )
@@ -375,8 +342,8 @@ impl Client {
     }
 
     /// Deletes the requested file or empty directory.
-    pub async fn delete_path(&self, spec: &NamespacePath, actor: &ActorId) -> Result<Commit> {
-        self.delete_path_with_options(spec, actor, &DeleteOptions::default())
+    pub async fn delete_path(&self, spec: &NamespacePath) -> Result<Commit> {
+        self.delete_path_with_options(spec, &DeleteOptions::default())
             .await
     }
 
@@ -384,12 +351,10 @@ impl Client {
     pub async fn delete_path_with_options(
         &self,
         spec: &NamespacePath,
-        actor: &ActorId,
         options: &DeleteOptions,
     ) -> Result<Commit> {
         self.commit_one(
             spec.namespace(),
-            actor,
             &options.commit,
             FilesystemOperation::delete_path(spec.absolute_path().clone(), options),
         )
@@ -400,16 +365,10 @@ impl Client {
     pub async fn update_attributes(
         &self,
         spec: &NamespacePath,
-        actor: &ActorId,
         changes: AttributeChanges,
     ) -> Result<Commit> {
-        self.update_attributes_with_options(
-            spec,
-            actor,
-            changes,
-            &UpdateAttributesOptions::default(),
-        )
-        .await
+        self.update_attributes_with_options(spec, changes, &UpdateAttributesOptions::default())
+            .await
     }
 
     /// Writes and removes attributes on the inode a path resolves to.
@@ -418,13 +377,11 @@ impl Client {
     pub async fn update_attributes_with_options(
         &self,
         spec: &NamespacePath,
-        actor: &ActorId,
         changes: AttributeChanges,
         options: &UpdateAttributesOptions,
     ) -> Result<Commit> {
         self.commit_one(
             spec.namespace(),
-            actor,
             &options.commit,
             FilesystemOperation::update_attributes(spec.absolute_path().clone(), changes, options),
         )
@@ -432,13 +389,8 @@ impl Client {
     }
 
     /// Replaces a visible inode's access row, including the root.
-    pub async fn update_access(
-        &self,
-        spec: &NamespacePath,
-        actor: &ActorId,
-        access: AccessState,
-    ) -> Result<Commit> {
-        self.update_access_with_options(spec, actor, access, &UpdateAccessOptions::default())
+    pub async fn update_access(&self, spec: &NamespacePath, access: AccessState) -> Result<Commit> {
+        self.update_access_with_options(spec, access, &UpdateAccessOptions::default())
             .await
     }
 
@@ -446,13 +398,11 @@ impl Client {
     pub async fn update_access_with_options(
         &self,
         spec: &NamespacePath,
-        actor: &ActorId,
         access: AccessState,
         options: &UpdateAccessOptions,
     ) -> Result<Commit> {
         self.commit_one(
             spec.namespace(),
-            actor,
             &options.commit,
             FilesystemOperation::update_access(spec.absolute_path().clone(), access, options),
         )
@@ -464,15 +414,9 @@ impl Client {
         &self,
         source_path: &NamespacePath,
         destination_path: &NamespacePath,
-        actor: &ActorId,
     ) -> Result<Commit> {
-        self.move_path_with_options(
-            source_path,
-            destination_path,
-            actor,
-            &MoveOptions::default(),
-        )
-        .await
+        self.move_path_with_options(source_path, destination_path, &MoveOptions::default())
+            .await
     }
 
     /// Moves a path within one namespace.
@@ -480,7 +424,6 @@ impl Client {
         &self,
         source_path: &NamespacePath,
         destination_path: &NamespacePath,
-        actor: &ActorId,
         options: &MoveOptions,
     ) -> Result<Commit> {
         if source_path.namespace() != destination_path.namespace() {
@@ -492,7 +435,6 @@ impl Client {
         }
         self.commit_one(
             source_path.namespace(),
-            actor,
             &options.commit,
             FilesystemOperation::move_path(
                 source_path.absolute_path().clone(),
@@ -508,15 +450,9 @@ impl Client {
         &self,
         source_path: &NamespacePath,
         destination_path: &NamespacePath,
-        actor: &ActorId,
     ) -> Result<Commit> {
-        self.copy_path_with_options(
-            source_path,
-            destination_path,
-            actor,
-            &CopyOptions::default(),
-        )
-        .await
+        self.copy_path_with_options(source_path, destination_path, &CopyOptions::default())
+            .await
     }
 
     /// Copies a path within one namespace.
@@ -524,7 +460,6 @@ impl Client {
         &self,
         source_path: &NamespacePath,
         destination_path: &NamespacePath,
-        actor: &ActorId,
         options: &CopyOptions,
     ) -> Result<Commit> {
         if source_path.namespace() != destination_path.namespace() {
@@ -536,7 +471,6 @@ impl Client {
         }
         self.commit_one(
             source_path.namespace(),
-            actor,
             &options.commit,
             FilesystemOperation::copy_path(
                 source_path.absolute_path().clone(),
@@ -554,13 +488,11 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: CommitSeq,
-        actor: &ActorId,
     ) -> Result<Commit> {
         self.restore_deleted_with_options(
             namespace_id,
             inode_id,
             deletion_seq,
-            actor,
             &RestoreDeletedOptions::default(),
         )
         .await
@@ -572,12 +504,10 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deletion_seq: CommitSeq,
-        actor: &ActorId,
         options: &RestoreDeletedOptions,
     ) -> Result<Commit> {
         self.commit_one(
             namespace_id,
-            actor,
             &options.commit,
             FilesystemOperation::restore_deleted(inode_id, deletion_seq, &options.destination),
         )
@@ -589,15 +519,9 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        actor: &ActorId,
     ) -> Result<Commit> {
-        self.restore_revision_with_options(
-            spec,
-            source_revision_no,
-            actor,
-            &CommitOptions::default(),
-        )
-        .await
+        self.restore_revision_with_options(spec, source_revision_no, &CommitOptions::default())
+            .await
     }
 
     /// Makes an earlier file revision the current revision, under the given
@@ -606,12 +530,10 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        actor: &ActorId,
         options: &CommitOptions,
     ) -> Result<Commit> {
         self.commit_one(
             spec.namespace(),
-            actor,
             options,
             FilesystemOperation::restore_revision(spec.absolute_path().clone(), source_revision_no),
         )

@@ -13,8 +13,12 @@ use std::future::Future;
 /// with one method for each operation.
 ///
 /// Each method has the signature of the [`Client`] method with the same name,
-/// and [`Client`] implements the trait by calling that method. A test
-/// implements it with answers that it scripts.
+/// with two differences: the three methods that send `Loonfs-Actor` take the
+/// actor that the session's state records, and the rebase's new fork ID is
+/// required, because the session chooses it. [`Client`] implements the trait
+/// by calling that method on a clone with that actor (see
+/// [`Client::with_actor`]). A test implements the trait with answers that it
+/// scripts.
 pub trait Mechanics: Send + Sync {
     /// Merges the fork `source_namespace_id`'s commits into `namespace_id`
     /// (see [`Client::merge_fork_with_options`]).
@@ -82,7 +86,8 @@ impl Mechanics for Client {
         actor: &ActorId,
         options: &MergeForkOptions,
     ) -> Result<Commit> {
-        Client::merge_fork_with_options(self, namespace_id, source_namespace_id, actor, options)
+        self.with_actor(actor.clone())
+            .merge_fork_with_options(namespace_id, source_namespace_id, options)
             .await
     }
 
@@ -93,14 +98,9 @@ impl Mechanics for Client {
         new_namespace_id: &NamespaceId,
         actor: &ActorId,
     ) -> Result<NamespaceMetadata> {
-        Client::fork_namespace_for_rebase(
-            self,
-            namespace_id,
-            source_namespace_id,
-            new_namespace_id,
-            actor,
-        )
-        .await
+        self.with_actor(actor.clone())
+            .fork_namespace_for_rebase(namespace_id, source_namespace_id, Some(new_namespace_id))
+            .await
     }
 
     async fn replay_fork_with_options(
@@ -110,7 +110,8 @@ impl Mechanics for Client {
         actor: &ActorId,
         options: &MergeForkOptions,
     ) -> Result<ReplayForkResponse> {
-        Client::replay_fork_with_options(self, namespace_id, source_namespace_id, actor, options)
+        self.with_actor(actor.clone())
+            .replay_fork_with_options(namespace_id, source_namespace_id, options)
             .await
     }
 

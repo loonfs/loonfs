@@ -116,7 +116,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     let remote_ns = namespace_id("remote");
     harness
         .client
-        .create_namespace(&remote_ns, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&remote_ns))
         .await
         .expect("create remote namespace");
     let first = stage_uploaded_content(&harness.client, &remote_ns, FIRST_BYTES).await;
@@ -126,7 +126,6 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .client
         .commit(
             &remote_ns,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("batch-one"),
@@ -250,7 +249,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -270,7 +269,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
 
     let committed = harness
         .client
-        .commit(&namespace, &loonfs_test_support::test_actor(), &request())
+        .commit(&namespace, &request())
         .await
         .expect("the put commits");
     assert_eq!(committed.committed_by, loonfs_test_support::test_actor());
@@ -319,7 +318,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     // nothing new.
     let replayed = harness
         .client
-        .commit(&namespace, &loonfs_test_support::test_actor(), &request())
+        .commit(&namespace, &request())
         .await
         .expect("an identical resubmission replays");
     assert_eq!(replayed, committed);
@@ -350,7 +349,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -372,7 +371,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
 
     let committed = harness
         .client
-        .commit(&namespace, &loonfs_test_support::test_actor(), &request())
+        .commit(&namespace, &request())
         .await
         .expect("the put commits");
     assert!(
@@ -406,7 +405,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
 
     let replayed = harness
         .client
-        .commit(&namespace, &loonfs_test_support::test_actor(), &request())
+        .commit(&namespace, &request())
         .await
         .expect("an identical resubmission still replays");
     assert_eq!(replayed, committed);
@@ -428,7 +427,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -439,7 +438,6 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("batch-stops-at-two"),
@@ -528,7 +526,7 @@ async fn an_empty_operation_list_is_rejected() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -536,7 +534,6 @@ async fn an_empty_operation_list_is_rejected() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("empty-batch"),
@@ -581,7 +578,7 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let content = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -589,7 +586,6 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("revision-without-inode"),
@@ -639,15 +635,12 @@ async fn a_foreign_binding_precondition_identifies_the_version_field() {
     for namespace in [&namespace, &foreign_namespace] {
         harness
             .client
-            .create_namespace(namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(namespace))
             .await
             .expect("create namespace");
         harness
             .client
-            .create_directory(
-                &NamespacePath::parse(namespace.as_str(), REPORTS_DIR).expect("path"),
-                &loonfs_test_support::test_actor(),
-            )
+            .create_directory(&NamespacePath::parse(namespace.as_str(), REPORTS_DIR).expect("path"))
             .await
             .expect("create directory");
     }
@@ -665,7 +658,6 @@ async fn a_foreign_binding_precondition_identifies_the_version_field() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest::single(
                 commit_id("foreign-version"),
                 None,
@@ -714,7 +706,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -722,7 +714,6 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("root-alone"),
@@ -756,7 +747,6 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("root-in-batch"),
@@ -817,7 +807,6 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         .client
         .commit(
             &namespace_id("missing"),
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("root-unknown-namespace"),
@@ -921,7 +910,6 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
@@ -950,7 +938,6 @@ async fn a_commit_id_used_embedded_replays_over_http() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("crosses-transports"),
@@ -984,7 +971,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let first = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
@@ -994,7 +981,6 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
         .client
         .commit(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("with_preconditions-create"),

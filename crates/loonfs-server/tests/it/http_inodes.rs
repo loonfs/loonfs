@@ -39,7 +39,7 @@ async fn server_with_namespace(root: &Path, writer_id: &str) -> TestServer {
     let harness = start_server(test_config(root.join("store"), writer_id, writer_id)).await;
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
     harness
@@ -55,27 +55,21 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
     ))
     .await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let before = NamespacePath::parse("demo", "/before.txt").expect("before path");
     let after = NamespacePath::parse("demo", "/after.txt").expect("after path");
     harness
         .client
-        .put_file(&before, b"one", &actor)
+        .put_file(&before, b"one")
         .await
         .expect("put revision one");
     harness
         .client
-        .put_file_with_options(
-            &before,
-            b"two",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&before, b"two", &replace_file_options())
         .await
         .expect("put revision two");
 
@@ -100,7 +94,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
 
     harness
         .client
-        .move_path(&before, &after, &actor)
+        .move_path(&before, &after)
         .await
         .expect("rename file");
     let renamed = harness
@@ -165,7 +159,7 @@ async fn http_stat_inode_tracks_renames_and_revision_reads_survive_deletion() {
 
     harness
         .client
-        .delete_path(&after, &actor)
+        .delete_path(&after)
         .await
         .expect("delete file");
     assert_api_code(
@@ -225,10 +219,9 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     ))
     .await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let root = harness
@@ -243,7 +236,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     let directory = NamespacePath::parse("demo", "/docs").expect("directory path");
     harness
         .client
-        .create_directory(&directory, &actor)
+        .create_directory(&directory)
         .await
         .expect("create directory");
     let directory_id = harness
@@ -294,7 +287,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     let file = NamespacePath::parse("demo", "/file.txt").expect("file path");
     harness
         .client
-        .put_file(&file, b"body", &actor)
+        .put_file(&file, b"body")
         .await
         .expect("put file");
     let file_id = harness
@@ -315,7 +308,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
     let deleted_namespace = namespace_id("deleted");
     harness
         .client
-        .create_namespace(&deleted_namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&deleted_namespace))
         .await
         .expect("create deleted namespace");
     harness
@@ -354,17 +347,16 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
     ))
     .await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     for name in ["Zebra.txt", "apple.txt", "B.txt"] {
         let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("child path");
         harness
             .client
-            .put_file(&path, name.as_bytes(), &actor)
+            .put_file(&path, name.as_bytes())
             .await
             .expect("put child");
     }
@@ -372,7 +364,6 @@ async fn http_lists_inode_children_in_name_key_order_and_paginates() {
         .client
         .update_attributes(
             &NamespacePath::parse("demo", "/docs/apple.txt").expect("annotated path"),
-            &actor,
             AttributeChanges {
                 set: BTreeMap::from([(attribute_key("owner"), attribute_text("platform"))]),
                 ..Default::default()
@@ -490,16 +481,15 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
     ))
     .await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let child = NamespacePath::parse("demo", "/docs/child.txt").expect("child path");
     harness
         .client
-        .put_file(&child, b"body", &actor)
+        .put_file(&child, b"body")
         .await
         .expect("put child");
     let directory = NamespacePath::parse("demo", "/docs").expect("directory path");
@@ -552,7 +542,6 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
         .client
         .delete_path_with_options(
             &directory,
-            &actor,
             &DeleteOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
                 ..Default::default()
@@ -586,14 +575,13 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
-    let actor = loonfs_test_support::test_actor();
     let path = NamespacePath::parse("demo", "/file.txt").expect("seed path");
     harness
         .client
-        .put_file(&path, b"body", &actor)
+        .put_file(&path, b"body")
         .await
         .expect("seed inode");
     let inode_id = harness
@@ -691,10 +679,9 @@ async fn http_create_directory_by_inode_binds_a_new_name_under_the_parent() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = server_with_namespace(temp_dir.path(), "http-inode-mkdir").await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_directory(&demo_path("/docs"), &actor)
+        .create_directory(&demo_path("/docs"))
         .await
         .expect("create parent");
     let docs = harness
@@ -706,7 +693,7 @@ async fn http_create_directory_by_inode_binds_a_new_name_under_the_parent() {
 
     harness
         .client
-        .create_directory_by_inode(&namespace, docs, &display_name("archive"), &actor)
+        .create_directory_by_inode(&namespace, docs, &display_name("archive"))
         .await
         .expect("create directory by inode");
     let created = harness
@@ -719,7 +706,7 @@ async fn http_create_directory_by_inode_binds_a_new_name_under_the_parent() {
     assert_api_code(
         harness
             .client
-            .create_directory_by_inode(&namespace, docs, &display_name("archive"), &actor)
+            .create_directory_by_inode(&namespace, docs, &display_name("archive"))
             .await,
         409,
         ErrorCode::PathConflict,
@@ -733,10 +720,9 @@ async fn http_create_file_by_inode_writes_a_new_name_under_the_parent() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = server_with_namespace(temp_dir.path(), "http-inode-create-file").await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_directory(&demo_path("/docs"), &actor)
+        .create_directory(&demo_path("/docs"))
         .await
         .expect("create parent");
     let docs = harness
@@ -748,13 +734,7 @@ async fn http_create_file_by_inode_writes_a_new_name_under_the_parent() {
 
     harness
         .client
-        .create_file_by_inode(
-            &namespace,
-            docs,
-            &display_name("report.txt"),
-            b"first",
-            &actor,
-        )
+        .create_file_by_inode(&namespace, docs, &display_name("report.txt"), b"first")
         .await
         .expect("create file by inode");
     assert_eq!(
@@ -768,13 +748,7 @@ async fn http_create_file_by_inode_writes_a_new_name_under_the_parent() {
     assert_api_code(
         harness
             .client
-            .create_file_by_inode(
-                &namespace,
-                docs,
-                &display_name("report.txt"),
-                b"second",
-                &actor,
-            )
+            .create_file_by_inode(&namespace, docs, &display_name("report.txt"), b"second")
             .await,
         409,
         ErrorCode::PathConflict,
@@ -788,10 +762,9 @@ async fn http_put_file_by_inode_follows_a_move_and_requires_the_current_revision
     let temp_dir = tempdir().expect("tempdir");
     let harness = server_with_namespace(temp_dir.path(), "http-inode-put-file").await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .put_file(&demo_path("/draft.txt"), b"one", &actor)
+        .put_file(&demo_path("/draft.txt"), b"one")
         .await
         .expect("put first revision");
     let inode_id = harness
@@ -802,13 +775,13 @@ async fn http_put_file_by_inode_follows_a_move_and_requires_the_current_revision
         .inode_id;
     harness
         .client
-        .move_path(&demo_path("/draft.txt"), &demo_path("/final.txt"), &actor)
+        .move_path(&demo_path("/draft.txt"), &demo_path("/final.txt"))
         .await
         .expect("rename file");
 
     harness
         .client
-        .put_file_by_inode(&namespace, inode_id, RevisionNo(1), b"two", &actor)
+        .put_file_by_inode(&namespace, inode_id, RevisionNo(1), b"two")
         .await
         .expect("put the next revision by inode");
     let current = harness
@@ -829,7 +802,7 @@ async fn http_put_file_by_inode_follows_a_move_and_requires_the_current_revision
     assert_api_code(
         harness
             .client
-            .put_file_by_inode(&namespace, inode_id, RevisionNo(1), b"three", &actor)
+            .put_file_by_inode(&namespace, inode_id, RevisionNo(1), b"three")
             .await,
         409,
         ErrorCode::StaleRevision,
@@ -843,10 +816,9 @@ async fn http_delete_by_inode_requires_the_current_binding_version() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = server_with_namespace(temp_dir.path(), "http-inode-delete").await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .put_file(&demo_path("/drafts/notes.txt"), b"body", &actor)
+        .put_file(&demo_path("/drafts/notes.txt"), b"body")
         .await
         .expect("put child");
     let stale = harness
@@ -856,7 +828,7 @@ async fn http_delete_by_inode_requires_the_current_binding_version() {
         .expect("stat directory");
     harness
         .client
-        .move_path(&demo_path("/drafts"), &demo_path("/archive"), &actor)
+        .move_path(&demo_path("/drafts"), &demo_path("/archive"))
         .await
         .expect("rename directory");
     let current = harness
@@ -874,7 +846,6 @@ async fn http_delete_by_inode_requires_the_current_binding_version() {
                 &stale
                     .binding_version
                     .expect("a named entry has a binding version"),
-                &actor,
             )
             .await,
         409,
@@ -888,7 +859,6 @@ async fn http_delete_by_inode_requires_the_current_binding_version() {
             &current
                 .binding_version
                 .expect("a named entry has a binding version"),
-            &actor,
             &DeleteByInodeOptions {
                 behavior: DeleteDirectoryBehavior::Recursive,
                 ..Default::default()
@@ -913,15 +883,14 @@ async fn http_move_by_inode_rebinds_under_a_parent_inode_at_the_current_binding_
     let temp_dir = tempdir().expect("tempdir");
     let harness = server_with_namespace(temp_dir.path(), "http-inode-move").await;
     let namespace = namespace_id("demo");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .put_file(&demo_path("/inbox/report.txt"), b"body", &actor)
+        .put_file(&demo_path("/inbox/report.txt"), b"body")
         .await
         .expect("put file");
     harness
         .client
-        .create_directory(&demo_path("/archive"), &actor)
+        .create_directory(&demo_path("/archive"))
         .await
         .expect("create destination");
     let archive = harness
@@ -947,7 +916,6 @@ async fn http_move_by_inode_rebinds_under_a_parent_inode_at_the_current_binding_
             &version,
             archive,
             &display_name("2026.txt"),
-            &actor,
         )
         .await
         .expect("move by inode");
@@ -969,7 +937,6 @@ async fn http_move_by_inode_rebinds_under_a_parent_inode_at_the_current_binding_
                 &version,
                 archive,
                 &display_name("2027.txt"),
-                &actor,
             )
             .await,
         409,

@@ -67,18 +67,13 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
     let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
     harness
         .client
-        .put_file_with_options(
-            &source,
-            b"source",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&source, b"source", &replace_file_options())
         .await
         .expect("seed source");
 
@@ -183,7 +178,7 @@ async fn a_misspelled_delete_guard_is_rejected_and_the_namespace_survives() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -226,7 +221,7 @@ async fn unknown_query_parameters_are_rejected_on_every_operation() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
 

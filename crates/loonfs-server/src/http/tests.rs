@@ -246,6 +246,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         ClientConfig {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".into()),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -254,7 +255,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
     )
     .expect("valid client config");
     client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace over http");
 

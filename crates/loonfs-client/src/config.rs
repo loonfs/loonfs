@@ -4,7 +4,7 @@
 use crate::{ClientError, Result};
 use http::Uri;
 use loonfs_types::config::{validate_absolute_http_url, ConfigFieldError};
-use loonfs_types::SecretString;
+use loonfs_types::{ActorId, SecretString};
 use serde::Deserialize;
 use std::fs;
 use std::net::IpAddr;
@@ -23,6 +23,13 @@ pub struct ClientConfig {
     pub server_url: String,
     /// Optional bearer token.
     pub auth_token: Option<SecretString>,
+    /// The actor sent as `Loonfs-Actor` on commits, uploads, and namespace
+    /// creation and forks, unless
+    /// [`Client::with_actor`](crate::Client::with_actor) replaces it. A client
+    /// without an actor can read, delete namespaces, and manage snapshots, but
+    /// an operation that records an actor fails before it is sent.
+    #[serde(default)]
+    pub actor: Option<ActorId>,
     /// Optional timeout for one HTTP request, in milliseconds.
     ///
     /// When this value is not set, content transfers may continue as long as
@@ -131,6 +138,7 @@ mod tests {
         ClientConfig {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(SecretString::from),
+            actor: None,
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -186,6 +194,7 @@ mod tests {
             ClientConfig {
                 server_url: "ftp://example.com".to_owned(),
                 auth_token: None,
+                actor: None,
                 request_timeout_ms: None,
                 disable_transient_retry: false,
                 ca_cert_path: None,
@@ -209,6 +218,7 @@ mod tests {
         let config = ClientConfig {
             server_url: "https://example.com".to_owned(),
             auth_token: Some(raw_token.into()),
+            actor: None,
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -238,6 +248,7 @@ mod tests {
                 ClientConfig {
                     server_url: "https://example.com".to_owned(),
                     auth_token: None,
+                    actor: None,
                     request_timeout_ms: None,
                     disable_transient_retry: false,
                     ca_cert_path: Some(display.clone()),

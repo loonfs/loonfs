@@ -52,18 +52,13 @@ async fn a_client_trusting_the_server_certificate_round_trips_over_tls() {
     let namespace = namespace_id("over-tls");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("over-tls", "/note.txt").expect("parse path");
     harness
         .client
-        .put_file_with_options(
-            &target,
-            b"ciphertext in flight",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, b"ciphertext in flight", &replace_file_options())
         .await
         .expect("write file");
 
@@ -93,6 +88,7 @@ async fn a_client_without_the_certificate_authority_is_refused_at_the_handshake(
         ClientConfig {
             server_url: harness.server_url.clone(),
             auth_token: harness.auth_token.clone().map(Into::into),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: true,
             ca_cert_path: None,
@@ -117,10 +113,7 @@ async fn a_client_without_the_certificate_authority_is_refused_at_the_handshake(
     // The refused handshake was that connection's alone.
     harness
         .client
-        .create_namespace(
-            &namespace_id("still-serving"),
-            &loonfs_test_support::test_actor(),
-        )
+        .create_namespace(Some(&namespace_id("still-serving")))
         .await
         .expect("the server still serves trusted clients");
 
@@ -161,10 +154,7 @@ async fn a_plaintext_request_to_the_tls_port_loses_only_its_own_connection() {
 
     harness
         .client
-        .create_namespace(
-            &namespace_id("after-plaintext"),
-            &loonfs_test_support::test_actor(),
-        )
+        .create_namespace(Some(&namespace_id("after-plaintext")))
         .await
         .expect("the server still serves tls clients");
 
@@ -196,10 +186,7 @@ async fn a_connection_that_never_starts_its_handshake_is_closed_after_the_idle_t
 
     harness
         .client
-        .create_namespace(
-            &namespace_id("after-silent"),
-            &loonfs_test_support::test_actor(),
-        )
+        .create_namespace(Some(&namespace_id("after-silent")))
         .await
         .expect("the server still serves tls clients");
 

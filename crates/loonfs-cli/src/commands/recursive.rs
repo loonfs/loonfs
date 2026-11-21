@@ -468,7 +468,6 @@ pub(crate) async fn run_copy_tree(
                 .copy_path_with_options(
                     &from,
                     &to,
-                    context.actor(),
                     &loonfs_client::CopyOptions {
                         behavior,
                         commit: CommitOptions {
@@ -691,7 +690,7 @@ mod tests {
             .profile
             .target
             .client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace))
             .await
             .expect("create namespace");
         context
@@ -732,7 +731,6 @@ mod tests {
             .client
             .commit(
                 context.namespace(),
-                context.actor(),
                 &CommitRequest {
                     commit_id: CommitId::generate(),
                     message: None,
@@ -919,7 +917,7 @@ mod tests {
             .profile
             .target
             .client
-            .delete_path(&broken, context.actor())
+            .delete_path(&broken)
             .await
             .expect("delete child");
         let tally = transfer_tree(

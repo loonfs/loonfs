@@ -170,6 +170,11 @@ impl ResolvedTarget {
     pub(crate) fn scope_to_context(&mut self, context: Context) {
         self.client = self.client.with_context(context);
     }
+
+    /// Sets the actor that the client's mutations record.
+    pub(crate) fn act_as(&mut self, actor_id: ActorId) {
+        self.client = self.client.with_actor(actor_id);
+    }
 }
 
 impl ResolvedTarget {

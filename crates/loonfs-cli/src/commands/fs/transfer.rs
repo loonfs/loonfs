@@ -179,7 +179,6 @@ async fn run_copy(
         .copy_path_with_options(
             from,
             to,
-            context.actor(),
             &loonfs_client::CopyOptions {
                 behavior: transfer_behavior(args),
                 commit: commit_options(&args.commit),
@@ -206,7 +205,6 @@ async fn run_move(
         .move_path_with_options(
             from,
             to,
-            context.actor(),
             &loonfs_client::MoveOptions {
                 behavior: transfer_behavior(args),
                 commit: commit_options(&args.commit),

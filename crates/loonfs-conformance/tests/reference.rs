@@ -136,6 +136,7 @@ fn configured_client(server_url: &str, auth_token: Option<&str>) -> Client {
         ClientConfig {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(Into::into),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -205,15 +206,12 @@ struct UploadModesExpected {
 
 async fn run_upload_modes(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<UploadModesRequest, UploadModesExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let expected_modes = match harness.shape {
         StoreShape::S3 => &expected.s3,
         StoreShape::Gcs => &expected.gcs,
     };
-    let capabilities = harness
-        .client
-        .get_capabilities()
-        .await
-        .expect("capabilities");
+    let capabilities = client.get_capabilities().await.expect("capabilities");
     let mut advertised_modes = vec![UploadMode::ServiceProxied];
     for (feature, mode) in [
         (FEATURE_UPLOADS_DIRECT_PUT, UploadMode::DirectPut),
@@ -227,9 +225,8 @@ async fn run_upload_modes(harness: &Harness, case: &Case) {
         }
     }
     assert_eq!(&advertised_modes, expected_modes);
-    harness
-        .client
-        .create_namespace(&request.namespace_id, &request.actor_id)
+    client
+        .create_namespace(Some(&request.namespace_id))
         .await
         .expect("create upload modes namespace");
     for body in [
@@ -239,14 +236,7 @@ async fn run_upload_modes(harness: &Harness, case: &Case) {
             part_size_bytes: None,
         },
     ] {
-        let begin = harness
-            .client
-            .create_upload(
-                &request.namespace_id,
-                &loonfs_test_support::test_actor(),
-                &body,
-            )
-            .await;
+        let begin = client.create_upload(&request.namespace_id, &body).await;
         if !expected_modes.contains(&body.mode()) {
             assert_error_response(
                 &begin.expect_err("unsupported upload mode"),
@@ -272,13 +262,8 @@ async fn run_upload_modes(harness: &Harness, case: &Case) {
             }
             other => panic!("expected open upload, found {other:?}"),
         }
-        harness
-            .client
-            .abort_upload(
-                &request.namespace_id,
-                &loonfs_test_support::test_actor(),
-                &begin.upload_id,
-            )
+        client
+            .abort_upload(&request.namespace_id, &begin.upload_id)
             .await
             .expect("abort mode check upload");
     }
@@ -405,10 +390,10 @@ struct CommitReplayExpected {
 
 async fn run_commit_replay(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<CommitReplayRequest, CommitReplayExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create replay namespace");
     let commit = CommitRequest::single(
@@ -420,14 +405,12 @@ async fn run_commit_replay(harness: &Harness, case: &Case) {
         },
     )
     .preconditions(request.preconditions);
-    let first = harness
-        .client
-        .commit(&namespace, &request.actor_id, &commit)
+    let first = client
+        .commit(&namespace, &commit)
         .await
         .expect("first commit");
-    let replayed = harness
-        .client
-        .commit(&namespace, &request.actor_id, &commit)
+    let replayed = client
+        .commit(&namespace, &commit)
         .await
         .expect("replayed commit");
 
@@ -459,20 +442,15 @@ struct DirectPutExpected {
 
 async fn run_direct_put(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<DirectPutRequest, DirectPutExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create direct-put namespace");
     let payload = request.content_utf8.as_bytes();
-    let begin = harness
-        .client
-        .create_direct_put_upload_target(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            Some(payload.len() as u64),
-        )
+    let begin = client
+        .create_direct_put_upload_target(&namespace, Some(payload.len() as u64))
         .await
         .expect("begin direct PUT");
     assert_eq!(upload_mode_name(begin.mode), expected.mode);
@@ -491,16 +469,13 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     };
     harness.assert_checksum_algorithm(checksum_algorithm, expected.checksum_algorithm);
 
-    harness
-        .client
+    client
         .upload_via_presigned_url(&access, payload)
         .await
         .expect("transfer direct PUT");
-    let completed = harness
-        .client
+    let completed = client
         .complete_upload(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &upload_id,
             &CompleteUploadBody::DirectPut {
                 content: UploadContentClaim {
@@ -524,30 +499,20 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     assert!(content_ref.checksum.matches(payload));
 
     let spec = namespace_path(&request.namespace_id, &request.path);
-    let committed = harness
-        .client
+    let committed = client
         .commit_completed_upload(
             &spec,
             content_ref.clone(),
             content_token,
-            &request.actor_id,
             &put_options(&request.commit_id),
             None,
         )
         .await
         .expect("commit direct PUT");
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
-    let stat = harness
-        .client
-        .stat(&spec)
-        .await
-        .expect("stat direct PUT file");
+    let stat = client.stat(&spec).await.expect("stat direct PUT file");
     assert_eq!(stat.content_ref(), Some(&content_ref));
-    let readback = harness
-        .client
-        .read_file(&spec)
-        .await
-        .expect("read direct PUT file");
+    let readback = client.read_file(&spec).await.expect("read direct PUT file");
     assert_eq!(readback, payload);
 }
 
@@ -582,21 +547,19 @@ struct MultipartExpected {
 
 async fn run_multipart(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<MultipartRequest, MultipartExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create multipart namespace");
     let payload = byte_pattern(
         request.content_pattern.length,
         request.content_pattern.modulus,
     );
-    let begin = harness
-        .client
+    let begin = client
         .create_direct_multipart_upload_target_with_options(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &DirectMultipartUploadOptions {
                 part_size_bytes: Some(request.part_size_bytes),
             },
@@ -632,14 +595,8 @@ async fn run_multipart(harness: &Harness, case: &Case) {
             checksum: Checksum::compute(checksum_algorithm, chunk),
         })
         .collect::<Vec<_>>();
-    let signed = harness
-        .client
-        .sign_upload_parts(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &upload_id,
-            claims.clone(),
-        )
+    let signed = client
+        .sign_upload_parts(&namespace, &upload_id, claims.clone())
         .await
         .expect("sign multipart parts");
     assert_eq!(signed.parts.len(), expected.part_count);
@@ -647,8 +604,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     for signed_part in &signed.parts {
         let index = signed_part.part_number as usize - 1;
         completed_parts.push(
-            harness
-                .client
+            client
                 .upload_part_via_presigned_url(
                     signed_part.part_number,
                     &signed_part.transfer,
@@ -668,26 +624,14 @@ async fn run_multipart(harness: &Harness, case: &Case) {
         },
         parts: completed_parts,
     };
-    let first = harness
-        .client
-        .complete_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &upload_id,
-            &completion_request,
-        )
+    let first = client
+        .complete_upload(&namespace, &upload_id, &completion_request)
         .await
         .expect("complete multipart upload");
     let first_content_ref = first.content_ref().expect("multipart content ref").clone();
     let first_completed_at_ms = completed_at_ms(&first.status);
-    let replayed = harness
-        .client
-        .complete_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &upload_id,
-            &completion_request,
-        )
+    let replayed = client
+        .complete_upload(&namespace, &upload_id, &completion_request)
         .await
         .expect("replay multipart completion");
     assert_eq!(replayed.namespace_id, first.namespace_id);
@@ -700,24 +644,18 @@ async fn run_multipart(harness: &Harness, case: &Case) {
     assert!(first_content_ref.checksum.matches(&payload));
 
     let spec = namespace_path(&request.namespace_id, &request.path);
-    let committed = harness
-        .client
+    let committed = client
         .commit_completed_upload(
             &spec,
             first_content_ref,
             replayed.content_token().cloned(),
-            &request.actor_id,
             &put_options(&request.commit_id),
             None,
         )
         .await
         .expect("commit multipart upload");
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
-    let readback = harness
-        .client
-        .read_file(&spec)
-        .await
-        .expect("read multipart file");
+    let readback = client.read_file(&spec).await.expect("read multipart file");
     assert_eq!(readback, payload);
 }
 
@@ -747,19 +685,14 @@ struct AbortExpected {
 
 async fn run_abort(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<AbortRequest, AbortExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create abort namespace");
-    let begin = harness
-        .client
-        .create_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &CreateUploadBody::ServiceProxied {},
-        )
+    let begin = client
+        .create_upload(&namespace, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin abortable upload");
     assert_eq!(upload_mode_name(begin.mode), expected.mode);
@@ -767,22 +700,12 @@ async fn run_abort(harness: &Harness, case: &Case) {
         serde_json::to_value(&begin).expect("session JSON")["status"],
         expected.begin_status
     );
-    let first = harness
-        .client
-        .abort_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &begin.upload_id,
-        )
+    let first = client
+        .abort_upload(&namespace, &begin.upload_id)
         .await
         .expect("abort upload");
-    let replayed = harness
-        .client
-        .abort_upload(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &begin.upload_id,
-        )
+    let replayed = client
+        .abort_upload(&namespace, &begin.upload_id)
         .await
         .expect("replay abort");
     assert_eq!(upload_status_name(&first.status), expected.status);
@@ -836,31 +759,24 @@ struct DownloadExpected {
 
 async fn run_download(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<DownloadRequest, DownloadExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create download namespace");
     let spec = namespace_path(&request.namespace_id, &request.path);
-    let committed = harness
-        .client
+    let committed = client
         .put_file_with_options(
             &spec,
             request.content_utf8.as_bytes(),
-            &request.actor_id,
             &put_options(&request.commit_id),
         )
         .await
         .expect("put download file");
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
-    let stat = harness
-        .client
-        .stat(&spec)
-        .await
-        .expect("stat download file");
-    let grant = harness
-        .client
+    let stat = client.stat(&spec).await.expect("stat download file");
+    let grant = client
         .create_download(&spec)
         .await
         .expect("begin direct download");
@@ -871,7 +787,7 @@ async fn run_download(harness: &Harness, case: &Case) {
         expected.checksum_algorithm,
     );
 
-    let bytes = stream_grant(&harness.client, &grant).await;
+    let bytes = stream_grant(&client, &grant).await;
     assert_eq!(bytes.len() as u64, grant.content_ref.size_bytes);
     assert!(grant.content_ref.checksum.matches(&bytes));
     assert_eq!(bytes, request.content_utf8.as_bytes());
@@ -960,10 +876,10 @@ struct ReadConsistencyExpected {
 
 async fn run_read_consistency(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<ReadConsistencyRequest, ReadConsistencyExpected>(case);
-    let client = &harness.client;
+    let client = &harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
     client
-        .create_namespace(&namespace, &request.actor_id)
+        .create_namespace(Some(&namespace))
         .await
         .expect("create read consistency namespace");
     let spec = namespace_path(&request.namespace_id, &request.path);
@@ -976,7 +892,6 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
             .put_file_with_options(
                 path,
                 request.content_utf8.as_bytes(),
-                &request.actor_id,
                 &put_options(commit_id),
             )
             .await
@@ -985,7 +900,6 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
     client
         .delete_path_with_options(
             &deleted,
-            &request.actor_id,
             &DeleteOptions {
                 commit: commit_options(&request.commit_ids.delete),
                 ..DeleteOptions::default()
@@ -1110,10 +1024,9 @@ fn signed_range(access: &ObjectTransfer) -> Option<&str> {
 
 async fn run_append(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<AppendRequest, AppendExpected>(case);
-    let client = &harness.client;
-    let actor = &request.actor_id;
+    let client = &harness.client.with_actor(request.actor_id.clone());
     client
-        .create_namespace(&namespace_id(&request.namespace_id), actor)
+        .create_namespace(Some(&namespace_id(&request.namespace_id)))
         .await
         .expect("create append namespace");
     let spec = namespace_path(&request.namespace_id, &request.path);
@@ -1122,17 +1035,12 @@ async fn run_append(harness: &Harness, case: &Case) {
     let appended = request.appended_utf8.as_bytes();
 
     let put = client
-        .put_file_with_options(&spec, content, actor, &put_options(&request.commit_ids.put))
+        .put_file_with_options(&spec, content, &put_options(&request.commit_ids.put))
         .await
         .expect("put the file to append to");
     assert_eq!(put.committed_seq.0, expected.put_committed_seq);
     let append = client
-        .append_file_with_options(
-            &spec,
-            appended,
-            actor,
-            &append_options(&request.commit_ids.append),
-        )
+        .append_file_with_options(&spec, appended, &append_options(&request.commit_ids.append))
         .await
         .expect("append to the file");
     assert_eq!(append.committed_seq.0, expected.append_committed_seq);
@@ -1217,7 +1125,6 @@ async fn run_append(harness: &Harness, case: &Case) {
         .append_file_with_options(
             &spec,
             &[],
-            actor,
             &append_options(&request.commit_ids.empty_append),
         )
         .await
@@ -1229,7 +1136,6 @@ async fn run_append(harness: &Harness, case: &Case) {
         .put_file_with_options(
             &empty_spec,
             &[],
-            actor,
             &put_options(&request.commit_ids.empty_put),
         )
         .await
@@ -1247,7 +1153,6 @@ async fn run_append(harness: &Harness, case: &Case) {
         .append_file_with_options(
             &empty_spec,
             appended,
-            actor,
             &append_options(&request.commit_ids.append_to_empty),
         )
         .await
@@ -1315,16 +1220,15 @@ struct ChildrenByInodeExpected {
 
 async fn run_children_by_inode(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<ChildrenByInodeRequest, ChildrenByInodeExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create children-by-inode namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
-    harness
-        .client
-        .create_directory(&directory, &request.actor_id)
+    client
+        .create_directory(&directory)
         .await
         .expect("create children-by-inode directory");
     for name in request.entry_names.iter().rev() {
@@ -1332,15 +1236,13 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
             &request.namespace_id,
             &format!("{}/{}", request.directory, name),
         );
-        harness
-            .client
-            .create_directory(&path, &request.actor_id)
+        client
+            .create_directory(&path)
             .await
             .expect("create child entry");
     }
 
-    let parent_inode_id = harness
-        .client
+    let parent_inode_id = client
         .stat(&directory)
         .await
         .expect("stat children-by-inode directory")
@@ -1351,8 +1253,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
     let mut saved_cursor = None;
     let mut resume_offset = None;
     loop {
-        let page = harness
-            .client
+        let page = client
             .list_by_inode(&namespace, parent_inode_id)
             .page_limit(page_limit(request.page_size))
             .cursor(cursor.clone())
@@ -1381,14 +1282,12 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
                 commit: commit_options(&request.rename_commit_id),
                 ..Default::default()
             };
-            let renamed = harness
-                .client
-                .move_path_with_options(&directory, &renamed_directory, &request.actor_id, &options)
+            let renamed = client
+                .move_path_with_options(&directory, &renamed_directory, &options)
                 .await
                 .expect("rename children-by-inode directory");
             assert_eq!(renamed.committed_seq.0, expected.renamed_head_seq);
-            let renamed_inode_id = harness
-                .client
+            let renamed_inode_id = client
                 .stat(&renamed_directory)
                 .await
                 .expect("stat renamed children-by-inode directory")
@@ -1404,8 +1303,7 @@ async fn run_children_by_inode(harness: &Harness, case: &Case) {
 
     let saved_cursor = saved_cursor.expect("saved mid-walk cursor");
     let resume_offset = resume_offset.expect("saved mid-walk offset");
-    let mut pager = harness
-        .client
+    let mut pager = client
         .list_by_inode(&namespace, parent_inode_id)
         .page_limit(page_limit(request.page_size))
         .cursor(Some(saved_cursor));
@@ -1451,6 +1349,7 @@ struct InodeMutationsExpected {
 
 async fn run_inode_mutations(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<InodeMutationsRequest, InodeMutationsExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
     let child_path = |name: &str| {
         namespace_path(
@@ -1458,44 +1357,36 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             &format!("{}/{name}", request.directory),
         )
     };
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create inode-mutations namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
-    harness
-        .client
-        .create_directory(&directory, &request.actor_id)
+    client
+        .create_directory(&directory)
         .await
         .expect("create inode-mutations directory");
-    harness
-        .client
-        .create_directory(&child_path(&request.path_directory_name), &request.actor_id)
+    client
+        .create_directory(&child_path(&request.path_directory_name))
         .await
         .expect("create path-addressed directory");
-    harness
-        .client
+    client
         .put_file_with_options(
             &child_path(&request.path_file_name),
             request.content_utf8.as_bytes(),
-            &request.actor_id,
             &put_options("conf-inode-mutations-path-file"),
         )
         .await
         .expect("put path-addressed file");
 
-    let parent_inode_id = harness
-        .client
+    let parent_inode_id = client
         .stat(&directory)
         .await
         .expect("stat inode-mutations directory")
         .inode_id;
-    harness
-        .client
+    client
         .commit(
             &namespace,
-            &request.actor_id,
             &CommitRequest::single(
                 commit_id("conf-inode-mutations-inode-directory"),
                 None,
@@ -1509,11 +1400,9 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .expect("create directory by inode");
     let (content_ref, content_tokens) =
         stage_content(harness, &namespace, request.content_utf8.as_bytes()).await;
-    harness
-        .client
+    client
         .commit(
             &namespace,
-            &request.actor_id,
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-inode-file"),
@@ -1529,8 +1418,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .await
         .expect("put file by inode");
 
-    let listing = harness
-        .client
+    let listing = client
         .list(&directory)
         .page()
         .await
@@ -1576,11 +1464,9 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
 
     let (content_ref, content_tokens) =
         stage_content(harness, &namespace, request.revised_content_utf8.as_bytes()).await;
-    harness
-        .client
+    client
         .commit(
             &namespace,
-            &request.actor_id,
             &CommitRequest {
                 preconditions: Vec::new(),
                 commit_id: commit_id("conf-inode-mutations-revision"),
@@ -1596,18 +1482,13 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .await
         .expect("put file revision by inode");
     let file_path = child_path(&request.inode_file_name);
-    let revised = harness
-        .client
-        .stat(&file_path)
-        .await
-        .expect("stat revised file");
+    let revised = client.stat(&file_path).await.expect("stat revised file");
     assert_eq!(
         revised.revision_no().expect("revised revision").0,
         expected.revised_revision_no
     );
     assert_eq!(
-        harness
-            .client
+        client
             .read_file(&file_path)
             .await
             .expect("read revised file"),
@@ -1620,14 +1501,8 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         commit: commit_options("conf-inode-mutations-rename"),
         ..Default::default()
     };
-    harness
-        .client
-        .move_path_with_options(
-            &file_path,
-            &renamed_file,
-            &request.actor_id,
-            &rename_options,
-        )
+    client
+        .move_path_with_options(&file_path, &renamed_file, &rename_options)
         .await
         .expect("rename file by path");
 
@@ -1648,11 +1523,9 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
             },
         )
     };
-    let stale = harness
-        .client
+    let stale = client
         .commit(
             &namespace,
-            &request.actor_id,
             &move_by_inode("conf-inode-mutations-stale-move", stale_version),
         )
         .await
@@ -1682,25 +1555,21 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .expect("send malformed binding version");
     assert_raw_status_error(malformed, &expected.malformed_binding_version).await;
 
-    let fresh_version = harness
-        .client
+    let fresh_version = client
         .stat(&renamed_file)
         .await
         .expect("stat renamed file")
         .binding_version
         .expect("renamed binding version");
-    let moved = harness
-        .client
+    let moved = client
         .commit(
             &namespace,
-            &request.actor_id,
             &move_by_inode("conf-inode-mutations-move", fresh_version.clone()),
         )
         .await
         .expect("move by inode");
     assert_eq!(moved.committed_seq.0, expected.moved_committed_seq);
-    let moved_entry = harness
-        .client
+    let moved_entry = client
         .stat(&namespace_path(
             &request.namespace_id,
             &format!(
@@ -1714,8 +1583,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
     let moved_version = moved_entry.binding_version.expect("moved binding version");
     assert_ne!(moved_version, fresh_version);
 
-    let feed = harness
-        .client
+    let feed = client
         .list_changes(&namespace, CommitSeq(expected.moved_committed_seq - 1))
         .page_limit(page_limit(1))
         .page()
@@ -1734,11 +1602,9 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         other => panic!("expected one moved event, found {other:?}"),
     }
 
-    let deleted = harness
-        .client
+    let deleted = client
         .commit(
             &namespace,
-            &request.actor_id,
             &CommitRequest::single(
                 commit_id("conf-inode-mutations-delete"),
                 None,
@@ -1785,42 +1651,36 @@ struct InodeAddressingExpected {
 
 async fn run_inode_addressing(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<InodeAddressingRequest, InodeAddressingExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    let actor = &request.actor_id;
     let child_path = |name: &str| {
         namespace_path(
             &request.namespace_id,
             &format!("{}/{name}", request.directory),
         )
     };
-    harness
-        .client
-        .create_namespace(&namespace, actor)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create inode-addressing namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
-    harness
-        .client
-        .create_directory(&directory, actor)
+    client
+        .create_directory(&directory)
         .await
         .expect("create inode-addressing directory");
     let source_path = child_path(&request.source_file_name);
-    harness
-        .client
+    client
         .put_file_with_options(
             &source_path,
             request.first_content_utf8.as_bytes(),
-            actor,
             &put_options("conf-inode-addressing-first"),
         )
         .await
         .expect("put first revision");
-    harness
-        .client
+    client
         .put_file_with_options(
             &source_path,
             request.second_content_utf8.as_bytes(),
-            actor,
             &PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit: commit_options("conf-inode-addressing-second"),
@@ -1829,26 +1689,19 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         )
         .await
         .expect("put second revision");
-    let parent_inode_id = harness
-        .client
+    let parent_inode_id = client
         .stat(&directory)
         .await
         .expect("stat inode-addressing directory")
         .inode_id;
-    let source = harness
-        .client
-        .stat(&source_path)
-        .await
-        .expect("stat source");
+    let source = client.stat(&source_path).await.expect("stat source");
     let source_inode_id = source.inode_id;
     let stale_version = source.binding_version.expect("source binding version");
     let renamed_path = child_path(&request.renamed_file_name);
-    harness
-        .client
+    client
         .move_path_with_options(
             &source_path,
             &renamed_path,
-            actor,
             &MoveOptions {
                 commit: commit_options("conf-inode-addressing-rename"),
                 ..Default::default()
@@ -1856,8 +1709,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         )
         .await
         .expect("rename source by path");
-    let renamed = harness
-        .client
+    let renamed = client
         .stat(&renamed_path)
         .await
         .expect("stat renamed source");
@@ -1867,15 +1719,13 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .expect("renamed binding version");
 
     assert_eq!(
-        harness
-            .client
+        client
             .read_file_by_inode(&namespace, source_inode_id)
             .await
             .expect("read current content by inode"),
         request.second_content_utf8.as_bytes()
     );
-    let grant = harness
-        .client
+    let grant = client
         .create_download_by_inode(&namespace, source_inode_id)
         .await
         .expect("grant current content by inode");
@@ -1904,11 +1754,9 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         parent_inode_id,
         display_name: display_name(name),
     };
-    let stale = harness
-        .client
+    let stale = client
         .commit(
             &namespace,
-            actor,
             &copy(
                 "conf-inode-addressing-stale-copy",
                 vec![binding(stale_version)],
@@ -1917,11 +1765,9 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .await
         .expect_err("a stale binding precondition must fail");
     assert_error_response(&stale, &expected.stale_binding_version);
-    let occupied = harness
-        .client
+    let occupied = client
         .commit(
             &namespace,
-            actor,
             &copy(
                 "conf-inode-addressing-occupied-copy",
                 vec![
@@ -1933,11 +1779,9 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .await
         .expect_err("a bound name must fail its absence precondition");
     assert_error_response(&occupied, &expected.occupied_name);
-    let copied = harness
-        .client
+    let copied = client
         .commit(
             &namespace,
-            actor,
             &copy(
                 "conf-inode-addressing-copy",
                 vec![binding(fresh_version), absence(&request.copy_file_name)],
@@ -1947,30 +1791,23 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .expect("copy by inode");
     assert_eq!(copied.committed_seq.0, expected.copied_committed_seq);
     let copy_path = child_path(&request.copy_file_name);
-    let copy_entry = harness.client.stat(&copy_path).await.expect("stat copy");
+    let copy_entry = client.stat(&copy_path).await.expect("stat copy");
     assert_ne!(copy_entry.inode_id, source_inode_id);
     assert_eq!(
-        harness
-            .client
-            .read_file(&copy_path)
-            .await
-            .expect("read copy"),
+        client.read_file(&copy_path).await.expect("read copy"),
         request.second_content_utf8.as_bytes()
     );
 
-    harness
-        .client
+    client
         .restore_revision_by_inode_with_options(
             &namespace,
             source_inode_id,
             RevisionNo(1),
-            actor,
             &commit_options("conf-inode-addressing-restore"),
         )
         .await
         .expect("restore revision by inode");
-    let restored = harness
-        .client
+    let restored = client
         .stat(&renamed_path)
         .await
         .expect("stat restored source");
@@ -1979,8 +1816,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         expected.restored_revision_no
     );
     assert_eq!(
-        harness
-            .client
+        client
             .read_file_by_inode(&namespace, source_inode_id)
             .await
             .expect("read restored content by inode"),
@@ -1989,12 +1825,10 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
 
     let attribute_key = AttributeKey::parse(&request.attribute_key).expect("attribute key");
     let attribute_value = AttributeValue::parse(&request.attribute_value).expect("attribute value");
-    harness
-        .client
+    client
         .update_attributes_by_inode_with_options(
             &namespace,
             copy_entry.inode_id,
-            actor,
             AttributeChanges {
                 set: std::collections::BTreeMap::from([(
                     attribute_key.clone(),
@@ -2009,8 +1843,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         )
         .await
         .expect("update attributes by inode");
-    let labeled = harness
-        .client
+    let labeled = client
         .stat_with_options(
             &copy_path,
             &loonfs_client::StatOptions {
@@ -2031,11 +1864,9 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         Some(&attribute_value)
     );
 
-    let deletion = harness
-        .client
+    let deletion = client
         .delete_path_with_options(
             &copy_path,
-            actor,
             &DeleteOptions {
                 commit: commit_options("conf-inode-addressing-delete-copy"),
                 ..Default::default()
@@ -2043,13 +1874,11 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         )
         .await
         .expect("delete copy");
-    harness
-        .client
+    client
         .restore_deleted_with_options(
             &namespace,
             copy_entry.inode_id,
             deletion.committed_seq,
-            actor,
             &RestoreDeletedOptions {
                 commit: commit_options("conf-inode-addressing-restore-deleted"),
                 destination: RestoreDeletedDestination::Name {
@@ -2061,8 +1890,7 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .await
         .expect("restore under a parent inode");
     assert_eq!(
-        harness
-            .client
+        client
             .stat(&child_path(&request.restored_file_name))
             .await
             .expect("stat restored copy")
@@ -2070,11 +1898,9 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         copy_entry.inode_id
     );
 
-    harness
-        .client
+    client
         .delete_path_with_options(
             &renamed_path,
-            actor,
             &DeleteOptions {
                 commit: commit_options("conf-inode-addressing-delete-source"),
                 ..Default::default()
@@ -2082,15 +1908,13 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         )
         .await
         .expect("delete source");
-    let deleted = harness
-        .client
+    let deleted = client
         .read_file_by_inode(&namespace, source_inode_id)
         .await
         .expect_err("a deleted inode has no current content");
     assert_error_response(&deleted, &expected.deleted_content);
 
-    let listing = harness
-        .client
+    let listing = client
         .list(&directory)
         .page()
         .await
@@ -2137,6 +1961,7 @@ struct SnapshotsExpected {
 
 async fn run_snapshots(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<SnapshotsRequest, SnapshotsExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
     let child_path = |name: &str| {
         namespace_path(
@@ -2144,9 +1969,8 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
             &format!("{}/{name}", request.directory),
         )
     };
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create snapshots namespace");
 
@@ -2155,30 +1979,25 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         commit: commit_options("conf-snapshots-create-directory"),
         ..Default::default()
     };
-    harness
-        .client
-        .create_directory_with_options(&directory, &request.actor_id, &directory_options)
+    client
+        .create_directory_with_options(&directory, &directory_options)
         .await
         .expect("create snapshots directory");
 
     let replaced_path = child_path(&request.replaced_file_name);
-    harness
-        .client
+    client
         .put_file_with_options(
             &replaced_path,
             request.captured_content_utf8.as_bytes(),
-            &request.actor_id,
             &put_options("conf-snapshots-create-replaced"),
         )
         .await
         .expect("create replaced snapshot file");
     let deleted_path = child_path(&request.deleted_file_name);
-    harness
-        .client
+    client
         .put_file_with_options(
             &deleted_path,
             request.deleted_content_utf8.as_bytes(),
-            &request.actor_id,
             &put_options("conf-snapshots-create-deleted"),
         )
         .await
@@ -2212,23 +2031,19 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
 
     let mut replace_options = put_options("conf-snapshots-replace-file");
     replace_options.behavior = DestinationBehavior::Replace;
-    harness
-        .client
+    client
         .put_file_with_options(
             &replaced_path,
             request.current_content_utf8.as_bytes(),
-            &request.actor_id,
             &replace_options,
         )
         .await
         .expect("replace snapshot file");
     let added_path = child_path(&request.added_file_name);
-    harness
-        .client
+    client
         .put_file_with_options(
             &added_path,
             request.added_content_utf8.as_bytes(),
-            &request.actor_id,
             &put_options("conf-snapshots-add-file"),
         )
         .await
@@ -2237,9 +2052,8 @@ async fn run_snapshots(harness: &Harness, case: &Case) {
         commit: commit_options("conf-snapshots-delete-file"),
         ..Default::default()
     };
-    harness
-        .client
-        .delete_path_with_options(&deleted_path, &request.actor_id, &delete_options)
+    client
+        .delete_path_with_options(&deleted_path, &delete_options)
         .await
         .expect("delete file after snapshot");
 
@@ -2597,11 +2411,7 @@ async fn stage_content(
 ) -> (ContentRef, Vec<ContentToken>) {
     let begin = harness
         .client
-        .create_upload(
-            namespace_id,
-            &loonfs_test_support::test_actor(),
-            &CreateUploadBody::ServiceProxied {},
-        )
+        .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
         .await
         .expect("begin service-proxied upload");
     assert_eq!(begin.mode, UploadMode::ServiceProxied);
@@ -2609,19 +2419,13 @@ async fn stage_content(
     let upload_id = begin.upload_id;
     harness
         .client
-        .put_upload_content(
-            namespace_id,
-            &loonfs_test_support::test_actor(),
-            &upload_id,
-            bytes,
-        )
+        .put_upload_content(namespace_id, &upload_id, bytes)
         .await
         .expect("stage upload content");
     let completed = harness
         .client
         .complete_upload(
             namespace_id,
-            &loonfs_test_support::test_actor(),
             &upload_id,
             &CompleteUploadBody::ServiceProxied {},
         )
@@ -2638,16 +2442,15 @@ async fn stage_content(
 
 async fn run_pagination(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<PaginationRequest, PaginationExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create pagination namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
-    harness
-        .client
-        .create_directory(&directory, &request.actor_id)
+    client
+        .create_directory(&directory)
         .await
         .expect("create pagination directory");
     for name in &request.entry_names {
@@ -2655,9 +2458,8 @@ async fn run_pagination(harness: &Harness, case: &Case) {
             &request.namespace_id,
             &format!("{}/{}", request.directory, name),
         );
-        harness
-            .client
-            .create_directory(&path, &request.actor_id)
+        client
+            .create_directory(&path)
             .await
             .expect("create pagination entry");
     }
@@ -2668,8 +2470,7 @@ async fn run_pagination(harness: &Harness, case: &Case) {
     let mut saved_cursor = None;
     let mut resume_offset = None;
     loop {
-        let page = harness
-            .client
+        let page = client
             .list(&directory)
             .page_limit(page_limit(request.page_size))
             .cursor(cursor.clone())
@@ -2697,8 +2498,7 @@ async fn run_pagination(harness: &Harness, case: &Case) {
     let mut resumed = Vec::new();
     let mut cursor = Some(saved_cursor);
     loop {
-        let page = harness
-            .client
+        let page = client
             .list(&directory)
             .page_limit(page_limit(request.page_size))
             .cursor(cursor.clone())
@@ -2734,10 +2534,10 @@ struct ChangesExpected {
 
 async fn run_changes(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<ChangesRequest, ChangesExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create changes namespace");
     let commit = CommitRequest::single(
@@ -2748,14 +2548,12 @@ async fn run_changes(harness: &Harness, case: &Case) {
             parents: false,
         },
     );
-    let committed = harness
-        .client
-        .commit(&namespace, &request.actor_id, &commit)
+    let committed = client
+        .commit(&namespace, &commit)
         .await
         .expect("commit change");
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
-    let feed = harness
-        .client
+    let feed = client
         .list_changes(&namespace, CommitSeq(request.after_seq))
         .page()
         .await
@@ -2982,10 +2780,10 @@ struct EndToEndExpected {
 
 async fn run_end_to_end(harness: &Harness, case: &Case) {
     let (request, expected) = parse_values::<EndToEndRequest, EndToEndExpected>(case);
+    let client = harness.client.with_actor(request.actor_id.clone());
     let namespace = namespace_id(&request.namespace_id);
-    harness
-        .client
-        .create_namespace(&namespace, &request.actor_id)
+    client
+        .create_namespace(Some(&namespace))
         .await
         .expect("create end-to-end namespace");
     let directory = namespace_path(&request.namespace_id, &request.directory);
@@ -2993,35 +2791,30 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         commit: commit_options(&request.commit_ids.mkdir),
         ..Default::default()
     };
-    let mkdir = harness
-        .client
-        .create_directory_with_options(&directory, &request.actor_id, &mkdir_options)
+    let mkdir = client
+        .create_directory_with_options(&directory, &mkdir_options)
         .await
         .expect("create end-to-end directory");
     assert_eq!(mkdir.committed_seq.0, expected.mkdir_committed_seq);
 
     let upload_path = namespace_path(&request.namespace_id, &request.upload_path);
-    let upload = harness
-        .client
+    let upload = client
         .put_file_with_options(
             &upload_path,
             request.content_utf8.as_bytes(),
-            &request.actor_id,
             &put_options(&request.commit_ids.upload),
         )
         .await
         .expect("upload end-to-end file");
     assert_eq!(upload.committed_seq.0, expected.upload_committed_seq);
-    let stat = harness
-        .client
+    let stat = client
         .stat(&upload_path)
         .await
         .expect("stat end-to-end file");
     assert_eq!(stat.size_bytes(), Some(expected.size_bytes));
     let uploaded_inode = stat.inode_id;
 
-    let initial_listing = harness
-        .client
+    let initial_listing = client
         .list(&directory)
         .page()
         .await
@@ -3031,12 +2824,11 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .iter()
         .any(|entry| entry.path.as_ref() == request.upload_path));
 
-    let grant = harness
-        .client
+    let grant = client
         .create_download(&upload_path)
         .await
         .expect("begin end-to-end download");
-    let streamed = stream_grant(&harness.client, &grant).await;
+    let streamed = stream_grant(&client, &grant).await;
     assert_eq!(streamed, request.content_utf8.as_bytes());
 
     let moved_path = namespace_path(&request.namespace_id, &request.moved_path);
@@ -3044,14 +2836,12 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         commit: commit_options(&request.commit_ids.r#move),
         ..Default::default()
     };
-    let moved = harness
-        .client
-        .move_path_with_options(&upload_path, &moved_path, &request.actor_id, &move_options)
+    let moved = client
+        .move_path_with_options(&upload_path, &moved_path, &move_options)
         .await
         .expect("move end-to-end file");
     assert_eq!(moved.committed_seq.0, expected.move_committed_seq);
-    let moved_listing = harness
-        .client
+    let moved_listing = client
         .list(&directory)
         .page()
         .await
@@ -3061,8 +2851,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .iter()
         .any(|entry| entry.path.as_ref() == request.moved_path));
 
-    let revisions = harness
-        .client
+    let revisions = client
         .list_file_revisions(&moved_path)
         .page()
         .await
@@ -3073,8 +2862,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         request.commit_ids.upload
     );
 
-    let changes = harness
-        .client
+    let changes = client
         .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
@@ -3084,15 +2872,13 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         commit: commit_options(&request.commit_ids.remove),
         ..Default::default()
     };
-    let removed = harness
-        .client
-        .delete_path_with_options(&moved_path, &request.actor_id, &delete_options)
+    let removed = client
+        .delete_path_with_options(&moved_path, &delete_options)
         .await
         .expect("remove end-to-end file");
     assert_eq!(removed.committed_seq.0, expected.remove_committed_seq);
 
-    let changes = harness
-        .client
+    let changes = client
         .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
@@ -3117,8 +2903,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
         .iter()
         .all(|change| change.committed_by == request.actor_id));
 
-    let trash = harness
-        .client
+    let trash = client
         .list_trash(&namespace)
         .page()
         .await
