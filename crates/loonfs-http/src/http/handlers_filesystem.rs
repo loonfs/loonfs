@@ -20,7 +20,7 @@ use loonfs_types::options::CommitSplitting;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    Commit, CommitRequest, DiffResponse, FilesystemOperation, ListChangesResponse,
+    Commit, CommitRequest, FilesystemOperation, ListChangesResponse, ListDiffResponse,
     ListFileRevisionsResponse, ListTrashResponse, RevisionNo,
 };
 use std::sync::Arc;
@@ -763,7 +763,7 @@ pub(super) async fn list_changes(
             DiffQuery
         ),
         responses(
-            (status = 200, description = "A page of the diff", body = DiffResponse),
+            (status = 200, description = "A page of the diff", body = ListDiffResponse),
             (status = 400, description = "Invalid sequence, path, limit, or consistency, a `to_seq` above the head that the request reads, or an `after_seq` outside `from_seq` through `to_seq`", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
@@ -779,7 +779,7 @@ pub(super) async fn list_diff(
     ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DiffQuery>,
-) -> Result<Json<DiffResponse>, ApiResponseError> {
+) -> Result<Json<ListDiffResponse>, ApiResponseError> {
     let runtime = state.runtime_for(context);
     let from_seq = required_query_param(query.from_seq, "from_seq")?;
     let options = DiffOptions {

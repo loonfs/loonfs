@@ -8,7 +8,7 @@ use axum::Json;
 use loonfs_objectstore::probe::run_store_contract_probe;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
-use loonfs_types::{StoreProbeRequest, StoreProbeResponse};
+use loonfs_types::{ProbeStoreRequest, ProbeStoreResponse};
 use std::sync::Arc;
 
 #[cfg_attr(
@@ -26,9 +26,9 @@ use std::sync::Arc;
         tag = "maintenance",
         summary = "Probe the store contract",
         description = "Checks that the configured object store supports the create-if-absent, compare-and-swap, visibility, listing, and ranged-read behavior that LoonFS depends on, and reports the result of each check. The probe runs only when a client calls this route, because it writes and deletes objects. It writes them all under a scratch prefix that isn't a durable object family, and its last check deletes them and confirms that the prefix is empty. If the store fails a check, the response is still 200, and it reports that check as `failed`. If the store declares that it doesn't support an optional capability, the response reports that check as `unsupported`, which isn't a failure. The probe doesn't control whether the deployment can serve presigned direct uploads. The endpoint allowlist controls that, because the probe tests only the server's own requests and never a presigned capability issued to a client.",
-        request_body(content = Option<StoreProbeRequest>, description = "The probe options. Omit the body or send `{}` to use the defaults."),
+        request_body(content = Option<ProbeStoreRequest>, description = "The probe options. Omit the body or send `{}` to use the defaults."),
         responses(
-            (status = 200, description = "The probe completed, and the body reports each check's outcome", body = StoreProbeResponse),
+            (status = 200, description = "The probe completed, and the body reports each check's outcome", body = ProbeStoreResponse),
             (status = 400, description = "Malformed request body", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
@@ -39,9 +39,9 @@ use std::sync::Arc;
 pub(super) async fn probe_store(
     State(state): State<Arc<HttpState>>,
     AppQuery(_): AppQuery<NoQuery>,
-    OptionalAppJson(request): OptionalAppJson<StoreProbeRequest>,
-) -> Result<Json<StoreProbeResponse>, ApiResponseError> {
-    let StoreProbeRequest {} = request.unwrap_or_default();
+    OptionalAppJson(request): OptionalAppJson<ProbeStoreRequest>,
+) -> Result<Json<ProbeStoreResponse>, ApiResponseError> {
+    let ProbeStoreRequest {} = request.unwrap_or_default();
     // The run id scopes the objects this run writes, so two probes against
     // one store never collide, and a provider's own log names the run.
     let probe_id = loonfs_types::ProbeId::generate();

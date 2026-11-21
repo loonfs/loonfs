@@ -12,7 +12,7 @@ use loonfs_types::{
     RunPoolMaintenanceJobResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
     SnapshotId, SnapshotRecord,
 };
-use loonfs_types::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
+use loonfs_types::{GrepIndex, ProbeStoreRequest, ProbeStoreResponse};
 use std::num::NonZeroU64;
 
 /// A pager over existing snapshots.
@@ -248,7 +248,7 @@ impl Client {
     /// check reported failed rather than with an error: the probe ran, and
     /// the result is that the store is wrong.
     /// Retrying this request starts a distinct attempt.
-    pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
+    pub async fn probe_store(&self, request: &ProbeStoreRequest) -> Result<ProbeStoreResponse> {
         let url = format!("{}/v0/maintenance/store/probe", self.base_url);
         self.send_json(self.request(operations::PROBE_STORE, &url).json(request)?)
             .await

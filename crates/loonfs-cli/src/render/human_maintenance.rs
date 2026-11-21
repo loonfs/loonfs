@@ -8,8 +8,8 @@ use loonfs_merge::{
 use loonfs_types::{
     CommitSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
     ListNamespacesResponse, ListSnapshotRecordsResponse, ListSnapshotsResponse,
-    MetadataMaintenanceOutcome, MetadataSkippedWork, NamespaceMetadata, RunMaintenanceJobResponse,
-    RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
+    MetadataMaintenanceOutcome, MetadataSkippedWork, NamespaceMetadata, ProbeStoreResponse,
+    RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse, Snapshot,
 };
 use loonfs_types::{MergeConflict, MergeConflictKind};
 
@@ -262,7 +262,7 @@ pub(super) fn human_grep_index_enabled(
     }
 }
 
-pub(super) fn human_store_probed(response: &StoreProbeResponse) -> String {
+pub(super) fn human_store_probed(response: &ProbeStoreResponse) -> String {
     store_probe_report_lines(response).join("\n")
 }
 

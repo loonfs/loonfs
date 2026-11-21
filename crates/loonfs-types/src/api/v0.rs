@@ -20,8 +20,8 @@ mod store_probe;
 mod uploads;
 
 pub use commits::{
-    Commit, CommitPrecondition, CommitRequest, DiffEntry, DiffEntryKind, DiffResponse,
-    DirectoryBinding, FilesystemEvent, ListChangesResponse, Merge,
+    Commit, CommitPrecondition, CommitRequest, DiffEntry, DiffEntryKind, DirectoryBinding,
+    FilesystemEvent, ListChangesResponse, ListDiffResponse, Merge,
 };
 pub use downloads::{
     CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
@@ -62,7 +62,7 @@ pub use snapshots::{
     SnapshotRecordOwner,
 };
 pub use store_probe::{
-    StoreProbeCheck, StoreProbeCheckOutcome, StoreProbeRequest, StoreProbeResponse,
+    ProbeStoreRequest, ProbeStoreResponse, StoreProbeCheck, StoreProbeCheckOutcome,
 };
 pub use uploads::{
     CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransfer,

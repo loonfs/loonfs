@@ -8,7 +8,7 @@ use loonfs_types::options::{
     CommitSplitting, DiffOptions, ListChangesOptions, ListFileRevisionsOptions, ListOptions,
     ListTrashOptions, ReadAt, ReadConsistency, ReadFileOptions, StatOptions,
 };
-use loonfs_types::{ChangeFeedPosition, DiffResponse, ListChangesResponse};
+use loonfs_types::{ChangeFeedPosition, ListChangesResponse, ListDiffResponse};
 use loonfs_types::{
     CommitSeq, EffectiveLimit, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListTrashResponse, NamespaceId, PageRequest, Pager, PathEntry,
@@ -359,7 +359,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         from_seq: CommitSeq,
-    ) -> Result<DiffResponse> {
+    ) -> Result<ListDiffResponse> {
         self.diff_with_options(namespace_id, from_seq, &DiffOptions::default())
             .await
     }
@@ -372,7 +372,7 @@ impl Client {
         namespace_id: &NamespaceId,
         from_seq: CommitSeq,
         options: &DiffOptions,
-    ) -> Result<DiffResponse> {
+    ) -> Result<ListDiffResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/diff"));
         query.push("from_seq", from_seq.0);
         if let Some(to_seq) = options.to_seq {

@@ -8,7 +8,9 @@ use loonfs::{DestinationBehavior, PutFileOptions, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_types::{CommitSeq, DiffEntryKind, DiffResponse, ErrorCode, ErrorResponse, RevisionNo};
+use loonfs_types::{
+    CommitSeq, DiffEntryKind, ErrorCode, ErrorResponse, ListDiffResponse, RevisionNo,
+};
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -109,7 +111,7 @@ async fn the_route_serves_pages_that_a_client_follows_to_the_end() {
     );
     assert!(created.get("previous_path").is_none(), "{created}");
     assert!(created.get("attributes_revision_no").is_none(), "{created}");
-    let first: DiffResponse = serde_json::from_value(json).expect("page");
+    let first: ListDiffResponse = serde_json::from_value(json).expect("page");
     let after_seq = first.next_after_seq.expect("a second page");
 
     let (status, body) = get(
@@ -121,7 +123,7 @@ async fn the_route_serves_pages_that_a_client_follows_to_the_end() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    let second: DiffResponse = serde_json::from_slice(&body).expect("page");
+    let second: ListDiffResponse = serde_json::from_slice(&body).expect("page");
     assert_eq!((second.to_seq, second.next_after_seq), (first.to_seq, None));
     assert_eq!(second.entries.len(), 1);
     assert_eq!(second.entries[0].kind, DiffEntryKind::Changed);

@@ -84,7 +84,7 @@ fn a_diff_page_reaches_the_diff_counters() {
         access_revision_no: None,
     };
     instruments.diff_page(&loonfs_core::DiffPage {
-        response: loonfs_types::DiffResponse {
+        response: loonfs_types::ListDiffResponse {
             namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             from_seq: loonfs_types::CommitSeq(1),
             to_seq: loonfs_types::CommitSeq(4),

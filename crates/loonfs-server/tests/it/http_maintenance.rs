@@ -728,7 +728,7 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
     ))
     .await;
 
-    let probe: loonfs_types::StoreProbeResponse = post_maintenance_json_body(
+    let probe: loonfs_types::ProbeStoreResponse = post_maintenance_json_body(
         &format!("{}/v0/maintenance/store/probe", harness.server_url),
         "test-token",
         serde_json::json!({}),
@@ -790,7 +790,7 @@ async fn http_maintenance_store_probe_requires_a_token_and_accepts_a_bodyless_re
     .await;
     let url = format!("{}/v0/maintenance/store/probe", harness.server_url);
 
-    let unauthorized: ApiResult<loonfs_types::StoreProbeResponse> =
+    let unauthorized: ApiResult<loonfs_types::ProbeStoreResponse> =
         post_maintenance_json_body(&url, "wrong-token", serde_json::json!({}));
     assert_eq!(
         unauthorized.expect_err("a wrong token is refused").code,
@@ -798,7 +798,7 @@ async fn http_maintenance_store_probe_requires_a_token_and_accepts_a_bodyless_re
     );
 
     // An absent body is treated as an empty object.
-    let bodyless: loonfs_types::StoreProbeResponse =
+    let bodyless: loonfs_types::ProbeStoreResponse =
         post_maintenance_json(&url, "test-token").expect("probe with no body");
     assert!(
         !bodyless.checks.is_empty(),

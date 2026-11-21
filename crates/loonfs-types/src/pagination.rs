@@ -329,7 +329,7 @@ pub struct DiffPagePosition {
     pub event_index: u32,
 }
 
-impl PagedResponse for crate::DiffResponse {
+impl PagedResponse for crate::ListDiffResponse {
     type Item = crate::DiffEntry;
     type Cursor = DiffPagePosition;
 
@@ -1217,7 +1217,7 @@ mod tests {
 
     #[test]
     fn diff_response_implements_paged_response() {
-        let mut first = crate::DiffResponse {
+        let mut first = crate::ListDiffResponse {
             namespace_id: crate::NamespaceId::parse("diff-ns").expect("namespace id"),
             from_seq: CommitSeq(1),
             to_seq: CommitSeq(5),
@@ -1235,7 +1235,7 @@ mod tests {
                 event_index: 2,
             })
         );
-        let second = crate::DiffResponse {
+        let second = crate::ListDiffResponse {
             after_seq: CommitSeq(3),
             next_after_seq: None,
             next_event_index: None,
