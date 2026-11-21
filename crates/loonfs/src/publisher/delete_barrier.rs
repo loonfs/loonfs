@@ -42,6 +42,7 @@ impl NamespacePublisher {
                 self.count_queued(&mut state);
                 queued
             };
+            self.report_queue_depth();
             self.compaction_cancellation.cancel();
             // A deleted session has ended. It leaves the table before the
             // delete's callers hear the outcome, so an open after that

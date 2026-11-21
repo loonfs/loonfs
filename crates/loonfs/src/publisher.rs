@@ -484,7 +484,8 @@ impl NamespacePublisher {
 
     /// Brings this namespace's share of the runtime's count of queued
     /// candidates up to the candidates in its queue. Call it with the state
-    /// locked after a change to the queue.
+    /// locked after a change to the queue, and call
+    /// [`Self::report_queue_depth`] once the lock is released.
     pub(super) fn count_queued(&self, state: &mut NamespacePublisherState) {
         let queued = queue::queued_candidates(state);
         self.context
@@ -493,6 +494,15 @@ impl NamespacePublisher {
             .publisher
             .move_queued_candidates(state.counted_candidates, queued);
         state.counted_candidates = queued;
+    }
+
+    /// Reports the candidates queued at every namespace of the runtime.
+    pub(super) fn report_queue_depth(&self) {
+        self.context
+            .runtime_core
+            .instruments()
+            .publisher
+            .queue_depth();
     }
 
     pub(super) fn elapsed_ms_since(&self, started_at_ms: u64) -> u64 {

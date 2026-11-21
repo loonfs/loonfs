@@ -174,9 +174,13 @@ fn a_count_gauge_reports_the_count_after_each_change() {
     let count = CountGauge::new(Arc::clone(&gauge) as Arc<dyn GaugeHandle>);
 
     count.add(3);
+    count.report();
     count.sub(1);
+    count.report();
     count.add(2);
+    count.report();
     count.sub(4);
+    count.report();
 
     assert_eq!(*gauge.values.lock().expect("values lock"), vec![3, 2, 4, 0]);
 }
@@ -191,9 +195,11 @@ fn a_count_gauge_ends_at_zero_after_concurrent_changes_cancel_out() {
             scope.spawn(|| {
                 for _ in 0..300 {
                     count.add(1);
+                    count.report();
                 }
                 for _ in 0..300 {
                     count.sub(1);
+                    count.report();
                 }
             });
         }

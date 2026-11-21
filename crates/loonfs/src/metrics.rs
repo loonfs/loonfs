@@ -100,8 +100,11 @@ pub trait GaugeHandle: Send + Sync {
 
 /// A count that several threads change, and the gauge that reports it.
 ///
-/// A report that races a concurrent change repeats until the gauge shows the
-/// count, so the gauge never stays behind the count once changes stop.
+/// A change and its report are separate calls, so a count changed under a
+/// lock is reported after the lock is released, because the gauge is caller
+/// code. A report that races a concurrent change repeats until the gauge
+/// shows the count, so the gauge never stays behind the count once changes
+/// stop.
 pub struct CountGauge {
     count: AtomicUsize,
     gauge: Arc<dyn GaugeHandle>,
@@ -116,21 +119,19 @@ impl CountGauge {
         }
     }
 
-    /// Adds `value` to the count and reports the count.
+    /// Adds `value` to the count.
     pub fn add(&self, value: usize) {
         self.count.fetch_add(value, Ordering::SeqCst);
-        self.report();
     }
 
-    /// Subtracts `value` from the count and reports the count.
+    /// Subtracts `value` from the count.
     pub fn sub(&self, value: usize) {
         self.count.fetch_sub(value, Ordering::SeqCst);
-        self.report();
     }
 
     /// Sets the gauge to the count, and sets it again while the count moved
     /// between the read and the set.
-    fn report(&self) {
+    pub fn report(&self) {
         let mut reported = self.count.load(Ordering::SeqCst);
         loop {
             self.gauge.set(i64::try_from(reported).unwrap_or(i64::MAX));

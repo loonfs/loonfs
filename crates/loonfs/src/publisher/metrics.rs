@@ -121,15 +121,20 @@ impl PublisherInstruments {
     }
 
     /// Moves one namespace's share of the queued candidates from `before`
-    /// to `after`, and reports the candidates queued at every namespace.
-    /// The caller holds the namespace's state lock, so the namespace's
-    /// changes apply in order and the total never falls below zero.
+    /// to `after`. The caller holds the namespace's state lock, so the
+    /// namespace's changes apply in order and the total never falls below
+    /// zero, and reports with [`Self::queue_depth`] once the lock is released.
     pub(crate) fn move_queued_candidates(&self, before: usize, after: usize) {
         if after >= before {
             self.queued_candidates.add(after - before);
         } else {
             self.queued_candidates.sub(before - after);
         }
+    }
+
+    /// Reports the candidates queued at every namespace and not yet taken.
+    pub(crate) fn queue_depth(&self) {
+        self.queued_candidates.report();
     }
 
     pub(crate) fn sessions(&self, open: usize) {

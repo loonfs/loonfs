@@ -52,6 +52,7 @@ impl<L: Listener> Listener for ConnectionLimit<L> {
         };
         let (inner, address) = self.listener.accept().await;
         self.open.add(1);
+        self.open.report();
         (
             Connection {
                 inner,
@@ -91,6 +92,7 @@ pub(super) struct Connection<I> {
 impl<I> Drop for Connection<I> {
     fn drop(&mut self) {
         self.open.sub(1);
+        self.open.report();
     }
 }
 
