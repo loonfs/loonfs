@@ -1014,7 +1014,7 @@ async fn run_read_consistency(harness: &Harness, case: &Case) {
             .expect("list trash");
         assert_eq!(trash.entries.len(), expected.trash_entry_count);
         let revisions = ListFileRevisionsOptions {
-            consistency: Some(consistency),
+            at: ReadAt::Live(Some(consistency)),
         };
         for listing in [
             client.list_file_revisions_with_options(&spec, &revisions),

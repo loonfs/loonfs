@@ -5,9 +5,9 @@ use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::pagers::{decode_page_request, file_revisions_page_response, FileRevisionsPager};
 use crate::trace::{self, operation_span};
 use crate::{
-    Consistency, CoreError, DownloadOptions, FileBytes, FileContentStream, InodeId,
-    ListFileRevisionsOptions, ListFileRevisionsResponse, Namespace, ReadFileStreamOptions, Result,
-    RevisionNo, SharedObjectStore,
+    CoreError, DownloadOptions, FileBytes, FileContentStream, InodeId, ListFileRevisionsOptions,
+    ListFileRevisionsResponse, Namespace, ReadAt, ReadFileStreamOptions, Result, RevisionNo,
+    SharedObjectStore,
 };
 use loonfs_types::{AbsolutePath, FileRevisionsPageCursor, PageRequest};
 
@@ -90,6 +90,11 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Lists a file path's revision history, newest first, as `options`
     /// asks.
+    ///
+    /// Options that read a snapshot, or one of the namespace's fork
+    /// snapshots, resolve the path in the snapshot's state and list the
+    /// revisions that the snapshot's manifest keeps, newest first from the
+    /// revision that the snapshot captured.
     pub fn list_file_revisions_with_options(
         &self,
         absolute_path: &str,
@@ -99,11 +104,11 @@ impl<M: crate::Mode> Namespace<M> {
             (
                 self.read_only(),
                 absolute_path.to_owned(),
-                options.consistency,
+                options.at.clone(),
             ),
-            |(reader, absolute_path, consistency), request| async move {
+            |(reader, absolute_path, at), request| async move {
                 reader
-                    .file_revisions_page(&absolute_path, decode_page_request(request)?, consistency)
+                    .file_revisions_page(&absolute_path, decode_page_request(request)?, &at)
                     .await
             },
         )
@@ -113,7 +118,7 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
-        consistency: Option<Consistency>,
+        at: &ReadAt,
     ) -> Result<ListFileRevisionsResponse> {
         trace::in_operation(
             operation_span!(self.core, "list_file_revisions", self.namespace_id),
@@ -121,28 +126,27 @@ impl<M: crate::Mode> Namespace<M> {
                 let _permit = self.core.read_permit().await;
                 let absolute_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
                 let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-                self.core
-                    .read_at_least(&self.namespace_id, consistency, cursor_head_seq, |pinned| {
-                        let request = request.clone();
-                        let absolute_path = absolute_path.clone();
-                        async move {
-                            let revisions = pinned
-                                .engine
-                                .list_file_revisions_page(
-                                    absolute_path.as_str(),
-                                    request,
-                                    &pinned.context,
-                                )
-                                .await?;
-                            Ok(file_revisions_page_response(
-                                self.namespace_id.clone(),
-                                pinned.head_seq(),
-                                revisions.page,
-                                revisions.inode_id,
-                            )?)
-                        }
-                    })
-                    .await
+                self.read_at_least(at, cursor_head_seq, |pinned, _| {
+                    let request = request.clone();
+                    let absolute_path = absolute_path.clone();
+                    async move {
+                        let revisions = pinned
+                            .engine
+                            .list_file_revisions_page(
+                                absolute_path.as_str(),
+                                request,
+                                &pinned.context,
+                            )
+                            .await?;
+                        Ok(file_revisions_page_response(
+                            self.namespace_id.clone(),
+                            pinned.head_seq(),
+                            revisions.page,
+                            revisions.inode_id,
+                        )?)
+                    }
+                })
+                .await
             },
         )
         .await
@@ -158,20 +162,20 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Lists the retained revisions of a file inode, newest first, as
     /// `options` asks.
+    ///
+    /// Options that read a snapshot, or one of the namespace's fork
+    /// snapshots, list the revisions that the snapshot's manifest keeps,
+    /// newest first from the revision that the snapshot captured.
     pub fn list_file_revisions_by_inode_with_options(
         &self,
         inode_id: InodeId,
         options: &ListFileRevisionsOptions,
     ) -> FileRevisionsPager {
         loonfs_types::Pager::with_state(
-            (self.read_only(), inode_id, options.consistency),
-            |(reader, inode_id, consistency), request| async move {
+            (self.read_only(), inode_id, options.at.clone()),
+            |(reader, inode_id, at), request| async move {
                 reader
-                    .file_revisions_by_inode_page(
-                        inode_id,
-                        decode_page_request(request)?,
-                        consistency,
-                    )
+                    .file_revisions_by_inode_page(inode_id, decode_page_request(request)?, &at)
                     .await
             },
         )
@@ -181,34 +185,29 @@ impl<M: crate::Mode> Namespace<M> {
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
-        consistency: Option<Consistency>,
+        at: &ReadAt,
     ) -> Result<ListFileRevisionsResponse> {
         trace::in_operation(
             operation_span!(self.core, "list_file_revisions_by_inode", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 let cursor_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
-                self.core
-                    .read_at_least(&self.namespace_id, consistency, cursor_head_seq, |pinned| {
-                        let request = request.clone();
-                        async move {
-                            let page = pinned
-                                .engine
-                                .list_file_revisions_by_inode_page(
-                                    inode_id,
-                                    request,
-                                    &pinned.context,
-                                )
-                                .await?;
-                            Ok(file_revisions_page_response(
-                                self.namespace_id.clone(),
-                                pinned.head_seq(),
-                                page,
-                                inode_id,
-                            )?)
-                        }
-                    })
-                    .await
+                self.read_at_least(at, cursor_head_seq, |pinned, _| {
+                    let request = request.clone();
+                    async move {
+                        let page = pinned
+                            .engine
+                            .list_file_revisions_by_inode_page(inode_id, request, &pinned.context)
+                            .await?;
+                        Ok(file_revisions_page_response(
+                            self.namespace_id.clone(),
+                            pinned.head_seq(),
+                            page,
+                            inode_id,
+                        )?)
+                    }
+                })
+                .await
             },
         )
         .await

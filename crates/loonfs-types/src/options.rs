@@ -343,11 +343,14 @@ impl Default for DiffOptions {
 }
 
 /// Options for listing a file's revisions by path or by inode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListFileRevisionsOptions {
-    /// How recently each page confirms the live head, or `None` for the
-    /// runtime's default.
-    pub consistency: Option<Consistency>,
+    /// The live head or the snapshot that each page reads, by default the
+    /// live head at the runtime's default consistency. A listing of a
+    /// snapshot returns the revisions that the snapshot's manifest keeps,
+    /// newest first from the revision that the snapshot captured, and every
+    /// page reads the same captured head.
+    pub at: ReadAt,
 }
 
 /// Options for a read of the live head that has no other options: a read of a namespace's
@@ -722,7 +725,7 @@ mod tests {
         assert_eq!(DownloadOptions::default().at, ReadAt::Live(None));
         assert_eq!(DownloadOptions::default().start_offset, 0);
         assert_eq!(ListChangesOptions::default().at, ReadAt::Live(None));
-        assert_eq!(ListFileRevisionsOptions::default().consistency, None);
+        assert_eq!(ListFileRevisionsOptions::default().at, ReadAt::Live(None));
         assert_eq!(ListTrashOptions::default().consistency, None);
         assert_eq!(LiveReadOptions::default().consistency, None);
     }
