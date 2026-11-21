@@ -2,9 +2,7 @@
 //! listings, file bytes, and download targets by inode ID.
 
 use crate::downloads::DirectDownloadByInodeTarget;
-use crate::namespace::reads::{
-    reject_snapshot_directory_cursor, validate_snapshot_directory_cursor,
-};
+use crate::namespace::reads::{reject_snapshot_cursor, validate_snapshot_cursor};
 use crate::pagers::{decode_list_page_request, InodeChildrenPager};
 use crate::trace::{self, operation_span};
 use crate::{
@@ -81,14 +79,14 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 if matches!(options.at, ReadAt::Live(_)) {
-                    reject_snapshot_directory_cursor(request.cursor.as_ref())?;
+                    reject_snapshot_cursor(request.cursor.as_ref())?;
                 }
                 let cursor_head_seq = request.cursor.as_ref().map(ListPageCursor::head_seq);
                 self.read_at_least(&options.at, cursor_head_seq, |pinned, source| {
                     let request = request.clone();
                     let options = options.clone();
                     async move {
-                        validate_snapshot_directory_cursor(&request, &pinned, &source)?;
+                        validate_snapshot_cursor(&request, &pinned, &source)?;
                         // Give awakened validation waiters a turn before
                         // synchronous page work. The head is already
                         // captured and the validation guard has been

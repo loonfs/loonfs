@@ -8450,7 +8450,16 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read.",
+            "description": "The snapshot whose state to list the file's revisions in. The listing starts at the\nrevision that the snapshot captured.",
+            "in": "query",
+            "name": "snapshot_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SnapshotId"
+            }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
@@ -8495,7 +8504,7 @@
                 }
               }
             },
-            "description": "Invalid path",
+            "description": "Invalid path, limit, cursor, snapshot ID, or consistency",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -8540,7 +8549,7 @@
                 }
               }
             },
-            "description": "Namespace or path not found",
+            "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -10104,7 +10113,16 @@
             }
           },
           {
-            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read.",
+            "description": "The snapshot whose state to list the file's revisions in. The listing starts at the\nrevision that the snapshot captured.",
+            "in": "query",
+            "name": "snapshot_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SnapshotId"
+            }
+          },
+          {
+            "description": "How recently the read confirms the namespace head. `eventual` (the default, unless the\nserver's `consistency` setting is `strong`) reads at the head that the server confirmed last\nwhile that confirmation is younger than the maximum staleness, and `strong` confirms the\nhead before the read. It can't be combined with `snapshot_id`.",
             "in": "query",
             "name": "consistency",
             "required": false,
@@ -10149,7 +10167,7 @@
                 }
               }
             },
-            "description": "Invalid inode ID, limit, or cursor",
+            "description": "Invalid inode ID, limit, cursor, snapshot ID, or consistency",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -10194,7 +10212,7 @@
                 }
               }
             },
-            "description": "Namespace or inode not found",
+            "description": "Namespace, inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"

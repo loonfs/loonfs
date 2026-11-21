@@ -266,6 +266,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .limit
                 .finish_page(&mut revision_records, |last| FileRevisionsPageCursor {
                     head_seq: self.visible_seq,
+                    snapshot_id: None,
                     inode_id,
                     last_revision_no: last.revision_no,
                     last_committed_seq: last.committed_seq,

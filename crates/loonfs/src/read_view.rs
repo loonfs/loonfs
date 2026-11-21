@@ -17,7 +17,10 @@ use crate::{
 use loonfs_core::RuntimeReadContext;
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::options::CommitSplitting;
-use loonfs_types::{AbsolutePath, ChangeFeedPosition, ExtensionName, ListPageCursor, PageRequest};
+use loonfs_types::{
+    AbsolutePath, ChangeFeedPosition, ExtensionName, FileRevisionsPageCursor, ListPageCursor,
+    PageRequest,
+};
 use std::sync::Arc;
 
 /// A captured namespace state that related reads share.
@@ -53,19 +56,57 @@ impl ReadSource {
     }
 }
 
-/// Rejects a directory cursor that another read minted. A snapshot implies
-/// its head, so the head test does work only for a view of the live head.
-pub(crate) fn validate_view_directory_cursor(
-    cursor: Option<&ListPageCursor>,
+/// A page cursor that a read of a snapshot binds to that snapshot.
+pub(crate) trait SnapshotBoundCursor {
+    /// The cursor's name in an error message.
+    const NAME: &'static str;
+
+    /// Returns the head sequence the issuing page was evaluated at.
+    fn head_seq(&self) -> CommitSeq;
+
+    /// Returns the snapshot whose read issued the cursor, or `None` for a
+    /// live read.
+    fn snapshot_id(&self) -> Option<&SnapshotId>;
+}
+
+impl SnapshotBoundCursor for ListPageCursor {
+    const NAME: &'static str = "directory";
+
+    fn head_seq(&self) -> CommitSeq {
+        ListPageCursor::head_seq(self)
+    }
+
+    fn snapshot_id(&self) -> Option<&SnapshotId> {
+        ListPageCursor::snapshot_id(self)
+    }
+}
+
+impl SnapshotBoundCursor for FileRevisionsPageCursor {
+    const NAME: &'static str = "revision";
+
+    fn head_seq(&self) -> CommitSeq {
+        self.head_seq
+    }
+
+    fn snapshot_id(&self) -> Option<&SnapshotId> {
+        self.snapshot_id.as_ref()
+    }
+}
+
+/// Rejects a cursor that another read minted. A snapshot implies its head,
+/// so the head test does work only for a view of the live head.
+pub(crate) fn validate_view_cursor<C: SnapshotBoundCursor>(
+    cursor: Option<&C>,
     captured_seq: CommitSeq,
     snapshot_id: Option<&SnapshotId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
         return Ok(());
     };
+    let name = C::NAME;
     if cursor.head_seq() != captured_seq {
         return Err(CoreError::InvalidCursor(format!(
-            "directory cursor head `{}` does not match the read view head `{captured_seq}`",
+            "{name} cursor head `{}` does not match the read view head `{captured_seq}`",
             cursor.head_seq()
         ))
         .into());
@@ -73,15 +114,15 @@ pub(crate) fn validate_view_directory_cursor(
     match (cursor.snapshot_id(), snapshot_id) {
         (Some(actual), Some(expected)) if actual == expected => Ok(()),
         (Some(actual), Some(expected)) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor snapshot `{actual}` does not match requested snapshot `{expected}`"
+            "{name} cursor snapshot `{actual}` does not match requested snapshot `{expected}`"
         ))
         .into()),
         (Some(actual), None) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor is bound to snapshot `{actual}`"
+            "{name} cursor is bound to snapshot `{actual}`"
         ))
         .into()),
         (None, Some(expected)) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor is not bound to snapshot `{expected}`"
+            "{name} cursor is not bound to snapshot `{expected}`"
         ))
         .into()),
         (None, None) => Ok(()),
@@ -362,11 +403,7 @@ impl ReadView {
     ) -> Result<ListPathEntriesResponse> {
         self.read(async {
             self.ensure_read_at(&options.at)?;
-            validate_view_directory_cursor(
-                request.cursor.as_ref(),
-                self.head_seq(),
-                self.snapshot_id(),
-            )?;
+            validate_view_cursor(request.cursor.as_ref(), self.head_seq(), self.snapshot_id())?;
             let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
             self.pinned
                 .path_entries_page(listed_path, request, options, self.snapshot_id())
@@ -428,11 +465,7 @@ impl ReadView {
     ) -> Result<ListInodeChildrenResponse> {
         self.read(async {
             self.ensure_read_at(&options.at)?;
-            validate_view_directory_cursor(
-                request.cursor.as_ref(),
-                self.head_seq(),
-                self.snapshot_id(),
-            )?;
+            validate_view_cursor(request.cursor.as_ref(), self.head_seq(), self.snapshot_id())?;
             self.pinned
                 .inode_children_page(inode_id, request, options, self.snapshot_id())
                 .await

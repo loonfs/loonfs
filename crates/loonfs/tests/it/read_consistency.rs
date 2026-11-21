@@ -167,7 +167,9 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
         at: ReadAt::Live(consistency),
         ..ReadFileStreamOptions::default()
     };
-    let revisions = ListFileRevisionsOptions { consistency };
+    let revisions = ListFileRevisionsOptions {
+        at: ReadAt::Live(consistency),
+    };
     let download = DownloadOptions {
         at: ReadAt::Live(consistency),
         ..DownloadOptions::default()

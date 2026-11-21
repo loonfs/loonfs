@@ -914,7 +914,7 @@ Deleting a missing or already-deleted user snapshot returns the same success res
 
 Creating, retrieving, listing, extending, and deleting snapshots require an administrator or the service context. Reading through a snapshot requires `read` and `history` on the historical inode, evaluated at the current head.
 
-Path stat, inode stat, path and inode directory listings, file content reads, downloads (in the JSON body), and change-feed requests all accept an optional `snapshot_id`:
+Path stat, inode stat, path and inode directory listings, path and inode revision listings, file content reads, downloads (in the JSON body), and change-feed requests all accept an optional `snapshot_id`:
 
 - On path content and path download requests, `snapshot_id` can't be combined with `revision_no` because the snapshot selects the revision.
 - On inode revision content (`GET /inodes/{inode_id}/revisions/{revision_no}/content`) and inode revision downloads, `snapshot_id` looks up that revision in the snapshot's state, keeping it readable even after the retention floor passes it.
@@ -1383,7 +1383,7 @@ Recursive listings (`recursive=true`, default `false`, and other values return `
 
 Cursor semantics across paged routes:
 
-- Directory, trash, revision, grep, and change-feed cursors are opaque resume positions rather than snapshots (except snapshot-bound directory cursors). They tolerate forward head movement: each page reads at the current head, continuing strictly after the last position. Because multi-page live listings can span different heads, concurrent creates behind the cursor can be missed, deletes behind it may already have been returned, and renames can duplicate or omit an entry. Callers needing a consistent cut re-run if `head_seq` changes. (The CLI reports the last page's `head_seq` and adds `head_drift` with first and last heads when they differ.)
+- Directory, trash, revision, grep, and change-feed cursors are opaque resume positions rather than snapshots (except snapshot-bound directory and revision cursors). They tolerate forward head movement: each page reads at the current head, continuing strictly after the last position. Because multi-page live listings can span different heads, concurrent creates behind the cursor can be missed, deletes behind it may already have been returned, and renames can duplicate or omit an entry. Callers needing a consistent cut re-run if `head_seq` changes. (The CLI reports the last page's `head_seq` and adds `head_drift` with first and last heads when they differ.)
 - Cursors reject backward head drift. If a cursor's head is ahead of an `eventual` page's cached head, LoonFS confirms the head first ([Read consistency](#read-consistency)). A cursor still ahead of the confirmed head, a malformed or unrecognized-version cursor, or a cursor replayed on a different target returns `invalid_request`.
 - A directory cursor created with `snapshot_id` is pinned to that snapshot's immutable view. Every later page MUST pass the same `snapshot_id` (omitting it or passing another returns `invalid_request`).
 
@@ -1471,7 +1471,7 @@ The server streams and verifies content in bounded chunks. For files exceeding `
 
 For reads without a `Range` header, the server intentionally omits `Content-Length` so receiving `N` bytes can't signal success before full length and checksum verification completes. An I/O or checksum failure after headers are sent aborts the stream rather than writing a JSON error. Clients MUST verify clean stream completion before publishing a downloaded file (streaming directly to stdout may expose unverified prefix bytes before an abort).
 
-Revision listings (`GET /filesystem/revisions` and `GET /inodes/{inode_id}/revisions`) return revisions newest first with standard `limit`, `cursor`, `consistency`, and `max_staleness_ms` parameters (neither response includes paths). Above the retention floor, revision history is complete. At or below the floor, each file keeps its newest revision, so paging reaches revision 1 only until base compaction drops older ones (cursors resume strictly after the last returned revision, so concurrent compaction neither skips nor duplicates retained revisions):
+Revision listings (`GET /filesystem/revisions` and `GET /inodes/{inode_id}/revisions`) return revisions newest first with standard `limit`, `cursor`, `snapshot_id`, `consistency`, and `max_staleness_ms` parameters (neither response includes paths). With `snapshot_id`, both listings read the snapshot's state (the path listing resolves the path in that state), so they start at the revision that the snapshot captured, and every page returns the snapshot's `captured_seq` as `head_seq`. A cursor from a listing with `snapshot_id` is bound to that snapshot, and every later page MUST pass the same `snapshot_id` (omitting it or passing another returns `invalid_request`). Above the retention floor, revision history is complete. At or below the floor, each file keeps its newest revision, so paging reaches revision 1 only until base compaction drops older ones (cursors resume strictly after the last returned revision, so concurrent compaction neither skips nor duplicates retained revisions):
 
 ```json
 {

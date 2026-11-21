@@ -68,10 +68,13 @@ pub(super) struct PathPageQuery {
     limit: Option<u32>,
     /// The opaque cursor that the previous page returned.
     cursor: Option<String>,
+    /// The snapshot whose state to list the file's revisions in. The listing starts at the
+    /// revision that the snapshot captured.
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
-    /// head before the read.
+    /// head before the read. It can't be combined with `snapshot_id`.
     consistency: Option<ReadConsistency>,
     /// With `consistency=eventual`, how old the server's last confirmation of the head can be, in
     /// milliseconds. The default is the server's `max_staleness_ms`.
@@ -532,10 +535,10 @@ pub(super) async fn list_trash(
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
-            (status = 400, description = "Invalid path", body = ErrorResponse),
+            (status = 400, description = "Invalid path, limit, cursor, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
-            (status = 404, description = "Namespace or path not found", body = ErrorResponse),
+            (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Path isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -552,7 +555,7 @@ pub(super) async fn list_file_revisions(
     let namespace = runtime.namespace(&namespace_id);
     let path = required_query_param(query.path, "path")?;
     let options = ListFileRevisionsOptions {
-        consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
+        at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
     };
     let response = namespace
         .list_file_revisions_with_options(&path, &options)

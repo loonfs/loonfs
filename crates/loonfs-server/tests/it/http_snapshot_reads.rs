@@ -3,12 +3,15 @@
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::{start_server, TestServer};
 use futures::StreamExt;
-use loonfs_client::{DownloadOptions, NamespacePath, ReadAt, ReadFileOptions};
+use loonfs_client::{
+    DownloadOptions, ListFileRevisionsOptions, NamespacePath, ReadAt, ReadFileOptions,
+};
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::ListChangesResponse;
 use loonfs_types::{
-    CommitSeq, ErrorCode, ErrorResponse, ListPathEntriesResponse, PathEntry, RevisionNo, Snapshot,
+    CommitSeq, ErrorCode, ErrorResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
+    PathEntry, RevisionNo, Snapshot,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -474,6 +477,168 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
             Some(ErrorCode::RevisionNotFound),
             "{snapshot_id}"
         );
+    }
+
+    harness.server.abort();
+}
+
+fn revision_numbers(listing: &ListFileRevisionsResponse) -> Vec<u64> {
+    listing
+        .revisions
+        .iter()
+        .map(|revision| revision.revision_no.0)
+        .collect()
+}
+
+/// Checks that both revision listings at a snapshot list the revisions that
+/// the snapshot captured, newest first, across pages, while later revisions
+/// stay out of the listing. Also checks that `snapshot_id` can't be combined
+/// with `consistency`, that a snapshot listing's cursor resumes only
+/// against the same snapshot, and that a deleted or unknown snapshot
+/// returns `snapshot_not_found`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_revision_listings_stop_at_the_captured_revision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_snapshot_server(temp_dir.path(), "snapshot-revisions").await;
+    let namespace = namespace_id("snapshot-revisions");
+    harness
+        .client
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
+    let replace_options = replace_file_options();
+    let actor = loonfs_test_support::test_actor();
+    for bytes in [b"revision 1", b"revision 2"] {
+        harness
+            .client
+            .put_file_with_options(&keep, bytes, &actor, &replace_options)
+            .await
+            .expect("put a revision before the snapshot");
+    }
+    let snapshot = create_snapshot(&harness.server_url, namespace.as_str(), "revisions", 10_000);
+    for bytes in [b"revision 3", b"revision 4"] {
+        harness
+            .client
+            .put_file_with_options(&keep, bytes, &actor, &replace_options)
+            .await
+            .expect("put a revision after the snapshot");
+    }
+    let later_snapshot = create_snapshot(
+        &harness.server_url,
+        namespace.as_str(),
+        "later-revisions",
+        10_000,
+    );
+    let inode_id = harness
+        .client
+        .stat(&keep)
+        .await
+        .expect("stat file")
+        .inode_id;
+
+    let path_route = format!("/v0/namespaces/{}/filesystem/revisions", namespace.as_str());
+    let inode_route = format!(
+        "/v0/namespaces/{}/inodes/{inode_id}/revisions",
+        namespace.as_str()
+    );
+    let snapshot_id = snapshot.snapshot_id.as_str();
+    for (route, path) in [(&path_route, Some("/keep.txt")), (&inode_route, None)] {
+        let url = |extra: &[(&str, &str)]| {
+            let mut params: Vec<(&str, &str)> =
+                path.map(|path| ("path", path)).into_iter().collect();
+            params.extend_from_slice(extra);
+            query_url(&harness.server_url, route, &params)
+        };
+        let live = get_json::<ListFileRevisionsResponse>(&url(&[])).expect("live listing");
+        assert_eq!(revision_numbers(&live), [4, 3, 2, 1], "{route}");
+
+        let first = get_json::<ListFileRevisionsResponse>(&url(&[
+            ("snapshot_id", snapshot_id),
+            ("limit", "1"),
+        ]))
+        .expect("first snapshot page");
+        assert_eq!(revision_numbers(&first), [2], "{route}");
+        assert_eq!(first.head_seq, snapshot.captured_seq, "{route}");
+        let cursor = first.next_cursor.expect("a second page");
+        let second = get_json::<ListFileRevisionsResponse>(&url(&[
+            ("snapshot_id", snapshot_id),
+            ("limit", "1"),
+            ("cursor", &cursor),
+        ]))
+        .expect("second snapshot page");
+        assert_eq!(revision_numbers(&second), [1], "{route}");
+        assert_eq!(second.head_seq, snapshot.captured_seq, "{route}");
+        assert_eq!(second.next_cursor, None, "{route}");
+
+        let live_first = get_json::<ListFileRevisionsResponse>(&url(&[("limit", "1")]))
+            .expect("first live page");
+        let live_cursor = live_first.next_cursor.expect("a second live page");
+        let later_snapshot_id = later_snapshot.snapshot_id.as_str();
+        for params in [
+            vec![("limit", "1"), ("cursor", cursor.as_str())],
+            vec![
+                ("snapshot_id", snapshot_id),
+                ("limit", "1"),
+                ("cursor", live_cursor.as_str()),
+            ],
+            vec![
+                ("snapshot_id", later_snapshot_id),
+                ("limit", "1"),
+                ("cursor", cursor.as_str()),
+            ],
+        ] {
+            let (status, error) = get_json::<ListFileRevisionsResponse>(&url(&params))
+                .expect_err("a cursor resumes only against the snapshot that issued it");
+            assert_eq!(status, 400, "{route} {params:?}");
+            assert_eq!(error.code, "invalid_request", "{route} {params:?}");
+            assert_eq!(error.param.as_deref(), Some("cursor"), "{route} {params:?}");
+        }
+
+        let (status, error) = get_json::<ListFileRevisionsResponse>(&url(&[
+            ("snapshot_id", snapshot_id),
+            ("consistency", "strong"),
+        ]))
+        .expect_err("a snapshot listing has no consistency setting");
+        assert_eq!(status, 400, "{route}");
+        assert_eq!(error.code, "invalid_request", "{route}");
+        assert_eq!(error.param.as_deref(), Some("consistency"), "{route}");
+    }
+
+    let options = ListFileRevisionsOptions {
+        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
+    };
+    for listing in [
+        harness
+            .client
+            .list_file_revisions_with_options(&keep, &options),
+        harness
+            .client
+            .list_file_revisions_by_inode_with_options(&namespace, inode_id, &options),
+    ] {
+        let page = listing.page().await.expect("client snapshot listing");
+        assert_eq!(revision_numbers(&page), [2, 1]);
+    }
+
+    delete_snapshot(&harness.server_url, namespace.as_str(), snapshot_id);
+    for missing in [snapshot_id, "snp_0000000000000zffffffffffff"] {
+        for url in [
+            query_url(
+                &harness.server_url,
+                &path_route,
+                &[("path", "/keep.txt"), ("snapshot_id", missing)],
+            ),
+            query_url(
+                &harness.server_url,
+                &inode_route,
+                &[("snapshot_id", missing)],
+            ),
+        ] {
+            let (status, error) = get_json::<ListFileRevisionsResponse>(&url)
+                .expect_err("a missing snapshot must fail");
+            assert_eq!(status, 404, "{url}");
+            assert_eq!(error.code, "snapshot_not_found", "{url}");
+        }
     }
 
     harness.server.abort();

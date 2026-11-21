@@ -7,7 +7,7 @@ use crate::pagers::{
     PathEntriesPager, TrashPager,
 };
 use crate::pinned_read::PinnedRead;
-use crate::read_view::{validate_view_directory_cursor, ReadSource, ReadView};
+use crate::read_view::{validate_view_cursor, ReadSource, ReadView, SnapshotBoundCursor};
 use crate::runtime_core::classify_read_result;
 use crate::trace::{self, operation_span};
 use crate::{
@@ -44,18 +44,18 @@ pub(crate) fn ensure_revision_read_at(at: &ReadAt, revision_no: Option<RevisionN
     }
 }
 
-/// Rejects a directory cursor that a listing of a snapshot can't resume: one
-/// minted at another head, or bound to another snapshot or to none. A cursor for a
+/// Rejects a cursor that a listing of a snapshot can't resume: one minted at
+/// another head, or bound to another snapshot or to none. A cursor for a
 /// listing of the live head passes, because the listing checks the cursor
-/// with [`reject_snapshot_directory_cursor`] before the read.
-pub(crate) fn validate_snapshot_directory_cursor(
-    request: &PageRequest<ListPageCursor>,
+/// with [`reject_snapshot_cursor`] before the read.
+pub(crate) fn validate_snapshot_cursor<C: SnapshotBoundCursor>(
+    request: &PageRequest<C>,
     pinned: &PinnedRead,
     source: &ReadSource,
 ) -> Result<()> {
     match source {
         ReadSource::Head => Ok(()),
-        ReadSource::Snapshot(snapshot_id) => validate_view_directory_cursor(
+        ReadSource::Snapshot(snapshot_id) => validate_view_cursor(
             request.cursor.as_ref(),
             pinned.head_seq(),
             Some(snapshot_id),
@@ -63,12 +63,13 @@ pub(crate) fn validate_snapshot_directory_cursor(
     }
 }
 
-pub(crate) fn reject_snapshot_directory_cursor(cursor: Option<&ListPageCursor>) -> Result<()> {
-    let Some(snapshot_id) = cursor.and_then(ListPageCursor::snapshot_id) else {
+pub(crate) fn reject_snapshot_cursor<C: SnapshotBoundCursor>(cursor: Option<&C>) -> Result<()> {
+    let Some(snapshot_id) = cursor.and_then(SnapshotBoundCursor::snapshot_id) else {
         return Ok(());
     };
     Err(CoreError::InvalidCursor(format!(
-        "directory cursor is bound to snapshot `{snapshot_id}`, so resume it from the same snapshot"
+        "{} cursor is bound to snapshot `{snapshot_id}`, so resume it from the same snapshot",
+        C::NAME
     ))
     .into())
 }
@@ -321,7 +322,7 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 if matches!(options.at, ReadAt::Live(_)) {
-                    reject_snapshot_directory_cursor(request.cursor.as_ref())?;
+                    reject_snapshot_cursor(request.cursor.as_ref())?;
                 }
                 let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
                 let cursor_head_seq = request.cursor.as_ref().map(ListPageCursor::head_seq);
@@ -330,7 +331,7 @@ impl<M: crate::Mode> Namespace<M> {
                     let options = options.clone();
                     let listed_path = listed_path.clone();
                     async move {
-                        validate_snapshot_directory_cursor(&request, &pinned, &source)?;
+                        validate_snapshot_cursor(&request, &pinned, &source)?;
                         // Give awakened validation waiters a turn before
                         // synchronous page work. The head is already
                         // captured and the validation guard has been

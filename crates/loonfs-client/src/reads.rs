@@ -204,7 +204,7 @@ impl Client {
         options: &ListFileRevisionsOptions,
     ) -> FileRevisionsPager {
         Pager::with_state(
-            (self.clone(), spec.clone(), *options),
+            (self.clone(), spec.clone(), options.clone()),
             |(client, spec, options), request| async move {
                 client.file_revisions_page(&spec, request, &options).await
             },
@@ -221,7 +221,7 @@ impl Client {
             QueryBuilder::new(self.namespace_url(spec.namespace(), "/filesystem/revisions"));
         query.push("path", spec.absolute_path().as_str());
         query.page(&request);
-        push_read_at(&mut query, &ReadAt::Live(options.consistency));
+        push_read_at(&mut query, &options.at);
         self.send_json(self.request(operations::LIST_FILE_REVISIONS, &query.build()))
             .await
     }
@@ -247,7 +247,12 @@ impl Client {
         options: &ListFileRevisionsOptions,
     ) -> FileRevisionsPager {
         Pager::with_state(
-            (self.clone(), namespace_id.clone(), inode_id, *options),
+            (
+                self.clone(),
+                namespace_id.clone(),
+                inode_id,
+                options.clone(),
+            ),
             |(client, namespace_id, inode_id, options), request| async move {
                 client
                     .file_revisions_by_inode_page(&namespace_id, inode_id, request, &options)
@@ -268,7 +273,7 @@ impl Client {
             self.namespace_url(namespace_id, &format!("/inodes/{inode_id}/revisions")),
         );
         query.page(&request);
-        push_read_at(&mut query, &ReadAt::Live(options.consistency));
+        push_read_at(&mut query, &options.at);
         self.send_json(self.request(operations::LIST_FILE_REVISIONS_BY_INODE, &query.build()))
             .await
     }
@@ -848,7 +853,9 @@ mod tests {
                 .await
                 .expect("a page")
                 .expect("trash");
-            let options = ListFileRevisionsOptions { consistency };
+            let options = ListFileRevisionsOptions {
+                at: ReadAt::Live(consistency),
+            };
             client
                 .list_file_revisions_with_options(&spec, &options)
                 .next()
