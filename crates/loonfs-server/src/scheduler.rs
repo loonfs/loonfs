@@ -8,7 +8,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::MetricsRecorder;
 use loonfs::{CommitSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
 use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
-use loonfs_http::{panic_message, HeldNamespace, HostState, Namespaces};
+use loonfs_http::{panic_message, HostState, Namespaces};
 use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::{EffectiveLimit, MonotonicTimer};
@@ -25,11 +25,8 @@ use tokio::time::Sleep;
 
 mod calls;
 mod metrics;
-mod reaper;
 mod retries;
 mod steps;
-
-pub(crate) use reaper::SessionReaper;
 
 /// The largest number of grep steps, build or reorganize, that one index
 /// step runs while each grep step does some work.
@@ -87,13 +84,6 @@ impl SchedulerState {
     }
 }
 
-/// Whether the grep index has work for a session at `seq`: the index is
-/// marked dirty, or the scheduler last brought the index up to date at
-/// another seq.
-fn index_pending(held: &HeldNamespace<SchedulerState>, seq: Option<CommitSeq>) -> bool {
-    held.index_dirty || held.host_state.indexed_seq != seq
-}
-
 /// When the scheduler next makes one call on a held namespace, and how many
 /// times in a row that call has failed there.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -143,6 +133,14 @@ pub(crate) struct StepRetry {
 /// idle session held, so the scheduler retries the step, until its backoff
 /// reaches [`MAX_STEP_BACKOFF_MS`]. A session that was closed or fenced, or
 /// whose namespace is gone, closes once no caller has its handle.
+///
+/// A scheduler built without a maintenance handle belongs to a server whose
+/// maintenance mode is `serve_only` or `disabled`. Folds, compactions,
+/// sweeps, and collections are another process's work there, so the
+/// scheduler runs no metadata, collection, or index step and sweeps nothing,
+/// and it closes a session on the idle age and ownership conditions alone,
+/// because the session's metadata needs no step from this server. The close
+/// writes nothing and sends no store requests.
 ///
 /// A sweep runs at start and then every `sweep_interval_ms`, beside the
 /// session steps. It covers namespaces without held sessions and garbage
@@ -204,7 +202,9 @@ pub(crate) struct SchedulerConfig {
 
 struct SchedulerInner {
     store: SharedObjectStore,
-    maintenance: Maintenance,
+    /// The maintenance handle of a server that maintains the store, and
+    /// `None` for one whose maintenance mode is `serve_only` or `disabled`.
+    maintenance: Option<Maintenance>,
     grep: Option<GrepIndexing>,
     namespaces: Arc<Namespaces<SchedulerState>>,
     timer: Arc<dyn MonotonicTimer>,
@@ -233,12 +233,14 @@ impl GrepIndexing {
 
 impl Scheduler {
     /// Builds a scheduler over `store` with the cadence and limits in
-    /// `config`, which schedules its calls on `timer`. `grep` is the indexing
-    /// of a server that maintains the grep index, and `None` otherwise.
+    /// `config`, which schedules its calls on `timer`. `maintenance` is the
+    /// maintenance handle of a server that maintains the store, and `None`
+    /// for one that runs only the close step. `grep` is the indexing of a
+    /// server that maintains the grep index, and `None` otherwise.
     pub(crate) fn new(
         config: SchedulerConfig,
         store: SharedObjectStore,
-        maintenance: Maintenance,
+        maintenance: Option<Maintenance>,
         namespaces: Arc<Namespaces<SchedulerState>>,
         timer: Arc<dyn MonotonicTimer>,
         grep: Option<GrepIndexing>,
@@ -281,12 +283,17 @@ impl Scheduler {
     /// failed call on one namespace or pool does not fail the sweep. After the
     /// [`Scheduler`] is stopped, no namespace starts its steps, no pool starts
     /// its collection, and a running compaction unit stops at its next block.
+    /// A scheduler without a maintenance handle lists nothing and returns
+    /// zero.
     pub async fn run_sweep(&self) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
+        let Some(maintenance) = &inner.maintenance else {
+            return Ok(0);
+        };
         let started_at_ms = inner.timer.monotonic_now_ms();
         let swept = async {
-            let namespaces = self.sweep_every_namespace().await?;
-            let pools = self.collect_every_pool().await?;
+            let namespaces = self.sweep_every_namespace(maintenance).await?;
+            let pools = self.collect_every_pool(maintenance).await?;
             Ok((namespaces, pools))
         }
         .await;
@@ -319,7 +326,10 @@ impl Scheduler {
     /// Collects every pool that the store lists, with the concurrency of the
     /// namespace sweep, and returns how many pools it listed, or the listing
     /// failure that ended it once the collections it had started returned.
-    async fn collect_every_pool(&self) -> Result<usize, ObjectStoreError> {
+    async fn collect_every_pool(
+        &self,
+        maintenance: &Maintenance,
+    ) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         self.sweep_listed_ids(
             |start_after| async move {
@@ -327,12 +337,15 @@ impl Scheduler {
                     list_pool_ids(&*inner.store, start_after.as_ref(), inner.page_limit).await?;
                 Ok((page.pool_ids, page.next_cursor))
             },
-            |pool_id| async move { self.gc_pool(&pool_id).await },
+            |pool_id| async move { self.gc_pool(maintenance, &pool_id).await },
         )
         .await
     }
 
-    async fn sweep_every_namespace(&self) -> Result<usize, ObjectStoreError> {
+    async fn sweep_every_namespace(
+        &self,
+        maintenance: &Maintenance,
+    ) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         self.sweep_listed_ids(
             |start_after| async move {
@@ -341,7 +354,7 @@ impl Scheduler {
                         .await?;
                 Ok((page.namespace_ids, page.next_cursor))
             },
-            |namespace_id| self.sweep_namespace(namespace_id),
+            |namespace_id| self.sweep_namespace(maintenance, namespace_id),
         )
         .await
     }
@@ -427,11 +440,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .expect("a maintenance scheduler lock should not be poisoned")
 }
 
-/// A started scheduler or session reaper. Stop it before the runtime shuts
-/// down.
+/// A started scheduler. Stop it before the runtime shuts down.
 pub(crate) struct RunningScheduler {
-    /// What the task is, for the shutdown error and warning.
-    name: &'static str,
     stop: MaintenanceCancellation,
     task: JoinHandle<()>,
 }
@@ -454,12 +464,11 @@ impl RunningScheduler {
         shutdown_deadline_ms: u64,
     ) -> loonfs::Result<()> {
         self.stop.cancel();
-        let name = self.name;
         let mut task = self.task;
         tokio::select! {
             biased;
             joined = &mut task => joined.map_err(|error| {
-                loonfs::Error::RuntimeTask(format!("{name} failed: {error}"))
+                loonfs::Error::RuntimeTask(format!("maintenance scheduler failed: {error}"))
             }),
             () = deadline => {
                 task.abort();
@@ -467,8 +476,7 @@ impl RunningScheduler {
                 let _ = task.await;
                 tracing::warn!(
                     shutdown_deadline_ms,
-                    task = name,
-                    "shutdown deadline passed before the task stopped; its running steps \
+                    "shutdown deadline passed before the scheduler stopped; its running steps \
                      are abandoned"
                 );
                 Ok(())

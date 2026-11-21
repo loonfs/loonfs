@@ -113,7 +113,7 @@ impl SchedulerServer {
         let scheduler = Scheduler::new(
             config.scheduler_config(),
             runtime.object_store(),
-            maintenance.clone(),
+            config.maintenance.maintains().then(|| maintenance.clone()),
             Arc::new(Namespaces::new(runtime.clone())),
             runtime.monotonic_timer(),
             grep,

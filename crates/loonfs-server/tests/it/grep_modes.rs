@@ -249,12 +249,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     );
     // The session published nothing, so only the enable's mark makes the
     // next run of the session steps build the index.
-    server
-        .scheduler
-        .as_ref()
-        .expect("scheduler")
-        .run_due_steps()
-        .await;
+    server.scheduler.run_due_steps().await;
     assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(0));
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
@@ -713,9 +708,10 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         maintains_grep_index(&server),
         "a serve-only deployment still serves the index routes"
     );
-    assert!(
-        server.scheduler.is_none(),
-        "serve-only mode builds no scheduler"
+    assert_eq!(
+        server.scheduler.run_sweep().await.expect("sweep"),
+        0,
+        "serve-only mode sweeps nothing"
     );
 
     namespace
@@ -804,8 +800,6 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
 async fn sweep(server: &loonfs_server::AppState) {
     server
         .scheduler
-        .as_ref()
-        .expect("a maintaining server has a scheduler")
         .run_sweep()
         .await
         .expect("list the namespaces");

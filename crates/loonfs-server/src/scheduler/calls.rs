@@ -14,8 +14,8 @@ use crate::scheduler::MAX_GREP_STEPS_PER_INDEX_STEP;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
-    AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, MetadataMaintenanceOutcome, NamespaceId,
-    PoolId, RetentionTarget,
+    AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, Maintenance, MetadataMaintenanceOutcome,
+    NamespaceId, PoolId, RetentionTarget,
 };
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepProgress, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
@@ -30,7 +30,11 @@ impl Scheduler {
     /// Runs the steps of one namespace for a sweep. A namespace whose
     /// metadata call returns `namespace_deleted` or `namespace_not_found` gets
     /// only its collection.
-    pub(super) async fn sweep_namespace(&self, namespace_id: NamespaceId) {
+    pub(super) async fn sweep_namespace(
+        &self,
+        maintenance: &Maintenance,
+        namespace_id: NamespaceId,
+    ) {
         let inner = &self.inner;
         let Some((claim, _permit)) = self
             .claim(&namespace_id, Overlap::LeaveRetentionAdvance)
@@ -44,7 +48,7 @@ impl Scheduler {
         // The call records its own failure. The index call and the advance
         // of a namespace that the call finds gone can only find it gone too.
         let gone = self
-            .maintain_metadata(&namespace_id, entry)
+            .maintain_metadata(maintenance, &namespace_id, entry)
             .await
             .is_err_and(|code| code.is_namespace_gone());
         if !gone {
@@ -53,9 +57,10 @@ impl Scheduler {
             }
             // The advance reads only folded commits, so it runs after the
             // metadata call, which can fold an idle tail.
-            self.advance_retention(&namespace_id, entry).await;
+            self.advance_retention(maintenance, &namespace_id, entry)
+                .await;
         }
-        self.gc(&namespace_id, entry, seq).await;
+        self.gc(maintenance, &namespace_id, entry, seq).await;
         self.finish_claim(claim).await;
     }
 
@@ -64,6 +69,7 @@ impl Scheduler {
     /// after `metadata_retry_interval_ms`.
     pub(super) async fn maintain_metadata(
         &self,
+        maintenance: &Maintenance,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
     ) -> Result<MetadataMaintenanceOutcome, ErrorCode> {
@@ -73,8 +79,7 @@ impl Scheduler {
         // step again.
         let seq = entry.map(|entry| lock(entry).handle.last_published_seq());
         let result = contain(
-            inner
-                .maintenance
+            maintenance
                 .maintain_metadata_while_due(namespace_id, &inner.stop)
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
@@ -198,11 +203,14 @@ impl Scheduler {
     pub(super) async fn finish_claim(&self, mut claimed: ClaimedNamespace<'_>) {
         // Each turn makes the advance that one sweep left while these steps
         // had the namespace, so the loop turns once for each sweep that
-        // overlaps the steps.
+        // overlaps the steps. Only a scheduler with a maintenance handle
+        // sweeps, so only that scheduler finds an advance left.
         while claimed.release_unless_retention_due() {
-            let entry = self.inner.namespaces.entry(&claimed.namespace_id);
-            self.advance_retention(&claimed.namespace_id, entry.as_deref())
-                .await;
+            if let Some(maintenance) = &self.inner.maintenance {
+                let entry = self.inner.namespaces.entry(&claimed.namespace_id);
+                self.advance_retention(maintenance, &claimed.namespace_id, entry.as_deref())
+                    .await;
+            }
         }
     }
 
@@ -210,6 +218,7 @@ impl Scheduler {
     /// namespace gone.
     pub(super) async fn gc(
         &self,
+        maintenance: &Maintenance,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
         seq: Option<CommitSeq>,
@@ -219,8 +228,7 @@ impl Scheduler {
             return false;
         }
         let result = contain(
-            inner
-                .maintenance
+            maintenance
                 .gc(namespace_id)
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
@@ -242,14 +250,13 @@ impl Scheduler {
     ///
     /// A pool whose prefix emptied after the listing found it is skipped
     /// without a failure.
-    pub(super) async fn gc_pool(&self, pool_id: &PoolId) {
+    pub(super) async fn gc_pool(&self, maintenance: &Maintenance, pool_id: &PoolId) {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
             return;
         }
         let result = contain(
-            inner
-                .maintenance
+            maintenance
                 .gc_pool(pool_id)
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
@@ -280,6 +287,7 @@ impl Scheduler {
     /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).
     async fn advance_retention(
         &self,
+        maintenance: &Maintenance,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
     ) {
@@ -293,8 +301,7 @@ impl Scheduler {
         // Boxed so the spawned scheduler's `Send` check does not recurse
         // through every engine future the advance awaits.
         let result = contain(
-            inner
-                .maintenance
+            maintenance
                 .advance_retention_floor_with_options(namespace_id, &options)
                 .boxed()
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),

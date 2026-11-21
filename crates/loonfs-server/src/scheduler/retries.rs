@@ -73,15 +73,19 @@ pub(super) enum MaintenanceCall {
     Retention,
     /// The garbage collection of a pool, which only a sweep makes.
     PoolGc,
+    /// The close of a session, which the session's steps make. It keeps no
+    /// retry state, because the next maintenance interval tries it again.
+    Close,
 }
 
 impl MaintenanceCall {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::Metadata,
         Self::GrepIndex,
         Self::Gc,
         Self::Retention,
         Self::PoolGc,
+        Self::Close,
     ];
 
     pub(super) fn as_str(self) -> &'static str {
@@ -91,6 +95,7 @@ impl MaintenanceCall {
             Self::Gc => "gc",
             Self::Retention => "retention",
             Self::PoolGc => "pool_gc",
+            Self::Close => "close",
         }
     }
 
@@ -103,7 +108,7 @@ impl MaintenanceCall {
             Self::Metadata => Some(state.metadata_retry),
             Self::GrepIndex => Some(state.index_retry),
             Self::Gc => Some(state.gc_retry),
-            Self::Retention | Self::PoolGc => None,
+            Self::Retention | Self::PoolGc | Self::Close => None,
         }
     }
 
@@ -112,7 +117,7 @@ impl MaintenanceCall {
             Self::Metadata => Some(&mut state.metadata_retry),
             Self::GrepIndex => Some(&mut state.index_retry),
             Self::Gc => Some(&mut state.gc_retry),
-            Self::Retention | Self::PoolGc => None,
+            Self::Retention | Self::PoolGc | Self::Close => None,
         }
     }
 }
