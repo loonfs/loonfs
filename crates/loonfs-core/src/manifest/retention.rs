@@ -7,7 +7,6 @@ use super::publish::ManifestChange;
 use super::published::PublicationReport;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::{GC_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
@@ -15,7 +14,7 @@ use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::MetadataSegmentCache;
 use crate::time::Observation;
 use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use loonfs_objectstore::keys::{metadata_segment_object_key, metadata_segment_prefix};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -58,25 +57,14 @@ pub enum RetentionTarget {
     Window,
 }
 
-/// Owners referencing more than this many metadata segments in one manifest are
-/// verified by listing their segment prefix rather than issuing one HEAD per
-/// segment.
-const SEGMENT_VERIFY_LIST_THRESHOLD: usize = 100;
-
-/// Maximum commits scanned per page while walking the commit history to find
-/// the retention cutoff.
-const RETENTION_COMMIT_SCAN_PAGE_LIMIT: usize = 256;
-
-/// Heap byte budget for each page scanned while finding the retention cutoff,
-/// keeping memory bounded even when individual commit rows are large.
-const RETENTION_COMMIT_SCAN_PAGE_BYTES: usize = 2 * 1024 * 1024;
-
-/// Checks that every segment that `manifest` lists exists.
+/// Checks that every segment that `manifest` lists exists, with one listing
+/// of each owning namespace's segment prefix.
 ///
-/// Owners with up to [`SEGMENT_VERIFY_LIST_THRESHOLD`] segments are verified
-/// with parallel HEAD requests; larger owners are verified by streaming their
-/// `metadata/segments/` prefix once so multi-thousand-segment manifests avoid
-/// an O(segments) HEAD storm.
+/// A listing is strongly consistent, and the check asks only whether each
+/// segment is present, so one listing answers for every segment of the owner
+/// however many the manifest lists. The listing stops at the last segment it
+/// has to find. A fork's manifest lists its source's segments under the
+/// source's prefix, so the check lists that prefix too.
 pub(crate) async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &NamespaceManifestPayload,
@@ -88,12 +76,7 @@ pub(crate) async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
             .or_default()
             .insert(metadata_segment_object_key(segment));
     }
-    let mut head_keys = Vec::new();
     for (owner, mut keys) in by_owner {
-        if keys.len() <= SEGMENT_VERIFY_LIST_THRESHOLD {
-            head_keys.extend(keys);
-            continue;
-        }
         let prefix = metadata_segment_prefix(owner);
         let mut entries = std::pin::pin!(store.list_entries_from_stream(&prefix, None));
         while let Some(entry) =
@@ -117,23 +100,7 @@ pub(crate) async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
             });
         }
     }
-    stream::iter(head_keys)
-        .map(|object_key| async move {
-            match store
-                .head(&object_key)
-                .await
-                .map_err(|error| ManifestLoadError::ReadSegment {
-                    object_key: object_key.clone(),
-                    message: error.public_message().into_owned(),
-                    kind: error.kind(),
-                })? {
-                Some(_) => Ok(()),
-                None => Err(ManifestLoadError::MissingSegment { object_key }),
-            }
-        })
-        .buffer_unordered(STORE_READS_IN_FLIGHT)
-        .try_collect()
-        .await
+    Ok(())
 }
 
 /// What a retention advance does, planned from one manifest and floor.
@@ -364,28 +331,19 @@ async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
 ) -> Result<CommitSeq> {
     let basis = metadata_basis_from_manifest(store, Some(segment_cache), current);
     let mut last = current.retention_floor_seq();
+    // One commit per scan: a commit row can be large, and the memo keeps the
+    // block for the next call within the caller's read budget.
     while last < through {
-        let page = commits_after_page(
-            &basis.segments,
-            last,
-            RETENTION_COMMIT_SCAN_PAGE_LIMIT,
-            RETENTION_COMMIT_SCAN_PAGE_BYTES,
-        )
-        .await?;
-        if page.is_empty() {
+        let Some(commit) = commits_after_page(&basis.segments, last, 1, usize::MAX)
+            .await?
+            .pop()
+        else {
+            break;
+        };
+        if commit.committed_at_ms > cutoff_at_ms {
             break;
         }
-        let mut done = false;
-        for commit in page {
-            if commit.committed_seq > through || commit.committed_at_ms > cutoff_at_ms {
-                done = true;
-                break;
-            }
-            last = commit.committed_seq;
-        }
-        if done {
-            break;
-        }
+        last = commit.committed_seq;
     }
     Ok(last)
 }
