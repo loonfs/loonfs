@@ -137,7 +137,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
                     CoreError::contention_exhausted(&object_key),
                 )),
-                Err(ObjectStoreError::Transport { .. }) => {
+                Err(error @ ObjectStoreError::Transport { .. }) => {
                     // This read checks whether an earlier compare-and-swap was
                     // written. It doesn't start a new extension, so an expiry
                     // after that write doesn't turn the success into a failure.
@@ -153,9 +153,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     {
                         Ok(CasOutcome::Settled(super::snapshot_summary(current.state)))
                     } else {
-                        Ok(CasOutcome::Contended(CoreError::contention_exhausted(
-                            &object_key,
-                        )))
+                        Ok(CasOutcome::Contended(CoreError::store(&object_key, &error)))
                     }
                 }
                 Err(error) => Err(CoreError::store(&object_key, &error)),

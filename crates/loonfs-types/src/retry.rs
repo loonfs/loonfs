@@ -1,6 +1,7 @@
 //! Bounded retry policy for replay-safe transport operations.
 
 use crate::clock::MonotonicTimer;
+use crate::entropy::{installed_entropy, Entropy};
 
 /// Bounded retry configuration for replay-safe transport operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +20,10 @@ impl TransportRetryPolicy {
     /// Grants one retry under the policy's retry count and the operation's
     /// deadline, and counts it in `retries` when it is granted.
     ///
-    /// The backoff never runs past the deadline.
+    /// Positive backoffs use equal jitter (`[cap / 2, cap]`) drawn from the
+    /// process [`Entropy`] source so concurrent callers don't retry in
+    /// lockstep while seeded runs stay repeatable. The backoff never runs past
+    /// the deadline.
     pub fn next_backoff(
         &self,
         retries: &mut u32,
@@ -36,16 +40,36 @@ impl TransportRetryPolicy {
             None => u64::MAX,
         };
         *retries += 1;
+        let cap_ms = self.backoff_ms(*retries);
+        let backoff_ms = if cap_ms == 0 {
+            0
+        } else {
+            let entropy = installed_entropy();
+            equal_jitter_ms(cap_ms, entropy.as_ref())
+        };
         TransportRetryOutcome::Wait {
-            backoff_ms: self.backoff_ms(*retries).min(remaining_ms),
+            backoff_ms: backoff_ms.min(remaining_ms),
         }
     }
 
-    /// Returns the capped exponential backoff before retry number `retry`,
-    /// counting from one, in milliseconds.
+    /// Returns the capped exponential backoff ceiling before retry number
+    /// `retry`, counting from one, in milliseconds.
     pub fn backoff_ms(&self, retry: u32) -> u64 {
         doubling_backoff_ms(self.initial_backoff_ms, retry, self.max_backoff_ms)
     }
+}
+
+/// Applies equal jitter in `[cap_ms / 2, cap_ms]` using `entropy`.
+fn equal_jitter_ms(cap_ms: u64, entropy: &dyn Entropy) -> u64 {
+    let half = cap_ms / 2;
+    let span = cap_ms - half;
+    if span == 0 {
+        return cap_ms;
+    }
+    let mut bytes = [0u8; 8];
+    entropy.fill(&mut bytes);
+    let sample = u64::from_be_bytes(bytes);
+    half + (sample % (span + 1))
 }
 
 /// Returns the backoff before attempt number `attempt`, counting from one:
@@ -103,5 +127,26 @@ impl<'timer> OperationDeadline<'timer> {
     /// Returns the total milliseconds assigned to the operation.
     pub fn deadline_ms(&self) -> u64 {
         self.deadline_ms
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SeededEntropy;
+
+    #[test]
+    fn equal_jitter_stays_in_half_to_cap_and_is_repeatable_with_seeded_entropy() {
+        let first = SeededEntropy::from_seed(42);
+        let second = SeededEntropy::from_seed(42);
+        for cap_ms in [1, 2, 100, 1_000, 10_000] {
+            let a = equal_jitter_ms(cap_ms, &first);
+            let b = equal_jitter_ms(cap_ms, &second);
+            assert_eq!(a, b);
+            assert!(
+                (cap_ms / 2..=cap_ms).contains(&a),
+                "jittered {a} out of range for cap {cap_ms}"
+            );
+        }
     }
 }
