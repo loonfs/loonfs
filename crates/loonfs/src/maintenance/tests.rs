@@ -414,6 +414,17 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         MetadataCompactionOutcome::Fenced
     );
     assert_eq!(store.counts().puts, 0);
+    let missing = NamespaceId::parse("missing-compactor-claim").expect("namespace id");
+    assert!(maintenance.compactor_epoch(&missing, None).await.is_err());
+    assert!(
+        !maintenance
+            .writer
+            .compactor_epochs
+            .lock()
+            .expect("compactor epochs lock")
+            .contains_key(&missing),
+        "failed claim must not leave a namespace entry behind"
+    );
 }
 
 /// Lets a rival write one commit and fold it before each manifest write it

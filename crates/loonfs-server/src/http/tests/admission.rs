@@ -56,7 +56,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     assert_eq!(error.request_id.as_deref(), Some(request_id.as_str()));
     assert_eq!(refused_polls.load(Ordering::SeqCst), 0);
 
-    for path in ["/health", "/readiness?probe=1", "/metrics"] {
+    for path in ["/health", "/readiness?probe=1"] {
         let response = router.clone().oneshot(request(path)).await.expect("probe");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(limit.in_flight(), 1);
@@ -65,6 +65,31 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     assert!(rendered.contains("loonfs_server_in_flight_requests 1\n"));
     assert!(rendered.contains("loonfs_server_busy_rejections_total{kind=\"request\"} 1\n"));
     assert!(rendered.contains("method=\"POST\",route=\"/v0/namespaces\",status_class=\"5xx\"} 1\n"));
+
+    // `/metrics` gets one independent scrape slot while general slots are full,
+    // and rejects a second concurrent scrape until the first body finishes.
+    let first_metrics = router
+        .clone()
+        .oneshot(request("/metrics"))
+        .await
+        .expect("first metrics scrape");
+    assert_eq!(first_metrics.status(), StatusCode::OK);
+    assert_eq!(limit.in_flight(), 1);
+    let second_metrics = router
+        .clone()
+        .oneshot(request("/metrics"))
+        .await
+        .expect("second concurrent metrics scrape");
+    assert_eq!(second_metrics.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(first_metrics);
+    let third_metrics = router
+        .clone()
+        .oneshot(request("/metrics"))
+        .await
+        .expect("metrics scrape after first finishes");
+    assert_eq!(third_metrics.status(), StatusCode::OK);
+    drop(third_metrics);
+
     assert_eq!(store.counts(), before);
     drop(first);
     assert_eq!(limit.in_flight(), 0);

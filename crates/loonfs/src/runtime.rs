@@ -86,89 +86,15 @@ pub struct Writable {
     pub(crate) publisher: PublisherRegistry,
 }
 
-/// Per-namespace compactor epochs shared across a runtime's sessions and
-/// [`Maintenance`] handles without blocking one namespace's claim on another's
-/// network I/O.
-#[derive(Default)]
-pub(crate) struct CompactorEpochs {
-    entries:
-        std::sync::Mutex<BTreeMap<NamespaceId, Arc<tokio::sync::Mutex<Option<CompactorEpoch>>>>>,
-}
-
-impl CompactorEpochs {
-    /// Returns the per-namespace claim slot, creating one if absent.
-    pub(crate) fn slot(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Arc<tokio::sync::Mutex<Option<CompactorEpoch>>> {
-        let mut entries = self
-            .entries
-            .lock()
-            .expect("compactor epochs lock should not be poisoned");
-        Arc::clone(
-            entries
-                .entry(namespace_id.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
-        )
-    }
-
-    /// Returns the claimed epoch if a slot exists and isn't currently claiming.
-    pub(crate) async fn get(&self, namespace_id: &NamespaceId) -> Option<CompactorEpoch> {
-        let slot = {
-            self.entries
-                .lock()
-                .expect("compactor epochs lock should not be poisoned")
-                .get(namespace_id)
-                .cloned()
-        }?;
-        let epoch = *slot.lock().await;
-        epoch
-    }
-
-    /// Clears `fenced_epoch` if it's still stored and removes idle empty slots
-    /// so ephemeral namespaces don't accumulate entries.
-    pub(crate) async fn forget_if_matches(
-        &self,
-        namespace_id: &NamespaceId,
-        fenced_epoch: CompactorEpoch,
-    ) {
-        let Some(slot) = ({
-            self.entries
-                .lock()
-                .expect("compactor epochs lock should not be poisoned")
-                .get(namespace_id)
-                .cloned()
-        }) else {
-            return;
-        };
-        let mut guard = slot.lock().await;
-        if *guard == Some(fenced_epoch) {
-            *guard = None;
-            // Hold `guard` while checking `entries` so no waiter can reclaim
-            // this slot before we remove it. Lock order is always `slot` then
-            // `entries`, since `entries` is never held across an await.
-            let mut entries = self
-                .entries
-                .lock()
-                .expect("compactor epochs lock should not be poisoned");
-            if entries
-                .get(namespace_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &slot) && Arc::strong_count(&slot) == 2)
-            {
-                entries.remove(namespace_id);
-            }
-        }
-    }
-}
-
 /// The writer state that a writable runtime, its sessions, and every
 /// [`Maintenance`] value of the runtime share.
 pub(crate) struct WriterState {
     /// The writer ID that the runtime's sessions commit as.
     pub(crate) writer_id: WriterId,
-    /// The compactor epoch this runtime has for each namespace, synchronized
-    /// per namespace so claims never block other namespaces across I/O.
-    pub(crate) compactor_epochs: CompactorEpochs,
+    /// The compactor epoch this runtime has for each namespace. Claims run
+    /// under the namespace's compaction lock (`turns.compaction`), so this map
+    /// is never locked across I/O and only stores succeeded claims.
+    pub(crate) compactor_epochs: std::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
 }
 
 impl fmt::Debug for Writable {
