@@ -135,7 +135,6 @@ impl NamespacePublisher {
         self.reserve_next_publish_slot(&mut state);
         self.count_queued(&mut state);
         drop(state);
-        self.report_queue_depth();
         item
     }
 

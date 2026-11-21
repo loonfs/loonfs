@@ -344,8 +344,6 @@ impl NamespacePublisher {
         );
         self.spawn_worker_if_idle(&mut state);
         self.count_queued(&mut state);
-        drop(state);
-        self.report_queue_depth();
         Ok(AdmittedSubmission {
             admission: SubmissionAdmission::OwnOutcome,
             queue_depth: queued + 1,

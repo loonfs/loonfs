@@ -22,7 +22,7 @@ pub(crate) use object_store::fan_out_object_store_recorder;
 pub(crate) use runtime::{ReadHeadSource, RuntimeInstruments};
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 /// `result` label for a successful operation.
@@ -96,6 +96,51 @@ pub trait CounterHandle: Send + Sync {
 pub trait GaugeHandle: Send + Sync {
     /// Replaces the reported value.
     fn set(&self, value: i64);
+}
+
+/// A count that several threads change, and the gauge that reports it.
+///
+/// A report that races a concurrent change repeats until the gauge shows the
+/// count, so the gauge never stays behind the count once changes stop.
+pub struct CountGauge {
+    count: AtomicUsize,
+    gauge: Arc<dyn GaugeHandle>,
+}
+
+impl CountGauge {
+    /// Creates a count of zero reported to `gauge`.
+    pub fn new(gauge: Arc<dyn GaugeHandle>) -> Self {
+        Self {
+            count: AtomicUsize::new(0),
+            gauge,
+        }
+    }
+
+    /// Adds `value` to the count and reports the count.
+    pub fn add(&self, value: usize) {
+        self.count.fetch_add(value, Ordering::SeqCst);
+        self.report();
+    }
+
+    /// Subtracts `value` from the count and reports the count.
+    pub fn sub(&self, value: usize) {
+        self.count.fetch_sub(value, Ordering::SeqCst);
+        self.report();
+    }
+
+    /// Sets the gauge to the count, and sets it again while the count moved
+    /// between the read and the set.
+    fn report(&self) {
+        let mut reported = self.count.load(Ordering::SeqCst);
+        loop {
+            self.gauge.set(i64::try_from(reported).unwrap_or(i64::MAX));
+            let now = self.count.load(Ordering::SeqCst);
+            if now == reported {
+                return;
+            }
+            reported = now;
+        }
+    }
 }
 
 /// A registered histogram.

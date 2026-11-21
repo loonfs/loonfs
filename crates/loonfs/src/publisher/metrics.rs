@@ -2,10 +2,9 @@
 
 use crate::metrics::labels::{LabeledCounters, MetricLabel};
 use crate::metrics::{
-    seconds_from_ms, CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder,
+    seconds_from_ms, CountGauge, CounterHandle, GaugeHandle, HistogramHandle, MetricsRecorder,
     LATENCY_SECONDS_BOUNDARIES, RESULT_ERROR, RESULT_OK, SMALL_COUNT_BOUNDARIES,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// The closed outcome vocabulary for a publication delivered to its caller.
@@ -43,10 +42,8 @@ pub(crate) struct PublisherInstruments {
     write_stop_refusals: Arc<dyn CounterHandle>,
     tail_replays: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
-    queue_depth: Arc<dyn GaugeHandle>,
-    /// The candidates queued at every namespace publisher of the runtime,
-    /// which `queue_depth` reports.
-    queued_candidates: AtomicUsize,
+    /// The candidates queued at every namespace publisher of the runtime.
+    queued_candidates: CountGauge,
     sessions_open: Arc<dyn GaugeHandle>,
     panics: Arc<dyn CounterHandle>,
     publishes: LabeledCounters<PublishOutcome>,
@@ -98,12 +95,11 @@ impl PublisherInstruments {
                 &[],
                 SMALL_COUNT_BOUNDARIES,
             ),
-            queue_depth: recorder.register_gauge(
+            queued_candidates: CountGauge::new(recorder.register_gauge(
                 "loonfs.publisher.queue_depth",
                 "Candidates queued at every namespace publisher and not yet taken",
                 &[],
-            ),
-            queued_candidates: AtomicUsize::new(0),
+            )),
             sessions_open: recorder.register_gauge(
                 "loonfs.publisher.sessions_open",
                 "Namespace writer sessions that a handle holds or whose admitted work is still running",
@@ -125,24 +121,15 @@ impl PublisherInstruments {
     }
 
     /// Moves one namespace's share of the queued candidates from `before`
-    /// to `after`. The caller holds the namespace's state lock, so the
-    /// namespace's changes apply in order and the total never falls below
-    /// zero.
+    /// to `after`, and reports the candidates queued at every namespace.
+    /// The caller holds the namespace's state lock, so the namespace's
+    /// changes apply in order and the total never falls below zero.
     pub(crate) fn move_queued_candidates(&self, before: usize, after: usize) {
         if after >= before {
-            self.queued_candidates
-                .fetch_add(after - before, Ordering::SeqCst);
+            self.queued_candidates.add(after - before);
         } else {
-            self.queued_candidates
-                .fetch_sub(before - after, Ordering::SeqCst);
+            self.queued_candidates.sub(before - after);
         }
-    }
-
-    /// Reports the candidates queued at every namespace and not yet taken.
-    pub(crate) fn queue_depth(&self) {
-        let queued = self.queued_candidates.load(Ordering::SeqCst);
-        self.queue_depth
-            .set(i64::try_from(queued).unwrap_or(i64::MAX));
     }
 
     pub(crate) fn sessions(&self, open: usize) {

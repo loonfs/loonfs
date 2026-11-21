@@ -149,3 +149,55 @@ fn a_snapshot_orders_entries_by_name_then_labels() {
         ]
     );
 }
+
+/// A gauge that keeps every value set on it, in order.
+#[derive(Default)]
+struct RecordingGauge {
+    values: Mutex<Vec<i64>>,
+}
+
+impl RecordingGauge {
+    fn last(&self) -> Option<i64> {
+        self.values.lock().expect("values lock").last().copied()
+    }
+}
+
+impl GaugeHandle for RecordingGauge {
+    fn set(&self, value: i64) {
+        self.values.lock().expect("values lock").push(value);
+    }
+}
+
+#[test]
+fn a_count_gauge_reports_the_count_after_each_change() {
+    let gauge = Arc::new(RecordingGauge::default());
+    let count = CountGauge::new(Arc::clone(&gauge) as Arc<dyn GaugeHandle>);
+
+    count.add(3);
+    count.sub(1);
+    count.add(2);
+    count.sub(4);
+
+    assert_eq!(*gauge.values.lock().expect("values lock"), vec![3, 2, 4, 0]);
+}
+
+#[test]
+fn a_count_gauge_ends_at_zero_after_concurrent_changes_cancel_out() {
+    let gauge = Arc::new(RecordingGauge::default());
+    let count = CountGauge::new(Arc::clone(&gauge) as Arc<dyn GaugeHandle>);
+
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                for _ in 0..300 {
+                    count.add(1);
+                }
+                for _ in 0..300 {
+                    count.sub(1);
+                }
+            });
+        }
+    });
+
+    assert_eq!(gauge.last(), Some(0));
+}
