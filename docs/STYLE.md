@@ -12,7 +12,7 @@ Three rules apply everywhere:
 
 - **Solve each kind of problem the same way across the codebase**, so that a developer who has seen the pattern once recognizes it everywhere. A convention applies to new code and to code that a change already touches, but an existing departure isn't, on its own, a reason for a change.
 
-- **Remove the old design in the same change that adds a new one.** A compatibility layer retains conflicting design decisions, and every developer has to learn both without an established preference.
+- **Remove the old design in the same change that adds a new one.** A compatibility layer keeps conflicting design decisions around, and every developer has to learn both without an established preference.
 
 - **Don't ship shortcuts.** A deliberate shortcut still has to be rewritten later, and by then other code usually depends on it.
 
@@ -22,7 +22,7 @@ Three rules apply everywhere:
 
 - **Fix the root cause of a bug, not the symptom.** A check that catches the symptom leaves the cause available to occur again.
 
-- **Estimate the back-of-the-envelope costs across scales before you commit to a design.** Estimate the round trips, bytes, and states that the design needs, up to the largest namespace the limits allow. Start with round trips, because one GET to object storage takes tens of milliseconds.
+- **Estimate the back-of-the-envelope costs before you commit to a design.** Estimate the round trips, bytes, and states that the design needs, up to the largest namespace the limits allow. Start with round trips, because one GET to object storage takes tens of milliseconds.
 
 ## Correctness
 
@@ -274,7 +274,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 - **Define each type once, in the lowest crate where it's needed**, and re-export it from the crates above.
 
-- **Implement each rule, constant, mapping, and helper only once**, because when a rule has two copies, a change to one can miss the other. The model oracle (`loonfs-model`) and grep keep their own copies on purpose. The oracle never shares code with core, because an oracle that shared core's code would share its bugs.
+- **Implement each rule, constant, mapping, and helper only once**, because when a rule has two copies, a change to one can miss the other. The model oracle (`loonfs-model`) and grep keep their own copies by design. The oracle never shares code with core, because an oracle that shared core's code would share its bugs.
 
 - **Don't put code in `mod.rs`.** Every module has one, so the file name doesn't tell a developer what's inside. Put code in a file whose name describes its contents, and use `mod.rs` for docs and re-exports.
 

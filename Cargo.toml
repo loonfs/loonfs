@@ -57,7 +57,7 @@ hyper-util = "0.1"
 icu_casemap = "=2.1.1"
 icu_normalizer = "=2.1.1"
 libc = "0.2"
-# Named directly, though axum already carries both: the server decodes query
+# Named directly, though axum already depends on both: the server decodes query
 # strings itself so that an unknown parameter is reported the same way an
 # unknown JSON body field is. `form_urlencoded` splits the query string into
 # pairs and `serde_urlencoded` deserializes them. The client encodes its query
@@ -79,7 +79,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 regex-syntax = "0.8"
 # Already in the tree beneath rustls and rcgen. Named directly because the GCS
 # presigner signs `GOOG4-RSA-SHA256` with an RSA key, which the hash and MAC
-# crates this workspace already carries cannot do.
+# crates in this workspace can't do.
 ring = "0.17"
 # `ring` because the server's TLS listener (`http/tls.rs`) and the client's
 # TLS configuration (`reqwest_transport.rs`) name the ring provider.
@@ -128,12 +128,12 @@ zstd = "0.14"
 
 [profile.dev]
 # Tests inherit this profile. Line tables are everything a backtrace or a
-# panic location needs; the rest of the debug info only costs link time and
+# panic location needs, and the rest of the debug info only costs link time and
 # disk.
 debug = "line-tables-only"
 
 # Every durable object is zstd-compressed and SHA-256 checksummed. Unoptimized,
-# those two dominate the tests that write large segments; optimized, they
+# those two dominate the tests that write large segments. Optimized, they
 # rebuild in seconds and leave the rest of the dev build untouched.
 [profile.dev.package.sha2]
 opt-level = 3
