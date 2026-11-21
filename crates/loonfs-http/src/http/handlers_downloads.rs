@@ -138,7 +138,7 @@ pub(super) async fn create_download(
             ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ("inode_id" = loonfs_types::InodeId, Path, description = "The file's inode ID.")
         ),
-        request_body = CreateDownloadByInodeRequest,
+        request_body = Option<CreateDownloadByInodeRequest>,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
             (status = 400, description = "Invalid inode ID, snapshot ID, or start_offset, or start_offset at or past the file's size", body = ErrorResponse),
@@ -207,7 +207,7 @@ pub(super) async fn create_download_by_inode(
             ("inode_id" = loonfs_types::InodeId, Path, description = "The file's inode ID."),
             ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number.")
         ),
-        request_body = CreateRevisionDownloadByInodeRequest,
+        request_body = Option<CreateRevisionDownloadByInodeRequest>,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
             (status = 400, description = "Invalid inode ID, revision number, snapshot ID, consistency, or start_offset, or start_offset at or past the revision's size", body = ErrorResponse),
@@ -313,7 +313,7 @@ async fn presigned_ranges(
                 presign_time(),
             )
             .await
-            .map_err(presign_issuer_error)?;
+            .map_err(|error| presign_issuer_error(error, None))?;
         granted.push(DownloadRange {
             start_offset,
             length: range.length,

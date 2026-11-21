@@ -5,7 +5,7 @@ use super::extractors::{ActorHeader, ContextHeaders};
 use super::handlers_uploads::{direct_multipart_issuer, direct_put_issuer};
 use super::query_params::{effective_page_limit, live_consistency, required_query_param};
 
-use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{
@@ -225,7 +225,7 @@ pub(super) async fn get_capabilities(
         tag = "namespaces",
         summary = "Create namespace",
         description = "Creates a new empty namespace. Without `namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
-        request_body = CreateNamespaceRequest,
+        request_body = Option<CreateNamespaceRequest>,
         responses(
             (status = 200, description = "Namespace created", body = loonfs_types::NamespaceMetadata),
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
@@ -241,8 +241,9 @@ pub(super) async fn create_namespace(
     State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
     AppQuery(_): AppQuery<NoQuery>,
-    AppJson(request): AppJson<CreateNamespaceRequest>,
+    OptionalAppJson(request): OptionalAppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
+    let request = request.unwrap_or_default();
     let namespace = state
         .runtime
         .create_namespace_with_options(
@@ -473,7 +474,7 @@ pub(super) async fn delete_namespace(
         summary = "Fork namespace",
         description = "Creates a new namespace from the source namespace's current head or from an unexpired snapshot. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The source namespace ID.")),
-        request_body = ForkNamespaceRequest,
+        request_body = Option<ForkNamespaceRequest>,
         responses(
             (status = 200, description = "Namespace forked", body = loonfs_types::NamespaceMetadata),
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
@@ -493,8 +494,9 @@ pub(super) async fn fork_namespace(
     ActorHeader(actor_id): ActorHeader,
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    AppJson(request): AppJson<ForkNamespaceRequest>,
+    OptionalAppJson(request): OptionalAppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
+    let request = request.unwrap_or_default();
     let runtime = state.runtime_for(context);
     let namespace = runtime
         .fork_namespace_with_options(

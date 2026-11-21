@@ -1,7 +1,6 @@
 //! The maintenance job handlers of a namespace and of a pool.
 
 use super::error::ApiResponseError;
-use super::extractors::OptionalActorHeader;
 
 use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -46,7 +45,6 @@ use std::sync::Arc;
 )]
 pub(super) async fn run_maintenance_job(
     State(state): State<Arc<HttpState>>,
-    OptionalActorHeader(_): OptionalActorHeader,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunMaintenanceJobRequest>,
@@ -128,7 +126,6 @@ pub(super) struct PoolSegment {
 )]
 pub(super) async fn run_pool_maintenance_job(
     State(state): State<Arc<HttpState>>,
-    OptionalActorHeader(_): OptionalActorHeader,
     AppPath(PoolSegment { pool_id }): AppPath<PoolSegment>,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<RunPoolMaintenanceJobRequest>,

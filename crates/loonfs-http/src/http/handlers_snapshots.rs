@@ -5,7 +5,7 @@ use super::extractors::ContextHeaders;
 use super::handlers_filesystem::PageQuery;
 
 use super::query_params::effective_page_limit;
-use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::Json;
 
@@ -34,7 +34,7 @@ use std::sync::Arc;
         summary = "Create snapshot",
         description = "Creates a snapshot of the current namespace state. The server first folds any WAL tail after the current manifest. Every accepted call creates a new snapshot with a new ID, and the name is a label, not a key. A snapshot with `ttl_ms` expires that many milliseconds from the server's current time, and a snapshot without it doesn't expire. The snapshot keeps its manifest until garbage collection deletes it, after it expires or is deleted and its grace window passes.",
         params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
-        request_body = CreateSnapshotRequest,
+        request_body = Option<CreateSnapshotRequest>,
         responses(
             (status = 200, description = "Snapshot created", body = Snapshot),
             (status = 400, description = "Invalid namespace ID, name, or ttl", body = ErrorResponse),
@@ -52,8 +52,9 @@ pub(super) async fn create_snapshot(
     ContextHeaders(context): ContextHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
-    AppJson(request): AppJson<CreateSnapshotRequest>,
+    OptionalAppJson(request): OptionalAppJson<CreateSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiResponseError> {
+    let request = request.unwrap_or_default();
     let namespace = state.open_writer(&namespace_id, context).await?;
     let snapshot = namespace
         .create_snapshot_with_options(&loonfs::CreateSnapshotOptions {

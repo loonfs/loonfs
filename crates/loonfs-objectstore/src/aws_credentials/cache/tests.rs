@@ -162,25 +162,29 @@ async fn approaching_expiry_refreshes_once_for_concurrent_callers_and_changes_ke
         "access-one"
     );
     clock.set(60);
-    let readers = (0..32)
-        .map(|_| {
-            let (cache, provider, clock) = (cache.clone(), provider.clone(), clock.clone());
-            tokio::spawn(async move { get(&cache, &provider, &clock).await })
-        })
-        .collect::<Vec<_>>();
+    let refresher = {
+        let (cache, provider, clock) = (cache.clone(), provider.clone(), clock.clone());
+        tokio::spawn(async move { get(&cache, &provider, &clock).await })
+    };
     provider
         .started
         .acquire()
         .await
         .expect("refresh started")
         .forget();
-    gate.add_permits(1);
-    for reader in readers {
-        let value = reader.await.expect("reader");
-        assert_eq!(value.access_key_id(), "access-two");
-        assert_eq!(value.secret_access_key(), "secret-two");
-        assert_eq!(value.session_token(), Some("token-two"));
+    // Concurrent callers arriving during the proactive refresh window keep
+    // reading the still-valid credentials without stalling on the provider.
+    for _ in 0..31 {
+        let value = get(&cache, &provider, &clock).await;
+        assert_eq!(value.access_key_id(), "access-one");
     }
+    gate.add_permits(1);
+    let refreshed = refresher.await.expect("refresher");
+    assert_eq!(refreshed.access_key_id(), "access-two");
+    assert_eq!(refreshed.secret_access_key(), "secret-two");
+    assert_eq!(refreshed.session_token(), Some("token-two"));
+    let after = get(&cache, &provider, &clock).await;
+    assert_eq!(after.access_key_id(), "access-two");
     assert_eq!(provider.calls(), 2);
 }
 

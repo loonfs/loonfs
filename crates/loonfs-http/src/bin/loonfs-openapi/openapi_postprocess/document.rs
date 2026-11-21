@@ -1,6 +1,9 @@
 //! Builds the published OpenAPI document from the generated one.
 
-use super::operations::{add_pagination_metadata, add_retry_metadata};
+use super::operations::{
+    add_pagination_metadata, add_request_id_response_headers, add_retry_metadata,
+    normalize_optional_request_bodies,
+};
 use super::OpenapiPostprocessError;
 use loonfs_types::headers;
 use serde::Serialize;
@@ -17,5 +20,7 @@ pub(crate) fn openapi_json_pretty(
     ]);
     add_retry_metadata(&mut document)?;
     add_pagination_metadata(&mut document)?;
+    normalize_optional_request_bodies(&mut document)?;
+    add_request_id_response_headers(&mut document)?;
     Ok(serde_json::to_string_pretty(&document)?)
 }

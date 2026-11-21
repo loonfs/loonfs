@@ -58,35 +58,36 @@ pub(super) fn authorize(policy: &AuthPolicy, headers: &HeaderMap) -> Result<(), 
 #[derive(Debug)]
 pub(super) struct ActorHeader(pub(super) ActorId);
 
+/// Returns the sole value of `name` when present, or `400 invalid_request`
+/// when the request sends more than one `name` header line.
+fn single_header_value<'a>(
+    headers: &'a axum::http::HeaderMap,
+    name: &str,
+) -> Result<Option<std::borrow::Cow<'a, str>>, ApiResponseError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ApiResponseError::new(
+            ErrorCode::InvalidRequest,
+            &format!("duplicate header {name}"),
+        )
+        .with_param(name));
+    }
+    Ok(Some(String::from_utf8_lossy(value.as_bytes())))
+}
+
 impl<S: Send + Sync> FromRequestParts<S> for ActorHeader {
     type Rejection = ApiResponseError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let OptionalActorHeader(actor_id) =
-            OptionalActorHeader::from_request_parts(parts, state).await?;
-        actor_id.map(Self).ok_or_else(missing_actor)
-    }
-}
-
-/// `Loonfs-Actor` when the request sends it. Maintenance jobs read it this
-/// way because only administrator recovery needs an actor.
-#[derive(Debug)]
-pub(super) struct OptionalActorHeader(pub(super) Option<ActorId>);
-
-impl<S: Send + Sync> FromRequestParts<S> for OptionalActorHeader {
-    type Rejection = ApiResponseError;
-
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let Some(value) = parts.headers.get(headers::ACTOR) else {
-            return Ok(Self(None));
-        };
-        let value = String::from_utf8_lossy(value.as_bytes());
-        ActorId::parse(&value)
-            .map(|actor_id| Self(Some(actor_id)))
-            .map_err(|error| {
-                ApiResponseError::new(ErrorCode::InvalidRequest, error.reason())
-                    .with_param(headers::ACTOR)
-            })
+        let value =
+            single_header_value(&parts.headers, headers::ACTOR)?.ok_or_else(missing_actor)?;
+        ActorId::parse(&value).map(Self).map_err(|error| {
+            ApiResponseError::new(ErrorCode::InvalidRequest, error.reason())
+                .with_param(headers::ACTOR)
+        })
     }
 }
 
@@ -109,13 +110,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ContextHeaders {
     type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let header = |name: &str| {
-            parts
-                .headers
-                .get(name)
-                .map(|value| String::from_utf8_lossy(value.as_bytes()))
-        };
-        let principals = header(headers::PRINCIPALS)
+        let principals = single_header_value(&parts.headers, headers::PRINCIPALS)?
             .map(|principals| {
                 principals.parse::<PrincipalSet>().map_err(|error| {
                     ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string())
@@ -123,7 +118,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ContextHeaders {
                 })
             })
             .transpose()?;
-        let context = header(headers::CONTEXT);
+        let context = single_header_value(&parts.headers, headers::CONTEXT)?;
         match (principals, context.as_deref()) {
             (Some(principals), None) => Ok(Self(Context::Principals(principals))),
             (None, Some(headers::SERVICE_CONTEXT)) => Ok(Self(Context::Service)),
@@ -874,5 +869,36 @@ mod tests {
         )
         .expect_err("value has the wrong type");
         assert_eq!(error.param(), Some("/values/a~1b~0c"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_identity_headers_are_rejected() {
+        let mut req = axum::http::Request::builder()
+            .header(headers::ACTOR, "usr_1")
+            .header(headers::ACTOR, "usr_2")
+            .body(())
+            .expect("request");
+        let (mut parts, ()) = req.into_parts();
+        let error = ActorHeader::from_request_parts(&mut parts, &())
+            .await
+            .expect_err("duplicate actor header must fail");
+        assert_eq!(error.param(), Some(headers::ACTOR));
+
+        for (header_name, first, second) in [
+            (headers::PRINCIPALS, "usr_1", "usr_2"),
+            (headers::CONTEXT, "service", "service"),
+        ] {
+            req = axum::http::Request::builder()
+                .header(header_name, first)
+                .header(header_name, second)
+                .body(())
+                .expect("request");
+            let (mut parts, ()) = req.into_parts();
+            let error = ContextHeaders::from_request_parts(&mut parts, &())
+                .await
+                .err()
+                .expect("duplicate context header must fail");
+            assert_eq!(error.param(), Some(header_name));
+        }
     }
 }

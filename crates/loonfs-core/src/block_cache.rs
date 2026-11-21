@@ -458,11 +458,16 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
                 return false;
             }
         };
-        let mut inner = self.lock();
-        if start.is_some_and(|start| inner.dropped_since(&key, start)) {
-            return false;
-        }
-        self.put(&mut inner, key, block, entry_charge, evicted)
+        let mut dropped = Vec::new();
+        let kept = {
+            let mut inner = self.lock();
+            if start.is_some_and(|start| inner.dropped_since(&key, start)) {
+                return false;
+            }
+            self.put(&mut inner, key, block, entry_charge, evicted, &mut dropped)
+        };
+        drop(dropped);
+        kept
     }
 
     /// Inserts `value` under `key` if the key has no entry or `newer`
@@ -496,25 +501,32 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             return None;
         }
         let entry_charge = self.entry_charge(&key, &value);
-        let mut inner = self.lock();
-        if start.is_some_and(|start| inner.dropped_since(&key, start)) {
-            return None;
-        }
-        if let Some(cached) = inner.entries.get(&key).map(|slot| &slot.block) {
-            if !newer(cached) {
-                return Some(cached.clone());
+        let mut dropped = Vec::new();
+        let existing = {
+            let mut inner = self.lock();
+            if start.is_some_and(|start| inner.dropped_since(&key, start)) {
+                return None;
             }
-        }
-        match entry_charge {
-            Ok(entry_charge) => {
-                self.put(&mut inner, key, value, entry_charge, None);
+            if let Some(cached) = inner.entries.get(&key).map(|slot| &slot.block) {
+                if !newer(cached) {
+                    return Some(cached.clone());
+                }
             }
-            Err(charged_bytes) => {
-                inner.drop_key(&key);
-                self.record_rejection(charged_bytes);
+            match entry_charge {
+                Ok(entry_charge) => {
+                    self.put(&mut inner, key, value, entry_charge, None, &mut dropped);
+                }
+                Err(charged_bytes) => {
+                    if let Some(slot) = inner.drop_key(&key) {
+                        dropped.push(slot.block);
+                    }
+                    self.record_rejection(charged_bytes);
+                }
             }
-        }
-        None
+            None
+        };
+        drop(dropped);
+        existing
     }
 
     /// Returns the charge of an entry of `block` under `key`, or the bytes
@@ -532,8 +544,9 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// least recently used entries until the cache is within its budget
     /// again, and returns whether the cache kept the new entry.
     ///
-    /// The evicted entries go into `evicted` if it's given, and are dropped
-    /// otherwise.
+    /// Evicted entries go into `evicted` if it's given, and any replaced or
+    /// unreturned evicted values are pushed into `dropped` so the caller can
+    /// free them after releasing the cache lock.
     fn put(
         &self,
         inner: &mut Inner<K, V>,
@@ -541,12 +554,14 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         block: V,
         entry_charge: usize,
         evicted: Option<&mut Vec<(K, V)>>,
+        dropped: &mut Vec<V>,
     ) -> bool {
         // A replaced entry's ghost positions point to its key, so the new
         // entry keeps that key instead of allocating another.
         let key = match inner.entries.remove_entry(&key) {
             Some((stored_key, previous)) => {
                 inner.charged_bytes = inner.charged_bytes.saturating_sub(previous.charged_bytes);
+                dropped.push(previous.block);
                 stored_key
             }
             None => Arc::new(key),
@@ -562,7 +577,7 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         inner.charged_bytes = inner.charged_bytes.saturating_add(entry_charge);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::Relaxed);
-        self.evict_over_budget(inner, evicted);
+        self.evict_over_budget(inner, evicted, dropped);
         inner.entries.contains_key(&key)
     }
 
@@ -572,7 +587,8 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
     /// even when the cache had no entry for the key, because it might have
     /// started before the change that the invalidation is for.
     pub fn invalidate(&self, key: &K) {
-        self.lock().drop_key(key);
+        let removed = self.lock().drop_key(key);
+        drop(removed);
     }
 
     /// Makes a load or a check of the key in flight insert nothing
@@ -585,7 +601,12 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
         self.config.max_decoded_bytes == 0
     }
 
-    fn evict_over_budget(&self, inner: &mut Inner<K, V>, mut evicted: Option<&mut Vec<(K, V)>>) {
+    fn evict_over_budget(
+        &self,
+        inner: &mut Inner<K, V>,
+        mut evicted: Option<&mut Vec<(K, V)>>,
+        dropped: &mut Vec<V>,
+    ) {
         while inner.charged_bytes > self.config.max_decoded_bytes {
             let Inner { entries, order, .. } = &mut *inner;
             let Some(candidate) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
@@ -601,6 +622,8 @@ impl<K: DecodedBlockKey, V: DecodedBlock> DecodedBlockCache<K, V> {
             self.record_eviction(slot.charged_bytes);
             if let Some(evicted) = evicted.as_deref_mut() {
                 evicted.push((K::clone(&candidate), slot.block));
+            } else {
+                dropped.push(slot.block);
             }
         }
     }

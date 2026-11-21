@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
 /// A request to create a snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateSnapshotRequest {

@@ -118,7 +118,8 @@ pub use capability::{
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_NAMESPACE_DEFAULT_RETENTION_WINDOW_MS,
-    LIMIT_PAGINATION_DEFAULT_LIMIT, LIMIT_PAGINATION_MAX_LIMIT, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_PAGINATION_DEFAULT_LIMIT, LIMIT_PAGINATION_MAX_LIMIT,
+    LIMIT_PAGINATION_NAMESPACES_DEFAULT_LIMIT, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
     LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
@@ -160,11 +161,12 @@ pub use metadata_rows::MetadataFamilyGroup;
 pub use name_policy::name_key_for_display_name;
 pub use pagination::{
     decode_cursor, decode_token, decode_token_bytes, encode_cursor, encode_token,
-    encode_token_bytes, ChangeFeedPosition, DirectoryPageCursor, DirectoryTreeFrame,
-    DirectoryTreePageCursor, EffectiveLimit, FileRevisionsPageCursor, GrepCursorPosition,
-    GrepPageCursor, LimitError, ListPageCursor, NamespaceListPageCursor, OpaqueToken,
-    OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse, Pager, TrashPageCursor,
-    DEFAULT_NAMESPACE_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PAGE_CURSOR_FORMAT_VERSION,
+    encode_token_bytes, ChangeFeedPosition, DiffPagePosition, DirectoryPageCursor,
+    DirectoryTreeFrame, DirectoryTreePageCursor, EffectiveLimit, FileRevisionsPageCursor,
+    GrepCursorPosition, GrepPageCursor, LimitError, ListPageCursor, NamespaceListPageCursor,
+    OpaqueToken, OpaqueTokenError, Page, PageCursor, PageRequest, PagedResponse, Pager,
+    TrashPageCursor, DEFAULT_NAMESPACE_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    PAGE_CURSOR_FORMAT_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, InodeKind, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES,
