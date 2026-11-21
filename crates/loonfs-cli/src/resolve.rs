@@ -8,7 +8,7 @@ use crate::config::{
     StoreConfig, ACTOR_ID_ENV, NAMESPACE_ENV, PRINCIPALS_ENV,
 };
 use crate::error::{CliError, Result};
-use loonfs::engine::DecodedBlockCacheConfig;
+use loonfs::DecodedBlockCacheConfig;
 use loonfs::{LoonFs, SharedObjectStore, WriterId};
 use loonfs_client::Client;
 use loonfs_grep::{

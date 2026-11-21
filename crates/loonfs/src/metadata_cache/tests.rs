@@ -576,7 +576,7 @@ async fn read_policy_stays_with_each_binding() {
     .await;
     let (never, never_store) = binding(|builder| {
         builder.config(crate::RuntimeConfig {
-            manifest_revalidation_interval_ms: crate::engine::READ_REVALIDATION_BOUND_MS,
+            manifest_revalidation_interval_ms: crate::READ_REVALIDATION_BOUND_MS,
             max_staleness_ms: 0,
             ..crate::RuntimeConfig::default()
         })

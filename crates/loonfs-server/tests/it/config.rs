@@ -1,8 +1,8 @@
 //! The server config file's decoding and checks, through the public
 //! loaders.
 
-use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::GC_GRACE_WINDOW_MS;
+use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs_server::{
     load_server_config, JobMode, MetadataCacheConfig, MetadataCacheSsdConfig, ReadConsistency,
     ServerConfig, ServerError, TlsServerConfig, TransportConfig,

@@ -118,7 +118,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
     };
     let grep_service = || {
         Arc::new(GrepService::new(Arc::new(GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::new(memory.grep.bytes),
+            loonfs::DecodedBlockCacheConfig::new(memory.grep.bytes),
         ))))
     };
     let grep_service = config.grep.mode.serves().then(grep_service);

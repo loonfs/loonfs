@@ -2,9 +2,9 @@
 //! the writer session's position, and no cache lifecycle event (invalidation,
 //! LRU eviction, or running with zero cache limits) erases writer fencing.
 
-use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::{counter, writer};
+use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs::{
     Commit, Error, LoonFs, LoonFsBuilder, MetadataCache, Namespace, NamespaceId, SharedObjectStore,
     Writable, WriterFence,

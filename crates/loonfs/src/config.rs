@@ -195,7 +195,7 @@ pub struct RuntimeConfig {
     /// Minimum interval, in milliseconds, between checks for a successor to
     /// the manifest of a cached head. Defaults to 1000, and zero checks on
     /// every read. A value above
-    /// [`READ_REVALIDATION_BOUND_MS`](crate::engine::READ_REVALIDATION_BOUND_MS)
+    /// [`READ_REVALIDATION_BOUND_MS`](crate::READ_REVALIDATION_BOUND_MS)
     /// fails the build with [`Error::Config`].
     pub manifest_revalidation_interval_ms: u64,
     /// Maximum staleness, in milliseconds, of an eventual read that doesn't
@@ -206,7 +206,7 @@ pub struct RuntimeConfig {
     /// head), without a request, while that confirmation is younger than the
     /// maximum staleness. Defaults to 1000, and zero confirms the head on
     /// every read. A value above
-    /// [`READ_REVALIDATION_BOUND_MS`](crate::engine::READ_REVALIDATION_BOUND_MS)
+    /// [`READ_REVALIDATION_BOUND_MS`](crate::READ_REVALIDATION_BOUND_MS)
     /// fails the build with [`Error::Config`].
     pub max_staleness_ms: u64,
     /// Consistency of a read that doesn't set its own, including every read

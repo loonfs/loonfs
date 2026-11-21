@@ -5,8 +5,8 @@
 use super::memory::read_cgroup_memory_limit;
 use super::{AuthConfig, MemorySizing, ServerConfig, TransportConfig};
 use crate::{Result, ServerError};
-use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::GC_GRACE_WINDOW_MS;
+use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_http::AuthPolicy;
 use loonfs_types::config::{non_blank, validate_non_empty, ConfigFieldError};
