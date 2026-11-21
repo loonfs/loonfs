@@ -23,7 +23,7 @@ pub(crate) async fn run_access_set(
     let options = UpdateAccessOptions {
         commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
-        expected_access_revision_no: args.expected_revision,
+        expected_access_revision_no: args.expected_access_revision,
     };
     let result = context
         .profile

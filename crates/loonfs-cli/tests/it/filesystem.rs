@@ -1171,7 +1171,7 @@ fn embedded_namespace_fork_uses_the_selected_snapshot() {
     fs::write(&payload, b"captured").expect("payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("path"), "/first.txt"]));
     let snapshot = harness.run(&[
-        "--json", "snapshot", "create", "demo", "--name", "basis", "--ttl-ms", "60000",
+        "--json", "snapshot", "create", "--name", "basis", "--ttl-ms", "60000",
     ]);
     assert_success(&snapshot);
     let snapshot = json_data(&snapshot);
@@ -1182,7 +1182,7 @@ fn embedded_namespace_fork_uses_the_selected_snapshot() {
         "fork",
         "demo",
         "clone",
-        "--snapshot",
+        "--snapshot-id",
         snapshot["snapshot_id"].as_str().expect("snapshot id"),
     ]);
     assert_success(&fork);

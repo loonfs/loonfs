@@ -71,7 +71,7 @@ pub(crate) struct AccessSetArgs {
     /// Replace only while the row is still at this access revision. Needs
     /// --expected-inode-id, which identifies the row.
     #[arg(long, value_hint = ValueHint::Other, requires = "expected_inode_id", value_parser = parse_access_revision_no)]
-    pub expected_revision: Option<AccessRevisionNo>,
+    pub expected_access_revision: Option<AccessRevisionNo>,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
