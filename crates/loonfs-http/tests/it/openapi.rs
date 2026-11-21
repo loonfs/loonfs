@@ -3,8 +3,11 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[path = "../../src/bin/loonfs-openapi/openapi_postprocess/mod.rs"]
-mod openapi_postprocess;
+#[path = "../../src/bin/loonfs-openapi"]
+mod openapi_bin {
+    pub(super) mod openapi_postprocess;
+}
+use openapi_bin::openapi_postprocess;
 
 use openapi_postprocess::operations::{add_pagination_metadata, add_retry_metadata};
 use openapi_postprocess::OpenapiPostprocessError;
