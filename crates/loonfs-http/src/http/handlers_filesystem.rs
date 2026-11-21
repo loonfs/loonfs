@@ -285,14 +285,16 @@ pub(super) struct DiffQuery {
         summary = "List directory",
         description = "Lists a directory from the current state or an unexpired snapshot.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ListPathPageQuery
         ),
         responses(
             (status = 200, description = "Directory listing page", body = loonfs_types::ListPathEntriesResponse),
             (status = 400, description = "Invalid path, limit, cursor, include_attributes, recursive, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 409, description = "Path isn't a directory", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -346,13 +348,14 @@ pub(super) async fn list_path_entries(
         summary = "Stat path",
         description = "Returns path metadata from the current state or an unexpired snapshot.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             PathQuery
         ),
         responses(
             (status = 200, description = "Path entry", body = loonfs_types::PathEntry),
             (status = 400, description = "Invalid path, include_attributes, snapshot ID, or consistency", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -400,19 +403,21 @@ pub(super) async fn get_path_entry(
         summary = "Read file",
         description = "Returns the current file bytes, a retained revision, or the revision captured by an unexpired snapshot. A `Range` header asks for one byte range of the file instead.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ContentQuery,
             ("Range" = Option<String>, Header, nullable = false, description = "One byte range of the file to read instead of the whole file, as `bytes=start-end`, where `end` is the offset of the last byte, or as `bytes=start-`. An `end` past the last byte reads to the end of the file. Any other value, including a suffix range or several ranges, returns 400 `invalid_request`.")
         ),
         responses(
-            (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream", headers(("Accept-Ranges" = String, description = "`bytes`, because the route accepts a `Range` header."))),
-            (status = 206, description = "The requested range of the file's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.", body = Vec<u8>, content_type = "application/octet-stream", headers(("Content-Range" = String, description = "The returned range and the file's size, as `bytes start-end/size`."), ("Accept-Ranges" = String, description = "`bytes`."))),
+            (status = 200, description = "File bytes", body = inline(crate::http::openapi::BinaryPayload), content_type = "application/octet-stream", headers(("Accept-Ranges" = String, description = "`bytes`, because the route accepts a `Range` header."))),
+            (status = 206, description = "The requested range of the file's bytes. The server doesn't verify a range against the file's checksum, which covers the whole file.", body = inline(crate::http::openapi::BinaryPayload), content_type = "application/octet-stream", headers(("Content-Range" = String, description = "The returned range and the file's size, as `bytes start-end/size`."), ("Accept-Ranges" = String, description = "`bytes`."))),
             (status = 400, description = "Invalid path, revision, snapshot ID, consistency, or `Range` header, or revision_no combined with snapshot_id", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 409, description = "Path isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "The file, or the range that the `Range` header asks for, exceeds the advertised `download.service_proxied.max_content_bytes` limit", body = ErrorResponse),
-            (status = 416, description = "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.", body = ErrorResponse),
+            (status = 416, description = "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.", body = ErrorResponse, headers(("Content-Range" = String, description = "The file's size, as `bytes */size`."))),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -468,13 +473,14 @@ pub(super) async fn get_file_content(
         summary = "List the trash",
         description = "Returns the namespace's trash entries, oldest deletion first. An entry leaves the trash when it's restored, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that a restore needs, and the directory binding that the delete removed.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             LivePageQuery
         ),
         responses(
             (status = 200, description = "Trash entries", body = ListTrashResponse),
             (status = 400, description = "Invalid limit or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -520,14 +526,16 @@ pub(super) async fn list_trash(
         summary = "List file revisions",
         description = "Resolves the current path to a file inode and returns that file's revisions. If the file might be renamed, use the inode revisions route, which identifies the file by a stable ID.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             PathPageQuery
         ),
         responses(
             (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
             (status = 400, description = "Invalid path", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or path not found", body = ErrorResponse),
+            (status = 409, description = "Path isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -573,12 +581,13 @@ pub(super) async fn list_file_revisions(
         tag = "filesystem",
         summary = "Apply a commit",
         description = "Applies one commit, which is an ordered, non-empty list of path operations that are committed together. The commit ID makes retries idempotent. The server checks the request's preconditions against the state before the commit, after it resolves any commit receipt and before it runs the operations. A failed precondition's position is reported in `details.precondition_index`. A request can contain a single operation. If an operation fails, the whole request fails, and for a request with more than one operation, `details.operation_index` reports the failed operation's position.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         request_body = CommitRequest,
         responses(
             (status = 200, description = "Commit applied", body = Commit),
             (status = 400, description = "Invalid commit", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or path not found", body = ErrorResponse),
             (status = 409, description = "Operation conflict", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -691,13 +700,14 @@ pub(super) async fn create_commit(
         summary = "List changes after a sequence",
         description = "Returns committed changes after a sequence. A snapshot limits the feed to its captured sequence.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ChangesQuery
         ),
         responses(
             (status = 200, description = "Committed changes", body = ListChangesResponse),
             (status = 400, description = "Invalid change cursor, limit, snapshot ID, consistency, or after_seq above the head that the request reads", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "The cursor is older than the retained change history. Rebuild state from a fresh listing or snapshot, and follow the feed from that state's head.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -747,13 +757,14 @@ pub(super) async fn list_changes(
         summary = "List the differences between two sequences",
         description = "Returns a page of the inodes whose visible state at `to_seq` differs from their state at `from_seq`, read from the commits between the two sequences.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             DiffQuery
         ),
         responses(
             (status = 200, description = "A page of the diff", body = DiffResponse),
             (status = 400, description = "Invalid sequence, path, limit, or consistency, a `to_seq` above the head that the request reads, or an `after_seq` outside `from_seq` through `to_seq`", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 409, description = "`from_seq` is below the retention floor, so the namespace no longer has the history after it. Rebuild state from a fresh listing or snapshot, and diff from that state's head.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),

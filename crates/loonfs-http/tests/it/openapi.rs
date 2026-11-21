@@ -477,16 +477,8 @@ fn openapi_documents_current_server_paths() {
     ] {
         let parameter = path_parameter(paths, path, method, "inode_id");
         assert_eq!(
-            parameter.pointer("/schema/type").and_then(Value::as_str),
-            Some("string")
-        );
-        assert_eq!(
-            parameter.pointer("/schema/pattern").and_then(Value::as_str),
-            Some(loonfs_types::inode_id::PATTERN)
-        );
-        assert_eq!(
-            parameter.get("example").and_then(Value::as_str),
-            Some(loonfs_types::inode_id::EXAMPLE)
+            parameter.pointer("/schema/$ref").and_then(Value::as_str),
+            Some("#/components/schemas/InodeId")
         );
     }
 
@@ -810,6 +802,16 @@ fn content_routes_publish_the_range_header_and_its_responses() {
         assert_eq!(headers[0]["required"], false, "{path}");
         assert_eq!(headers[0]["schema"], json!({"type": "string"}), "{path}");
         let responses = &operation["responses"];
+        assert_eq!(
+            responses["200"]["content"]["application/octet-stream"]["schema"],
+            json!({"type": "string", "format": "binary"}),
+            "{path}"
+        );
+        assert_eq!(
+            responses["206"]["content"]["application/octet-stream"]["schema"],
+            json!({"type": "string", "format": "binary"}),
+            "{path}"
+        );
         assert!(
             responses["200"]["headers"]["Accept-Ranges"].is_object(),
             "{path}"
@@ -818,12 +820,25 @@ fn content_routes_publish_the_range_header_and_its_responses() {
             responses["206"]["headers"]["Content-Range"].is_object(),
             "{path}"
         );
+        assert!(
+            responses["416"]["headers"]["Content-Range"].is_object(),
+            "{path}"
+        );
         assert_eq!(
             responses["416"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/ErrorResponse",
             "{path}"
         );
     }
+    assert_eq!(
+        spec["paths"]["/v0/namespaces/{namespace_id}/uploads/{upload_id}/content"]["put"]
+            ["requestBody"]["content"]["application/octet-stream"]["schema"],
+        json!({"type": "string", "format": "binary"})
+    );
+    assert!(
+        spec["components"]["responses"]["UnavailableResponse"]["headers"]["Retry-After"]
+            .is_object()
+    );
 }
 
 #[test]

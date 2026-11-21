@@ -40,7 +40,15 @@
             }
           }
         },
-        "description": "The server can't complete the request now. Check `code` to find whether the outcome is unknown (after a deadline or a lost acknowledgment), or the cause is shutdown, load, writer session admission, store contention, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying."
+        "description": "The server can't complete the request now. Check `code` to find whether the outcome is unknown (after a deadline or a lost acknowledgment), or the cause is shutdown, load, writer session admission, store contention, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying.",
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds to wait before retrying when `code` is `server_busy`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -5212,7 +5220,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -5296,7 +5304,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -5330,6 +5338,26 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace not found"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
           },
           "500": {
             "content": {
@@ -5380,7 +5408,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -5435,6 +5463,16 @@
             },
             "description": "Another publication changed the namespace manifest first. Retry the request."
           },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -5484,7 +5522,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -5539,6 +5577,16 @@
             },
             "description": "Another publication changed the namespace manifest first. Retry the request."
           },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -5588,7 +5636,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -5695,7 +5743,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -5796,7 +5844,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -5805,7 +5853,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -5879,7 +5927,7 @@
             "name": "pool_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/PoolId"
             }
           }
         ],
@@ -6227,7 +6275,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -6270,6 +6318,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -6331,7 +6389,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -6435,7 +6493,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -6544,6 +6602,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -6603,7 +6671,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -6647,6 +6715,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -6727,7 +6805,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -6854,6 +6932,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -6913,7 +7001,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -6979,12 +7067,8 @@
             "content": {
               "application/octet-stream": {
                 "schema": {
-                  "items": {
-                    "format": "int32",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "type": "array"
+                  "format": "binary",
+                  "type": "string"
                 }
               }
             },
@@ -7002,12 +7086,8 @@
             "content": {
               "application/octet-stream": {
                 "schema": {
-                  "items": {
-                    "format": "int32",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "type": "array"
+                  "format": "binary",
+                  "type": "string"
                 }
               }
             },
@@ -7047,6 +7127,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -7056,6 +7146,16 @@
               }
             },
             "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Path isn't a file"
           },
           "410": {
             "content": {
@@ -7085,7 +7185,15 @@
                 }
               }
             },
-            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size."
+            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.",
+            "headers": {
+              "Content-Range": {
+                "description": "The file's size, as `bytes */size`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -7116,7 +7224,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -7161,6 +7269,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -7170,6 +7288,16 @@
               }
             },
             "description": "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Path isn't a file"
           },
           "410": {
             "content": {
@@ -7229,7 +7357,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -7345,6 +7473,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -7354,6 +7492,16 @@
               }
             },
             "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Path isn't a directory"
           },
           "410": {
             "content": {
@@ -7399,7 +7547,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -7483,6 +7631,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -7532,7 +7690,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -7619,6 +7777,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -7628,6 +7796,16 @@
               }
             },
             "description": "Namespace or path not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Path isn't a file"
           },
           "410": {
             "content": {
@@ -7673,7 +7851,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -7751,6 +7929,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -7805,7 +7993,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -7849,6 +8037,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -7922,7 +8120,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -8059,6 +8257,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -8143,18 +8351,16 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
             "description": "The inode ID.",
-            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-              "type": "string"
+              "$ref": "#/components/schemas/InodeId"
             }
           },
           {
@@ -8229,6 +8435,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -8278,18 +8494,16 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
             "description": "The directory's inode ID.",
-            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-              "type": "string"
+              "$ref": "#/components/schemas/InodeId"
             }
           },
           {
@@ -8396,6 +8610,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -8460,18 +8684,16 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-              "type": "string"
+              "$ref": "#/components/schemas/InodeId"
             }
           },
           {
@@ -8519,12 +8741,8 @@
             "content": {
               "application/octet-stream": {
                 "schema": {
-                  "items": {
-                    "format": "int32",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "type": "array"
+                  "format": "binary",
+                  "type": "string"
                 }
               }
             },
@@ -8542,12 +8760,8 @@
             "content": {
               "application/octet-stream": {
                 "schema": {
-                  "items": {
-                    "format": "int32",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "type": "array"
+                  "format": "binary",
+                  "type": "string"
                 }
               }
             },
@@ -8586,6 +8800,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -8635,7 +8859,15 @@
                 }
               }
             },
-            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size."
+            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.",
+            "headers": {
+              "Content-Range": {
+                "description": "The file's size, as `bytes */size`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -8666,18 +8898,16 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-              "type": "string"
+              "$ref": "#/components/schemas/InodeId"
             }
           }
         ],
@@ -8721,6 +8951,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -8800,18 +9040,16 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-              "type": "string"
+              "$ref": "#/components/schemas/InodeId"
             }
           },
           {
@@ -8889,6 +9127,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -8953,18 +9201,16 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-              "type": "string"
+              "$ref": "#/components/schemas/InodeId"
             }
           },
           {
@@ -9021,12 +9267,8 @@
             "content": {
               "application/octet-stream": {
                 "schema": {
-                  "items": {
-                    "format": "int32",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "type": "array"
+                  "format": "binary",
+                  "type": "string"
                 }
               }
             },
@@ -9044,12 +9286,8 @@
             "content": {
               "application/octet-stream": {
                 "schema": {
-                  "items": {
-                    "format": "int32",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "type": "array"
+                  "format": "binary",
+                  "type": "string"
                 }
               }
             },
@@ -9088,6 +9326,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -9137,7 +9385,15 @@
                 }
               }
             },
-            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size."
+            "description": "The `Range` header starts at or past the end of the file. The error's `details.size_bytes` and the response's `Content-Range: bytes */size` header give the file's size.",
+            "headers": {
+              "Content-Range": {
+                "description": "The file's size, as `bytes */size`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -9168,18 +9424,16 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
             "description": "The file's inode ID.",
-            "example": "ino_000000r0000013kje0d47gc8kw",
             "in": "path",
             "name": "inode_id",
             "required": true,
             "schema": {
-              "pattern": "^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-              "type": "string"
+              "$ref": "#/components/schemas/InodeId"
             }
           },
           {
@@ -9232,6 +9486,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -9311,7 +9575,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -9443,7 +9707,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -9577,7 +9841,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -9610,7 +9874,7 @@
                 }
               }
             },
-            "description": "Invalid request or consistency, or the source isn't a fork of this namespace"
+            "description": "Invalid request, or the source isn't a fork of this namespace"
           },
           "401": {
             "content": {
@@ -9714,7 +9978,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -9848,7 +10112,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -9905,6 +10169,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -9957,7 +10231,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -10001,6 +10275,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -10063,7 +10347,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -10107,6 +10391,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -10144,7 +10438,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -10187,6 +10481,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -10237,7 +10541,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -10291,6 +10595,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -10300,6 +10614,16 @@
               }
             },
             "description": "Snapshot not found or expired"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
           },
           "413": {
             "content": {
@@ -10339,7 +10663,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           }
         ],
@@ -10383,6 +10707,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -10457,7 +10791,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -10466,7 +10800,7 @@
             "name": "upload_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/UploadId"
             }
           }
         ],
@@ -10501,6 +10835,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -10520,6 +10864,16 @@
               }
             },
             "description": "Namespace deleted"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Direct upload presigning is unsupported"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -10551,7 +10905,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -10560,7 +10914,7 @@
             "name": "upload_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/UploadId"
             }
           }
         ],
@@ -10594,6 +10948,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -10655,7 +11019,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -10664,7 +11028,7 @@
             "name": "upload_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/UploadId"
             }
           }
         ],
@@ -10709,6 +11073,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -10780,7 +11154,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -10789,7 +11163,7 @@
             "name": "upload_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/UploadId"
             }
           }
         ],
@@ -10797,12 +11171,8 @@
           "content": {
             "application/octet-stream": {
               "schema": {
-                "items": {
-                  "format": "int32",
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "type": "array"
+                "format": "binary",
+                "type": "string"
               }
             }
           },
@@ -10838,6 +11208,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -10908,7 +11288,7 @@
             "name": "namespace_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/NamespaceId"
             }
           },
           {
@@ -10917,7 +11297,7 @@
             "name": "upload_id",
             "required": true,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/UploadId"
             }
           }
         ],
@@ -10961,6 +11341,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {

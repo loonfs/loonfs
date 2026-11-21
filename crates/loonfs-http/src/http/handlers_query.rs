@@ -93,13 +93,14 @@ pub(super) struct GrepQuery {
         summary = "Content search",
         description = "Searches file content with a regular expression, using the namespace's grep index to narrow the candidates. The server checks each candidate against the full pattern and returns matches ordered by the content value of each file's revision, then by `inode_id`, and then by `byte_offset`. It scans every revision committed after the index watermark, unless `allow_stale` skips them. A first page reads the namespace at its head, and a later page reads at the first page's head. The deployment must serve grep, and the namespace must have a materialized, active grep index.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             GrepQuery
         ),
         responses(
             (status = 200, description = "One page of matches", body = GrepResponse),
             (status = 400, description = "Invalid pattern, cursor, scope, or consistency, both scopes, or an unindexable pattern without allow_scan", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, scope path, or scope inode not found", body = ErrorResponse),
             (status = 409, description = "The cursor's sequence is older than the retention floor. Run the search again from its first page.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -196,13 +197,14 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         tag = "maintenance",
         summary = "Enable the grep index",
         description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill at the next maintenance interval and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence whose files the backfill reads, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 409, description = "Another publication changed the namespace manifest first. Retry the request.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -247,11 +249,13 @@ pub(super) async fn enable_grep_index(
         tag = "maintenance",
         summary = "Get grep index status",
         description = "Reports whether the namespace's grep index is `disabled`, `backfilling`, or `active`, with build progress when it's available. A namespace that has never enabled the index is `disabled`. A deployment that doesn't maintain grep indexes returns `not_supported`, and this operation doesn't change the index.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index status and build progress", body = GrepIndex),
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -292,13 +296,14 @@ async fn read_grep_index_status(
         tag = "maintenance",
         summary = "Disable the grep index",
         description = "Disables the namespace's grep index by publishing a namespace manifest whose grep entry lists no segments. Index maintenance stops when a step reads the disabled entry, and garbage collection reclaims the segments later. Repeating the request has the same result. If the grep entry is corrupt, the request replaces it with a disabled entry, so the index can be enabled again. If the entry has another version of the grep format, the request returns `index_corrupt` and leaves the entry unchanged. A deployment that doesn't maintain the grep index returns `not_supported`.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index disabled or already disabled", body = GrepIndex),
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 409, description = "Another publication changed the namespace manifest first. Retry the request.", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses

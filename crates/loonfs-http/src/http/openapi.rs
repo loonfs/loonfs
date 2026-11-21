@@ -99,10 +99,30 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
 )]
 struct LoonfsOpenApi;
 
+/// Schema marker for raw `application/octet-stream` payloads, emitting
+/// `{ "type": "string", "format": "binary" }` instead of an integer array.
+pub(super) struct BinaryPayload;
+
+impl utoipa::PartialSchema for BinaryPayload {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
+                utoipa::openapi::KnownFormat::Binary,
+            )))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for BinaryPayload {}
+
 /// OpenAPI definition for the 503 response every operation can return.
 #[derive(utoipa::ToResponse)]
 #[response(
-    description = "The server can't complete the request now. Check `code` to find whether the outcome is unknown (after a deadline or a lost acknowledgment), or the cause is shutdown, load, writer session admission, store contention, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying."
+    description = "The server can't complete the request now. Check `code` to find whether the outcome is unknown (after a deadline or a lost acknowledgment), or the cause is shutdown, load, writer session admission, store contention, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying.",
+    headers(
+        ("Retry-After" = String, description = "Seconds to wait before retrying when `code` is `server_busy`.")
+    )
 )]
 #[expect(
     dead_code,

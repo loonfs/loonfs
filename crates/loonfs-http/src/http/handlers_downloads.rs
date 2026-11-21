@@ -48,14 +48,16 @@ const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/max_staleness_ms", "/s
         summary = "Begin download",
         description = "Returns ordered, signed object ranges that cover exactly `[start_offset, size_bytes)` of the selected revision. Each range includes its signed headers in `transfer.headers`, and the client sends them unchanged. The client checks each range's length and the complete revision's checksum. To resume a download, a client asks for a new download from its current offset. A deployment that can't presign URLs returns 501 `not_supported`. The proxied `GET /filesystem/content` route is still available, up to the `download.service_proxied.max_content_bytes` limit.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID.")
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")
         ),
         request_body = CreateDownloadRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadResponse),
             (status = 400, description = "Invalid path, revision, snapshot ID, revision_no combined with snapshot_id, or start_offset at or past the file's size", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, path, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 409, description = "Path isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Direct download is unsupported", body = ErrorResponse),
@@ -133,14 +135,15 @@ pub(super) async fn create_download(
         summary = "Begin download by inode",
         description = "Authorizes a direct read of the current revision of a visible file inode, wherever the inode is bound, or of the revision that an unexpired snapshot captured. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw")
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
+            ("inode_id" = loonfs_types::InodeId, Path, description = "The file's inode ID.")
         ),
         request_body = CreateDownloadByInodeRequest,
         responses(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
             (status = 400, description = "Invalid inode ID, snapshot ID, or start_offset, or start_offset at or past the file's size", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, visible inode, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
@@ -200,8 +203,8 @@ pub(super) async fn create_download_by_inode(
         summary = "Begin revision download by inode",
         description = "Authorizes a direct read of one retained inode revision. With `snapshot_id`, the server finds the revision in the snapshot instead of at the live head. The presigned URLs read exactly `[start_offset, size_bytes)`, as on the path route. The response doesn't include a path.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
+            ("inode_id" = loonfs_types::InodeId, Path, description = "The file's inode ID."),
             ("revision_no" = loonfs_types::RevisionNo, Path, description = "The revision number.")
         ),
         request_body = CreateRevisionDownloadByInodeRequest,
@@ -209,6 +212,7 @@ pub(super) async fn create_download_by_inode(
             (status = 200, description = "Download authorized", body = CreateDownloadByInodeResponse),
             (status = 400, description = "Invalid inode ID, revision number, snapshot ID, consistency, or start_offset, or start_offset at or past the revision's size", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, inode, revision, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
             (status = 409, description = "Inode isn't a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),

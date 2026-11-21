@@ -335,7 +335,7 @@ pub(super) async fn list_namespaces(
         summary = "Get namespace",
         description = "Returns the current head and retention state for a namespace.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             GetNamespaceQuery
         ),
         responses(
@@ -380,7 +380,7 @@ pub(super) async fn get_namespace(
         tag = "maintenance",
         summary = "Get namespace diagnostics",
         description = "Returns namespace state together with the current manifest and visible WAL tail.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Namespace diagnostics", body = loonfs_types::NamespaceDiagnostics),
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
@@ -422,13 +422,14 @@ pub(super) async fn get_namespace_diagnostics(
         summary = "Delete namespace",
         description = "Marks a namespace as deleted. The namespace ID can never be used again to create or fork a namespace.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             DeleteNamespaceQuery
         ),
         responses(
             (status = 200, description = "Namespace deleted", body = loonfs_types::DeleteNamespaceResponse),
             (status = 400, description = "Invalid request", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 409, description = "Delete conflict", body = ErrorResponse),
             (status = 410, description = "Namespace already deleted", body = ErrorResponse),
@@ -471,12 +472,13 @@ pub(super) async fn delete_namespace(
         tag = "namespaces",
         summary = "Fork namespace",
         description = "Creates a new namespace from the source namespace's current head or from an unexpired snapshot. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
-        params(("namespace_id" = String, Path, description = "The source namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The source namespace ID.")),
         request_body = ForkNamespaceRequest,
         responses(
             (status = 200, description = "Namespace forked", body = loonfs_types::NamespaceMetadata),
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Source namespace not found, or the snapshot is missing or expired. A fork that folds the source's WAL tail also returns `snapshot_not_found` once 5 minutes have passed since its first call started.", body = ErrorResponse),
             (status = 409, description = "Fork conflict", body = ErrorResponse),
             (status = 410, description = "The source or target namespace ID was deleted and can't be used again (`namespace_deleted`)", body = ErrorResponse),
@@ -530,7 +532,7 @@ pub(super) async fn fork_namespace(
         tag = "namespaces",
         summary = "Merge a fork",
         description = "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. The merge's WAL object counts toward the namespace's fold triggers like any commit.",
-        params(("namespace_id" = String, Path, description = "The namespace that the merge commits into.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace that the merge commits into.")),
         request_body = MergeForkRequest,
         responses(
             (status = 200, description = "Fork merged", body = Commit),
@@ -602,7 +604,7 @@ pub(super) async fn merge_fork(
         summary = "Get a fork's next merge range",
         description = "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `below_retention_floor`, the response's `outcome` says which floor instead of failing.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace that the fork merges into."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace that the fork merges into."),
             NextMergeRangeQuery
         ),
         responses(
@@ -660,11 +662,11 @@ pub(super) async fn get_next_merge_range(
         tag = "namespaces",
         summary = "Fork a namespace for a rebase",
         description = "Creates a rebase's new fork from the namespace's head, for a fork of the namespace whose unmerged commits the replay route then replays into the new fork. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new fork's ID, and its `fork_basis.rebased_from` identifies the fork. A request whose new fork already exists returns `namespace_exists`.",
-        params(("namespace_id" = String, Path, description = "The namespace that the fork was forked from.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace that the fork was forked from.")),
         request_body = ForkNamespaceForRebaseRequest,
         responses(
             (status = 200, description = "New fork created", body = loonfs_types::NamespaceMetadata),
-            (status = 400, description = "Invalid request or consistency, or the source isn't a fork of this namespace", body = ErrorResponse),
+            (status = 400, description = "Invalid request, or the source isn't a fork of this namespace", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which. A new fork that folds this namespace's WAL tail returns `snapshot_not_found` once 5 minutes have passed since its first call started.", body = ErrorResponse),
@@ -723,7 +725,7 @@ pub(super) async fn fork_namespace_for_rebase(
         tag = "namespaces",
         summary = "Replay a fork into a rebase's new fork",
         description = "Replays a fork's unmerged commits into the namespace, a rebase's new fork for the fork, as one replay commit, which applies the changes that don't conflict with the new fork and reports the ones that do. Each request continues after the new fork's previous replay commit. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork with the same conflict report. The report counts toward the replay commit's size, so a report that doesn't fit returns `merge_too_large` with a split hint.",
-        params(("namespace_id" = String, Path, description = "The rebase's new fork, which the replay commit commits into.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The rebase's new fork, which the replay commit commits into.")),
         request_body = ReplayForkRequest,
         responses(
             (status = 200, description = "Fork replayed", body = ReplayForkResponse),

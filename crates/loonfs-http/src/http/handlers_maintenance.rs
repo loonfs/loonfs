@@ -31,7 +31,7 @@ use std::sync::Arc;
         tag = "maintenance",
         summary = "Run one maintenance job",
         description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, or `retention_window`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         request_body(content = RunMaintenanceJobRequest, description = "The maintenance job to run"),
         responses(
             (status = 200, description = "Maintenance job completed", body = RunMaintenanceJobResponse),
@@ -114,7 +114,7 @@ pub(super) struct PoolSegment {
         tag = "maintenance",
         summary = "Run one maintenance job on a pool",
         description = "Runs one maintenance job for the pool. The body's `kind` selects the job, which is `gc`. The response includes the same `kind` and the job's result. A `gc` job lists the pool's upload sessions and member entries, reads the roots of every member of the pool, and then sweeps the pool's content objects, upload records, and temporary objects to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from.",
-        params(("pool_id" = String, Path, description = "The pool ID.")),
+        params(("pool_id" = loonfs_types::PoolId, Path, description = "The pool ID.")),
         request_body(content = RunPoolMaintenanceJobRequest, description = "The maintenance job to run"),
         responses(
             (status = 200, description = "Maintenance job completed", body = RunPoolMaintenanceJobResponse),

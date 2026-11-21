@@ -33,12 +33,13 @@ use std::sync::Arc;
         tag = "namespaces",
         summary = "Create snapshot",
         description = "Creates a snapshot of the current namespace state. The server first folds any WAL tail after the current manifest. Every accepted call creates a new snapshot with a new ID, and the name is a label, not a key. A snapshot with `ttl_ms` expires that many milliseconds from the server's current time, and a snapshot without it doesn't expire. The snapshot keeps its manifest until garbage collection deletes it, after it expires or is deleted and its grace window passes.",
-        params(("namespace_id" = String, Path, description = "The namespace ID.")),
+        params(("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID.")),
         request_body = CreateSnapshotRequest,
         responses(
             (status = 200, description = "Snapshot created", body = Snapshot),
             (status = 400, description = "Invalid namespace ID, name, or ttl", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
@@ -82,13 +83,14 @@ pub(super) async fn create_snapshot(
         summary = "List snapshots",
         description = "Lists snapshots in snapshot ID order. The list leaves out expired snapshots, deleted snapshots, and fork snapshots, which the maintenance snapshot inventory lists. A deleted namespace returns `namespace_deleted`.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             PageQuery
         ),
         responses(
             (status = 200, description = "Snapshots", body = ListSnapshotsResponse),
             (status = 400, description = "Invalid namespace ID, limit, or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -130,7 +132,7 @@ pub(super) async fn list_snapshots(
         summary = "Extend snapshot",
         description = "Moves an unexpired snapshot's expiry to `ttl_ms` from the server's current time. The expiry never moves earlier, so a snapshot without an expiry is returned unchanged. A missing, deleted, or expired snapshot returns `snapshot_not_found`. Repeating the request has the same result.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
         ),
         request_body = ExtendSnapshotRequest,
@@ -138,7 +140,9 @@ pub(super) async fn list_snapshots(
             (status = 200, description = "Snapshot extended", body = Snapshot),
             (status = 400, description = "Invalid ID or ttl", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Snapshot not found or expired", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -178,13 +182,14 @@ pub(super) async fn extend_snapshot(
         summary = "Retrieve snapshot",
         description = "Returns one snapshot, as the snapshot listing returns it. A missing ID, the ID of an expired or deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`. A deleted namespace returns `namespace_deleted`.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
         ),
         responses(
             (status = 200, description = "Snapshot", body = Snapshot),
             (status = 400, description = "Invalid namespace or snapshot ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -225,13 +230,14 @@ pub(super) async fn get_snapshot(
         summary = "Delete snapshot",
         description = "Deletes a snapshot by recording the server's current time as its delete time. From then on, the snapshot can't be read, forked, extended, or retrieved, and the snapshot listing leaves it out. Garbage collection can then reclaim its unreferenced manifest and runs after the grace window. Deleting a missing or deleted snapshot succeeds without a write, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
         ),
         responses(
             (status = 200, description = "Snapshot deleted, or already absent", body = DeleteSnapshotResponse),
             (status = 400, description = "Invalid namespace or snapshot ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace not found, or the ID belongs to a fork snapshot", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -285,7 +291,7 @@ pub(super) struct SnapshotPathParams {
         summary = "List snapshot records",
         description = "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window, and a deleted snapshot stays, with its `deleted_at_ms`, until its delete time plus the grace window. A cursor continues the listing against the current set of snapshots.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
             PageQuery
         ),
         responses(
@@ -330,8 +336,8 @@ pub(super) async fn list_snapshot_records(
         summary = "Retrieve snapshot record",
         description = "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired or deleted snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
         params(
-            ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("snapshot_id" = String, Path, description = "The snapshot ID.")
+            ("namespace_id" = loonfs_types::NamespaceId, Path, description = "The namespace ID."),
+            ("snapshot_id" = loonfs_types::SnapshotId, Path, description = "The snapshot ID.")
         ),
         responses(
             (status = 200, description = "Existing snapshot", body = SnapshotRecord),
