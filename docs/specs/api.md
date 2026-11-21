@@ -609,6 +609,8 @@ In the reference server, a namespace's writer session opens on the first write r
 - Metadata (and the grep index, if enabled) is caught up with the session's published sequence (a session that never published still waits for an enabled index to finish building).
 - No collection step is due.
 
+A server whose maintenance mode is `serve_only` or `disabled` runs no metadata, collection, or index step and no sweep, because folds, compactions, sweeps, and collections are another process's work. Its scheduler still checks its sessions at every maintenance interval and closes a session on the first two conditions alone, so a session that can't write anymore closes as soon as no request keeps its handle, and an idle session closes after `idle_session_close_after_ms` whether or not its metadata is caught up. The close writes nothing and sends no store requests. The session's unfolded WAL tail stays in the store for the maintaining process to fold.
+
 While the scheduler is closing a session, a new open for the same namespace waits for the drain and then opens a fresh session (never failing with `writer_session_closed` on this path), while opens for other namespaces don't wait.
 
 The server also drops a session when the namespace is deleted through that server, or on the next open after a session records that it was fenced or found its namespace deleted or missing. When a session is fenced:

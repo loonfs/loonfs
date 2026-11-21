@@ -2,14 +2,13 @@
 //! host intervals.
 
 use super::calls::Overlap;
-use super::retries::MaintenanceCall;
-use super::{index_pending, lock, RunningScheduler, Scheduler, SchedulerState};
+use super::retries::{CallFailure, MaintenanceCall};
+use super::{contain, lock, RunningScheduler, Scheduler, SchedulerState};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{CommitSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
-use loonfs_http::{panic_message, HeldNamespace};
+use loonfs_http::HeldNamespace;
 use std::collections::HashSet;
-use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 
@@ -79,7 +78,11 @@ impl Scheduler {
     /// step because it's due at most once per `gc_interval_ms`, and a session
     /// with a commit at every interval has index work at every interval. A
     /// session that was closed or fenced, or whose namespace is gone, closes as
-    /// soon as no caller has its handle.
+    /// soon as no caller has its handle. A scheduler without a maintenance
+    /// handle runs the close step alone.
+    ///
+    /// A close that fails or panics counts as a failed `close` call, and the
+    /// next maintenance interval tries again.
     async fn run_session_steps(&self, namespace_id: &NamespaceId) {
         let inner = &self.inner;
         let Some(entry) = inner.namespaces.entry(namespace_id) else {
@@ -95,29 +98,30 @@ impl Scheduler {
                 metadata_due(&held, positioned, inner.timer.monotonic_now_ms()),
             )
         };
-        let metadata = if open && metadata_due {
-            Some(self.maintain_metadata(namespace_id, Some(&entry)).await)
-        } else {
-            None
+        let metadata = match &inner.maintenance {
+            Some(maintenance) if open && metadata_due => Some(
+                self.maintain_metadata(maintenance, namespace_id, Some(&entry))
+                    .await,
+            ),
+            _ => None,
         };
         let due = match metadata {
             _ if !open => Due::Close(Close::Ended),
             Some(Err(code)) if code.is_namespace_gone() => Due::Close(Close::Ended),
             metadata => {
-                let metadata_settled = metadata.map_or(!positioned, |answer| {
-                    answer == Ok(MetadataMaintenanceOutcome::CaughtUp)
-                });
+                // Metadata that another process maintains needs no step from
+                // this server.
+                let metadata_settled = inner.maintenance.is_none()
+                    || metadata.map_or(!positioned, |answer| {
+                        answer == Ok(MetadataMaintenanceOutcome::CaughtUp)
+                    });
                 let held = lock(&entry);
                 let now_ms = inner.timer.monotonic_now_ms();
-                if seq.is_some()
-                    && held
-                        .host_state
-                        .collection_pending(seq, now_ms, inner.config.gc_interval_ms)
+                if self.collection_pending(&held, seq)
                     && now_ms >= held.host_state.gc_retry.retry_at_ms
                 {
                     Due::Collection
-                } else if inner.grep.is_some()
-                    && index_pending(&held, seq)
+                } else if self.index_pending(&held, seq)
                     && now_ms >= held.host_state.index_retry.retry_at_ms
                 {
                     Due::Index
@@ -131,10 +135,13 @@ impl Scheduler {
         // A collection or an index step that finds the namespace gone ends
         // the session, as the metadata step does.
         let close = match due {
-            Due::Collection => self
-                .gc(namespace_id, Some(&entry), seq)
-                .await
-                .then_some(Close::Ended),
+            Due::Collection => match &inner.maintenance {
+                Some(maintenance) => self
+                    .gc(maintenance, namespace_id, Some(&entry), seq)
+                    .await
+                    .then_some(Close::Ended),
+                None => None,
+            },
             Due::Index => match &inner.grep {
                 Some(grep) => self
                     .maintain_index(grep, namespace_id, Some(&entry), seq)
@@ -145,17 +152,45 @@ impl Scheduler {
             Due::Close(close) => Some(close),
         };
         if let Some(close) = close {
-            let closing = AssertUnwindSafe(self.close_session(namespace_id, seq, close));
-            if let Err(payload) = closing.catch_unwind().await {
-                inner.metrics.panics.increment(1);
-                tracing::error!(
-                    namespace_id = %namespace_id,
-                    call = "close",
-                    panic = panic_message(payload.as_ref()),
-                    "closing a session panicked; the next maintenance interval tries again"
-                );
-            }
+            let result = contain(
+                self.close_session(namespace_id, seq, close)
+                    .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+            )
+            .await;
+            self.record_call(
+                namespace_id,
+                Some(&entry),
+                MaintenanceCall::Close,
+                result,
+                0,
+            );
         }
+    }
+
+    /// Whether a collection step is pending for a held session at `seq`:
+    /// this server maintains the store, the session has published, its seq
+    /// moved since the last collection, and `gc_interval_ms` passed since
+    /// that collection.
+    fn collection_pending(
+        &self,
+        held: &HeldNamespace<SchedulerState>,
+        seq: Option<CommitSeq>,
+    ) -> bool {
+        let inner = &self.inner;
+        inner.maintenance.is_some()
+            && seq.is_some()
+            && held.host_state.collection_pending(
+                seq,
+                inner.timer.monotonic_now_ms(),
+                inner.config.gc_interval_ms,
+            )
+    }
+
+    /// Whether an index step is pending for a held session at `seq`: this
+    /// server maintains the grep index, and the index is marked dirty or the
+    /// scheduler last brought it up to date at another seq.
+    fn index_pending(&self, held: &HeldNamespace<SchedulerState>, seq: Option<CommitSeq>) -> bool {
+        self.inner.grep.is_some() && (held.index_dirty || held.host_state.indexed_seq != seq)
     }
 
     /// Closes the session if no caller has its handle and, for
@@ -165,12 +200,12 @@ impl Scheduler {
         namespace_id: &NamespaceId,
         seq: Option<CommitSeq>,
         close: Close,
-    ) {
+    ) -> loonfs::Result<()> {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {
-            return;
+            return Ok(());
         }
-        let closed = match close {
+        match close {
             Close::Ended => {
                 inner
                     .namespaces
@@ -195,22 +230,16 @@ impl Scheduler {
                                     .is_some_and(|retry| self.backoff_at_cap(retry))
                             };
                             (metadata_settled || at_cap(MaintenanceCall::Metadata))
-                                && (inner.grep.is_none()
-                                    || !index_pending(held, seq)
+                                && (!self.index_pending(held, seq)
                                     || at_cap(MaintenanceCall::GrepIndex))
-                                && (!held.host_state.collection_pending(
-                                    seq,
-                                    inner.timer.monotonic_now_ms(),
-                                    inner.config.gc_interval_ms,
-                                ) || at_cap(MaintenanceCall::Gc))
+                                && (!self.collection_pending(held, seq)
+                                    || at_cap(MaintenanceCall::Gc))
                         },
                     )
                     .await
             }
-        };
-        if let Err(error) = closed {
-            tracing::warn!(%namespace_id, error = %error, "session close failed");
         }
+        .map(|_| ())
     }
 
     pub(crate) fn start(&self) -> RunningScheduler {
@@ -222,6 +251,7 @@ impl Scheduler {
             gc_interval_ms = config.gc_interval_ms,
             sweep_interval_ms = config.sweep_interval_ms,
             max_concurrent_maintenance = config.max_concurrent_maintenance.get(),
+            maintains = inner.maintenance.is_some(),
             maintains_grep_index = inner.grep.is_some(),
             "maintenance scheduler started"
         );

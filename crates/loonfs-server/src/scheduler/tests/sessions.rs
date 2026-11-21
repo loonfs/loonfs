@@ -911,7 +911,7 @@ async fn a_session_that_maintained_itself_leaves_the_session_steps_nothing_to_do
     let scheduler = super::Scheduler::new(
         scheduler_config(None).scheduler_config(),
         runtime.object_store(),
-        runtime.maintenance(writer_id("maintenance")),
+        Some(runtime.maintenance(writer_id("maintenance"))),
         namespaces,
         runtime.monotonic_timer(),
         None,
@@ -997,31 +997,27 @@ async fn session_steps_see_a_session_as_idle_exactly_when_the_runtime_timer_does
     server.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that when the maintenance scheduler is off (`serve_only` or
-/// `disabled`), `SessionReaper` still closes sessions that pass
-/// `idle_session_close_after_ms` or end early, without making any store
-/// requests or folding the WAL tail.
+/// Checks that the scheduler of a server whose maintenance mode is
+/// `serve_only` or `disabled` closes a session that passes
+/// `idle_session_close_after_ms` or ends early, without a store request and
+/// without folding the WAL tail, that its sweep lists nothing, and that
+/// `app` builds that scheduler and `AppState::run_due_steps` drives it.
 #[tokio::test]
-async fn session_reaper_closes_idle_and_ended_sessions_without_store_requests() {
+async fn a_scheduler_without_maintenance_closes_idle_and_ended_sessions_without_store_requests() {
     use crate::config::JobMode;
-    use crate::scheduler::SessionReaper;
 
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let config = scheduler_config(None);
+    let mut config = scheduler_config(None);
+    config.maintenance = JobMode::ServeOnly;
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.scheduler.inner.namespaces;
-    let reaper = SessionReaper::new(
-        Arc::clone(namespaces),
-        config.maintenance_interval_ms.get(),
-        config.idle_session_close_after_ms.get(),
-    );
 
-    let idle_ns = namespace_id("reaper-idle");
-    let ended_ns = namespace_id("reaper-ended");
+    let idle_ns = namespace_id("unmaintained-idle");
+    let ended_ns = namespace_id("unmaintained-ended");
     for ns in [&idle_ns, &ended_ns] {
         server
             .runtime
@@ -1039,41 +1035,44 @@ async fn session_reaper_closes_idle_and_ended_sessions_without_store_requests() 
     }
     store.take();
 
-    // Ended sessions close as soon as the clock ticks past their open time,
-    // while active sessions stay open until past `idle_session_close_after_ms`.
-    server.clock.advance_ms(1);
-    reaper.reap_once().await;
+    // An ended session closes at the first run after its open, and an open
+    // session stays until past `idle_session_close_after_ms`.
+    server.run_steps_after(1).await;
     assert_eq!(held_ids(namespaces), vec![idle_ns.clone()]);
     assert!(
         store.take().is_empty(),
-        "reaping ended sessions must make no store requests"
+        "closing an ended session makes no store request"
     );
 
     server
-        .clock
-        .advance_ms(config.idle_session_close_after_ms.get() - 1);
-    reaper.reap_once().await;
+        .run_steps_after(config.idle_session_close_after_ms.get() - 1)
+        .await;
     assert_eq!(held_ids(namespaces), vec![idle_ns.clone()]);
 
-    server.clock.advance_ms(1);
-    reaper.reap_once().await;
+    server.run_steps_after(1).await;
     assert!(
         held_ids(namespaces).is_empty(),
-        "idle session closes once past `idle_session_close_after_ms`"
+        "an idle session closes once past `idle_session_close_after_ms`"
     );
     assert!(
         store.take().is_empty(),
-        "reaping idle sessions must make no store requests"
+        "closing an idle session makes no store request"
     );
     assert_eq!(
         server.wal_tail_objects(&idle_ns).await,
         2,
-        "reaping must not fold the WAL tail (fence + commit remain)"
+        "the close doesn't fold the WAL tail (fence + commit remain)"
+    );
+    store.take();
+    assert_eq!(server.scheduler.run_sweep().await.expect("sweep"), 0);
+    assert!(
+        store.take().is_empty(),
+        "a sweep without maintenance lists nothing"
     );
     server.runtime.shutdown().await.expect("shutdown");
 
-    // Verify `app` attaches the reaper (and no scheduler) in non-maintaining
-    // modes, and that embedded hosts can drive it via `AppState::run_due_steps`.
+    // `app` builds the scheduler in the non-maintaining modes, and an
+    // embedded host drives it through `AppState::run_due_steps`.
     for (index, mode) in [JobMode::ServeOnly, JobMode::Disabled]
         .into_iter()
         .enumerate()
@@ -1089,13 +1088,8 @@ async fn session_reaper_closes_idle_and_ended_sessions_without_store_requests() 
         )
         .await
         .expect("build app");
-        assert!(state.scheduler.is_none());
-        let reaper = state
-            .session_reaper
-            .as_ref()
-            .expect("session reaper attached");
 
-        let embedded_ns = namespace_id(&format!("reaper-embedded-{index}"));
+        let embedded_ns = namespace_id(&format!("unmaintained-embedded-{index}"));
         state
             .http
             .runtime
@@ -1109,7 +1103,10 @@ async fn session_reaper_closes_idle_and_ended_sessions_without_store_requests() 
             .await
             .expect("open session");
         handle.close().await.expect("close session");
-        assert_eq!(held_ids(&reaper.namespaces), vec![embedded_ns.clone()]);
+        assert_eq!(
+            held_ids(&state.scheduler.inner.namespaces),
+            vec![embedded_ns.clone()]
+        );
 
         store.take();
         let opened_ms = state.http.runtime.monotonic_timer().monotonic_now_ms();
@@ -1118,12 +1115,12 @@ async fn session_reaper_closes_idle_and_ended_sessions_without_store_requests() 
         }
         state.run_due_steps().await;
         assert!(
-            held_ids(&reaper.namespaces).is_empty(),
-            "AppState::run_due_steps must reap ended sessions in {mode:?} mode"
+            held_ids(&state.scheduler.inner.namespaces).is_empty(),
+            "`AppState::run_due_steps` closes an ended session in {mode:?} mode"
         );
         assert!(
             store.take().is_empty(),
-            "AppState::run_due_steps must make no store requests when maintenance is off"
+            "`AppState::run_due_steps` makes no store request when the server doesn't maintain"
         );
         state.http.runtime.shutdown().await.expect("shutdown");
     }

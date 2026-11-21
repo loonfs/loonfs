@@ -15,6 +15,7 @@ use loonfs_types::{Context, MonotonicTimer, NamespaceId, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Semaphore;
 
@@ -263,9 +264,26 @@ pub struct HeldNamespace<S> {
 type NamespaceClose = Shared<BoxFuture<'static, loonfs::Result<CloseNamespaceReport>>>;
 
 impl<S> HeldNamespace<S> {
+    /// Starts the session's close, or joins the close that's running. A panic
+    /// inside the close becomes an error, so every waiter gets the error and
+    /// the close's cleanup removes the entry. A shared future that panicked
+    /// would panic again for every later open of the namespace.
     fn begin_close(&mut self) -> NamespaceClose {
         self.closing
-            .get_or_insert_with(|| self.handle.clone().close().boxed().shared())
+            .get_or_insert_with(|| {
+                let handle = self.handle.clone();
+                AssertUnwindSafe(handle.close())
+                    .catch_unwind()
+                    .map(|closed| match closed {
+                        Ok(result) => result,
+                        Err(payload) => Err(loonfs::Error::RuntimeTask(format!(
+                            "closing the session panicked: {}",
+                            crate::panic_message(payload.as_ref())
+                        ))),
+                    })
+                    .boxed()
+                    .shared()
+            })
             .clone()
     }
 }
