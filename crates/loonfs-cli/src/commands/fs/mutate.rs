@@ -79,7 +79,7 @@ pub(crate) async fn run_filesystem_rm(
         })?;
 
     // A delete resolved through a path always records its binding, so the
-    // printed command restores in place with no destination — and keeps
+    // printed command restores in place with no destination, and it keeps
     // working even if the enclosing directories are renamed before the
     // paste.
     let recovery_command =

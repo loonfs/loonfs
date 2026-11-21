@@ -119,8 +119,8 @@ impl TlsListener {
 
     /// Mirrors what axum's own `Listener for TcpListener` does with a failed
     /// accept, because the trait makes each implementor responsible for it:
-    /// a per-connection error is dropped, and anything else — `EMFILE` being
-    /// the case worth naming — is logged and retried after a pause rather
+    /// a per-connection error is dropped, and anything else (`EMFILE` being
+    /// the case worth noting) is logged and retried after a pause rather
     /// than ending the accept loop. The first failure logs, and then at most
     /// one line per [`ACCEPT_ERROR_LOG_INTERVAL_MS`], with the failures
     /// suppressed since the last line.

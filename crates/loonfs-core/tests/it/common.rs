@@ -44,8 +44,8 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Publishes one mutation request through the commit engine — the single
-/// publish pipeline — with its content already prepared.
+/// Publishes one mutation request through the commit engine (the single
+/// publish pipeline) with its content already prepared.
 pub(crate) async fn submit_commit<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

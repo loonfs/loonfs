@@ -440,7 +440,7 @@ pub fn decode_index_block(
         .map_err(|error| SegmentBlockCodecError::Codec(error.to_string()))?;
     // Index keys must be sorted, and block ranges must tile their region:
     // every range fits in `u64`, and each block starts exactly where its
-    // predecessor ends — the builder writes blocks back to back. Range
+    // predecessor ends, because the builder writes blocks back to back. Range
     // lookup relies on key order; span loading and its bulk-read budget
     // rely on contiguous, overflow-free ranges.
     let mut previous: Option<(&String, u64)> = None;

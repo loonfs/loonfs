@@ -33,8 +33,8 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     assert_eq!(report.deleted.upload_sessions, 0);
     assert!(store.head(&content_key).await.expect("head").is_some());
 
-    // Past the lease plus a grace the session is aborted and the object it
-    // was writing is deleted — in that order.
+    // Past the lease plus a grace period, the session is aborted and the object
+    // it was writing is deleted, in that order.
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GC_GRACE_WINDOW_MS + 1);
     let report = collect_pool(&store, &pool_id, &expired).await;
     assert_eq!(

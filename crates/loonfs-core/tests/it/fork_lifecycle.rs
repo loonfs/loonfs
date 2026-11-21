@@ -1645,7 +1645,7 @@ async fn creation_and_fork_look_up_the_id_before_their_first_write() {
     }
 }
 
-/// Checks that a create whose put of manifest 1 lands after another create's
+/// Checks that a create whose put of manifest 1 is written after another create's
 /// namespace published a newer manifest and a collection deleted manifest 1
 /// reports `namespace_exists`: the put succeeds, and the read of the manifest
 /// boundary after it counts the put as lost. The namespace's newest manifest

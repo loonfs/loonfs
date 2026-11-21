@@ -221,8 +221,8 @@ pub(crate) enum DestinationName {
 ///
 /// Bytes are handed on chunk by chunk, so a streamed download that fails its
 /// verification at the end fails after some of the file has already been
-/// written. That is what streaming to a pipe means — `cat` behaves the same
-/// way — and it is why the exit status, not the output, is what says whether
+/// written. That is what streaming to a pipe means (`cat` behaves the same
+/// way), and it is why the exit status, not the output, says whether
 /// the content was verified.
 pub(crate) async fn stream_file_to_stdout(
     context: &NamespaceContext,

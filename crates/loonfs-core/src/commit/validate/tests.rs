@@ -1,7 +1,7 @@
 //! Commit validation tests driving the operation validator directly over an
 //! in-memory metadata view.
 //!
-//! These tests live in the crate because the operation types are internal.
+//! These tests are kept in the crate because the operation types are internal.
 
 use super::super::{CommitOperation, NewChild, ResolvedBinding};
 use super::error::CommitOperand;

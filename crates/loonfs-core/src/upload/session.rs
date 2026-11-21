@@ -46,7 +46,7 @@ impl NewUploadSession {
     }
 
     /// A multipart session records identity, the provider handle, and the
-    /// geometry — and nothing about the payload, which it has not been told.
+    /// geometry, and nothing about the payload, which it has not been told.
     pub(crate) fn direct_multipart(
         content_id: ContentId,
         provider_upload_id: &str,

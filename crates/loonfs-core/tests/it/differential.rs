@@ -791,8 +791,8 @@ fn metadata_apply_matches_model_for_a_restore_of_a_deleted_file() {
                 position(2, 1),
                 1,
             ),
-            // The revoke names the delete's own position — the third commit,
-            // second delta — which differs from where the revoke itself is committed.
+            // The revoke identifies the delete's own position (the third commit,
+            // second delta), which differs from where the revoke itself is committed.
             restore_deleted(
                 0,
                 InodeId(3),

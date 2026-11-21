@@ -1,12 +1,12 @@
 //! The LoonFS object-store boundary.
 //!
-//! LoonFS assumes only the narrow provider contract the format spec names —
-//! create-if-absent, compare-and-swap, read-after-write visibility, prefix
-//! listing — and this crate owns that boundary: the [`ObjectStore`] trait,
+//! LoonFS assumes only the narrow provider contract defined in the format spec
+//! (create-if-absent, compare-and-swap, read-after-write visibility, and prefix
+//! listing). This crate defines that boundary: the [`ObjectStore`] trait,
 //! provider adapters for S3, Cloudflare R2, Google Cloud Storage, Azure Blob Storage, and the local filesystem, the durable key layout in [`keys`] and
 //! [`layout`], and the contract probe in [`probe`] that proves a configured
-//! store honours that contract — the same checks the conformance suite runs
-//! against real providers.
+//! store honors that contract (the same checks the conformance suite runs
+//! against real providers).
 //!
 //! Namespace semantics don't belong here: the crate reads, writes, and lists
 //! objects by key, and `loonfs-core` gives the keys their meaning.

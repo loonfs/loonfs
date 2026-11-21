@@ -215,8 +215,8 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .await
         .expect("embedded changes");
 
-    // The parity claim: the two transports produced the same commit —
-    // same sequence, same id, same annotation, same ordered events.
+    // The parity claim: the two transports produced the same commit (same
+    // sequence, same ID, same annotation, and same ordered events).
     assert_eq!(
         remote_changes
             .changes

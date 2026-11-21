@@ -322,10 +322,10 @@ pub(super) fn presign_time() -> SystemTime {
 /// tokens covering a ref no operation puts are ignored.
 ///
 /// A rejected token is reported whether or not a sibling token verified.
-/// Coverage is still determined per ref — a put whose ref no proof admits is
-/// refused by the commit engine — but a token this deployment did not mint,
-/// or minted for another namespace, is worth saying out
-/// loud even when the request it arrived in went on to publish.
+/// Coverage is still determined per ref (a put whose ref no proof admits is
+/// refused by the commit engine), but a token this deployment did not mint,
+/// or minted for another namespace, is worth logging loudly even when the
+/// request it arrived in went on to publish.
 ///
 /// Returns the rejections when no token verified and at least one token was rejected.
 pub(super) async fn content_preparation_for_puts(
@@ -377,11 +377,11 @@ pub(super) async fn content_preparation_for_puts(
 
 /// Whether a rejection says the token was not this deployment's to accept.
 ///
-/// These three are the only rejections no honest client can produce: the
-/// signature is this server's own HMAC, and the namespace
-/// are the pair the completed session was for. Everything else — an expiry,
-/// a malformed body, a ref the payload does not cover — is a client that got
-/// something wrong or waited too long, so it stays at debug.
+/// These are the only rejections no honest client can produce: the
+/// signature is this server's own HMAC, and the namespace is the one the
+/// completed session was for. Everything else (an expiry, a malformed body, or
+/// a ref the payload does not cover) is a client that got something wrong or
+/// waited too long, so it stays at debug.
 fn is_forged_content_token(error: &ContentTokenError) -> bool {
     matches!(
         error,

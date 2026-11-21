@@ -197,7 +197,7 @@ impl GrepHost {
 /// Durable control objects these tests assert on directly.
 ///
 /// They read the same bytes the runtime writes, decoded through the
-/// envelope codec `loonfs-types` publishes — the durable format is a
+/// envelope codec `loonfs-types` publishes. The durable format is a
 /// specified artifact, so a test can check it without reaching into the
 /// engine that produced it.
 pub(crate) mod control {

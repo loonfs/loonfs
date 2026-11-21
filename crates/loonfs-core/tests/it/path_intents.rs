@@ -159,8 +159,8 @@ async fn list_path_page<S: ObjectStore + ?Sized>(
         .await
 }
 
-/// Drains the paged revision listing — the only revision-listing operation
-/// the stack exposes — so tests can check a file's full history.
+/// Drains the paged revision listing (the only revision-listing operation
+/// the stack exposes) so tests can check a file's full history.
 async fn list_file_revisions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1199,7 +1199,7 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
 
     // Deleting `/docs` unbinds the name: it is reusable immediately, and
     // writes and moves under it create a fresh subtree rather than
-    // conflicting with the dead one. The old subtree stays dead — its
+    // conflicting with the dead one. The old subtree stays dead, and its
     // previous child is not resurrected by the recreation.
     NamespaceFixture::new(&store, &namespace_id("demo"), &context)
         .write_file_bytes(
@@ -1311,7 +1311,7 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
 
     // The unbind is what makes the old binding dead: an operation aimed at
     // the source path finds nothing, while the same inode is still reachable
-    // — and still deletable under a precondition naming it — at the destination.
+    // (and still deletable under a precondition targeting it) at the destination.
     let stale_binding = submit_operation(
         &store,
         &namespace_id("demo"),

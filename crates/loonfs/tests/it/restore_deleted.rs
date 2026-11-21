@@ -109,7 +109,7 @@ fn a_restore_recovers_a_deleted_file_and_positions_stay_scoped() {
         .expect("delete file")
         .committed_seq;
 
-    // Recovery re-attaches the same inode — identity, content, and the full
+    // Recovery re-attaches the same inode, so its identity, content, and full
     // revision history come back, even at a new path.
     block_on(namespace_writer.restore_deleted_with_options(
         inode_id,
@@ -418,8 +418,8 @@ fn a_restore_survives_snapshots_and_reopen_in_both_orders() {
             b"persisted"
         );
 
-        // Order two: delete, snapshot, reopen, THEN restore — the
-        // revoke must resolve a deletion that lives in durable segments,
+        // Order two: delete, snapshot, reopen, THEN restore. The
+        // revoke must resolve a deletion stored in durable segments,
         // not the WAL tail.
         let inode_id = fs
             .stat_path_blocking(&namespace_id, "/docs/report.txt")
@@ -571,8 +571,8 @@ fn the_feed_names_deleted_entries_and_their_writer() {
 
     let changes = block_on(namespace.list_changes(CommitSeq(0)).page()).expect("list changes");
 
-    // A projection of the feed sees the spelling a person typed — on the
-    // deletion as well as the creation — without a second lookup per entry.
+    // A projection of the feed sees the spelling a person typed (on the
+    // deletion as well as the creation) without a second lookup per entry.
     let deleted_name = changes
         .changes
         .iter()

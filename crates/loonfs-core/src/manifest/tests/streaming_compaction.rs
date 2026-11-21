@@ -27,10 +27,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// -------------------------------------------------------------------------
-// The family-group mapping
-// -------------------------------------------------------------------------
-
 #[test]
 fn every_family_belongs_to_exactly_one_compaction_group() {
     for family in ApiMetadataRowFamily::ALL {
@@ -82,14 +78,10 @@ fn retention_clusters_partition_their_group_families() {
     }
 }
 
-// -------------------------------------------------------------------------
-// Workloads
-// -------------------------------------------------------------------------
-
-/// A namespace whose bindings group holds many parent directories, deletions
-/// and moves below the retention floor, and more of both above it — enough
+/// A namespace whose bindings group contains many parent directories, deletions
+/// and moves below the retention floor, and more of both above it (enough
 /// for a job to cross many slots and for the drop rules to have something to
-/// do.
+/// do).
 async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId) {
     let context = test_context();
     bootstrap_namespace(store, namespace_id, &context)
@@ -265,10 +257,6 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
         .expect("snapshot the late write");
 }
 
-// -------------------------------------------------------------------------
-// Driving a job
-// -------------------------------------------------------------------------
-
 /// A budget that admits the whole group in one unit.
 fn compact_everything_policy() -> MetadataRunPolicy {
     MetadataRunPolicy {
@@ -343,7 +331,7 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
 
 /// The claim a job holds while it runs, opened the way the job driver opens
 /// it. These tests split the rebuild from the driver, so they create the
-/// lease themselves — every later write compare-and-swaps against the etag
+/// lease themselves. Every later write compare-and-swaps against the etag
 /// this one returns, so a lease that was never created cannot be refreshed.
 #[allow(
     clippy::result_large_err,
@@ -551,10 +539,6 @@ async fn compact_group_whole<S: ObjectStore + ?Sized>(
     .await;
 }
 
-// -------------------------------------------------------------------------
-// The plan split
-// -------------------------------------------------------------------------
-
 /// Checks that a planned unit judges rows against the manifest's retention
 /// floor.
 #[tokio::test]
@@ -579,10 +563,6 @@ async fn the_planner_judges_rows_against_the_manifests_retention_floor() {
         assert_eq!(spec.frozen_floor_seq(), floor_seq);
     }
 }
-
-// -------------------------------------------------------------------------
-// The oracle
-// -------------------------------------------------------------------------
 
 /// Checks that a whole unit and the plan, rewrite, and finalization run apart
 /// reach the same rows, drop only rows the floor covers, and leave the group
@@ -834,10 +814,6 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
     }
 }
 
-// -------------------------------------------------------------------------
-// Duplicate row keys
-// -------------------------------------------------------------------------
-
 /// The object keys the current manifest holds for `group`.
 async fn group_segment_keys<S: ObjectStore + ?Sized>(
     store: &S,
@@ -964,10 +940,6 @@ fn assert_duplicate_row_key(error: &CoreError, duplicated_key: &str) {
         "the error must name the family and the duplicated key, got: {message}"
     );
 }
-
-// -------------------------------------------------------------------------
-// Reverse-bind resolution cost
-// -------------------------------------------------------------------------
 
 /// What one compaction cost the store, by section.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1298,10 +1270,6 @@ async fn a_compaction_reads_its_window_once() {
     );
 }
 
-// -------------------------------------------------------------------------
-// Restart equivalence
-// -------------------------------------------------------------------------
-
 /// Cancels the job by setting a token once the store has served a given
 /// number of reads, so a cancellation happens in the middle of a compaction rather
 /// than at a boundary the test picked.
@@ -1474,10 +1442,6 @@ async fn a_cancelled_compaction_leaves_orphans_and_the_rerun_ends_where_it_would
         "no manifest names a cancelled attempt's segment"
     );
 }
-
-// -------------------------------------------------------------------------
-// Resource discipline
-// -------------------------------------------------------------------------
 
 /// Builds `run_count` runs of `rows_per_run` attribute rows each, with a
 /// 4 KiB value of random characters in every row, and returns the runs with
@@ -1941,10 +1905,6 @@ async fn one_wide_directory_streams_a_row_at_a_time() {
         "the job must leave the group in one run"
     );
 }
-
-// -------------------------------------------------------------------------
-// The whole arc, through the step maintenance calls
-// -------------------------------------------------------------------------
 
 /// Every object key the current manifest references.
 async fn referenced_segment_keys<S: ObjectStore + ?Sized>(

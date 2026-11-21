@@ -428,7 +428,7 @@ async fn snapshot_after_administrator_change() -> (
     )
     .await
     .expect("replace administrator");
-    // A new runtime rules out stale-cache permission checks. The old ACL is
+    // A new runtime prevents stale-cache permission checks. The old ACL is
     // available only through the deliberately historical snapshot context.
     let reader =
         loonfs::LoonFs::builder_with_store(writer.object_store(), loonfs::Context::Service)

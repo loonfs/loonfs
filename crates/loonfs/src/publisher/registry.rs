@@ -64,8 +64,8 @@ pub(super) struct RegistryShared {
     pub(super) context: Arc<PublisherContext>,
     state: Mutex<RegistryState>,
     /// Publication and deletion units whose panic a task survived. Tasks
-    /// contain panics to keep the registry usable, so this — not a task
-    /// join error — is what a drain reports.
+    /// contain panics to keep the registry usable, so this (not a task
+    /// join error) is what a drain reports.
     pub(super) panicked_units: AtomicUsize,
 }
 

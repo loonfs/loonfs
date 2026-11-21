@@ -183,8 +183,8 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .expect("fold the batch into one delta run");
     }
 
-    // Confirm the manifest really carries several straddling delta direntry
-    // runs with inline filters — the premise of the assertions below.
+    // Confirm the manifest really contains several straddling delta direntry
+    // runs with inline filters, which is the premise of the assertions below.
     let root = loonfs_core::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await

@@ -30,10 +30,6 @@ use loonfs_types::format::segment_blocks::{
 use loonfs_types::{CommitSeq, ContentId, IndexSegmentId, InodeId, RevisionNo, RunNo};
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------------------
-// Fixture names
-// ---------------------------------------------------------------------------
-
 /// The entry of an active index reorganizing a set of segments.
 pub(crate) const ACTIVE_ENTRY_FIXTURE: &str = "grep_entry.v1.json";
 /// The entry of a backfill in progress, with segments and no
@@ -52,10 +48,6 @@ const CONTENT_REVISIONS_BLOCK_FIXTURE: &str = "grep_segment_content_revisions.v1
 const VALUES_BLOCK_FIXTURE: &str = "grep_segment_values.v1.bin";
 /// One data block of `filter` rows.
 const FILTERS_BLOCK_FIXTURE: &str = "grep_segment_filters.v1.bin";
-
-// ---------------------------------------------------------------------------
-// Golden helpers
-// ---------------------------------------------------------------------------
 
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
@@ -87,10 +79,6 @@ pub(crate) fn read_golden(name: &str) -> Vec<u8> {
 fn unzstd(bytes: &[u8]) -> Vec<u8> {
     zstd::stream::decode_all(bytes).expect("decompress the block")
 }
-
-// ---------------------------------------------------------------------------
-// Samples: fixed values covering every grep status and both index shapes
-// ---------------------------------------------------------------------------
 
 /// An active index with a reorganization into the base level running over
 /// its runs. The reorganization rewrites the two level-1 runs into the
@@ -293,10 +281,6 @@ fn decode_golden_data_block(name: &str) -> DecodedDataBlock<IndexRow> {
     };
     decode_data_block_rows::<IndexRow>(&stored, &handle).expect("decode golden data block")
 }
-
-// ---------------------------------------------------------------------------
-// The fixtures
-// ---------------------------------------------------------------------------
 
 /// The bytes of `entry` as its core entry, the JSON object that a namespace
 /// manifest lists under `grep`.

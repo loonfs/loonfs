@@ -3,7 +3,7 @@
 //!
 //! The default provider connector performs HTTP IO on whichever runtime
 //! issues the request. A store shared across current-thread runtimes then
-//! parks pooled connections until the client's 30s request timeout fires —
+//! parks pooled connections until the client's 30s request timeout fires,
 //! so provider IO runs on a dedicated runtime. Every provider client uses a
 //! connector onto its store's own runtime, so caller runtime topology can
 //! never affect provider IO.

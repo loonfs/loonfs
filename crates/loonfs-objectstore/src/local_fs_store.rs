@@ -693,8 +693,8 @@ async fn collect_keys(
         // Concurrent writers race this walk by design: deletes prune empty
         // parent directories and publishes write-then-rename scratch files.
         // An entry that vanishes between enumeration and inspection is an
-        // absent key, not a listing failure — exactly what a cloud
-        // provider's list reports for it.
+        // absent key, not a listing failure (matching what a cloud
+        // provider's list reports for it).
         for path in directory_entries(prefix, &current).await? {
             let metadata = match fs::metadata(&path).await {
                 Ok(metadata) => metadata,
@@ -846,8 +846,8 @@ async fn prune_empty_parent_directories(
 /// Private scratch names (the store lock and in-flight temp writes) are
 /// never objects: listings hide them and `resolve_key` rejects them, so the
 /// hidden set and the unaddressable set are identical. The match is
-/// deliberately narrow — key segments are otherwise allowed to start with a
-/// dot.
+/// deliberately narrow, because key segments are otherwise allowed to start
+/// with a dot.
 fn is_scratch_name(name: &str) -> bool {
     name == STORE_LOCK_FILE_NAME || (name.starts_with('.') && name.contains(".tmp-"))
 }

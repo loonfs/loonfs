@@ -5,8 +5,8 @@ use loonfs_types::{AbsolutePath, NamespaceId};
 
 /// A path qualified by namespace.
 ///
-/// Both parts are validated at construction — [`NamespacePath::parse`] for
-/// strings, [`NamespacePath::new`] for already-typed parts — so a value of
+/// Both parts are validated at construction ([`NamespacePath::parse`] for
+/// strings and [`NamespacePath::new`] for already-typed parts), so a value of
 /// this type always names a well-formed target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespacePath {

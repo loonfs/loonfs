@@ -127,8 +127,8 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
         serde_json::from_reader(accepted.into_reader()).expect("decode commit response");
     assert_eq!(committed.commit_id.as_str(), "move-replace");
 
-    // Malformed upload bodies must also stay inside the envelope — an
-    // Option-typed body must reject garbage, not default it to a session.
+    // Malformed upload bodies must also stay inside the envelope. An
+    // Option-typed body must reject garbage rather than defaulting it to a session.
     match raw_agent()
         .post(&format!(
             "{}/v0/namespaces/demo/uploads",

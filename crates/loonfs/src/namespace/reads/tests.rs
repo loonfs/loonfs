@@ -3,8 +3,8 @@
 //! The shipped segment target is 8 MiB of decoded rows, so a compacted run
 //! only splits into many segments at a scale no test can write in seconds.
 //! These tests narrow the rows per compacted segment through
-//! [`Maintenance::narrow_segment_row_budget`]. Everything else — folds,
-//! compaction planning, and the page read — is the shipped path.
+//! [`Maintenance::narrow_segment_row_budget`]. Everything else (folds,
+//! compaction planning, and the page read) uses the shipped path.
 
 use crate::publish::{CommitCandidate, CommitIntent, FilesystemOperation, InlineContent};
 use crate::test_support::writer;

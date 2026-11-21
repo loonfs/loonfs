@@ -443,8 +443,8 @@ pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
     match serde_json::from_slice::<ErrorResponse>(body) {
         Ok(body) => ClientError::from_error_response(status, body),
         // A status with a non-envelope body is most commonly an intermediary
-        // responding for the server (a load balancer's HTML 502): keep the
-        // status — it is the only signal in the response.
+        // responding for the server (a load balancer's HTML 502). Keep the
+        // status, because it is the only signal in the response.
         Err(err) => {
             let provider_code = provider_error_code(body);
             ClientError::HttpStatus {

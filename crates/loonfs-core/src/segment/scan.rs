@@ -360,7 +360,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     }
 
     /// Counts a segment whose filter admitted the probe but whose rows had
-    /// no match — the filter's false-positive rate as observed by lookups.
+    /// no match (the filter's false-positive rate as observed by lookups).
     fn record_filter_false_positive_if_empty(&self, matched_rows: usize) {
         if matched_rows == 0 {
             if let Some(cache) = self.segment_cache {

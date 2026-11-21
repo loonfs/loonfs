@@ -154,8 +154,8 @@ fn load_config_source(path: &Path) -> Result<ConfigDocument> {
     let table: toml::Table = toml::from_str(&text).map_err(|err| {
         unusable_config(format!("failed to decode config {}: {err}", path.display()))
     })?;
-    // Version before shape: a config written for another version should say
-    // so directly, not surface as unknown-field noise from the strict decode.
+    // Version before shape: a config written for another version should report
+    // that directly, instead of failing with unknown-field noise from the strict decode.
     match table.get("config_version") {
         None => {
             return Err(unusable_config(format!(

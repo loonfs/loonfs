@@ -188,8 +188,8 @@ impl RequestInstruments {
 /// The `method` label for a served request.
 ///
 /// `Method::as_str` borrows from the method, and a label must be `'static`,
-/// so the standard methods are mapped through this closed match instead —
-/// which also keeps an extension method from becoming a label of its own.
+/// so the standard methods are mapped through this closed match instead.
+/// This also keeps an extension method from becoming a label of its own.
 fn method_label(method: &Method) -> &'static str {
     match *method {
         Method::GET => "GET",

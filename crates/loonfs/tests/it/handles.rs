@@ -783,7 +783,7 @@ fn a_threshold_crossing_publish_returns_before_its_fold_completes() {
 fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
     // Shutdown is terminal for the write path only. Mutations are refused,
     // so nothing can cross the WAL threshold and start a fold after the
-    // drain, while reads — which own no background work — answer from
+    // drain, while reads (which own no background work) read from
     // durable state exactly as before.
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");

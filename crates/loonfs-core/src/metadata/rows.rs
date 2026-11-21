@@ -56,7 +56,7 @@ impl Default for MetadataState {
 /// position that was in the trash, so for valid histories the two rules
 /// agree, and the recorded target serves as audit metadata and the
 /// projection contract (change-feed consumers reduce with it and can flag a
-/// mismatch as corruption). Keep every reader on this helper — a site
+/// mismatch as corruption). Keep every reader on this helper, because a site
 /// with its own copy of the rule is how visibility splits from the durable
 /// truth.
 pub(crate) fn hiding_tombstone_from_records(

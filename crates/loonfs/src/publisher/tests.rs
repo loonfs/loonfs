@@ -356,7 +356,7 @@ fn test_namespaces(count: usize) -> Vec<NamespaceId> {
 
 /// Bootstraps a namespace under the identity the standalone publisher will
 /// publish with, so its first publication continues the writer session the
-/// bootstrap left behind — the same continuity a writer handle has.
+/// bootstrap left behind (the same continuity a writer handle has).
 async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
     runtime
         .core
@@ -2976,8 +2976,8 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     // Park the first publication at its WAL put, batch a second commit
     // behind it, then queue the delete: the queued batch must publish
     // before the delete runs, and the blocked CAS outlasts the pacing
-    // interval — the interleaving where a racing second worker could run
-    // the delete first.
+    // interval (the interleaving where a racing second worker could run
+    // the delete first).
     store.block_next();
     let before = {
         let namespace = namespace.clone();

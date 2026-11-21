@@ -640,8 +640,8 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     };
 
     // The cold-boot shape: a view with no shared cache attached. Repeating
-    // a lookup must not re-fetch — the per-view memo is the only reuse this
-    // configuration has, and without it a cold list degrades from one fetch
+    // a lookup must not re-fetch, because the per-view memo is the only reuse
+    // this configuration has, and without it a cold list degrades from one fetch
     // per block to one fetch per lookup.
     let segments =
         super::load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
@@ -781,8 +781,8 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     // Three snapshots append three delta runs whose direntry key ranges
     // straddle one another (each run binds names from both ends of the
     // alphabet), so range pruning alone cannot narrow a name lookup below
-    // several candidate segments — the shape a bulk-loaded directory's
-    // unfolded backlog takes.
+    // several candidate segments (the shape a bulk-loaded directory's
+    // unfolded backlog takes).
     for names in [["a.txt", "z.txt"], ["b.txt", "y.txt"], ["c.txt", "x.txt"]] {
         for name in names {
             crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
@@ -871,8 +871,8 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     );
 
     // The same lookup against the same manifest with the inline copies
-    // stripped must return the same rows through fetched filter blocks —
-    // the inline copy is an accelerator, never an answer of its own.
+    // stripped must return the same rows through fetched filter blocks,
+    // because the inline copy is an accelerator and never an answer of its own.
     let mut stripped_payload = segments.manifest().payload().clone();
     stripped_payload.manifest_no = ManifestNo(stripped_payload.manifest_no.0 + 1);
     stripped_payload.manifest_no = stripped_payload
@@ -975,8 +975,8 @@ async fn corrupt_inline_filter_fails_the_lookup() {
 
 /// One direntry segment from a snapshot's manifest, with the inline filter copy stripped
 /// from its descriptor so both the filter and the index have to come from
-/// somewhere other than the manifest — the shape a base segment, whose
-/// filter is too big to inline, already has.
+/// somewhere other than the manifest (the shape a base segment, whose
+/// filter is too big to inline, already has).
 async fn direntry_segment_after_snapshot() -> (
     tempfile::TempDir,
     RecordingStore<LocalFsStore>,

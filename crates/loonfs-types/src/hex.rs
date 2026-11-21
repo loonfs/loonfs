@@ -12,7 +12,7 @@ pub enum HexDecodeError {
         /// Number of ASCII bytes in the rejected input.
         length: usize,
     },
-    /// Reports an input byte outside `0`–`9` and `a`–`f`.
+    /// Reports an input byte outside `0` to `9` and `a` to `f`.
     #[error("invalid hex byte {byte:#04x}")]
     InvalidByte {
         /// First byte that violated the lowercase hexadecimal alphabet.

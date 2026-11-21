@@ -269,9 +269,9 @@ fn embedded_grep_works_after_index_enable() {
         format!("{message}\nfeature: query.grep\n")
     );
 
-    // Enable waits for the backfill in-process: the one-shot CLI is its own
-    // grep maintenance, so the query works immediately — no server, no
-    // driver, no state that never resolves.
+    // Enable waits for the backfill in-process: the one-shot CLI runs its own
+    // grep maintenance, so the query works immediately (with no server, no
+    // driver, and no state that never resolves).
     let enabled = harness.run(&["--json", "maintenance", "index", "enable"]);
     assert_success(&enabled);
     assert_eq!(json_data(&enabled)["status"], "active");
@@ -1068,7 +1068,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(stdout_string(&quiet_gc).starts_with("gc for demo:"));
         assert!(!stderr_string(&quiet_gc).contains("pass 1:"));
 
-        // Maintenance failures surface the registry code in both modes.
+        // Maintenance failures report the registry code in both modes.
         let missing = harness.run(&[
             "--json",
             "maintenance",

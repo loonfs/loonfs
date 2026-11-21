@@ -428,8 +428,8 @@ impl ObjectStore for ProviderObjectStore {
         }
     }
 
-    /// Bounded reads issue the ranged GET directly — one round trip, not a
-    /// sizing HEAD plus a GET — and pay a single HEAD only on the failure
+    /// Bounded reads issue the ranged GET directly (one round trip, not a
+    /// sizing HEAD plus a GET) and pay a single HEAD only on the failure
     /// path, to determine whether the range or the transport was the problem.
     /// The contract matches the local reference provider exactly: a descending
     /// range is `InvalidRange` before existence is consulted, a missing object
@@ -1296,8 +1296,8 @@ mod tests {
             Some(Bytes::new())
         );
 
-        // A missing object is `Ok(None)` however the request is shaped —
-        // the same answer the unranged read and the local provider give.
+        // A missing object is `Ok(None)` however the request is shaped,
+        // matching what the unranged read and the local provider return.
         let missing = "namespaces/demo/segments/seg_missing.sst";
         assert_eq!(
             store.get(missing, range(0, 4)).await.expect("missing"),

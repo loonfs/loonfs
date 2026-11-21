@@ -179,7 +179,7 @@ async fn owned_staging_over_an_occupied_key_answers_the_same_for_bytes_and_for_a
     for streamed in [false, true] {
         for (occupant, settles) in [(BYTES, true), (other, false)] {
             let temp_dir = tempdir().expect("tempdir");
-            // Another writer's object lands at the freshly minted key just
+            // Another writer's object is written at the freshly minted key just
             // as this write's create arrives.
             let store = LostCreateStore::new(
                 LocalFsStore::new(temp_dir.path()).expect("store"),

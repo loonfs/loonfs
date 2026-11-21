@@ -50,10 +50,10 @@ pub const AWS_S3_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// Cloudflare R2's documented maximum for a single-part upload: 5 MiB less
 /// than 5 GiB.
 ///
-/// Cloudflare R2 limits, "Maximum upload size — 5 GiB (single-part)", whose
-/// footnote gives the exact figure as 5 MiB below 5 GiB (4.995 GiB). R2's
-/// ceiling is the smaller of the two S3-compatible providers, so it is
-/// stated separately rather than assumed equal to AWS's.
+/// Cloudflare R2's documented limit is "Maximum upload size: 5 GiB
+/// (single-part)", whose footnote gives the exact figure as 5 MiB below 5 GiB
+/// (4.995 GiB). R2's ceiling is the smaller of the two S3-compatible providers,
+/// so it is stated separately rather than assumed equal to AWS's.
 pub const CLOUDFLARE_R2_MAX_DIRECT_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 
 /// Supplies SigV4 endpoint addressing and signing policy for S3-compatible URLs.
@@ -100,7 +100,7 @@ impl S3CompatiblePresigner {
     /// so they address the same object.
     ///
     /// Blank required values and an unusable key prefix fail immediately;
-    /// endpoint, content, expiry, and signing-time failures surface when
+    /// endpoint, content, expiry, and signing-time failures are reported when
     /// [`DirectPutIssuer::presign_put`] runs.
     pub fn new(config: S3PresignerConfig, credentials: crate::AwsS3Credentials) -> Result<Self> {
         let source = aws_credentials_source(&credentials, &config.region)?;

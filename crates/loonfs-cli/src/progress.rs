@@ -247,7 +247,7 @@ impl ProgressReporter {
     ///
     /// A transfer of several files reports none of these. Each file of a
     /// tree passes through the same stretches, several at a time, so one
-    /// file entering its commit says nothing about where the operation is —
+    /// file entering its commit says nothing about where the operation is,
     /// and on a terminal it would leave the line flickering between the two.
     pub(crate) fn phase(&self, phase: &str) {
         if !self.enabled() {
@@ -569,7 +569,7 @@ mod tests {
         }
 
         // A pipe has no total, so it has no percentage and nothing to
-        // estimate — only what has gone by.
+        // estimate, only what has gone by.
         let piped = silent_reporter(ProgressOp::Put, "/piped.bin");
         let mut unknown = state(2_048, None);
         unknown.files_total = Some(1);

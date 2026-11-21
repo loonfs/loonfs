@@ -501,8 +501,8 @@ fn concurrent_embedded_puts_commit_or_report_the_fence() {
     }
 
     // Four simultaneous processes: each is its own writer session, so they
-    // fence each other on acquisition. Fencing is terminal — no silent
-    // reacquisition — so the contract is honesty, not recovery: every
+    // fence each other on acquisition. Fencing is terminal (there is no silent
+    // reacquisition), so the contract is honesty rather than recovery: every
     // process either commits its put or reports `writer_fenced`, the last
     // acquirer always commits, and a fenced put commits nothing.
     let children: Vec<Child> = payloads
@@ -743,7 +743,7 @@ fn a_multi_chunk_file_round_trips_to_a_file_and_to_stdout() {
 fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
     let harness = Harness::with_demo_namespace();
 
-    // Above the inline threshold, so the bytes live in a content object.
+    // Above the inline threshold, so the bytes are stored in a content object.
     let payload: Vec<u8> = (0..=u8::MAX).cycle().take(64 * 1024 + 1).collect();
     let local = harness.temp_dir.path().join("source.bin");
     fs::write(&local, &payload).expect("write payload");
@@ -1040,7 +1040,7 @@ fn naming_strictness_and_directory_intent_hold_end_to_end() {
     let double_slash = harness.run(&["put", payload.to_str().expect("utf-8 path"), "//x.txt"]);
     assert_failure(&double_slash);
 
-    // Case-only rename works in place — including without --force — and a
+    // Case-only rename works in place (including without --force), and a
     // no-op respelling stays a conflict.
     assert_success(&harness.run(&["--json", "mv", "/docs/report.pdf", "/docs/REPORT.PDF"]));
     let stat = harness.run(&["--json", "stat", "/docs/REPORT.PDF"]);
@@ -1446,8 +1446,8 @@ fn rm_reports_the_inode_and_restore_brings_it_back() {
         "--force",
     ]));
 
-    // rm reports the inode id and the deletion's sequence — together the
-    // recovery handle restore needs.
+    // rm reports the inode ID and the deletion's sequence, which together form
+    // the recovery handle that restore needs.
     let removed = harness.run(&["--json", "rm", "/docs/report.txt"]);
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
@@ -1708,8 +1708,8 @@ fn namespace_delete_without_yes_fails_cleanly_when_not_interactive() {
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
 
-    // Piped stdin (no terminal): the command names the requirement instead
-    // of surfacing the prompt machinery's i/o error.
+    // Piped stdin (no terminal): the command reports the requirement instead
+    // of returning the prompt machinery's I/O error.
     let refused = harness.run(&["--json", "namespace", "delete", "demo"]);
     assert_failure(&refused);
     assert_eq!(
@@ -1992,7 +1992,7 @@ fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
             .as_str()
             .is_some_and(|inode_id| { loonfs_types::InodeId::parse(inode_id).is_ok() }));
 
-        // Without -p the conflict still surfaces.
+        // Without -p, the conflict is still reported.
         let strict = harness.run(&["--json", "mkdir", "/a/b", "--profile", profile]);
         assert_failure(&strict);
         assert_eq!(json_error(&strict)["code"], "path_conflict");

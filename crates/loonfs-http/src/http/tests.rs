@@ -2653,8 +2653,8 @@ async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> LoonFs<Writa
         .expect("build writer")
 }
 
-/// Bootstraps a namespace through a second embedded runtime — seeding
-/// durable state as `writer_id` would from another process — and returns
+/// Bootstraps a namespace through a second embedded runtime (seeding
+/// durable state as `writer_id` would from another process) and returns
 /// that runtime for follow-up seed writes.
 async fn bootstrap_namespace(
     store: &SharedObjectStore,
@@ -3127,8 +3127,8 @@ mod direct_download {
     /// The read cap these deployments are configured with.
     ///
     /// Small on purpose. The audit's case is a file the deployment refuses
-    /// to buffer, and what makes a file that is the cap rather than the
-    /// byte count — so the behavior under test is identical at a kilobyte
+    /// to buffer, and what triggers that is the cap rather than the
+    /// byte count, so the behavior under test is identical at a kilobyte
     /// and at 256 MiB, and this suite does not move a gigabyte per run to
     /// restate the same comparison. That the comparison itself picks the
     /// presigned URL for a 300 MiB file at the real default is pinned in the
@@ -3138,8 +3138,8 @@ mod direct_download {
     /// The whole-object ceiling the loopback put issuer reports.
     ///
     /// Above [`loonfs_client::MIN_STREAMING_PUT_BYTES`], because a payload
-    /// below that never asks what transports are on offer at all — so a
-    /// ceiling under it could never be the thing a put ran into.
+    /// below that never asks what transports are on offer at all, so a
+    /// ceiling under it could never be the limit a put ran into.
     const LOOPBACK_DIRECT_PUT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
     /// An issuer that hands out unsigned loopback URLs.

@@ -176,10 +176,6 @@ async fn inode_of<S: ObjectStore + ?Sized>(
         .inode_id
 }
 
-// ---------------------------------------------------------------------------
-// What the planner accepts and rejects
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn an_update_writes_attributes_on_a_file_and_on_a_directory() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -472,10 +468,6 @@ async fn an_update_is_rejected_when_the_resulting_map_breaks_a_limit() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Race preconditions
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn an_already_satisfied_patch_reports_a_stale_expectation() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -694,10 +686,6 @@ async fn an_attribute_precondition_rejects_a_recreated_path_before_checking_its_
     );
 }
 
-// ---------------------------------------------------------------------------
-// Multi-operation requests
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn a_put_and_an_update_of_the_new_path_commit_together() {
     let (_temp_dir, store, namespace_id, context) = setup().await;
@@ -835,10 +823,6 @@ async fn a_request_that_stops_at_a_bad_update_publishes_nothing() {
         "the accepted operation of a stopped request publishes nothing"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Durability: across a fold, and across a fork
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn attributes_survive_a_fold_and_the_counter_keeps_going() {
@@ -1019,10 +1003,6 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
         Some((AttributesRevisionNo(1), map(&[("owner", "ada")])))
     );
 }
-
-// ---------------------------------------------------------------------------
-// What every other operation does to attributes
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn move_rename_replace_and_restore_preserve_attributes() {

@@ -374,8 +374,8 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
                 break;
             };
             // The locality is a slice of the iterator's own key, so it is
-            // only copied when it changes — once per group rather than once
-            // per row.
+            // copied only when it changes (once per group rather than once
+            // per row).
             let opened = {
                 let iterator = &iterators[next];
                 let (row_key, _) = iterator
@@ -495,10 +495,10 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
     /// driving it. Comparing the two families outright is not available to a
     /// compaction that never keeps them together: the reverse bind index is keyed by child,
     /// so no grouping ever contains a bind row and the reverse row that indexes
-    /// it, and the two are judged in different passes. The digests stand in —
-    /// each pass folds the rows it wrote into one, order does not matter, and
-    /// the two agree at the end exactly when the compaction wrote the two families
-    /// the same rows.
+    /// it, and the two are judged in different passes. The digests stand in:
+    /// each pass folds the rows it wrote into one digest, order does not matter, and
+    /// the two agree at the end exactly when the compaction wrote the same rows
+    /// to both families.
     ///
     /// The check covers what the compaction wrote rather than what it read, which is
     /// the stronger claim: it says the two families dropped in lockstep, not
@@ -526,9 +526,9 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
 /// An order-independent digest of the rows one family was written.
 ///
 /// The combiner is wrapping addition, so the digest depends on the multiset of
-/// rows and not on the order they were written in — which is the point,
-/// because the two families of an index pair are written in different orders
-/// and, for the bind pair, in different passes. This is corruption detection,
+/// rows and not on the order they were written in. That order independence is
+/// essential because the two families of an index pair are written in different
+/// orders and, for the bind pair, in different passes. This is corruption detection,
 /// not a signature: what it has to catch is a compaction that wrote a secondary
 /// index rows its canonical family does not contain, including a row differing in one
 /// field. Nothing durable stores it.
