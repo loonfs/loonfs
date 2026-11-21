@@ -276,7 +276,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
 
 - **Implement each rule, constant, mapping, and helper only once**, because when a rule has two copies, a change to one can miss the other. The model oracle (`loonfs-model`) and grep keep their own copies by design. The oracle never shares code with core, because an oracle that shared core's code would share its bugs.
 
-- **Don't put code in `mod.rs`.** Every module has one, so the file name doesn't tell a developer what's inside. Put code in a file whose name describes its contents, and use `mod.rs` for docs and re-exports.
+- **Use Rust 2018 sibling module files (`foo.rs` alongside `foo/`), not `mod.rs`.** A file named after its module tells a developer what's inside in every tab and stack trace. When a module splits into a directory of subfiles, keep `foo.rs` to module docs, submodule declarations, and re-exports, and put the implementation in named files under `foo/`. (Shared helper directories under Cargo's `tests/` root are the only exception, where Cargo requires `mod.rs` to avoid treating the helper as an integration test binary.)
 
 - **Keep a module under about 500 non-test lines, and a function under about 100.** Move branches up into the parent function and loops down into helpers, so that the parent keeps the state and the helpers compute results.
 
