@@ -34,18 +34,32 @@ pub(crate) async fn classify_read_result<T>(
         },
         _ => return result,
     };
+    if missing_manifest
+        && core
+            .namespace_store(&context.read_basis.head.namespace_id)
+            .above_boundary(context.read_basis.basis.manifest_no(), None)
+            .await?
+            .0
+    {
+        return result;
+    }
+    ensure_source_current(core, context, source).await?;
+    result
+}
+
+/// Returns what a new read of `source` would return before it reads: for the
+/// head, `ManifestReplaced` when a newer manifest replaced the manifest that
+/// `context` reads above, and for a snapshot, the snapshot's error when the
+/// snapshot no longer admits a read.
+pub(crate) async fn ensure_source_current(
+    core: &RuntimeCore,
+    context: &RuntimeReadContext,
+    source: &ReadSource,
+) -> Result<()> {
     let namespace = core.namespace_store(&context.read_basis.head.namespace_id);
     match source {
         ReadSource::Head => {
             let replaced_manifest_no = context.read_basis.basis.manifest_no();
-            if missing_manifest
-                && namespace
-                    .above_boundary(replaced_manifest_no, None)
-                    .await?
-                    .0
-            {
-                return result;
-            }
             let current = namespace.load_current_manifest().await?;
             let current_manifest_no = current.payload().manifest_no;
             if current_manifest_no > replaced_manifest_no {
@@ -62,7 +76,7 @@ pub(crate) async fn classify_read_result<T>(
                 .await?;
         }
     }
-    result
+    Ok(())
 }
 
 /// Returns the error of a read that found its manifest replaced on every

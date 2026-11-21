@@ -67,8 +67,8 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
         )
         .await
         .map_err(|error| GrepError::store(object_key, &error))?
-        .ok_or_else(|| GrepError::IndexCorrupt {
-            message: format!("grep's entry lists missing index segment `{object_key}`"),
+        .ok_or_else(|| GrepError::IndexSegmentMissing {
+            object_key: object_key.to_owned(),
         })?;
     if bytes.len() != handle.stored_bytes as usize {
         return Err(GrepError::StoreUnavailable {

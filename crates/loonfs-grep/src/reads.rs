@@ -269,6 +269,18 @@ impl NamespaceReadView<'_> {
         })
     }
 
+    /// Returns `result`, unless it's an index segment missing from the
+    /// store and a newer manifest replaced the manifest that this view reads
+    /// above. Then it returns `manifest_replaced`, so the query reads again
+    /// from a reloaded head. Under the current manifest the missing segment
+    /// stands as corruption.
+    pub(crate) async fn classify_index_result<T>(&self, result: Result<T>) -> Result<T> {
+        if let Err(GrepError::IndexSegmentMissing { .. }) = &result {
+            self.view.ensure_manifest_current().await?;
+        }
+        result
+    }
+
     /// Returns a view of this view's head at `seq`, which checks the
     /// subject's rights at the head, or `below_retention_floor` when the
     /// retention floor is above `seq`.

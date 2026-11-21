@@ -7,7 +7,7 @@ use crate::pagers::{
     RetainedRevisionsPager, SnapshotFilesPager,
 };
 use crate::pinned_read::PinnedRead;
-use crate::runtime_core::{classify_read_result, RuntimeCore};
+use crate::runtime_core::{classify_read_result, ensure_source_current, RuntimeCore};
 use crate::{
     CommitSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
     FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
@@ -299,6 +299,13 @@ impl ReadView {
                 .find_extension_entry(&self.pinned.context, name),
         )
         .await
+    }
+
+    /// Returns `manifest_replaced` when a newer manifest replaced the manifest
+    /// that this view reads above, for an extension that finds one of its own
+    /// segments missing from the store.
+    pub async fn ensure_manifest_current(&self) -> Result<()> {
+        ensure_source_current(&self.core, &self.pinned.context, &self.source).await
     }
 
     /// Resolves an absolute path against this view.

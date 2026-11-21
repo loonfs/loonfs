@@ -33,7 +33,7 @@ mod read_retry;
 
 pub(crate) use read_heads::HeadConfirmation;
 pub(crate) use read_position::{HeadPositions, ReadPositionSlot};
-pub(crate) use read_retry::classify_read_result;
+pub(crate) use read_retry::{classify_read_result, ensure_source_current};
 
 /// The object-store client, settings, budget, clocks, caches, and metrics
 /// that read-only and writable runtimes share.

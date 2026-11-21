@@ -61,6 +61,18 @@ pub enum GrepError {
         /// Entry or segment validation failure.
         message: String,
     },
+    /// Grep's entry lists an index segment that the store doesn't have. A
+    /// query that finds one reads again from a reloaded head when a newer
+    /// manifest replaced the manifest that lists the segment. Under the
+    /// current manifest the error stands as corruption.
+    #[error(
+        "grep index is corrupt: grep's entry lists missing index segment `{object_key}`; \
+         disable and re-enable grep to rebuild it"
+    )]
+    IndexSegmentMissing {
+        /// The key of the missing index segment.
+        object_key: String,
+    },
     /// Grep's entry has a format version that this build doesn't read. The
     /// build doesn't disable such an entry either, so it never discards an
     /// index that it can't read.
@@ -158,7 +170,9 @@ impl GrepError {
             Self::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
             Self::IndexLagging { .. } => ErrorCode::IndexLagging,
             Self::StoreUnavailable { kind, .. } => loonfs::classify_store_failure(*kind),
-            Self::IndexCorrupt { .. } | Self::UnsupportedVersion { .. } => ErrorCode::IndexCorrupt,
+            Self::IndexCorrupt { .. }
+            | Self::IndexSegmentMissing { .. }
+            | Self::UnsupportedVersion { .. } => ErrorCode::IndexCorrupt,
             Self::Runtime(error) => error.code(),
         }
     }

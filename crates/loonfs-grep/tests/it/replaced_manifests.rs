@@ -1,12 +1,20 @@
-//! Tests a query whose cached head includes a manifest that a compaction
-//! replaced, after a collection removed that manifest's segments.
+//! Tests a query whose cached head includes a manifest that a compaction or
+//! a reorganization replaced, after a collection removed that manifest's
+//! segments, and a query whose current manifest lists a missing segment.
 
-use crate::common::{grep_with, page_request, request, writable_namespace, GrepHost};
+use crate::common::{
+    control, drive_worker_to_current, grep_with, page_request, request, writable_namespace,
+    GrepHost,
+};
 use loonfs::{LoonFs, NamespaceId, SharedObjectStore};
+use loonfs_grep::entry::grep_extension_name;
+use loonfs_grep::{GramIndexBuildPolicy, GrepError};
+use loonfs_objectstore::keys::extension_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::clock::ManualClock;
-use loonfs_types::GrepRequest;
+use loonfs_test_support::ids::nonzero_usize;
+use loonfs_types::{ErrorCode, GrepRequest};
 use std::sync::Arc;
 
 /// Checks that a query at the runtime's default consistency runs again from
@@ -116,5 +124,145 @@ async fn a_query_at_a_collected_cached_head_reads_the_newest_manifest() {
             .iter()
             .any(|found| found.path.as_str() == "/third.txt"),
         "{response:?}"
+    );
+}
+
+/// Returns the keys of the index segments that grep's entry in the
+/// namespace's current manifest lists.
+async fn current_index_segment_keys(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> Vec<String> {
+    control::grep_entry(store, namespace_id)
+        .await
+        .expect("grep is enabled")
+        .segments()
+        .map(|segment| extension_segment_object_key(&grep_extension_name(), segment))
+        .collect()
+}
+
+/// Checks that a query whose cached head lists a grep index segment that a
+/// reorganization replaced, and that is then deleted, runs again from a
+/// reloaded head and finds the files the newest manifest's index lists.
+///
+/// The test deletes the old segment from the store directly, as a namespace
+/// collection does once the segment is older than the grace window. The
+/// reader's clock doesn't move, so its cached head stays confirmed.
+#[tokio::test]
+async fn a_query_at_a_cached_head_whose_index_segment_was_deleted_reads_the_newest_manifest() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("grep-replaced-segment").expect("namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
+    let actor = loonfs_test_support::test_actor();
+    namespace
+        .put_file("/first.txt", b"needle one", &actor)
+        .await
+        .expect("commit the first file");
+    writer.drain().await.expect("drain");
+    let host = GrepHost::new(&store, "grep-replaced-segment-host").await;
+    host.enable_grep_index(&namespace_id)
+        .await
+        .expect("enable grep");
+    let replaced_keys = current_index_segment_keys(&store, &namespace_id).await;
+    assert!(!replaced_keys.is_empty(), "the index lists a segment");
+
+    // The reader's first read caches a head whose manifest lists the
+    // segments above. The read is a stat, so no query caches their blocks.
+    let reader = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
+        .read_only()
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("build reader");
+    reader
+        .namespace(&namespace_id)
+        .stat("/first.txt")
+        .await
+        .expect("the stat caches the head");
+
+    // A second file adds a delta run, and a reorganization at one delta run
+    // merges both runs into new segments, which a newer manifest lists.
+    let commit = namespace
+        .put_file("/second.txt", b"needle two", &actor)
+        .await
+        .expect("commit the second file");
+    writer.drain().await.expect("drain");
+    let policy = GramIndexBuildPolicy {
+        max_delta_runs: nonzero_usize(1),
+        ..GramIndexBuildPolicy::default()
+    };
+    drive_worker_to_current(&host.worker, &namespace_id, policy).await;
+    let current_keys = current_index_segment_keys(&store, &namespace_id).await;
+    for key in &replaced_keys {
+        assert!(!current_keys.contains(key), "{key} was replaced");
+        store
+            .delete(key)
+            .await
+            .expect("delete the replaced segment");
+    }
+
+    let response = grep_with(
+        &host.service,
+        &reader,
+        &store,
+        &namespace_id,
+        &GrepRequest {
+            consistency: None,
+            ..request("needle")
+        },
+        page_request(None, 10),
+    )
+    .await
+    .expect("the query runs again from a reloaded head");
+    assert_eq!(response.head_seq, commit.committed_seq);
+    let mut paths: Vec<&str> = response
+        .matches
+        .iter()
+        .map(|found| found.path.as_str())
+        .collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["/first.txt", "/second.txt"], "{response:?}");
+}
+
+/// Checks that a query whose current manifest lists a missing grep index
+/// segment returns `index_corrupt`, because no newer manifest replaced the
+/// manifest that lists the segment.
+#[tokio::test]
+async fn a_query_whose_current_manifest_lists_a_missing_index_segment_is_corrupt() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("grep-missing-segment").expect("namespace");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
+    namespace
+        .put_file(
+            "/first.txt",
+            b"needle one",
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("commit the file");
+    writer.drain().await.expect("drain");
+    let host = GrepHost::new(&store, "grep-missing-segment-host").await;
+    host.enable_grep_index(&namespace_id)
+        .await
+        .expect("enable grep");
+    let keys = current_index_segment_keys(&store, &namespace_id).await;
+    assert!(!keys.is_empty(), "the index lists a segment");
+    for key in &keys {
+        store.delete(key).await.expect("delete the segment");
+    }
+
+    let error = host
+        .grep(&namespace_id, &request("needle"), page_request(None, 10))
+        .await
+        .expect_err("the manifest lists a missing segment");
+    assert_eq!(error.code(), ErrorCode::IndexCorrupt);
+    let GrepError::IndexSegmentMissing { object_key } = &error else {
+        panic!("expected a missing index segment, got {error:?}");
+    };
+    assert!(
+        keys.contains(object_key),
+        "the error names a deleted segment: {object_key}"
     );
 }
