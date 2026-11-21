@@ -8,6 +8,10 @@ use crate::scheduler::{GrepIndexing, Scheduler, SchedulerState};
 use crate::{Result, ServerError};
 use axum::serve::ListenerExt as _;
 use axum::Router;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable, WriterId};
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
@@ -16,12 +20,15 @@ use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use loonfs_types::config::ConfigFieldError;
 use std::ffi::OsString;
-use std::future::{Future, IntoFuture};
+use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
+use std::pin::{pin, Pin};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
+use tokio::task::{JoinError, JoinSet};
+use tower::ServiceExt as _;
 
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
 
@@ -349,6 +356,7 @@ where
 {
     let deadline_ms = config.config.shutdown_deadline_ms.get();
     let max_connections = config.config.max_connections.get();
+    let connection_idle_timeout_ms = config.config.connection_idle_timeout_ms.get();
     let (router, state) = app(config, options).await?;
     let listener = super::connection_limit::ConnectionLimit::new(
         listener,
@@ -361,7 +369,14 @@ where
         scheduler: state.scheduler,
         deadline_ms,
     };
-    serve_and_settle(listener, router, settlement, shutdown).await
+    serve_and_settle(
+        listener,
+        router,
+        connection_idle_timeout_ms,
+        settlement,
+        shutdown,
+    )
+    .await
 }
 
 /// What a server settles after it stops serving, and how long the drain and
@@ -387,6 +402,7 @@ pub(super) struct Settlement {
 pub(super) async fn serve_and_settle<L>(
     listener: L,
     router: Router,
+    connection_idle_timeout_ms: u64,
     settlement: Settlement,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()>
@@ -401,13 +417,14 @@ where
     } = settlement;
     let scheduler = scheduler.start();
     let (listener_close_tx, listener_close_rx) = tokio::sync::oneshot::channel();
-    let mut server = Box::pin(
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = listener_close_rx.await;
-            })
-            .into_future(),
-    );
+    let mut server = Box::pin(serve_connections(
+        listener,
+        router,
+        connection_idle_timeout_ms,
+        async move {
+            let _ = listener_close_rx.await;
+        },
+    ));
     let mut shutdown = Box::pin(shutdown);
     // The budget starts when shutdown fires. It does not limit uptime.
     let deadline_from_now = || {
@@ -415,8 +432,8 @@ where
             tokio::time::Instant::now() + Duration::from_millis(deadline_ms),
         ))
     };
-    let (served, mut deadline) = tokio::select! {
-        result = server.as_mut() => (result, deadline_from_now()),
+    let mut deadline = tokio::select! {
+        () = server.as_mut() => deadline_from_now(),
         () = shutdown.as_mut() => {
             // This is synchronous so readiness changes before the drain waits.
             // The scheduler stops first, so none of its runs finds the sessions
@@ -424,7 +441,7 @@ where
             scheduler.cancel();
             runtime.close_admission();
             let mut deadline = deadline_from_now();
-            let drained = drain_with_deadline(
+            drain_with_deadline(
                 server.as_mut(),
                 requests.as_ref(),
                 listener_close_tx,
@@ -432,15 +449,15 @@ where
                 deadline_ms,
             )
             .await;
-            (drained, deadline)
+            deadline
         }
     };
-    // Dropping the server cancels requests left behind by an expired drain.
+    // Dropping the server aborts the connection tasks that a passed deadline
+    // left behind, and with them their requests.
     drop(server);
     // The scheduler waits under the same deadline, and is aborted when the
     // deadline ends.
     let stopped = scheduler.stop(deadline.as_mut(), deadline_ms).await;
-    served.map_err(ServerError::Serve)?;
     let runtime_settled = runtime.shutdown().await;
     // Nothing reads through the cache any more, so the SSD tier can write
     // the blocks it queued and stop.
@@ -454,12 +471,11 @@ async fn drain_with_deadline<S>(
     listener_close_tx: tokio::sync::oneshot::Sender<()>,
     mut deadline: Pin<&mut tokio::time::Sleep>,
     shutdown_deadline_ms: u64,
-) -> std::io::Result<()>
-where
-    S: Future<Output = std::io::Result<()>> + ?Sized,
+) where
+    S: Future<Output = ()> + ?Sized,
 {
     let deadline_passed = tokio::select! {
-        result = server.as_mut() => return result,
+        () = server.as_mut() => return,
         () = async {
             if let Some(requests) = requests {
                 requests.settle().await;
@@ -470,7 +486,7 @@ where
     let _ = listener_close_tx.send(());
     if !deadline_passed {
         tokio::select! {
-            result = server.as_mut() => return result,
+            () = server.as_mut() => return,
             () = deadline.as_mut() => {}
         }
     }
@@ -478,7 +494,121 @@ where
         shutdown_deadline_ms,
         "graceful drain deadline passed; remaining requests are abandoned"
     );
-    Ok(())
+}
+
+/// Serves each connection that `listener` accepts in its own task until
+/// `close_listener` resolves, then closes the listener and waits for every
+/// accepted connection to close.
+///
+/// When the listener closes, a connection without a request in flight
+/// closes at once, and a connection with one closes after the response.
+/// Dropping the returned future aborts every connection task.
+async fn serve_connections<L>(
+    mut listener: L,
+    router: Router,
+    connection_idle_timeout_ms: u64,
+    close_listener: impl Future<Output = ()>,
+) where
+    L: axum::serve::Listener<Addr = SocketAddr>,
+{
+    let idle_timeout = Duration::from_millis(connection_idle_timeout_ms);
+    // The header read timeout covers the wait for each request head on an
+    // HTTP/1 connection, including the wait between keep-alive requests.
+    // HTTP/2 has no such timeout. Its pings close a connection whose peer
+    // stopped answering, but not an idle peer that still answers them.
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(idle_timeout);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(idle_timeout)
+        .keep_alive_timeout(idle_timeout);
+    let graceful = GracefulShutdown::new();
+    let mut tasks = JoinSet::new();
+    let mut close_listener = pin!(close_listener);
+    loop {
+        let (io, _address) = tokio::select! {
+            accepted = listener.accept() => accepted,
+            Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                log_connection_panic(joined);
+                continue;
+            }
+            () = close_listener.as_mut() => break,
+        };
+        let first_request = Arc::new(Notify::new());
+        let service = TowerToHyperService::new(router.clone().map_request({
+            let first_request = Arc::clone(&first_request);
+            move |request| {
+                first_request.notify_one();
+                request
+            }
+        }));
+        let builder = builder.clone();
+        let watcher = graceful.watcher();
+        tasks.spawn(async move {
+            let connection =
+                watcher.watch(builder.serve_connection_with_upgrades(TokioIo::new(io), service));
+            serve_connection(
+                connection,
+                first_request.notified(),
+                connection_idle_timeout_ms,
+            )
+            .await;
+        });
+    }
+    drop(listener);
+    graceful.shutdown().await;
+    while let Some(joined) = tasks.join_next().await {
+        log_connection_panic(joined);
+    }
+}
+
+fn log_connection_panic(joined: std::result::Result<(), JoinError>) {
+    if let Err(error) = joined {
+        tracing::error!(%error, "connection task panicked");
+    }
+}
+
+/// Drives one connection to its end, and closes it if no request arrives
+/// within `connection_idle_timeout_ms`.
+///
+/// The header read timeout starts only once hyper knows the connection
+/// speaks HTTP/1, so it doesn't cover a TLS handshake, the bytes hyper
+/// reads to tell HTTP/1 from HTTP/2, or an HTTP/2 connection's first
+/// request. This bound covers all three.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "monotonic time is used only to limit how long a connection waits for its first request, and no protocol time depends on it"
+)]
+async fn serve_connection<E: std::fmt::Display>(
+    connection: impl Future<Output = std::result::Result<(), E>>,
+    first_request: impl Future<Output = ()>,
+    connection_idle_timeout_ms: u64,
+) {
+    let mut connection = pin!(connection);
+    let first_request = tokio::time::timeout(
+        Duration::from_millis(connection_idle_timeout_ms),
+        first_request,
+    );
+    let served = tokio::select! {
+        served = connection.as_mut() => served,
+        arrived = first_request => match arrived {
+            Ok(()) => connection.await,
+            Err(_elapsed) => {
+                tracing::debug!(
+                    connection_idle_timeout_ms,
+                    "closed a connection that sent no request within `connection_idle_timeout_ms`"
+                );
+                return;
+            }
+        },
+    };
+    if let Err(error) = served {
+        tracing::debug!(error = %error, "connection closed with an error");
+    }
 }
 
 /// Installs the handlers for ctrl-c and, on unix, SIGTERM (the stop signal

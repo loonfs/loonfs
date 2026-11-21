@@ -43,8 +43,6 @@ pub enum ServerError {
     },
     #[error("failed to install the shutdown signal handlers: {0}")]
     Signal(#[source] io::Error),
-    #[error("server failed while serving requests: {0}")]
-    Serve(#[source] io::Error),
     #[error("runtime or maintenance shutdown did not settle: {0}")]
     Shutdown(#[source] loonfs::Error),
     #[error("unsupported LOONFS_TRACE value `{0}`; expected `json` or `off`")]
