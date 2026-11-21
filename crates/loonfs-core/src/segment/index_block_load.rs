@@ -9,7 +9,7 @@ use super::cache::SegmentBlockKind;
 use super::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey};
 use super::data_block_load::decoded_data_cache_block;
 use super::segment_block_cache::LoadedSegmentBlock;
-use crate::heap_bytes::index_block_heap_bytes;
+use crate::heap_bytes::{filter_block_heap_bytes, index_block_heap_bytes};
 use crate::manifest::error::ManifestLoadError;
 use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -363,7 +363,7 @@ pub(super) fn section_bytes(
 
 fn filter_cache_block(filter: SegmentFilter) -> DecodedMetadataSegmentBlock {
     DecodedMetadataSegmentBlock::Filter {
-        decoded_bytes: filter.decoded_bytes() + crate::heap_bytes::arc_bytes::<()>(),
+        decoded_bytes: filter_block_heap_bytes(&filter),
         filter: Arc::new(filter),
     }
 }

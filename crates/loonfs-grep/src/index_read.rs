@@ -3,7 +3,9 @@
 use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey};
 use crate::codec::IndexRow;
 use crate::{GrepError, Result};
-use loonfs::engine::SegmentBlockKind;
+use loonfs::engine::{
+    data_block_heap_bytes, filter_block_heap_bytes, index_block_heap_bytes, SegmentBlockKind,
+};
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::manifest::{ExtensionSegmentRef, EXTENSION_SEGMENT_ENCODING};
@@ -263,22 +265,23 @@ fn decode_section(
                 "index segment `{object_key}` {kind:?} block exceeds the object bounds"
             ),
         })?;
-    let decoded_bytes = handle.decoded_bytes as usize;
     match kind {
-        SegmentBlockKind::Filter => Ok(DecodedGrepBlock::Filter {
-            filter: Arc::new(
-                decode_filter_block(stored, handle)
-                    .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
-            ),
-            decoded_bytes,
-        }),
-        SegmentBlockKind::Index => Ok(DecodedGrepBlock::Index {
-            entries: Arc::new(
-                decode_index_block(stored, handle)
-                    .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
-            ),
-            decoded_bytes,
-        }),
+        SegmentBlockKind::Filter => {
+            let filter = decode_filter_block(stored, handle)
+                .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?;
+            Ok(DecodedGrepBlock::Filter {
+                decoded_bytes: filter_block_heap_bytes(&filter),
+                filter: Arc::new(filter),
+            })
+        }
+        SegmentBlockKind::Index => {
+            let entries = decode_index_block(stored, handle)
+                .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?;
+            Ok(DecodedGrepBlock::Index {
+                decoded_bytes: index_block_heap_bytes(&entries),
+                entries: Arc::new(entries),
+            })
+        }
         _ => decode_data_cache_block(object_key, stored, handle),
     }
 }
@@ -311,13 +314,11 @@ fn decode_data_cache_block(
     bytes: &[u8],
     handle: &BlockHandle,
 ) -> Result<DecodedGrepBlock> {
-    let block = Arc::new(
-        decode_data_block_rows::<IndexRow>(bytes, handle)
-            .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
-    );
+    let block = decode_data_block_rows::<IndexRow>(bytes, handle)
+        .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?;
     Ok(DecodedGrepBlock::Data {
-        block,
-        decoded_bytes: handle.decoded_bytes as usize,
+        decoded_bytes: data_block_heap_bytes(&block),
+        block: Arc::new(block),
     })
 }
 
@@ -375,16 +376,16 @@ pub(crate) async fn load_data_block_span<S: ObjectStore + ?Sized>(
         {
             let offset = loonfs_types::usize_from_u64(entry.block.offset - handle.offset);
             let stored = &bytes[offset..offset + entry.block.stored_bytes as usize];
-            let block = Arc::new(
-                decode_data_block_rows::<IndexRow>(stored, &entry.block)
-                    .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
-            );
+            let block = decode_data_block_rows::<IndexRow>(stored, &entry.block)
+                .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?;
+            let decoded_bytes = data_block_heap_bytes(&block);
+            let block = Arc::new(block);
             if let Some(cache) = cache {
                 cache.insert(
                     key(entry),
                     DecodedGrepBlock::Data {
                         block: Arc::clone(&block),
-                        decoded_bytes: entry.block.decoded_bytes as usize,
+                        decoded_bytes,
                     },
                 );
             }
@@ -408,22 +409,27 @@ fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_key, load_data_block_span, load_index_block, load_index_section_bytes, BlockHandle,
-        Checksum, ExtensionSegmentRef, GrepError, IndexRow, EXTENSION_SEGMENT_ENCODING,
-        MAX_BULK_LOAD_BYTES,
+        cache_key, decode_data_cache_block, load_data_block_span, load_index_block,
+        load_index_section_bytes, BlockHandle, Checksum, ExtensionSegmentRef, GrepError, IndexRow,
+        EXTENSION_SEGMENT_ENCODING, MAX_BULK_LOAD_BYTES,
     };
     use crate::cache::GrepBlockCache;
     use crate::codec::Gram;
     use bytes::Bytes;
-    use loonfs::engine::{DecodedBlockCacheConfig, SegmentBlockKind};
+    use loonfs::engine::{
+        data_block_heap_bytes, DecodedBlock, DecodedBlockCacheConfig, SegmentBlockKind,
+    };
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{ByteRange, ObjectStore, PutMode, Result as StoreResult};
     use loonfs_test_support::stores::{
         delegate_object_store, ConcurrencyWatchStore, KeyPredicate, RecordingStore,
     };
-    use loonfs_types::format::segment_blocks::{decode_index_block, SegmentBlocksBuilder};
+    use loonfs_types::format::segment_blocks::{
+        decode_index_block, SegmentBlocksBuilder, DEFAULT_TARGET_BLOCK_BYTES,
+    };
     use loonfs_types::IndexSegmentId;
     use std::assert_matches;
+    use std::mem::size_of;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -633,5 +639,42 @@ mod tests {
             .await
             .expect("valid checksum and encoding should load");
         assert_eq!(entries.len(), 1);
+    }
+
+    /// Checks that a cached data block is charged the heap its decoded rows
+    /// own, which is more than the block's decoded length on the wire.
+    #[test]
+    fn a_cached_data_block_is_charged_its_heap() {
+        let mut builder = SegmentBlocksBuilder::new(DEFAULT_TARGET_BLOCK_BYTES);
+        for gram in 0..4 {
+            let row = IndexRow::gram_postings(Gram([b'a', b'b', b'a' + gram]), &[1, 3])
+                .expect("valid postings");
+            builder
+                .push(&row.row_key(), &row.filter_key(), &row)
+                .expect("append row");
+        }
+        let built = builder.build().expect("build segment");
+        let entries = decode_index_block(
+            &built.bytes[loonfs_types::usize_from_u64(built.index.offset)..],
+            &built.index,
+        )
+        .expect("decode index");
+        assert_eq!(entries.len(), 1);
+        let handle = entries[0].block;
+        let start = loonfs_types::usize_from_u64(handle.offset);
+        let stored = &built.bytes[start..start + handle.stored_bytes as usize];
+
+        let decoded =
+            decode_data_cache_block("segments/weight", stored, &handle).expect("decode data block");
+        let weight = decoded.weight();
+        let block = decoded.data().expect("a data block");
+        assert_eq!(block.rows.len(), 4);
+        assert_eq!(weight, data_block_heap_bytes(&block));
+        assert!(
+            weight
+                >= block.row_keys.capacity() * size_of::<String>()
+                    + block.rows.capacity() * size_of::<IndexRow>()
+        );
+        assert!(weight > handle.decoded_bytes as usize);
     }
 }
