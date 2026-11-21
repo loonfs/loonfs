@@ -143,6 +143,10 @@ pub mod cache {
         DecodedBlockCacheStats, DecodedBlockKey, Insertion, ObjectStoreScope,
     };
     pub use crate::gc::{CompletedUploadSessionCache, SharedCompletedUploadSessions};
+    pub use crate::heap_bytes::{
+        arc_bytes, data_block_heap_bytes, filter_block_heap_bytes, index_block_heap_bytes,
+        HeapBytes,
+    };
     pub use crate::namespace::head_cache::{
         CachedHead, HeadAndWalTailCache, SharedHeadsAndWalTails, WalTailCacheKey,
     };
