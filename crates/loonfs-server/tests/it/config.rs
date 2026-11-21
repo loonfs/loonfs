@@ -465,7 +465,7 @@ root = "/tmp/loonfs-server"
 }
 
 #[test]
-fn request_and_shutdown_deadlines_default_and_reject_zero() {
+fn deadlines_and_the_connection_idle_timeout_default_and_reject_zero() {
     let path = write_config(
         r#"
 bind = "127.0.0.1:9400"
@@ -482,8 +482,13 @@ root = "/tmp/loonfs-server"
         .clone();
     assert_eq!(config.request_deadline_ms.get(), 60_000);
     assert_eq!(config.shutdown_deadline_ms.get(), 600_000);
+    assert_eq!(config.connection_idle_timeout_ms.get(), 60_000);
 
-    for field in ["request_deadline_ms", "shutdown_deadline_ms"] {
+    for field in [
+        "request_deadline_ms",
+        "shutdown_deadline_ms",
+        "connection_idle_timeout_ms",
+    ] {
         let path = write_config(&format!(
             r#"
 bind = "127.0.0.1:9400"
@@ -495,7 +500,7 @@ kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
         ));
-        let error = load_server_config(&path).expect_err("zero deadline must be rejected");
+        let error = load_server_config(&path).expect_err("a zero time limit must be rejected");
         assert_zero_rejected_on_decode(error, field, "u64");
     }
 }

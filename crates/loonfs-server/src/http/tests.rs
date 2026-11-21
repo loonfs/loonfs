@@ -160,6 +160,7 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
+        60_000,
         Settlement {
             requests: None,
             runtime: writer.clone(),
@@ -322,6 +323,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
+        60_000,
         Settlement {
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),
@@ -401,6 +403,7 @@ async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtim
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
+        60_000,
         Settlement {
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),
@@ -615,6 +618,7 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
+        60_000,
         Settlement {
             requests: state.http.request_limit().cloned(),
             runtime: state.http.runtime.clone(),

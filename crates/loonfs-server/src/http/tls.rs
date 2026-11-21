@@ -1,5 +1,5 @@
-//! TLS termination: the certificate/key load and the [`axum::serve`]
-//! listener that wraps accepted TCP connections in a rustls session.
+//! TLS termination: the certificate/key load and the listener that wraps
+//! accepted TCP connections in a rustls session.
 
 use crate::config::TlsServerConfig;
 use crate::{Result, ServerError};
@@ -45,7 +45,7 @@ pub(super) fn server_config(config: &TlsServerConfig) -> Result<rustls::ServerCo
             cert_path: config.cert_path.clone(),
             reason: error.to_string(),
         })?;
-    // Offered in preference order. HTTP/2 first because axum serves it, and
+    // Offered in preference order. HTTP/2 first because the server serves it, and
     // `http/1.1` retained because a client that cannot speak h2 must still
     // reach the same routes.
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
@@ -87,14 +87,16 @@ fn open(path: &str) -> Result<std::fs::File> {
     })
 }
 
-/// A TCP listener that hands [`axum::serve`] TLS connections.
+/// A TCP listener that hands the server TLS connections.
 ///
 /// `accept` deliberately returns as soon as the TCP connection is accepted,
-/// before the handshake runs. axum awaits `accept` in the loop that also
-/// dispatches connections, so a handshake performed here would be a
+/// before the handshake runs. The server awaits `accept` in the loop that
+/// also dispatches connections, so a handshake performed here would be a
 /// head-of-line block: one client that connects and then stalls would keep
 /// every other client waiting. The handshake instead runs inside the
-/// connection's own task, on the first poll of the returned [`TlsIo`].
+/// connection's own task, on the first poll of the returned [`TlsIo`], and
+/// `connection_idle_timeout_ms` bounds the handshake with the wait for the
+/// connection's first request.
 pub(super) struct TlsListener {
     tcp: TcpListener,
     acceptor: TlsAcceptor,

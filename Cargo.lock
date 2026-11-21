@@ -1989,6 +1989,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper-util",
  "loonfs",
  "loonfs-client",
  "loonfs-core",
