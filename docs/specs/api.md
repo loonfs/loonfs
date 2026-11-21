@@ -2748,7 +2748,7 @@ Loonfs-Context: service
     "commit_id": "c_rebase_demo_branch_1",
     "committed_seq": 432,
     "committed_at_ms": 1752625201000,
-    "actor_id": "usr_8f3c",
+    "committed_by": "usr_8f3c",
     "merge": {
       "source_namespace_id": "demo-branch",
       "source_after_seq": 418,
