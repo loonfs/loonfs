@@ -4,6 +4,7 @@ use axum::serve::Listener;
 use loonfs::metrics::{GaugeHandle, MetricsRecorder};
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -13,6 +14,7 @@ pub(super) struct ConnectionLimit<L> {
     listener: L,
     permits: Arc<Semaphore>,
     waiting: Arc<dyn GaugeHandle>,
+    open: Arc<OpenConnections>,
 }
 
 impl<L> ConnectionLimit<L> {
@@ -25,6 +27,14 @@ impl<L> ConnectionLimit<L> {
                 "One while the accept loop waits for a connection permit, otherwise zero",
                 &[],
             ),
+            open: Arc::new(OpenConnections {
+                count: AtomicUsize::new(0),
+                gauge: metrics.register_gauge(
+                    "loonfs.server.connections_open",
+                    "Connections the server has accepted and not yet closed",
+                    &[],
+                ),
+            }),
         }
     }
 }
@@ -45,10 +55,12 @@ impl<L: Listener> Listener for ConnectionLimit<L> {
             }
         };
         let (inner, address) = self.listener.accept().await;
+        self.open.opened();
         (
             Connection {
                 inner,
                 _permit: permit,
+                open: Arc::clone(&self.open),
             },
             address,
         )
@@ -74,9 +86,40 @@ impl Drop for Waiting {
     }
 }
 
+/// The count of connections the server has accepted and not yet closed,
+/// and the gauge that reports the count.
+struct OpenConnections {
+    count: AtomicUsize,
+    gauge: Arc<dyn GaugeHandle>,
+}
+
+impl OpenConnections {
+    fn opened(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.report();
+    }
+
+    fn closed(&self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
+        self.report();
+    }
+
+    fn report(&self) {
+        let open = self.count.load(Ordering::SeqCst);
+        self.gauge.set(i64::try_from(open).unwrap_or(i64::MAX));
+    }
+}
+
 pub(super) struct Connection<I> {
     inner: I,
     _permit: OwnedSemaphorePermit,
+    open: Arc<OpenConnections>,
+}
+
+impl<I> Drop for Connection<I> {
+    fn drop(&mut self) {
+        self.open.closed();
+    }
 }
 
 impl<I: AsyncRead + Unpin> AsyncRead for Connection<I> {

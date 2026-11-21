@@ -27,8 +27,10 @@ impl NamespacePublisher {
         let fold_task = {
             let mut state = self.lock_state();
             state.queue.push_front(WorkItem::Batch(waiting));
+            self.count_queued(&mut state);
             state.fold.as_ref().map(|fold| fold.liveness.clone())
         };
+        self.report_queue_depth();
         let started_at_ms = self.context.runtime_core.timer().monotonic_now_ms();
         let remaining_ms = oldest_enqueued_at
             .saturating_add(self.context.admission.write_stop_wait_budget_ms())
@@ -83,7 +85,9 @@ impl NamespacePublisher {
             state.queue.retain(
                 |item| !matches!(item, WorkItem::Batch(batch) if batch.candidates.is_empty()),
             );
+            self.count_queued(&mut state);
         }
+        self.report_queue_depth();
         let instruments = self.context.runtime_core.instruments();
         instruments
             .publisher

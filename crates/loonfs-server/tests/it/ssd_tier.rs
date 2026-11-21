@@ -132,6 +132,11 @@ async fn a_restarted_server_reads_its_metadata_blocks_from_the_ssd_tier() {
     .await;
     let found = scrape(&second.server_url, Some("test-token")).expect("scrape at startup");
     assert!(series(&found, "loonfs_segment_cache_retained_stored_bytes") > 0.0);
+    assert_eq!(
+        series(&found, "loonfs_segment_cache_queued_bytes"),
+        0.0,
+        "blocks that the tier finds on disk at startup aren't queued"
+    );
     let served = collect_path_entries(&second.client, &listing, &Default::default())
         .await
         .expect("list from the restarted server");

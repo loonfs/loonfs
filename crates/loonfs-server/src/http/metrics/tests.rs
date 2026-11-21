@@ -215,6 +215,7 @@ fn each_cache_stats_field_renders_into_its_own_series() {
                 evictions: 14,
                 rejections: 15,
                 stored_bytes: 16,
+                queued_bytes: 17,
             }),
             manifests: cache(100),
             heads: cache(200),
@@ -239,6 +240,7 @@ fn each_cache_stats_field_renders_into_its_own_series() {
         "loonfs_segment_cache_evictions_total{tier=\"ssd\"} 14".to_owned(),
         "loonfs_segment_cache_rejections_total{tier=\"ssd\"} 15".to_owned(),
         "loonfs_segment_cache_retained_stored_bytes 16".to_owned(),
+        "loonfs_segment_cache_queued_bytes 17".to_owned(),
         "loonfs_segment_cache_filter_skips_total 9".to_owned(),
         "loonfs_segment_cache_filter_false_positives_total 10".to_owned(),
     ];

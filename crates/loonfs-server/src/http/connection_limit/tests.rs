@@ -41,6 +41,7 @@ async fn a_full_connection_limit_stops_accept_until_the_first_connection_drops()
     );
     let (first, ()) = listener.accept().await;
     assert_eq!(accepts.load(Ordering::SeqCst), 1);
+    assert_gauge(&recorder, "loonfs.server.connections_open", 1);
     {
         let mut waiting = Box::pin(listener.accept());
         assert!(futures::poll!(waiting.as_mut()).is_pending());
@@ -54,8 +55,33 @@ async fn a_full_connection_limit_stops_accept_until_the_first_connection_drops()
     let (second, ()) = waiting.await;
     assert_eq!(accepts.load(Ordering::SeqCst), 2);
     assert_waiting(&recorder, 0);
+    assert_gauge(&recorder, "loonfs.server.connections_open", 1);
     drop(second);
     assert_eq!(listener.permits.available_permits(), 1);
+    assert_gauge(&recorder, "loonfs.server.connections_open", 0);
+}
+
+#[tokio::test]
+async fn the_open_connections_gauge_counts_accepted_connections_until_they_drop() {
+    let (first, _first_peer) = tokio::io::duplex(64);
+    let (second, _second_peer) = tokio::io::duplex(64);
+    let recorder = DefaultMetricsRecorder::new();
+    let mut listener = ConnectionLimit::new(
+        ReadyListener {
+            streams: VecDeque::from([first, second]),
+            accepts: Arc::new(AtomicUsize::new(0)),
+        },
+        2,
+        &recorder,
+    );
+    assert_gauge(&recorder, "loonfs.server.connections_open", 0);
+    let (first, ()) = listener.accept().await;
+    let (second, ()) = listener.accept().await;
+    assert_gauge(&recorder, "loonfs.server.connections_open", 2);
+    drop(first);
+    assert_gauge(&recorder, "loonfs.server.connections_open", 1);
+    drop(second);
+    assert_gauge(&recorder, "loonfs.server.connections_open", 0);
 }
 
 #[tokio::test]
@@ -83,11 +109,19 @@ async fn a_second_tcp_connection_is_accepted_only_after_the_first_closes() {
 }
 
 fn assert_waiting(recorder: &DefaultMetricsRecorder, expected: i64) {
+    assert_gauge(
+        recorder,
+        "loonfs.server.connection_accept_waiting",
+        expected,
+    );
+}
+
+fn assert_gauge(recorder: &DefaultMetricsRecorder, name: &str, expected: i64) {
     let snapshot = recorder.snapshot();
     let entry = snapshot
         .all()
         .iter()
-        .find(|entry| entry.name == "loonfs.server.connection_accept_waiting")
-        .expect("waiting gauge");
-    assert_eq!(entry.value, MetricValue::Gauge(expected));
+        .find(|entry| entry.name == name)
+        .expect("registered gauge");
+    assert_eq!(entry.value, MetricValue::Gauge(expected), "{name}");
 }
