@@ -27,7 +27,16 @@ pub(crate) fn sends_again(error: &ClientError) -> bool {
         ClientError::Api { .. } => error.code().is_some_and(|code| {
             code.kind() == ErrorKind::OutcomeUnknown || code.retryable_without_operator_action()
         }),
-        _ => true,
+        ClientError::Http(_) | ClientError::Io(_) => true,
+        ClientError::HttpStatus { status, .. } => *status == 429 || *status >= 500,
+        ClientError::ConfigIo(_)
+        | ClientError::ConfigDecode(_)
+        | ClientError::ConfigField(_)
+        | ClientError::InvalidNamespacePath(_)
+        | ClientError::UploadTooLarge { .. }
+        | ClientError::Json(_)
+        | ClientError::Protocol(_) => false,
+        _ => false,
     }
 }
 
@@ -67,4 +76,48 @@ pub(crate) fn refusal(request: &PendingCommit, error: &ErrorResponse) -> Refusal
 /// or was deleted.
 pub(crate) fn is_gone(error: &ClientError) -> bool {
     error.code().is_some_and(ErrorCode::is_namespace_gone)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sends_again;
+    use loonfs_client::ClientError;
+
+    #[test]
+    fn sends_again_retries_only_transient_and_transport_failures() {
+        assert!(sends_again(&ClientError::Http("reset".to_owned())));
+        assert!(sends_again(&ClientError::Io("eof".to_owned())));
+        assert!(sends_again(&ClientError::HttpStatus {
+            status: 502,
+            provider_code: None,
+            detail: "bad gateway".to_owned(),
+        }));
+        assert!(sends_again(&ClientError::HttpStatus {
+            status: 429,
+            provider_code: None,
+            detail: "rate limited".to_owned(),
+        }));
+
+        for non_retryable in [
+            ClientError::ConfigIo("missing".to_owned()),
+            ClientError::ConfigDecode("bad toml".to_owned()),
+            ClientError::InvalidNamespacePath("/bad".to_owned()),
+            ClientError::UploadTooLarge {
+                size_bytes: 100,
+                reason: "too big".to_owned(),
+            },
+            ClientError::Json("invalid json".to_owned()),
+            ClientError::Protocol("contract violation".to_owned()),
+            ClientError::HttpStatus {
+                status: 400,
+                provider_code: None,
+                detail: "bad request".to_owned(),
+            },
+        ] {
+            assert!(
+                !sends_again(&non_retryable),
+                "must not retry {non_retryable:?}"
+            );
+        }
+    }
 }

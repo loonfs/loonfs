@@ -107,10 +107,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Some(&acquired),
             )
             .await?;
-        // Only the publication budget bounds this loop, because a lost fence race means the
-        // old writer wrote a WAL object, and stopping after a count would make the
-        // caller publish another epoch.
-        loop {
+        // Bounded by both the publication time budget and
+        // `MAX_UNFOLDED_WAL_OBJECTS`: an old writer can never race more than
+        // the write-stop ceiling of WAL objects without folding, while the
+        // attempt cap prevents an unbounded spin against a frozen clock or
+        // broken store.
+        for _attempt in 0..crate::limits::MAX_UNFOLDED_WAL_OBJECTS {
             let head = &anchor.read_state;
             super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
             let fence = prepare_fence(head, acquired.writer_epoch)?;
@@ -164,6 +166,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Err(error) => return Err(error),
             }
         }
+        Err(CoreError::contention_exhausted(
+            &anchor.current_manifest().object_key,
+        ))
     }
 
     /// Returns the manifest of the namespace's cached head, with the manifest
