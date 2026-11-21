@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::cache::CompletedUploadSessionCache;
+use crate::in_flight::POOL_MEMBER_READS_IN_FLIGHT;
 use crate::limits::POOL_ROOTS_READ_BUDGET_MS;
 use crate::manifest::tests::{
     build_namespace_manifest_from_metadata_state, write_namespace_manifest, ManifestMetadataSource,
@@ -878,4 +879,52 @@ async fn a_cached_completed_session_follows_its_members_status() {
             .take_get_keys()
             .contains(&upload_outcome(&pool_id, &session.upload_id)));
     }
+}
+
+/// Checks that a collection reads the roots of more members than it keeps in
+/// flight and keeps the content that each member's view refers to, and that a
+/// member that becomes unreadable while the members after it are read in
+/// flight still stops the content sweep.
+#[tokio::test]
+async fn a_collection_reads_more_members_than_it_keeps_in_flight() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let names = (0..POOL_MEMBER_READS_IN_FLIGHT + 2)
+        .map(|index| format!("member-{index}"))
+        .collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let (pool_id, members) = pool(&store, &names).await;
+    let mut referenced = Vec::new();
+    for (member, number) in members.iter().zip(1..) {
+        let content_id = numbered_content_id(number);
+        referenced.push(plant(&store, &pool_id, &content_id).await);
+        publish_layout(&store, member, &content_id).await;
+    }
+    let unreferenced = plant(&store, &pool_id, &ContentId::generate()).await;
+    let aged = aged_context(&store, &members).await;
+    let report = collect_pool(&store, &pool_id, &aged).await;
+    assert_eq!(report.skipped, []);
+    assert_eq!(report.deleted.content_objects, 1);
+    assert!(!exists(&store, &unreferenced).await);
+    for key in &referenced {
+        assert!(exists(&store, key).await, "`{key}`");
+    }
+
+    let corrupt = &members[members.len() / 2];
+    let current = crate::test_support::namespace_store(&store, corrupt)
+        .load_current_manifest()
+        .await
+        .expect("current manifest");
+    replace_object(&store, &current.object_key, Bytes::from_static(b"not json"))
+        .await
+        .expect("corrupt the member's manifest");
+    let unreferenced = plant(&store, &pool_id, &ContentId::generate()).await;
+    let aged = aged_context(&store, &members).await;
+    let report = collect_pool(&store, &pool_id, &aged).await;
+    assert_eq!(
+        report.skipped,
+        [GcSkippedWork::ContentDeletionUnreadableMember]
+    );
+    assert_eq!(report.deleted.content_objects, 0);
+    assert!(exists(&store, &unreferenced).await);
 }
