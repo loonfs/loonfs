@@ -272,32 +272,15 @@ impl Client {
             if !self.transport_retry_enabled || !retryable {
                 return Err(failed.error);
             }
-            let TransportRetryOutcome::Wait { backoff_ms } = self
-                .transport_retry
-                .next_backoff(&mut retries, deadline.as_ref())
-            else {
+            // The policy waits the whole `Retry-After`, or stops when the deadline can't fit it.
+            let TransportRetryOutcome::Wait { backoff_ms } = self.transport_retry.next_backoff(
+                &mut retries,
+                deadline.as_ref(),
+                failed.retry_after_ms,
+            ) else {
                 return Err(failed.error);
             };
-            // A `Retry-After` is the server's own wait, so the client waits
-            // the whole of it, or returns the error when the operation's
-            // deadline can't fit the wait, instead of sending again earlier
-            // than the server asked.
-            let wait_ms = match failed.retry_after_ms {
-                Some(retry_after_ms) => {
-                    let wait_ms = retry_after_ms.max(backoff_ms);
-                    if let Some(deadline) = deadline.as_ref() {
-                        if deadline
-                            .remaining_ms()
-                            .is_none_or(|remaining_ms| remaining_ms <= wait_ms)
-                        {
-                            return Err(failed.error);
-                        }
-                    }
-                    wait_ms
-                }
-                None => backoff_ms,
-            };
-            transport_delay(Duration::from_millis(wait_ms)).await;
+            transport_delay(Duration::from_millis(backoff_ms)).await;
             attempt_timeout = match deadline.as_ref() {
                 Some(deadline) => match deadline.remaining_ms() {
                     Some(remaining_ms) => Some(Duration::from_millis(remaining_ms)),
