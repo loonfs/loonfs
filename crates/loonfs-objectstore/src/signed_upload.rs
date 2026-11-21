@@ -92,7 +92,7 @@ impl<'a> PartReader<'a> {
     /// the stream ends. `None` once nothing is left.
     ///
     /// A full part is returned without polling the stream again, so a
-    /// caller cannot conclude from a full part that more is coming — only
+    /// caller cannot conclude from a full part that more is coming. Only
     /// a short part proves the stream ended.
     pub(crate) async fn next_part(&mut self) -> Result<Option<Bytes>> {
         let mut buffer = bytes::BytesMut::with_capacity(self.part_bytes);

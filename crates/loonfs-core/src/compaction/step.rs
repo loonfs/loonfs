@@ -263,8 +263,8 @@ impl MetadataCompactionCancellation {
 
     /// Resolves once the token is set, and stays pending while it is not.
     ///
-    /// For a caller waiting on something else — a permit, a queue — that has
-    /// to stop waiting when the unit is cancelled.
+    /// For a caller waiting on something else (such as a permit or a queue)
+    /// that has to stop waiting when the unit is cancelled.
     pub async fn cancelled(&self) {
         let woken = self.0.woken.notified();
         tokio::pin!(woken);

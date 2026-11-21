@@ -777,7 +777,7 @@ async fn assert_gcs_signed_writes_stay_under_the_configured_prefix(
         .expect("upload under the prefix");
 
     // The store scopes every key beneath the same prefix, so listing its
-    // root is exactly this run's objects — and the new one is among them.
+    // root returns exactly this run's objects, and the new one is among them.
     let store = store_config
         .configured_object_store()
         .expect("build a store")
@@ -807,9 +807,8 @@ async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id:
     };
 
     // Rewrite the capability's own lifetime to one already spent. The
-    // signature covered the original, so this is refused twice over — which
-    // is the point: neither the expiry nor the signature can be edited in
-    // flight.
+    // signature covered the original, so this is refused twice over. Neither
+    // the expiry nor the signature can be edited in flight.
     let expired = url.replace("X-Goog-Expires=900", "X-Goog-Expires=1");
     assert_ne!(&expired, url, "the capability did not carry an expiry");
     let response = raw_agent().put(&expired).send_bytes(bytes);
@@ -829,7 +828,7 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
     let target = NamespacePath::parse(namespace, "/cap-bound.bin").expect("cap-bound target");
 
     // This adapter signs no multipart for GCS, so the whole-object write is
-    // the only direct transport on offer — and the proxy will not take it.
+    // the only direct transport available, and the proxy will not take it.
     harness
         .client
         .put_file_with_options(

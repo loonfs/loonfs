@@ -238,7 +238,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     )
     .await;
     // A fresh enable publishes a backfill and reports the sequence its
-    // snapshot captured — not a watermark it has not reached.
+    // snapshot captured, not a watermark it has not reached.
     assert_matches!(
         &enabled.status,
         loonfs_types::GrepIndexStatus::Backfilling {
@@ -741,7 +741,7 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         "nothing here schedules the backfill it published"
     );
 
-    // And an assigned host — or an operator — carries it the rest of the way.
+    // An assigned host (or an operator) finishes the backfill from here.
     let worker = grep_worker(&store, "assigned-grep-host").await;
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(1));

@@ -1,7 +1,7 @@
 //! [`NamespaceEngine`]: the namespace-scoped entry point for reads, writes,
-//! uploads, snapshots, and maintenance. This module contains the type, its
-//! constructors, its authorization, and its per-subject reads; each other
-//! operation is a method in the module that implements it.
+//! uploads, snapshots, and maintenance. Defines the type, its constructors,
+//! authorization, and per-subject reads. Each other operation is implemented
+//! as a method in its own module.
 
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::commit::engine::NamespaceCommitEngine;

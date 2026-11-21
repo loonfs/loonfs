@@ -131,7 +131,7 @@ async fn an_empty_listing_is_not_found_without_a_boundary_and_corrupt_with_one()
     );
 }
 
-/// Checks that a create whose put of manifest 1 lands after a collection
+/// Checks that a create whose put of manifest 1 is written after a collection
 /// deleted the namespace's manifest 1, and whose response is lost, settles
 /// the put as its own and then counts it as lost because manifest 1 is at
 /// the boundary. The create returns `namespace_exists`, and the newest
@@ -316,7 +316,7 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
     }
 }
 
-/// Checks that a manifest put that lands after the namespace's retirement is
+/// Checks that a manifest put written after the namespace's retirement is
 /// lost: a writer claim that found manifest 2 as the newest puts manifest 3
 /// after the namespace was deleted and retired and its manifests were
 /// collected. The claim returns `namespace_deleted`, and a reader doesn't take

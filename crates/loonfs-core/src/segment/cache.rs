@@ -163,7 +163,7 @@ fn wrong_kind(object_key: &str, message: &str) -> ManifestLoadError {
 /// The lookups that the bloom filters of segments settled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SegmentFilterStats {
-    /// Segments skipped because their bloom filter ruled out a lookup before
+    /// Segments skipped because their bloom filter rejected a lookup before
     /// any index or data read.
     pub skips: usize,
     /// Segments whose filter admitted a lookup that matched no rows.

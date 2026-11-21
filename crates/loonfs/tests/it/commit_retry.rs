@@ -495,9 +495,9 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .expect("first put");
 
     // Take a snapshot of the head, then give up incremental replay below it. The commit's
-    // receipt still binds the id, so a rerun still conflicts and the
-    // conflict still names the commit's sequence — but the change feed no
-    // longer answers for that sequence.
+    // receipt still binds the ID, so a rerun still conflicts and the
+    // conflict still reports the commit's sequence, even though the change feed
+    // no longer returns events for that sequence.
     runtime
         .create_snapshot(&namespace_id)
         .await
@@ -552,8 +552,8 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
 
     let last_seq = compact_receipt_past_horizon(&runtime, &namespace_id, first.committed_seq).await;
 
-    // The live session's caches still answer the receipt (a conservative,
-    // longer in-process window — a rerun in the same process still replays
+    // The live session's caches still return the receipt (a conservative,
+    // longer in-process window, so a rerun in the same process still replays
     // or conflicts). The horizon is a durable-state fact, and the late
     // retry it governs is a cross-process event, so reopen on the same
     // store to read what the compaction actually kept.
@@ -561,9 +561,9 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
     let namespace = runtime.reader.namespace(&namespace_id);
 
-    // Same id, same bytes — but the receipt is gone, so this is not a
+    // Same ID and same bytes, but the receipt is gone, so this is neither a
     // replay (which would return the original sequence without committing)
-    // and not a conflict: it commits again.
+    // nor a conflict: it commits again.
     let retried = runtime
         .put_file_with_options(
             &namespace_id,

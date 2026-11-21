@@ -29,7 +29,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 /// Content bytes one backfill step ingests before it records its cursor.
-/// This budgets ingestion, not index reorganization — it happens to share a value
+/// This budgets ingestion, not index reorganization. It happens to share a value
 /// with the metadata compaction input limit, and must stay independent
 /// so a compaction policy change cannot silently change backfill behavior.
 const GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP: NonZeroU64 =

@@ -130,7 +130,7 @@ impl Client {
     }
 
     /// Creates a client, validating the config exactly as
-    /// [`ClientConfig::load`] does — direct Rust construction cannot bypass
+    /// [`ClientConfig::load`] does, so direct Rust construction cannot bypass
     /// validation.
     ///
     /// `context` is the context that every request acts in. There's no

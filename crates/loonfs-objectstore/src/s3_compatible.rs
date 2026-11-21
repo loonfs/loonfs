@@ -707,7 +707,7 @@ fn xml_etag(document: &str) -> Option<String> {
 /// Reads the text of the first `<name>` element in a provider document.
 ///
 /// The S3 control documents this crate reads are a handful of flat elements
-/// — an upload id, an error code — so a scan finds them without an XML
+/// (such as an upload ID or an error code), so a scan finds them without an XML
 /// parser, and anything it cannot find is reported as absent rather than
 /// guessed at.
 fn xml_element(document: &str, name: &str) -> Option<String> {

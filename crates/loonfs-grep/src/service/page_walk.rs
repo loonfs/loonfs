@@ -30,7 +30,7 @@ struct LineMatch {
 
 /// Runs the pattern over content, one match per line, in offset order.
 /// One forward walk: matches arrive in offset order, so the current line's
-/// bounds and number advance monotonically — a file full of matches costs
+/// bounds and number advance monotonically. A file full of matches costs
 /// one scan of its bytes, never a repeated scan per match.
 fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec<LineMatch> {
     let mut matches = Vec::new();
@@ -69,9 +69,9 @@ fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec<LineMatch>
 
 /// Whether a file's current path lies inside the requested scope.
 ///
-/// Both spellings are rendered from the same stored display names — the
-/// candidate's by the current-state resolution, the scope's by resolving
-/// the requested prefix — so this compares durable names rather than caller
+/// Both spellings are rendered from the same stored display names (the
+/// candidate's from current-state resolution, and the scope's from resolving
+/// the requested prefix), so this compares durable names rather than caller
 /// input, and name-policy folding applies exactly as it does to every other
 /// read.
 fn path_within_scope(path: &AbsolutePath, scope: &AbsolutePath) -> bool {
@@ -87,7 +87,7 @@ fn path_within_scope(path: &AbsolutePath, scope: &AbsolutePath) -> bool {
 
 /// Folds the page's highest examined-and-rejected candidate into the resume
 /// cursor on a budget exit. Sound only when every examined candidate is
-/// resolved — rejected, or read and recorded — which the budget exits
+/// resolved (either rejected, or read and recorded), which the budget exits
 /// guarantee. Never sound on a mid-file page fill: there, later candidates
 /// were examined but their content reads discarded, and the cursor must stay
 /// at the last emitted match.

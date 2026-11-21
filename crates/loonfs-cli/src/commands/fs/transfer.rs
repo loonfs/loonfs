@@ -43,8 +43,8 @@ enum TransferKind {
 ///
 /// The stat can go stale between here and the commit. That is the same
 /// window `cp` has on any filesystem, and losing it fails the transfer
-/// rather than writing somewhere unexpected — the commit still names the
-/// exact path resolved here.
+/// rather than writing somewhere unexpected, because the commit still targets
+/// the exact path resolved here.
 async fn resolve_transfer_destination(
     context: &NamespaceContext,
     named: NamespacePath,

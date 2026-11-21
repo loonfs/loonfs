@@ -546,7 +546,7 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
         // Sequential awaited puts leave nothing to batch: with a zero
         // pacing interval each publishes immediately as its own WAL
         // object. (Concurrent submissions may still batch behind an
-        // in-flight publication — that is load-driven, not timer-driven.)
+        // in-flight publication, because that is load-driven rather than timer-driven.)
         for (path, bytes) in [
             ("/docs/a.txt", b"alpha".as_slice()),
             ("/docs/b.txt", b"beta".as_slice()),

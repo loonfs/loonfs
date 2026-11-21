@@ -302,8 +302,8 @@ pub enum CoreError {
     },
     #[error("namespace corrupt: {0}")]
     NamespaceCorrupt(String),
-    /// This writer session's epoch was superseded. Terminal for the session:
-    /// callers surface it without reacquiring.
+    /// This writer session's epoch was superseded. Terminal for the session, so
+    /// callers report it without reacquiring.
     #[error("writer session fenced: {0}")]
     WriterFenced(WriterFence),
     #[error("object store error for `{object_key}`: {message}")]

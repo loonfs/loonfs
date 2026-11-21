@@ -32,7 +32,7 @@ pub(crate) struct PublishBatchReport {
     pub(crate) effect: PublishViewEffect,
 }
 
-/// What one batch did to the publish view it ran against — the whole of what
+/// What one batch did to the publish view it ran against, containing everything
 /// a caller needs to determine what happens to the projection it loaded.
 #[derive(Debug, Clone)]
 #[allow(

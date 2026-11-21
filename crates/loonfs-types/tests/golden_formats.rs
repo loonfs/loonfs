@@ -9,8 +9,8 @@
 //!   regenerate the family's version-1 fixture with `UPDATE_GOLDEN=1 cargo
 //!   test`; released formats follow the spec's evolution rules.
 //! - If a fixture stops decoding, the current reader can no longer read bytes
-//!   another implementation of the same format version wrote — a
-//!   compatibility break once that format is deployed.
+//!   written by another implementation of the same format version (a
+//!   compatibility break once that format is deployed).
 //! - Every durable family rejects unknown fields at every nesting level.
 //!   Compaction and WAL folding write successor records, so permissive
 //!   decoding could erase a field introduced by an unsupported writer.
@@ -49,10 +49,6 @@ use std::assert_matches;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-
-// ---------------------------------------------------------------------------
-// Golden helpers
-// ---------------------------------------------------------------------------
 
 fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -111,10 +107,6 @@ fn unzstd(bytes: &[u8]) -> Vec<u8> {
 fn rezstd(bytes: &[u8]) -> Vec<u8> {
     zstd::stream::encode_all(bytes, 0).expect("compress envelope")
 }
-
-// ---------------------------------------------------------------------------
-// Samples: fixed values covering every variant of every durable enum
-// ---------------------------------------------------------------------------
 
 fn namespace_id() -> NamespaceId {
     NamespaceId::parse("demo").expect("valid namespace id")
@@ -810,10 +802,6 @@ fn sample_initializing_manifest() -> NamespaceManifestPayload {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Encode/decode round trips against committed fixtures
-// ---------------------------------------------------------------------------
-
 fn assert_wal_matches_golden(name: &str, payload: WalObjectPayload) {
     let encoded = encode_wal_object_envelope_zstd(payload.clone())
         .expect("encode wal")
@@ -1147,10 +1135,10 @@ fn control_objects_match_golden_bytes() {
             expires_at_ms: 87_400_000,
         },
     );
-    // The one session shape that carries a provider handle, and the one
+    // The one session shape that includes a provider handle, and the one
     // that claims nothing at all: a multipart session is opened before its
     // payload is known, so it records identity, the provider upload, and
-    // the geometry — and learns what it assembled only at completion.
+    // the geometry, and learns what it assembled only at completion.
     check_control_golden(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
@@ -1530,10 +1518,6 @@ fn metadata_row_family_wire_tags_are_pinned() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Version, kind, and corruption semantics
-// ---------------------------------------------------------------------------
-
 /// Edits a WAL payload and updates its checksum.
 fn wal_document_with_payload_edit(
     payload: &WalObjectPayload,
@@ -1625,7 +1609,7 @@ fn with_cbor_document_entry(
 #[test]
 fn wal_delta_decode_rejects_invalid_name_key() {
     // The WAL delta's `name_key` field is a typed `NameKey`, so the wire
-    // decode boundary is where malformed keys are rejected — nothing
+    // decode boundary is where malformed keys are rejected, and nothing
     // downstream re-validates. Encode a valid bind delta, corrupt the key
     // in the CBOR map, and require the decode to fail.
     let valid = WalDelta::BindDirentry {
@@ -2032,10 +2016,8 @@ fn immutable_envelopes_reject_unknown_fields() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Wire-name pinning: the durable delta and precondition names in format.md
-// 6.6, "Operations and WAL deltas", and B.3, "Preconditions"
-// ---------------------------------------------------------------------------
+// Pins the durable delta and precondition wire names from format.md 6.6
+// ("Operations and WAL deltas") and B.3 ("Preconditions").
 
 #[test]
 fn wal_delta_wire_tags_match_spec_names() {
@@ -2149,10 +2131,6 @@ fn wal_delta_wire_tags_match_spec_names() {
         assert_eq!(value["kind"], expected_tag, "in {value}");
     }
 }
-
-// ---------------------------------------------------------------------------
-// Metadata segment blocks
-// ---------------------------------------------------------------------------
 
 /// A delete by path: the tombstone records the binding it removed.
 fn sample_tombstone_set_row() -> MetadataRow {
@@ -2742,11 +2720,6 @@ fn sst_block_data_tombstone_rows_match_golden_bytes() {
         &sample_tombstone_rows(),
     );
 }
-
-// ---------------------------------------------------------------------------
-// Tombstone and trash rows: the deleted binding is one value, or it
-// is absent
-// ---------------------------------------------------------------------------
 
 /// Re-encodes a row as the CBOR map another writer would have produced, so a
 /// test can rewrite it entry by entry.

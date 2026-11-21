@@ -1297,9 +1297,9 @@ async fn read_snapshot_files<S: ObjectStore + ?Sized>(
 
 #[tokio::test]
 async fn deleting_a_snapshot_never_reuses_its_id() {
-    // A deleted snapshot id is never reused. A caller asking for
-    // a snapshot again — even at the same instant, over the same basis, under the
-    // same owner name — gets a brand new record, so the delete can never be
+    // A deleted snapshot ID is never reused. A caller asking for a snapshot
+    // again (even at the same instant, over the same basis, under the same
+    // owner name) gets a brand new record, so the delete can never be
     // undone by racing it.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1919,7 +1919,7 @@ async fn snapshots_append_past_the_threshold_and_compaction_drains() {
     assert_eq!(appended.manifest.payload().base_seq(), CommitSeq(0));
 
     // Compaction rewrites one family group per unit, each publishing its
-    // own manifest — the manifest chain is the progress record.
+    // own manifest, so the manifest chain is the progress record.
     let mut units = 0usize;
     let mut last_manifest_no = None;
     loop {

@@ -14,8 +14,8 @@ const MIN_COMPACTION_POSITIONS: usize = 16;
 /// its own entry and returns `is_live` from it, so this keeps no second copy
 /// of the entry table.
 /// Eviction skips ghosts as it pops them, and ghosts are dropped in bulk
-/// once they outnumber the live entries they shadow — amortized constant,
-/// like a vector reallocation. Nothing is scheduled.
+/// once they outnumber the live entries they shadow (amortized constant time,
+/// like a vector reallocation). Nothing is scheduled.
 #[derive(Debug)]
 pub struct Recency<K> {
     order: VecDeque<(K, u64)>,

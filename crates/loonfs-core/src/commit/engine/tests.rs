@@ -289,9 +289,9 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
         .expect("read head")
         .writer_epoch;
 
-    // A rebuilt engine — cache eviction, cache-disabled mode — shares
-    // the session state, so the session stays terminally fenced and
-    // never touches the head.
+    // A rebuilt engine (for example after cache eviction or in cache-disabled
+    // mode) shares the session state, so the session stays terminally fenced
+    // and never touches the head.
     drop(engine_a1);
     let mut engine_a2 = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),

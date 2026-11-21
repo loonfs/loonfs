@@ -401,8 +401,8 @@ impl PutFileJournal for RecordingJournal {
     }
 }
 
-/// The conversation a resumed upload has: no `begin` — it rejoins the
-/// session it was given — and signing plus uploads only for the parts still
+/// The conversation a resumed upload has: no `begin` (it rejoins the
+/// session it was given), and signing plus uploads only for the parts still
 /// missing.
 fn resumed_script(missing: &[u32], uploaded: ContentRef) -> Vec<Outcome> {
     let mut script = vec![capabilities(true)];

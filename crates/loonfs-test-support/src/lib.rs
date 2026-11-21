@@ -1,8 +1,8 @@
 //! Shared test helpers for the object-store boundary.
 //!
-//! This crate contains reusable fault-injection stores, instrumentation,
-//! runtime helpers, pagination constructors, and HTTP setup. It depends only
-//! on `loonfs-types` and `loonfs-objectstore`, which lets `loonfs-core` use it
+//! Provides reusable fault-injection stores, instrumentation, runtime
+//! helpers, pagination constructors, and HTTP setup. Depends only on
+//! `loonfs-types` and `loonfs-objectstore`, so `loonfs-core` can use it
 //! without a dependency cycle. Helpers that require higher-level crate types
 //! stay in the crate that owns those types.
 

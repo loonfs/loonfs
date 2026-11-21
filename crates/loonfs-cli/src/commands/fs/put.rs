@@ -87,8 +87,9 @@ pub(crate) async fn run_filesystem_put(
     let local_leaf = crate::commands::context::utf8_local_name(local_leaf)
         .map_err(|error| context.fail(error))?;
     let remote_path = match args.remote_path.as_deref() {
-        // A trailing slash names the directory the file is written in — the
-        // cp/rsync habit — while a plain path is the full destination.
+        // A trailing slash identifies the directory the file is written in
+        // (following the cp/rsync convention), while a plain path is the full
+        // destination.
         Some(path) => destination_user_path(
             "remote_path",
             "local_path",

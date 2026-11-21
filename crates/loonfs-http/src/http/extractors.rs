@@ -540,8 +540,8 @@ pub(super) struct UploadStreamOutcome {
 }
 
 impl UploadStreamOutcome {
-    /// The response a failed write owes the client, when the body — not the
-    /// store — is what failed.
+    /// The response a failed write owes the client when the body (not the
+    /// store) is what failed.
     pub(super) fn into_rejection(self) -> Option<ApiResponseError> {
         match self
             .abort

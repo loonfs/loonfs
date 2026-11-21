@@ -389,7 +389,7 @@ impl<S> InstrumentedObjectStore<S> {
         }
     }
 
-    /// Attaches a low-cardinality provider label copied into subsequent samples.
+    /// Attaches a low-cardinality provider label copied into later samples.
     pub fn store_kind(mut self, store_kind: &'static str) -> Self {
         self.store_kind = Some(store_kind);
         self
@@ -640,7 +640,7 @@ where
     ) -> BoxStream<'static, Result<ListedObject>> {
         // Streamed listings (WAL replay, GC) must not be invisible in the
         // metrics. The wrapper records one sample when the stream is
-        // dropped — finished or abandoned — carrying the item count and
+        // dropped (whether finished or abandoned), including the item count and
         // the first error's class.
         Box::pin(RecordedListStream {
             inner: self.inner.list_entries_from_stream(prefix, start_after),

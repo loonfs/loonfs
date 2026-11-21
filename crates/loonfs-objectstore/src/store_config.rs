@@ -325,7 +325,7 @@ fn validate_r2_credentials(credentials: &CloudflareR2Credentials) -> Result<(), 
 ///
 /// Reaching one of these endpoints without TLS is a misconfiguration, not a
 /// choice: they all serve TLS, and the deployment would otherwise mint
-/// presigned URLs — bearer capabilities to read or write one object — into
+/// presigned URLs (bearer capabilities to read or write one object) into
 /// cleartext. Any other host is left alone: a private gateway on `http` is a
 /// legitimate setup, and it simply earns no direct transfers.
 fn validate_tls_on_proven_domains(

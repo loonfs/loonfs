@@ -19,15 +19,15 @@ pub(crate) const SOURCE_CHUNK_BYTES: usize = 64 * 1024;
 
 /// A payload delivered in pieces, for a put that must not keep it whole in memory.
 ///
-/// Chunk boundaries have no meaning — an uploader regroups them into
-/// whatever units its transport wants. A chunk error ends the upload.
+/// Chunk boundaries have no meaning, because an uploader regroups them into
+/// whatever units its transport needs. A chunk error ends the upload.
 pub type PayloadStream = BoxStream<'static, io::Result<Bytes>>;
 
 /// Where one put reads its payload, and what the source reports about the payload up front.
 ///
 /// The length is a hint and never a promise: a source that reports the length lets the
 /// put pick the cheaper transport and declare a `Content-Length`, and a
-/// source that can't report the length — a pipe, a socket, standard input — takes
+/// source that can't report the length (such as a pipe, a socket, or standard input) takes
 /// exactly the same path and discovers the length as it goes.
 pub struct PayloadSource {
     pub(crate) stream: PayloadStream,
@@ -51,8 +51,8 @@ impl PayloadSource {
         }
     }
 
-    /// Creates a source of unknown length that reads from anything asynchronous
-    /// — standard input, a socket, a decompressor.
+    /// Creates a source of unknown length that reads from an asynchronous
+    /// reader, such as standard input, a socket, or a decompressor.
     pub fn reader<R>(reader: R) -> Self
     where
         R: AsyncRead + Send + Unpin + 'static,
@@ -137,7 +137,7 @@ impl PartReader {
     /// the source ends. `None` once nothing is left.
     ///
     /// A full part is returned without reading further, so a caller cannot
-    /// conclude from a full part that more is coming — only a short part
+    /// conclude from a full part that more is coming. Only a short part
     /// proves the source ended.
     pub(crate) async fn next_part(&mut self) -> io::Result<Option<Bytes>> {
         let mut buffer: Option<BytesMut> = None;

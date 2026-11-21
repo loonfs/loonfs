@@ -71,8 +71,8 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             // The error carries the caller's reconciliation identity as
             // structured fields, not prose (API spec, "Standard error
             // contract"). The server decided this against the durable
-            // receipt, so it reports where the id was committed too — the one read
-            // a retry needs, instead of a search of the feed.
+            // receipt, so it reports where the ID was committed too (the one
+            // read a retry needs, instead of a search of the feed).
             let details = response.details.expect("structured details");
             assert_eq!(details.commit_id, Some(commit_id));
             assert_eq!(

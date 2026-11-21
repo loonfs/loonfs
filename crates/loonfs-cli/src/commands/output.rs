@@ -48,8 +48,8 @@ impl ListingHeadObservation {
 /// One failed item inside a recursive transfer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TreeTransferFailure {
-    /// The path that failed — remote for uploads and copies, whichever side
-    /// failed for downloads.
+    /// The path that failed (remote for uploads and copies, and whichever side
+    /// failed for downloads).
     pub path: String,
     pub error: CliError,
 }
@@ -282,9 +282,9 @@ pub(crate) enum CommandData {
         human_target: Option<String>,
         committed_seq: CommitSeq,
         commit_id: CommitId,
-        /// Inode the mutation acted on, when the command resolved one —
-        /// `rm` reports it so `loonfs restore` can bring the deletion back
-        /// from the trash.
+        /// Inode the mutation acted on, when the command resolved one. `rm`
+        /// reports it so `loonfs restore` can bring the deletion back from the
+        /// trash.
         #[serde(
             skip_serializing_if = "Option::is_none",
             with = "loonfs_types::inode_id::public::option"
@@ -296,7 +296,7 @@ pub(crate) enum CommandData {
         recovery_command: Option<String>,
     },
     /// A `mkdir -p` whose target was already a directory. Nothing was
-    /// committed, so there is no commit to report — the directory the
+    /// committed, so there is no commit to report, and the directory the
     /// caller asked for is simply there.
     DirectoryAlreadyExists {
         target: String,
@@ -364,7 +364,7 @@ impl CommandData {
                 .iter()
                 .any(|check| check.status == DoctorStatus::Failed),
             // A wait that ran out of budget renders where the index got to
-            // — real data, not an error — and still exits nonzero, because
+            // (real data, not an error) and still exits nonzero, because
             // the caller asked for a target that was not reached.
             CommandData::GrepIndexEnabled {
                 budget_exhausted, ..

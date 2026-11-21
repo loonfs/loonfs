@@ -354,7 +354,7 @@ impl NamespacePublisher {
     /// publish first, and requests admitted after it fail with
     /// `namespace_deleted` once it succeeds. If the delete fails (for
     /// example a stale `expected_head_seq`), later requests publish
-    /// normally — nothing is rejected for a delete that did not happen.
+    /// normally, and nothing is rejected for a delete that did not happen.
     pub(super) async fn submit_delete(
         &self,
         options: DeleteNamespaceOptions,

@@ -514,8 +514,8 @@ pub(crate) async fn load_segment_filter<S: ObjectStore + ?Sized>(
 ///
 /// # Panics
 ///
-/// Panics if `descriptor` names no extent filter, which manifest validation
-/// rules out for a `content_layouts` segment.
+/// Panics if `descriptor` has no extent filter, which manifest validation
+/// prevents for a `content_layouts` segment.
 pub(crate) async fn load_segment_extent_filter<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: &MetadataSegmentCache,

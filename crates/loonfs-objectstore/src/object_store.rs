@@ -226,8 +226,8 @@ pub enum ObjectStoreError {
         /// Object whose current state disagreed with the requested write mode.
         object_key: String,
     },
-    /// The provider rejected the caller's identity or authorization —
-    /// wrong, expired, or insufficient credentials. Configuration-shaped
+    /// The provider rejected the caller's identity or authorization (wrong,
+    /// expired, or insufficient credentials). Configuration-shaped
     /// and never transient: retrying cannot help, an operator can.
     #[error("permission denied for `{object_key}`: {message}")]
     PermissionDenied {

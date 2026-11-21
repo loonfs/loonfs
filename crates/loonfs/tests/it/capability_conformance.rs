@@ -5,8 +5,8 @@
 //! The registry describes the reference deployment, which serves one API group
 //! this crate does not implement: `query/v0` and every grep key come from
 //! `loonfs-grep`, which a host composes on top of these handles. Both grep
-//! keys are composed — `query.grep` for searching and `maintenance.grep.index`
-//! for maintaining the index — even though the second one is parented by
+//! keys are composed (`query.grep` for searching and `maintenance.grep.index`
+//! for maintaining the index), even though the second one is parented by
 //! an API group these handles do advertise. The embedded document omits
 //! host-specific features and limits from the spec's example. `loonfs-server`'s
 //! `grep_modes` test pins the merged document a composed deployment answers

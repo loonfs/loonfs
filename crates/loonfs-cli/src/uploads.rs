@@ -121,7 +121,7 @@ impl SourceIdentity {
 pub(crate) struct UploadJournal {
     file: OwnedStateFile,
     state: Mutex<UploadState>,
-    /// Explicit commit IDs retain their requests for subsequent invocations.
+    /// Explicit commit IDs keep their requests for later invocations.
     keep_after_ack: bool,
 }
 

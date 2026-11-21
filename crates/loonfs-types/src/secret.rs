@@ -14,9 +14,9 @@ pub const REDACTED: &str = "<redacted>";
 /// at the sites that genuinely need the raw value (request signing, provider
 /// builders, config persistence).
 ///
-/// Serde serialization is transparent and **writes the actual secret** —
-/// config files need the real value round-tripped — so never serialize a
-/// secret-bearing struct into logs or display output; use a redacted copy
+/// Serde serialization is transparent and writes the actual secret (because
+/// config files need the real value round-tripped), so never serialize a
+/// secret-bearing struct into logs or display output. Use a redacted copy
 /// (see [`SecretString::masked`]) instead.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -325,7 +325,7 @@ async fn compare_and_swap_rejects_stale(store: &dyn ObjectStore, run: &ProbeRun)
 }
 
 /// A compare-and-swap against a key that does not exist has no version to
-/// match, so it is a failed precondition — not a create.
+/// match, so it is a failed precondition rather than a create.
 async fn compare_and_swap_missing_object_rejected(
     store: &dyn ObjectStore,
     run: &ProbeRun,
@@ -374,9 +374,9 @@ async fn get_with_metadata_round_trip(store: &dyn ObjectStore, run: &ProbeRun) -
 }
 
 /// Garbage collection measures its grace window against the object's own
-/// last-modified time, so a store that does not report one — or reports the
+/// last-modified time, so a store that does not report one (or reports the
 /// unix epoch, which is what an S3-compatible endpoint that omits the header
-/// turns into — hands every object an infinite age and reclamation loses the
+/// turns into) hands every object an infinite age and reclamation loses the
 /// window that protects in-flight publications and live readers.
 ///
 /// The write's own result includes no timestamp, so the check heads the

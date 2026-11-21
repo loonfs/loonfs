@@ -1,8 +1,8 @@
 //! The derived trash family: its reducer, the compaction that collapses
-//! cancelled deletions, and the bounded trash listing it backs.
+//! cancelled deletions, and the bounded trash listing built on it.
 //!
-//! The family is materialized by snapshot publication, so it lives with the
-//! other manifest-family tests; the listing is its only consumer and is
+//! The family is materialized by snapshot publication, so these tests are kept
+//! with the other manifest-family tests. The listing is its only consumer and is
 //! exercised here against real manifests rather than in isolation.
 
 use super::*;
@@ -243,10 +243,6 @@ fn the_compaction_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest
     );
 }
 
-// ---------------------------------------------------------------------------
-// The listing over real manifests
-// ---------------------------------------------------------------------------
-
 async fn submit_operation_for_test<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -469,8 +465,8 @@ async fn assert_listing_matches_the_old_walk<S: ObjectStore + ?Sized>(
         head.seq,
         read_floor_seq(store, namespace_id).await,
     ));
-    // A limit of 2 forces the page machinery — cursors, removal markers
-    // straddling page boundaries — on every step.
+    // A limit of 2 exercises the page machinery (cursors and removal markers
+    // straddling page boundaries) on every step.
     let listed = sorted_by_position(trash_entries(store, namespace_id, 2).await);
     assert_eq!(
         listed, expected,

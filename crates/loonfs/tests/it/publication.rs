@@ -1,6 +1,6 @@
 //! Cancellation semantics of the unified publication path: admitted work
-//! is owned by the publication service's tasks, so cancelling callers —
-//! one, or all of them — abandons only result delivery, never the
+//! is owned by the publication service's tasks, so cancelling callers
+//! (one or all of them) abandons only result delivery, never the
 //! publication itself.
 
 use futures::future::BoxFuture;
@@ -38,7 +38,7 @@ struct ParkedPuts {
 /// publisher's admission and its only await is the result channel, so a
 /// pending first poll proves the candidate sits in the open batch behind
 /// the parked publication. A settle sleep would leave a window where a
-/// caller cancelled early was never admitted at all — and a publication
+/// caller cancelled early was never admitted at all, and a publication
 /// that never existed cannot be committed.
 async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let namespace_id = NamespaceId::parse("parked").expect("valid namespace id");

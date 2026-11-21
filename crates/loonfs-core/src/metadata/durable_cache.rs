@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 /// Batch-scoped memo of durable-layer lookups: everything except the
 /// mutation overlay (manifest segments, WAL tail, in-memory base). Publish
 /// batches attach one so repeated path walks across candidates scan each
-/// durable key once; the overlay — the only layer that changes between
-/// candidates — is composed per lookup on top.
+/// durable key once. The overlay (the only layer that changes between
+/// candidates) is composed per lookup on top.
 ///
 /// Callers filter the cached vectors by their own visible sequence and keep
 /// the newest row. A binding vector contains the manifest's newest row of
@@ -41,7 +41,7 @@ pub(super) struct DurableVisibilityCacheInner {
 
 /// A durable row set handed out of the shared cache plus the composed
 /// view's overlay rows for the same key. Iteration chains the two, so a
-/// cache hit never copies the cached vector — only the overlay rows (empty
+/// cache hit never copies the cached vector, and only the overlay rows (empty
 /// outside commit validation) are owned per lookup.
 pub(crate) struct SharedRows<T> {
     pub(super) durable: Arc<Vec<T>>,

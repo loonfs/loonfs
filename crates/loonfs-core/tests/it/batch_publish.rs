@@ -157,7 +157,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
     // One batch: delete the file the snapshot captured, then recreate the same name
     // with NoReplace. The recreate must observe the batch-local unbind over
     // the durable binding, and the delete must observe the durable binding
-    // at all — both through the batch's cached durable layer.
+    // at all, both through the batch's cached durable layer.
     let staged = namespace_store(&store, &namespace_id)
         .store_bytes_as_content(b"recreated")
         .await
@@ -1169,9 +1169,9 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
     )
     .await
     .expect_err("conflicting retry");
-    // The receipt decided this one, so the conflict names where the id
-    // was committed and what was committed there — the sequence a retry reads back, and
-    // the identity it proves itself against.
+    // The receipt decided this one, so the conflict reports where the ID
+    // was committed and what was committed there (the sequence a retry reads
+    // back and the identity it checks against).
     assert_matches!(
         conflict,
         CoreError::CommitIdReuseConflict {

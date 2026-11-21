@@ -53,7 +53,7 @@ async fn a_scrape_reports_requests_object_store_calls_and_cache_metrics() {
     let first = scrape(&harness.server_url, Some("test-token")).expect("scrape");
 
     // Requests are labeled by the route template axum matched, never by the
-    // path — the namespace id in that path would be an unbounded label.
+    // path, because the namespace ID in that path would be an unbounded label.
     // Labels render in sorted order, so a scrape of the same readings is
     // byte-stable however the instrument was registered.
     let status_route = "loonfs_server_requests_total{method=\"GET\",\

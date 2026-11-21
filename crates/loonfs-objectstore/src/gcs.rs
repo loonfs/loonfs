@@ -497,7 +497,7 @@ fn gcs_object(key: &str, body: &[u8]) -> Result<ObjectMetadata> {
 /// GCS reports its hashes either as one comma-joined `x-goog-hash` value or
 /// as a header line per algorithm, and promises no order between them. Every
 /// value is searched, so which spelling arrives cannot determine whether the
-/// checksum is found — reading only the first header line would miss a
+/// checksum is found. Reading only the first header line would miss a
 /// crc32c that happened to follow an md5.
 fn stored_crc32c_from_headers(headers: &http::HeaderMap) -> Option<Checksum> {
     headers

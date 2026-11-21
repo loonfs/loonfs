@@ -4,8 +4,8 @@
 //! file's length, and the proof is retention at the store boundary: every
 //! buffer the store hands back reports when it is released, so the peak is
 //! exact rather than sampled. The buffered read is measured beside it as the
-//! control — it is supposed to hold the whole file, and the difference
-//! between the two numbers is the whole point of the streaming one.
+//! control (it is supposed to keep the whole file in memory), and the
+//! difference between the two numbers is the whole point of the streaming one.
 
 use crate::common::{namespace, open_runtime_async, store};
 use loonfs::{

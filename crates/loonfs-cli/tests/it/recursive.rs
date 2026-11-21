@@ -319,7 +319,7 @@ fn recursive_transfers_roundtrip_a_tree() {
     );
     assert!(downloaded.join("empty/inner").is_dir());
 
-    // Server-side copy: the tree is copied without moving bytes — the copied
+    // Server-side copy: the tree is copied without moving bytes, so the copied
     // file shares its source's content reference.
     let cp = harness.run(&["--json", "cp", "-r", "/up", "/copy"]);
     assert_success(&cp);

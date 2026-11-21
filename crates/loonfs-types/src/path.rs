@@ -457,9 +457,9 @@ fn validate_path_bounds(byte_length: usize, depth: usize) -> Result<(), PathErro
 }
 
 /// Characters Windows reserves inside a path component. Each one means
-/// something else there — a drive or stream separator, a wildcard, a pipe, a
-/// quote, a redirect — so a name that contains one cannot be written to an NTFS
-/// volume at all, and a tree containing it could not be written,
+/// something else there (a drive or stream separator, a wildcard, a pipe, a
+/// quote, or a redirect), so a name that contains one cannot be written to an
+/// NTFS volume at all, and a tree containing it could not be written,
 /// archived, or synced on Windows.
 ///
 /// This is the same portability floor the trailing-dot and device-name rules

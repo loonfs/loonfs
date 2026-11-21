@@ -553,7 +553,7 @@ impl Namespace<Writable> {
 
     /// Publishes one candidate through the runtime's publication service:
     /// batching is adaptive, every submitter receives its own durable result,
-    /// and admitted work is owned by the service's worker — a cancelled
+    /// and admitted work is owned by the service's worker, so a cancelled
     /// caller abandons only its result delivery, never the publication.
     pub async fn commit_candidate(&self, candidate: CommitCandidate) -> Result<Commit> {
         trace::in_operation(

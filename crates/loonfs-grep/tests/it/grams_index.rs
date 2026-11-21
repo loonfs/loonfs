@@ -606,7 +606,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .next_cursor
         .expect("a truncated page must carry a cursor");
 
-    // The next page's walk reaches bravo and surfaces the read error at
+    // The next page's walk reaches bravo and reports the read error at
     // the position the serial scan would have.
     let error = host
         .grep(

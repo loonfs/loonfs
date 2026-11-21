@@ -147,9 +147,9 @@ impl Namespace<Writable> {
     ///
     /// The payload is hashed as it is forwarded to object storage rather
     /// than kept in memory, so memory follows the transfer's part size instead of the
-    /// object's length. Everything after this point — the reference it
-    /// produces, completion, publication — is identical to the buffered
-    /// path's; callers that already have their bytes should stay on
+    /// object's length. Everything after this point (the reference it
+    /// produces, completion, and publication) is identical to the buffered
+    /// path, so callers that already have their bytes should stay on
     /// [`Self::put_upload_content`].
     pub async fn put_upload_content_stream(
         &self,

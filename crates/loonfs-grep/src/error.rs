@@ -79,9 +79,9 @@ pub enum GrepError {
     Runtime(#[from] loonfs::Error),
 }
 
-/// Grep names the runtime's own error vocabulary for the conditions it
-/// shares with every other reader — an unusable cursor, a lost basis — so
-/// one code means one thing whoever produced it.
+/// Grep reuses the runtime's own error vocabulary for the conditions it
+/// shares with every other reader (such as an unusable cursor or a lost basis),
+/// so one code means one thing regardless of which layer produced it.
 impl From<CoreError> for GrepError {
     fn from(error: CoreError) -> Self {
         Self::Runtime(loonfs::Error::Core(error))

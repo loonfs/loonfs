@@ -382,11 +382,11 @@ impl RestoreDeletedHint {
                 shell_quote(&context.profile.profile_name)
             ));
         }
-        // The flag and the environment variable both name a file that a bare
-        // invocation would not find on its own — the flag because it is not
-        // spelled again, the variable because a later shell need not still
-        // export it. The default locations need no flag: they are what a bare
-        // invocation looks at.
+        // The flag and the environment variable both identify a file that a bare
+        // invocation would not find on its own (the flag because it is not
+        // spelled again, and the variable because a later shell might not
+        // export it). The default locations need no flag, because they are what
+        // a bare invocation checks.
         if matches!(location.source, ConfigSource::Flag | ConfigSource::Env) {
             context_flags.push_str(&format!(
                 " --config {}",
@@ -412,8 +412,8 @@ impl RestoreDeletedHint {
 /// Names may contain spaces and quotes (they are display strings, not
 /// identifiers), and so may profile names and config paths, so a printed
 /// command that is meant to be pasted has to survive them. Single quotes take
-/// everything literally, which is why the one character they cannot contain — a
-/// single quote — is spliced in as an escaped one outside them.
+/// everything literally, so the one character they cannot contain (a single
+/// quote) is spliced in as an escaped one outside them.
 pub(crate) fn shell_quote(argument: &str) -> String {
     const SAFE: &str = "@%+=:,./-_";
     if !argument.is_empty()

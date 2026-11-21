@@ -352,9 +352,9 @@ fn committed_change_with_events(
 /// Maps one commit's ordered WAL deltas to semantic filesystem events, one
 /// per internal operation.
 ///
-/// One request operation can compile into several internal operations —
-/// creating missing parent directories, replacing a file by moving over it,
-/// copying attributes onto a new inode — and each of those gets its own
+/// One request operation can compile into several internal operations (such as
+/// creating missing parent directories, replacing a file by moving over it, or
+/// copying attributes onto a new inode), and each of those gets its own
 /// event. The deltas include the request-operation index they came from, so the
 /// events stay in request order whatever their count.
 ///

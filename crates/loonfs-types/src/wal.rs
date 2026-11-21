@@ -300,8 +300,8 @@ pub enum WalDelta {
         /// survives on the immortal tombstone row after unbind rows age out.
         deleted_binding: DeletedBinding,
     },
-    /// Revokes exactly one subtree tombstone — the one recorded at `target`
-    /// — making the subtree eligible for visibility again once re-bound. An
+    /// Revokes exactly one subtree tombstone (the one recorded at `target`),
+    /// making the subtree eligible for visibility again once re-bound. An
     /// immutable compensating event, not an in-place row deletion: a later
     /// `TombstoneSubtree` for the same root supersedes the revoke.
     RevokeSubtreeTombstone {
@@ -460,8 +460,8 @@ pub struct WalCommitPayload {
     pub semantic_commit_fingerprint: CommitFingerprint,
     /// Wall-clock stamp from the publishing writer's request context, in
     /// Unix milliseconds. Observational only: never a validity or ordering
-    /// input — `committed_seq` is the order — and excluded from the semantic commit
-    /// fingerprint, so replay identity is untouched by clocks.
+    /// input (`committed_seq` defines the order), and excluded from the semantic
+    /// commit fingerprint, so replay identity is untouched by clocks.
     pub committed_at_ms: u64,
     /// Caller-supplied annotation, omitted when absent and excluded from filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
