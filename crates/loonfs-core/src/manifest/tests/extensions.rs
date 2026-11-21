@@ -24,6 +24,11 @@ pub(crate) fn extension_segment(namespace_id: &NamespaceId, number: u64) -> Exte
     ExtensionSegmentRef {
         owner_namespace_id: namespace_id.clone(),
         segment_id: IndexSegmentId::parse(format!("idx_{number:026}")).expect("index segment id"),
+        checksum: loonfs_types::Checksum::compute(
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+            &number.to_be_bytes(),
+        ),
+        encoding: loonfs_types::format::manifest::EXTENSION_SEGMENT_ENCODING,
         row_count: 1,
         min_row_key: "text-a".to_owned(),
         max_row_key: "text-a".to_owned(),

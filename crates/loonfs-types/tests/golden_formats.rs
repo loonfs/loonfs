@@ -711,6 +711,8 @@ fn sample_extensions_manifest() -> NamespaceManifestPayload {
         owner_namespace_id: namespace_id(),
         segment_id: IndexSegmentId::parse("idx_014d2pf2dbsqqg28t5cy4tqkfg")
             .expect("valid index segment id"),
+        checksum: Checksum::compute(ChecksumAlgorithm::Crc64nvme, b"extension-segment"),
+        encoding: loonfs_types::format::manifest::EXTENSION_SEGMENT_ENCODING,
         row_count: 12,
         min_row_key: "content-revision-014d2pf2dbsqqg28t5cy4tqkfh".to_owned(),
         max_row_key: "value-00000000000000000001".to_owned(),

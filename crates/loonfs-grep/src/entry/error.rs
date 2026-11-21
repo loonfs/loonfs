@@ -28,6 +28,15 @@ pub enum GrepEntryError {
     #[error("grep reorganization output references missing segment `{segment_id}`")]
     MissingReorganizeOutputSegment { segment_id: IndexSegmentId },
     #[error(
+        "grep segment `{segment_id}` uses unsupported encoding `{encoding}`; this build reads \
+         encoding `{}`",
+        loonfs_types::format::manifest::EXTENSION_SEGMENT_ENCODING
+    )]
+    UnsupportedSegmentEncoding {
+        segment_id: IndexSegmentId,
+        encoding: u32,
+    },
+    #[error(
         "grep reorganization output `{segment_id}` isn't in a run with the reorganization's level \
          and run number"
     )]
