@@ -428,8 +428,9 @@ async fn two_stores_with_the_same_object_key_keep_separate_entries() {
 }
 
 /// Checks that an insert that finds the write queue full writes nothing to
-/// disk and records a rejection, that the block stays in memory, and that
-/// the queue takes writes again once the writer has caught up.
+/// disk and records a rejection, that the block stays in memory, that the
+/// stats report the queued block's charge until the writer writes it, and
+/// that the queue takes writes again once the writer has caught up.
 #[tokio::test]
 async fn a_full_write_queue_rejects_the_write_and_the_block_stays_in_memory() {
     let (blocks, store) = (test_blocks(), store("/a"));
@@ -442,8 +443,13 @@ async fn a_full_write_queue_rejects_the_write_and_the_block_stays_in_memory() {
     cache.insert(first);
     cache.insert(second);
     assert_eq!(ssd.stats().rejections, 1);
+    assert_eq!(
+        ssd.stats().queued_bytes,
+        SsdSegmentBlocks::queue_charge(first.stored.len())
+    );
     assert!(cache.in_memory(second).await, "the block is in memory");
     assert_eq!(writer.write_queued(), 1);
+    assert_eq!(ssd.stats().queued_bytes, 0);
     assert!(file_of(&ssd, &store, first).exists());
     assert!(!file_of(&ssd, &store, second).exists());
 

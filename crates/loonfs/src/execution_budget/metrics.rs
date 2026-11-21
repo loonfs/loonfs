@@ -13,6 +13,7 @@ pub(crate) struct ExecutionBudgetInstruments {
     pub(crate) publications: Arc<dyn PermitObserver>,
     pub(crate) folds: Arc<dyn PermitObserver>,
     pub(crate) compactions: Arc<dyn PermitObserver>,
+    pub(crate) collections: Arc<dyn PermitObserver>,
     pub(crate) content_writes: Arc<dyn PermitObserver>,
 }
 
@@ -89,6 +90,17 @@ impl ExecutionBudgetInstruments {
                 (
                     "loonfs.execution_budget.compactions_waiting",
                     "Metadata compactions waiting for a compaction permit",
+                ),
+            ),
+            collections: PermitGauges::register(
+                recorder,
+                (
+                    "loonfs.execution_budget.collections_running",
+                    "Garbage collections holding a collection permit",
+                ),
+                (
+                    "loonfs.execution_budget.collections_waiting",
+                    "Garbage collections waiting for a collection permit",
                 ),
             ),
             content_writes: PermitGauges::register(

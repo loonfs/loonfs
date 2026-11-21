@@ -133,13 +133,9 @@ impl NamespacePublisher {
         }
         let item = state.queue.pop_front();
         self.reserve_next_publish_slot(&mut state);
-        let queue_depth = queued_candidates(&state);
+        self.count_queued(&mut state);
         drop(state);
-        self.context
-            .runtime_core
-            .instruments()
-            .publisher
-            .queue_depth(queue_depth);
+        self.report_queue_depth();
         item
     }
 

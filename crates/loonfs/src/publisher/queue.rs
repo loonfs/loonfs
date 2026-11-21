@@ -266,7 +266,7 @@ impl NamespacePublisher {
         enqueued_at: u64,
     ) -> std::result::Result<AdmittedSubmission, CoreError> {
         let mut state = self.lock_state();
-        let _session = self.admitted_session(&state)?;
+        let session = self.admitted_session(&state)?;
         if let Some(existing) = state.in_flight.get_mut(&commit_id) {
             if existing.semantic_identity != semantic_identity {
                 let primary_identity = existing.semantic_identity.clone();
@@ -343,6 +343,12 @@ impl NamespacePublisher {
             },
         );
         self.spawn_worker_if_idle(&mut state);
+        self.count_queued(&mut state);
+        // The report runs host code, which may read this session's status,
+        // so both locks are released first.
+        drop(session);
+        drop(state);
+        self.report_queue_depth();
         Ok(AdmittedSubmission {
             admission: SubmissionAdmission::OwnOutcome,
             queue_depth: queued + 1,
@@ -442,11 +448,6 @@ impl NamespacePublisher {
     }
 
     fn trace_enqueue(&self, queue_depth: usize, reason: &'static str) {
-        self.context
-            .runtime_core
-            .instruments()
-            .publisher
-            .queue_depth(queue_depth);
         phase_event!(
             self.context.runtime_core,
             Phase::Enqueue,

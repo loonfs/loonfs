@@ -207,6 +207,10 @@ struct NamespacePublisherState {
     /// immediately.
     last_publish: Option<Observation>,
     last_published: Option<LastPublish>,
+    /// The candidates this namespace last added to the runtime's count of
+    /// queued candidates, which [`NamespacePublisher::count_queued`] keeps
+    /// equal to the candidates in `queue`.
+    counted_candidates: usize,
 }
 
 /// The newest commit this session published, and when it published it.
@@ -257,6 +261,7 @@ impl NamespacePublisher {
                 next_task_id: 0,
                 last_publish: None,
                 last_published: None,
+                counted_candidates: 0,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot { engine: None })),
             read_position,
@@ -474,6 +479,30 @@ impl NamespacePublisher {
         if let Some(shared) = self.shared.upgrade() {
             shared.panicked_units.fetch_add(1, Ordering::SeqCst);
         }
+        self.context.runtime_core.instruments().publisher.panic();
+    }
+
+    /// Brings this namespace's share of the runtime's count of queued
+    /// candidates up to the candidates in its queue. Call it with the state
+    /// locked after a change to the queue, and call
+    /// [`Self::report_queue_depth`] once the lock is released.
+    pub(super) fn count_queued(&self, state: &mut NamespacePublisherState) {
+        let queued = queue::queued_candidates(state);
+        self.context
+            .runtime_core
+            .instruments()
+            .publisher
+            .move_queued_candidates(state.counted_candidates, queued);
+        state.counted_candidates = queued;
+    }
+
+    /// Reports the candidates queued at every namespace of the runtime.
+    pub(super) fn report_queue_depth(&self) {
+        self.context
+            .runtime_core
+            .instruments()
+            .publisher
+            .queue_depth();
     }
 
     pub(super) fn elapsed_ms_since(&self, started_at_ms: u64) -> u64 {

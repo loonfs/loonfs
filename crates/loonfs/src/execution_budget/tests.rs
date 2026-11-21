@@ -777,12 +777,14 @@ async fn content_staging_holds_the_shared_write_permit_without_publication_admis
 }
 
 /// Checks that an explicit garbage collection takes a collection permit:
-/// with every permit held, the collection waits, and it runs once a permit
-/// is released.
+/// with every permit held, the collection waits and the collection gauges
+/// count it, and it runs once a permit is released.
 #[tokio::test]
 async fn an_explicit_collection_waits_for_a_collection_permit() {
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let budget = ExecutionBudget::builder()
         .max_concurrent_collections(NonZeroUsize::MIN)
+        .metrics_recorder(recorder.clone())
         .build();
     let gated = sharing(&budget).await;
     let namespace_id = namespace_id("collected");
@@ -805,10 +807,25 @@ async fn an_explicit_collection_waits_for_a_collection_permit() {
             .is_err(),
         "the collection waits while every permit is held"
     );
+    let collection_gauges = || {
+        [
+            "loonfs.execution_budget.collections_running",
+            "loonfs.execution_budget.collections_waiting",
+        ]
+        .map(|name| gauge(&recorder.snapshot(), name, &[]))
+    };
+    let collection_stats = || {
+        let stats = budget.stats();
+        (stats.collections_running, stats.collections_waiting)
+    };
+    assert_eq!(collection_stats(), (1, 1));
+    assert_eq!(collection_gauges(), [1, 1]);
     drop(held);
     bounded(Duration::from_secs(10), collection)
         .await
         .expect("the collection runs once the permit is released")
         .expect("collection");
+    assert_eq!(collection_stats(), (0, 0));
+    assert_eq!(collection_gauges(), [0, 0]);
     gated.runtime.shutdown().await.expect("shut down");
 }

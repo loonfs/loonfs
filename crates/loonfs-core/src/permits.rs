@@ -78,7 +78,8 @@ impl Permits {
     }
 
     /// Changes the counts, then reports them after the lock is released,
-    /// because the observer is caller code.
+    /// because the observer is caller code. A report that races a
+    /// concurrent change repeats until the observer has the current counts.
     fn update(&self, change: impl FnOnce(&mut PermitCounts)) {
         let counts = {
             let mut counts = self
@@ -91,9 +92,19 @@ impl Permits {
         self.report(counts);
     }
 
-    fn report(&self, counts: PermitCounts) {
-        if let Some(observer) = &self.observer {
+    fn report(&self, mut counts: PermitCounts) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        loop {
             observer.report(counts.running, counts.waiting);
+            // `BudgetPermit::drop` reports too, so this read recovers a
+            // poisoned lock the way that drop does.
+            let now = *self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+            if now == counts {
+                return;
+            }
+            counts = now;
         }
     }
 }

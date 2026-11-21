@@ -126,6 +126,7 @@ impl ExecutionBudget {
         let publications = self.inner.publications.counts();
         let folds = self.inner.folds.counts();
         let compactions = self.inner.compactions.counts();
+        let collections = self.inner.collections.counts();
         let content_writes = self.inner.content_writes.counts();
         ExecutionBudgetStats {
             admitted_requests: admitted.requests,
@@ -140,6 +141,8 @@ impl ExecutionBudget {
             folds_waiting: folds.waiting,
             compactions_running: compactions.running,
             compactions_waiting: compactions.waiting,
+            collections_running: collections.running,
+            collections_waiting: collections.waiting,
             content_writes_running: content_writes.running,
             content_writes_waiting: content_writes.waiting,
         }
@@ -382,6 +385,7 @@ impl ExecutionBudgetBuilder {
             publications,
             folds,
             compactions,
+            collections,
             content_writes,
         } = match &self.metrics_recorder {
             Some(recorder) => ExecutionBudgetInstruments::new(recorder.as_ref()),
@@ -400,7 +404,7 @@ impl ExecutionBudgetBuilder {
                 publications: Permits::new(self.max_concurrent_publications, Some(publications)),
                 folds: Permits::new(self.max_concurrent_folds, Some(folds)),
                 compactions: Permits::new(self.max_concurrent_compactions, Some(compactions)),
-                collections: Permits::new(self.max_concurrent_collections, None),
+                collections: Permits::new(self.max_concurrent_collections, Some(collections)),
                 max_compaction_input_bytes: self.max_compaction_input_bytes,
                 content_writes: Arc::new(Permits::new(
                     self.max_concurrent_content_writes,
@@ -440,6 +444,10 @@ pub struct ExecutionBudgetStats {
     pub compactions_running: usize,
     /// Metadata compactions waiting for a compaction permit.
     pub compactions_waiting: usize,
+    /// Garbage collections that have a collection permit.
+    pub collections_running: usize,
+    /// Garbage collections waiting for a collection permit.
+    pub collections_waiting: usize,
     /// Content object writes that have a content write permit.
     pub content_writes_running: usize,
     /// Content object writes waiting for a content write permit.

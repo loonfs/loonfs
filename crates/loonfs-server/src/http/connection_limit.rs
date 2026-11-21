@@ -1,7 +1,7 @@
 //! Connection admission before TCP accept and TLS handshakes.
 
 use axum::serve::Listener;
-use loonfs::metrics::{GaugeHandle, MetricsRecorder};
+use loonfs::metrics::{CountGauge, GaugeHandle, MetricsRecorder};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ pub(super) struct ConnectionLimit<L> {
     listener: L,
     permits: Arc<Semaphore>,
     waiting: Arc<dyn GaugeHandle>,
+    open: Arc<CountGauge>,
 }
 
 impl<L> ConnectionLimit<L> {
@@ -25,6 +26,11 @@ impl<L> ConnectionLimit<L> {
                 "One while the accept loop waits for a connection permit, otherwise zero",
                 &[],
             ),
+            open: Arc::new(CountGauge::new(metrics.register_gauge(
+                "loonfs.server.connections_open",
+                "Connections the server has accepted and not yet closed",
+                &[],
+            ))),
         }
     }
 }
@@ -45,10 +51,13 @@ impl<L: Listener> Listener for ConnectionLimit<L> {
             }
         };
         let (inner, address) = self.listener.accept().await;
+        self.open.add(1);
+        self.open.report();
         (
             Connection {
                 inner,
                 _permit: permit,
+                open: Arc::clone(&self.open),
             },
             address,
         )
@@ -77,6 +86,14 @@ impl Drop for Waiting {
 pub(super) struct Connection<I> {
     inner: I,
     _permit: OwnedSemaphorePermit,
+    open: Arc<CountGauge>,
+}
+
+impl<I> Drop for Connection<I> {
+    fn drop(&mut self) {
+        self.open.sub(1);
+        self.open.report();
+    }
 }
 
 impl<I: AsyncRead + Unpin> AsyncRead for Connection<I> {

@@ -126,6 +126,10 @@ pub struct SsdSegmentBlocksStats {
     /// index's own allocation for the block. A tier of small blocks keeps
     /// fewer bytes on disk than this.
     pub stored_bytes: usize,
+    /// The bytes charged to the blocks in the write queue, waiting for the
+    /// writer: each block's stored length and its queued write's own
+    /// allocation. The queue's cap bounds this.
+    pub queued_bytes: usize,
 }
 
 /// The key of one block on disk: the first 16 bytes of the SHA-256 of the
@@ -359,6 +363,7 @@ impl SsdSegmentBlocks {
             evictions: index.evictions,
             rejections: index.rejections,
             stored_bytes: index.cached_decoded_bytes,
+            queued_bytes: self.files.queued_bytes.load(Ordering::SeqCst),
         }
     }
 

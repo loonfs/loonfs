@@ -2108,13 +2108,17 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .all(|live| publisher_state(&live.publisher).worker.is_none()));
 }
 
+/// Checks that a publisher worker contains a panic, counts it in
+/// `loonfs.publisher.panics`, and publishes the work queued behind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_survives_panic_and_processes_later_queue_items() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(PanicWalPutStore::new(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let writer = test_writer(shared.clone()).await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer =
+        test_writer_with_cache(shared.clone(), MetadataCache::default(), recorder.clone()).await;
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -2165,6 +2169,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         .expect("queued submit task")
         .expect("the surviving worker publishes queued work");
     assert_eq!(queued_response.committed_seq, CommitSeq(1));
+    assert_eq!(counter(&recorder, "loonfs.publisher.panics"), 1);
 
     let drain_error = writer
         .drain()
@@ -2186,6 +2191,200 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         crate::ExecutionBudgetStats::default(),
         "panic and drain refund the budget"
     );
+}
+
+/// Checks that `loonfs.publisher.queue_depth` reports the candidates queued
+/// at every namespace's publisher together, and falls to zero once both
+/// queues are taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_depth_gauge_sums_the_queues_of_every_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(BlockingStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        |operation| matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent } if is_publication(bytes)),
+    ));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = test_writer_with_cache(
+        store.clone() as SharedStore,
+        MetadataCache::default(),
+        recorder.clone(),
+    )
+    .await;
+    let mut namespaces = Vec::new();
+    for name in ["first", "second"] {
+        let namespace_id = NamespaceId::parse(name).expect("valid namespace id");
+        writer
+            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .await
+            .expect("bootstrap");
+        namespaces.push(
+            writer
+                .open_namespace(&namespace_id)
+                .expect("open namespace"),
+        );
+    }
+    let queue_depth =
+        || crate::test_support::gauge(&recorder.snapshot(), "loonfs.publisher.queue_depth", &[]);
+
+    // Each namespace's worker takes its first commit and parks at the WAL
+    // put, so each namespace's second commit stays in its queue.
+    store.arm();
+    let commit = |namespace: &crate::Namespace<crate::Writable>, name: &'static str| {
+        let namespace = namespace.clone();
+        tokio::spawn(async move {
+            namespace
+                .commit_candidate(CommitCandidate::new(create_directory_request(name, name)))
+                .await
+        })
+    };
+    let mut commits = Vec::new();
+    for namespace in &namespaces {
+        let publisher = namespace.session().publisher.clone();
+        commits.push(commit(namespace, "parked"));
+        bounded(Duration::from_secs(10), async {
+            loop {
+                {
+                    let state = publisher_state(&publisher);
+                    if state.in_flight.len() == 1 && queued_candidates(&state) == 0 {
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker takes the first commit");
+        commits.push(commit(namespace, "queued"));
+        bounded(
+            Duration::from_secs(10),
+            wait_for_queued_candidates(&publisher, 1),
+        )
+        .await
+        .expect("the second commit stays queued");
+    }
+    assert_eq!(queue_depth(), 2);
+
+    store.release();
+    for commit in commits {
+        commit
+            .await
+            .expect("commit task")
+            .expect("the commit publishes");
+    }
+    assert_eq!(queue_depth(), 0);
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// A recorder whose publisher queue depth gauge reads the namespace's
+/// session status each time it is set, as a host's recorder may.
+struct SessionStatusRecorder {
+    inner: DefaultMetricsRecorder,
+    namespace: Arc<std::sync::Mutex<Option<crate::Namespace<crate::Writable>>>>,
+}
+
+struct SessionStatusGauge {
+    inner: Arc<dyn crate::metrics::GaugeHandle>,
+    namespace: Arc<std::sync::Mutex<Option<crate::Namespace<crate::Writable>>>>,
+}
+
+impl crate::metrics::GaugeHandle for SessionStatusGauge {
+    fn set(&self, value: i64) {
+        if let Some(namespace) = self.namespace.lock().expect("namespace lock").as_ref() {
+            let _ = namespace.session_status();
+        }
+        self.inner.set(value);
+    }
+}
+
+impl crate::metrics::MetricsRecorder for SessionStatusRecorder {
+    fn register_counter(
+        &self,
+        name: &'static str,
+        description: &'static str,
+        labels: &[(&'static str, &'static str)],
+    ) -> Arc<dyn crate::metrics::CounterHandle> {
+        self.inner.register_counter(name, description, labels)
+    }
+
+    fn register_gauge(
+        &self,
+        name: &'static str,
+        description: &'static str,
+        labels: &[(&'static str, &'static str)],
+    ) -> Arc<dyn crate::metrics::GaugeHandle> {
+        let inner = self.inner.register_gauge(name, description, labels);
+        if name != "loonfs.publisher.queue_depth" {
+            return inner;
+        }
+        Arc::new(SessionStatusGauge {
+            inner,
+            namespace: Arc::clone(&self.namespace),
+        })
+    }
+
+    fn register_histogram(
+        &self,
+        name: &'static str,
+        description: &'static str,
+        labels: &[(&'static str, &'static str)],
+        boundaries: &'static [f64],
+    ) -> Arc<dyn crate::metrics::HistogramHandle> {
+        self.inner
+            .register_histogram(name, description, labels, boundaries)
+    }
+}
+
+/// Checks that a commit completes when the host's recorder reads the
+/// namespace's session status while the publisher reports its queue depth.
+/// The report runs after the publisher releases its state lock and its
+/// writer-session lock, which the status read takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorder_may_read_the_session_status_while_the_queue_depth_is_reported() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_slot = Arc::new(std::sync::Mutex::new(None));
+    let recorder = Arc::new(SessionStatusRecorder {
+        inner: DefaultMetricsRecorder::new(),
+        namespace: Arc::clone(&namespace_slot),
+    });
+    let writer = crate::LoonFs::builder_with_store(store, crate::Context::Service)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            trace_mode: TraceMode::Remote,
+            ..crate::RuntimeConfig::default()
+        })
+        .metrics_recorder(recorder)
+        .store_kind(ConfiguredObjectStoreKind::LocalFs)
+        .build()
+        .await
+        .expect("build writer");
+    let namespace_id = NamespaceId::parse("status-read").expect("valid namespace id");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("bootstrap");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    *namespace_slot.lock().expect("namespace lock") = Some(namespace.clone());
+
+    // The commit runs in its own task, so a report that still held a lock
+    // the status read takes would block that task, and the bound fails the
+    // test instead of hanging it.
+    let commit = tokio::spawn(async move {
+        namespace
+            .commit_candidate(CommitCandidate::new(create_directory_request(
+                "reported", "reported",
+            )))
+            .await
+    });
+    bounded(Duration::from_secs(10), commit)
+        .await
+        .expect("the commit is admitted and published while the recorder reads the session status")
+        .expect("commit task")
+        .expect("the commit publishes");
+    writer.shutdown().await.expect("shutdown");
 }
 
 /// Checks that a session's fold, in a runtime whose read cache keeps
