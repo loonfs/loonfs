@@ -136,9 +136,9 @@ pub(super) async fn test_app_with_sessions(
         )
     };
     let grep_service = || {
-        let cache = Arc::new(GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
-        ));
+        let cache = Arc::new(GrepBlockCache::new(loonfs::DecodedBlockCacheConfig::new(
+            DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+        )));
         Arc::new(GrepService::new(cache))
     };
     let grep_service = config.grep.serves().then(grep_service);

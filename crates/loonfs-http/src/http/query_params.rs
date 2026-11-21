@@ -1,7 +1,7 @@
 //! Shared query-parameter checks for HTTP handlers.
 
 use super::error::ApiResponseError;
-use loonfs::engine::READ_REVALIDATION_BOUND_MS;
+use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs::{Consistency, ErrorCode, ReadAt, ReadConsistency, SnapshotId};
 use loonfs_types::LimitError;
 
