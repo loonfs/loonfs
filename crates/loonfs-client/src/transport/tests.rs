@@ -126,11 +126,7 @@ async fn store_contention_is_not_retried_by_the_client() {
         };
         client.timer = Arc::new(StdMonotonicTimer::default());
         let error = client
-            .abort_upload(
-                &namespace_id,
-                &loonfs_test_support::test_actor(),
-                &upload_id,
-            )
+            .abort_upload(&namespace_id, &upload_id)
             .await
             .expect_err("every attempt is refused");
         assert_eq!(error.code(), Some(code));
@@ -201,6 +197,7 @@ where
         ClientConfig {
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: Some("test-token".into()),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: request_timeout_ms.and_then(std::num::NonZeroU64::new),
             disable_transient_retry: true,
             ca_cert_path: None,
@@ -321,6 +318,7 @@ async fn a_client_sends_the_header_of_the_context_it_was_built_with() {
             ClientConfig {
                 server_url: "http://127.0.0.1".to_owned(),
                 auth_token: None,
+                actor: Some(loonfs_test_support::test_actor()),
                 request_timeout_ms: None,
                 disable_transient_retry: true,
                 ca_cert_path: None,
@@ -365,6 +363,7 @@ async fn health_and_capabilities_omit_principal_context_headers() {
         ClientConfig {
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: None,
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: true,
             ca_cert_path: None,
@@ -788,6 +787,7 @@ async fn transport_failures_resend_up_to_the_attempt_cap() {
         ClientConfig {
             server_url: "http://example.invalid".to_owned(),
             auth_token: None,
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: true,
             ca_cert_path: None,
@@ -819,7 +819,6 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
     let namespace_id = &NamespaceId::parse("demo").expect("valid namespace id");
     let fork_id = &NamespaceId::parse("fork").expect("valid id");
     let upload_id = &UploadId::parse("upl_00000000000000000000000001").expect("valid upload id");
-    let actor = &loonfs_test_support::test_actor();
     let delete_options = &DeleteNamespaceOptions {
         expected_head_seq: Some(CommitSeq(7)),
     };
@@ -848,13 +847,12 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
     let cases = [
         (
             "create_namespace",
-            attempts(async |client| client.create_namespace(namespace_id, actor).await).await,
+            attempts(async |client| client.create_namespace(Some(namespace_id)).await).await,
             1,
         ),
         (
             "fork_namespace",
-            attempts(async |client| client.fork_namespace(namespace_id, fork_id, actor).await)
-                .await,
+            attempts(async |client| client.fork_namespace(namespace_id, Some(fork_id)).await).await,
             1,
         ),
         (
@@ -871,7 +869,7 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
             "create_directory_with_options with a commit id",
             attempts(async |client| {
                 client
-                    .create_directory_with_options(directory, actor, directory_options)
+                    .create_directory_with_options(directory, directory_options)
                     .await
             })
             .await,
@@ -881,11 +879,7 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
             "create_upload",
             attempts(async |client| {
                 client
-                    .create_upload(
-                        namespace_id,
-                        &loonfs_test_support::test_actor(),
-                        &CreateUploadBody::ServiceProxied {},
-                    )
+                    .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
                     .await
             })
             .await,
@@ -895,11 +889,7 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
             "create_direct_put_upload_target",
             attempts(async |client| {
                 client
-                    .create_direct_put_upload_target(
-                        namespace_id,
-                        &loonfs_test_support::test_actor(),
-                        Some(6),
-                    )
+                    .create_direct_put_upload_target(namespace_id, Some(6))
                     .await
             })
             .await,
@@ -915,12 +905,7 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
             "put_upload_content",
             attempts(async |client| {
                 client
-                    .put_upload_content(
-                        namespace_id,
-                        &loonfs_test_support::test_actor(),
-                        upload_id,
-                        b"content",
-                    )
+                    .put_upload_content(namespace_id, upload_id, b"content")
                     .await
             })
             .await,
@@ -932,7 +917,6 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
                 client
                     .complete_upload(
                         namespace_id,
-                        &loonfs_test_support::test_actor(),
                         upload_id,
                         &CompleteUploadBody::ServiceProxied {},
                     )
@@ -965,4 +949,119 @@ async fn retry_policy_sets_how_often_each_client_method_sends() {
     for (name, actual, expected) in cases {
         assert_eq!(actual, expected, "{name}");
     }
+}
+
+/// Builds a client for `http://example.invalid` with no actor, sending every
+/// request through `transport`.
+fn client_without_actor(transport: &scripted_transport::ScriptedTransport) -> Client {
+    Client::with_transport(
+        ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            actor: None,
+            request_timeout_ms: None,
+            disable_transient_retry: true,
+            ca_cert_path: None,
+        },
+        transport.clone(),
+        loonfs_types::Context::Service,
+    )
+    .expect("valid client config")
+}
+
+/// Checks that a mutation sends the client's actor as `Loonfs-Actor`, and
+/// that `with_actor` sends its own actor while the original client keeps
+/// sending the configured one.
+#[tokio::test]
+async fn a_mutation_sends_the_actor_of_its_client() {
+    let directory = NamespacePath::parse("demo", "/docs").expect("valid namespace path");
+    let other = loonfs_types::ActorId::parse("other-actor").expect("valid actor id");
+    let transport = scripted_transport::script(
+        std::iter::repeat_with(|| scripted_transport::Outcome::Success(b"{}".to_vec())).take(3),
+    );
+    let client = scripted_transport::client(&transport);
+    let overridden = client.with_actor(other.clone());
+    assert_eq!(client.actor(), Some(&loonfs_test_support::test_actor()));
+    assert_eq!(overridden.actor(), Some(&other));
+
+    for sender in [&client, &overridden, &client] {
+        let _ = sender.create_directory(&directory).await;
+    }
+
+    let actors: Vec<_> = transport
+        .sent()
+        .iter()
+        .map(|sent| sent.header("Loonfs-Actor").map(str::to_owned))
+        .collect();
+    assert_eq!(
+        actors,
+        vec![
+            Some("test-actor".to_owned()),
+            Some("other-actor".to_owned()),
+            Some("test-actor".to_owned()),
+        ]
+    );
+}
+
+/// Checks that a client without an actor reads, and refuses a mutation with
+/// a missing `actor` field before it sends a request.
+#[tokio::test]
+async fn a_client_without_an_actor_reads_but_refuses_a_mutation() {
+    let spec = NamespacePath::parse("demo", "/notes.txt").expect("valid namespace path");
+    let transport =
+        scripted_transport::script([scripted_transport::Outcome::Success(b"content".to_vec())]);
+    let client = client_without_actor(&transport);
+    assert_eq!(client.actor(), None);
+
+    let error = client
+        .create_directory(&spec)
+        .await
+        .expect_err("a mutation needs an actor");
+    assert_matches!(
+        error,
+        ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Missing {
+            field: "actor"
+        })
+    );
+    assert_eq!(transport.attempts(), 0);
+
+    assert_eq!(
+        client
+            .read_file(&spec)
+            .await
+            .expect("a read needs no actor"),
+        b"content"
+    );
+    assert_eq!(transport.attempts(), 1);
+    assert_eq!(transport.sent()[0].header("Loonfs-Actor"), None);
+}
+
+/// Checks that a namespace created or forked without an ID sends a body
+/// without one, so the server generates the ID.
+#[tokio::test]
+async fn a_namespace_created_or_forked_without_an_id_sends_none() {
+    let source = NamespaceId::parse("demo").expect("valid namespace id");
+    let transport = scripted_transport::script(
+        std::iter::repeat_with(|| scripted_transport::Outcome::Success(b"{}".to_vec())).take(3),
+    );
+    let client = scripted_transport::client(&transport);
+    let _ = client.create_namespace(None).await;
+    let _ = client.fork_namespace(&source, None).await;
+    let _ = client
+        .fork_namespace_for_rebase(&source, &source, None)
+        .await;
+
+    let bodies: Vec<serde_json::Value> = transport
+        .sent()
+        .iter()
+        .map(|sent| serde_json::from_slice(&sent.body).expect("json body"))
+        .collect();
+    assert_eq!(
+        bodies,
+        vec![
+            serde_json::json!({}),
+            serde_json::json!({}),
+            serde_json::json!({"source_namespace_id": "demo"}),
+        ]
+    );
 }

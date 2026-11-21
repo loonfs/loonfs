@@ -6,7 +6,7 @@ use crate::transport::{decode_json, SendPolicy, WireRequest};
 use crate::{Client, ClientError, PayloadSource, Result};
 use bytes::Bytes;
 use loonfs_types::options::DirectMultipartUploadOptions;
-use loonfs_types::{headers, ActorId, Checksum, NamespaceId, UploadId};
+use loonfs_types::{headers, Checksum, NamespaceId, UploadId};
 use loonfs_types::{
     CompleteUploadBody, CompletedUploadPart, CreateUploadBody, ObjectTransfer,
     SignUploadPartsRequest, SignUploadPartsResponse, UploadPartChecksumClaim, UploadSession,
@@ -17,14 +17,13 @@ impl Client {
     pub async fn create_upload(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         request: &CreateUploadBody,
     ) -> Result<UploadSession> {
         let url = self.namespace_url(namespace_id, "/uploads");
         // Do not retry automatically because each request creates a session.
         self.send_json(
             self.request(operations::CREATE_UPLOAD, &url)
-                .header(headers::ACTOR, actor.as_str())
+                .header(headers::ACTOR, self.mutation_actor()?.as_str())
                 .json(request)?,
         )
         .await
@@ -36,15 +35,10 @@ impl Client {
     pub async fn create_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         size_bytes: Option<u64>,
     ) -> Result<UploadSession> {
-        self.create_upload(
-            namespace_id,
-            actor,
-            &CreateUploadBody::DirectPut { size_bytes },
-        )
-        .await
+        self.create_upload(namespace_id, &CreateUploadBody::DirectPut { size_bytes })
+            .await
     }
 
     /// Opens a direct multipart upload session with the server's default part
@@ -52,11 +46,9 @@ impl Client {
     pub async fn create_direct_multipart_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
     ) -> Result<UploadSession> {
         self.create_direct_multipart_upload_target_with_options(
             namespace_id,
-            actor,
             &DirectMultipartUploadOptions::default(),
         )
         .await
@@ -70,12 +62,10 @@ impl Client {
     pub async fn create_direct_multipart_upload_target_with_options(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         options: &DirectMultipartUploadOptions,
     ) -> Result<UploadSession> {
         self.create_upload(
             namespace_id,
-            actor,
             &CreateUploadBody::DirectMultipart {
                 part_size_bytes: options.part_size_bytes,
             },
@@ -90,7 +80,6 @@ impl Client {
     pub async fn sign_upload_parts(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
         parts: Vec<UploadPartChecksumClaim>,
     ) -> Result<SignUploadPartsResponse> {
@@ -98,7 +87,7 @@ impl Client {
         // Signing does not change upload state, so this request may be retried.
         self.send_json(
             self.request(operations::SIGN_UPLOAD_PARTS, &url)
-                .header(headers::ACTOR, actor.as_str())
+                .header(headers::ACTOR, self.mutation_actor()?.as_str())
                 .json(&SignUploadPartsRequest { parts })?,
         )
         .await
@@ -169,14 +158,13 @@ impl Client {
     pub async fn put_upload_content(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadSession> {
         // Proxied uploads are the request most likely to hit the server's
         // concurrency cap; staging the same bytes again is idempotent.
         let request = self
-            .put_upload_content_request(namespace_id, actor, upload_id)
+            .put_upload_content_request(namespace_id, upload_id)?
             .body(Bytes::copy_from_slice(bytes));
         self.send_json(request).await
     }
@@ -196,11 +184,10 @@ impl Client {
     pub async fn put_upload_content_stream(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
         source: PayloadSource,
     ) -> Result<UploadSession> {
-        let request = self.put_upload_content_request(namespace_id, actor, upload_id);
+        let request = self.put_upload_content_request(namespace_id, upload_id)?;
         let (stream, size_bytes) = source.into_stream();
         decode_json(
             &self
@@ -212,13 +199,13 @@ impl Client {
     fn put_upload_content_request(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
-    ) -> WireRequest {
+    ) -> Result<WireRequest> {
         let url = self.namespace_url(namespace_id, &format!("/uploads/{upload_id}/content"));
-        self.request(operations::PUT_UPLOAD_CONTENT, &url)
-            .header(headers::ACTOR, actor.as_str())
-            .header("content-type", "application/octet-stream")
+        Ok(self
+            .request(operations::PUT_UPLOAD_CONTENT, &url)
+            .header(headers::ACTOR, self.mutation_actor()?.as_str())
+            .header("content-type", "application/octet-stream"))
     }
 
     /// Ends an open upload session and deletes the object it was writing.
@@ -229,14 +216,13 @@ impl Client {
     pub async fn abort_upload(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
     ) -> Result<UploadSession> {
         let url = self.namespace_url(namespace_id, &format!("/uploads/{upload_id}/abort"));
         // Aborting is idempotent: a repeat reports the abort that stands.
         self.send_json(
             self.request(operations::ABORT_UPLOAD, &url)
-                .header(headers::ACTOR, actor.as_str()),
+                .header(headers::ACTOR, self.mutation_actor()?.as_str()),
         )
         .await
     }
@@ -249,13 +235,12 @@ impl Client {
     pub async fn get_upload(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
     ) -> Result<UploadSession> {
         let url = self.namespace_url(namespace_id, &format!("/uploads/{upload_id}"));
         self.send_json(
             self.request(operations::GET_UPLOAD, &url)
-                .header(headers::ACTOR, actor.as_str()),
+                .header(headers::ACTOR, self.mutation_actor()?.as_str()),
         )
         .await
     }
@@ -266,7 +251,6 @@ impl Client {
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         upload_id: &UploadId,
         request: &CompleteUploadBody,
     ) -> Result<UploadSession> {
@@ -274,7 +258,7 @@ impl Client {
         // The durable completed-session record replays an identical completion without new effect.
         self.send_json(
             self.request(operations::COMPLETE_UPLOAD, &url)
-                .header(headers::ACTOR, actor.as_str())
+                .header(headers::ACTOR, self.mutation_actor()?.as_str())
                 .json(request)?,
         )
         .await

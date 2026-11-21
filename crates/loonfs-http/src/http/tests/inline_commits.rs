@@ -431,6 +431,7 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
             ClientConfig {
                 server_url: format!("http://{address}"),
                 auth_token: Some("test-token".into()),
+                actor: Some(loonfs_test_support::test_actor()),
                 request_timeout_ms: None,
                 disable_transient_retry: true,
                 ca_cert_path: None,
@@ -444,16 +445,14 @@ async fn rust_client_small_puts_use_one_request_only_when_inline_is_advertised()
         let mut options = PutFileOptions::default();
         options.commit.commit_id = Some(CommitId::parse("client-small").expect("commit id"));
         let first = client
-            .put_file_with_options(&spec, b"same", &loonfs_test_support::test_actor(), &options)
+            .put_file_with_options(&spec, b"same", &options)
             .await
             .expect("put");
         assert_eq!(
             requests.swap(0, Ordering::SeqCst),
             if threshold.is_some() { 1 } else { 4 }
         );
-        let retry = client
-            .put_file_with_options(&spec, b"same", &loonfs_test_support::test_actor(), &options)
-            .await;
+        let retry = client.put_file_with_options(&spec, b"same", &options).await;
         if threshold.is_some() {
             assert_eq!(retry.expect("replay"), first);
             assert_eq!(requests.load(Ordering::SeqCst), 1);

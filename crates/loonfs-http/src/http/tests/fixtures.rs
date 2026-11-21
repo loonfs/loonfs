@@ -219,6 +219,7 @@ pub(super) async fn serve(router: axum::Router) -> (Client, SocketAddr, JoinHand
         ClientConfig {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".into()),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,

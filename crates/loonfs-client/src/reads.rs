@@ -415,12 +415,29 @@ impl Client {
     }
 
     /// Returns the bytes of one retained revision of a file.
+    ///
+    /// See [`Self::read_file_revision_with_options`].
     pub async fn read_file_revision(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        let url = self.file_content_url(spec, Some(revision_no), &ReadFileOptions::default());
+        self.read_file_revision_with_options(spec, revision_no, &ReadFileOptions::default())
+            .await
+    }
+
+    /// Returns the bytes of one retained revision of a file, at the
+    /// consistency that `options` sets.
+    ///
+    /// A snapshot captures one revision of each file, so options that read a
+    /// snapshot return `invalid_request`.
+    pub async fn read_file_revision_with_options(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+        options: &ReadFileOptions,
+    ) -> Result<Vec<u8>> {
+        let url = self.file_content_url(spec, Some(revision_no), options);
         Ok(self
             .call(&self.request(operations::GET_FILE_CONTENT, &url))
             .await?
@@ -563,18 +580,36 @@ impl Client {
     }
 
     /// Reads and verifies one retained file revision by inode identity.
+    ///
+    /// See [`Self::read_file_revision_by_inode_with_options`].
     pub async fn read_file_revision_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        let url = self.inode_revision_content_url(
+        self.read_file_revision_by_inode_with_options(
             namespace_id,
             inode_id,
             revision_no,
             &ReadFileOptions::default(),
-        );
+        )
+        .await
+    }
+
+    /// Reads and verifies one retained file revision by inode identity, at
+    /// the consistency or the snapshot that `options` sets.
+    ///
+    /// Options that read a snapshot, or one of the namespace's fork
+    /// snapshots, read the revision that the snapshot's manifest keeps.
+    pub async fn read_file_revision_by_inode_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        options: &ReadFileOptions,
+    ) -> Result<Vec<u8>> {
+        let url = self.inode_revision_content_url(namespace_id, inode_id, revision_no, options);
         Ok(self
             .call(&self.request(operations::GET_FILE_REVISION_CONTENT_BY_INODE, &url))
             .await?
@@ -640,7 +675,7 @@ impl Client {
         query.build()
     }
 
-    fn inode_revision_content_url(
+    pub(crate) fn inode_revision_content_url(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,

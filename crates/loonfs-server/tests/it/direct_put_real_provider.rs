@@ -73,7 +73,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     harness
         .client
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id))
         .await
         .expect("create namespace");
 
@@ -84,11 +84,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
 
     let begin = harness
         .client
-        .create_direct_put_upload_target(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            Some(bytes.len() as u64),
-        )
+        .create_direct_put_upload_target(&namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -104,7 +100,6 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
         .client
         .complete_upload(
             &namespace_id,
-            &loonfs_test_support::test_actor(),
             &begin.upload_id,
             &CompleteUploadBody::DirectPut {
                 content: direct_put_claim(bytes, checksum_algorithm),
@@ -257,11 +252,7 @@ async fn assert_wrong_direct_put_bytes_rejected(
     let mut wrong_bytes = *bytes;
     wrong_bytes[0] ^= 1;
     let begin = client
-        .create_direct_put_upload_target(
-            namespace_id,
-            &loonfs_test_support::test_actor(),
-            Some(bytes.len() as u64),
-        )
+        .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin wrong-bytes direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -275,7 +266,6 @@ async fn assert_wrong_direct_put_bytes_rejected(
         client
             .complete_upload(
                 namespace_id,
-                &loonfs_test_support::test_actor(),
                 &begin.upload_id,
                 &CompleteUploadBody::DirectPut {
                     content: direct_put_claim(bytes, checksum_algorithm),
@@ -304,11 +294,7 @@ async fn assert_direct_put_requires_its_signed_headers(
         ),
     ] {
         let begin = client
-            .create_direct_put_upload_target(
-                namespace_id,
-                &loonfs_test_support::test_actor(),
-                Some(bytes.len() as u64),
-            )
+            .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
             .await
             .expect("begin meddled direct put");
         let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -325,7 +311,6 @@ async fn assert_direct_put_requires_its_signed_headers(
             client
                 .complete_upload(
                     namespace_id,
-                    &loonfs_test_support::test_actor(),
                     &begin.upload_id,
                     &CompleteUploadBody::DirectPut {
                         content: direct_put_claim(bytes, checksum_algorithm),
@@ -346,11 +331,7 @@ async fn assert_direct_put_is_no_replace(
 ) {
     let bytes = b"duplicate direct put bytes\n";
     let begin = client
-        .create_direct_put_upload_target(
-            namespace_id,
-            &loonfs_test_support::test_actor(),
-            Some(bytes.len() as u64),
-        )
+        .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin duplicate direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -368,7 +349,6 @@ async fn assert_direct_put_is_no_replace(
     let complete = client
         .complete_upload(
             namespace_id,
-            &loonfs_test_support::test_actor(),
             &begin.upload_id,
             &CompleteUploadBody::DirectPut {
                 content: direct_put_claim(bytes, checksum_algorithm),
@@ -571,16 +551,15 @@ async fn gcp_gcs_append_keeps_crc32c_after_a_snapshot() {
     .await;
     let namespace_id = NamespaceId::parse("gcs-append").expect("namespace");
     let target = NamespacePath::parse(namespace_id.as_str(), "/append.bin").expect("path");
-    let actor = loonfs_test_support::test_actor();
     harness
         .client
-        .create_namespace(&namespace_id, &actor)
+        .create_namespace(Some(&namespace_id))
         .await
         .expect("namespace");
     let mut payload = vec![b'a'; 9 * 1024 * 1024];
     harness
         .client
-        .put_file(&target, &payload, &actor)
+        .put_file(&target, &payload)
         .await
         .expect("put base");
     let base = harness.client.stat(&target).await.expect("stat base");
@@ -590,7 +569,7 @@ async fn gcp_gcs_append_keeps_crc32c_after_a_snapshot() {
     let tail = vec![b'b'; 4096];
     harness
         .client
-        .append_file(&target, &tail, &actor)
+        .append_file(&target, &tail)
         .await
         .expect("append");
     payload.extend_from_slice(&tail);
@@ -665,7 +644,7 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
     let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
     harness
         .client
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id))
         .await
         .expect("create namespace");
 
@@ -697,11 +676,7 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
 ) {
     let bytes = b"gcs completion reads the object back\n";
     let begin = client
-        .create_direct_put_upload_target(
-            namespace_id,
-            &loonfs_test_support::test_actor(),
-            Some(bytes.len() as u64),
-        )
+        .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (checksum_algorithm, access) = direct_put_of(&begin);
@@ -714,7 +689,6 @@ async fn assert_gcs_completion_judges_the_object_that_is_there(
     let complete = client
         .complete_upload(
             namespace_id,
-            &loonfs_test_support::test_actor(),
             &begin.upload_id,
             &CompleteUploadBody::DirectPut {
                 content: direct_put_claim(bytes, checksum_algorithm),
@@ -743,11 +717,7 @@ async fn assert_gcs_signed_writes_stay_under_the_configured_prefix(
     let bytes = b"gcs prefix scoping\n";
     let begin = harness
         .client
-        .create_direct_put_upload_target(
-            &namespace_id,
-            &loonfs_test_support::test_actor(),
-            Some(bytes.len() as u64),
-        )
+        .create_direct_put_upload_target(&namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
@@ -797,11 +767,7 @@ async fn assert_gcs_signed_writes_stay_under_the_configured_prefix(
 async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"gcs expiry\n";
     let begin = client
-        .create_direct_put_upload_target(
-            namespace_id,
-            &loonfs_test_support::test_actor(),
-            Some(bytes.len() as u64),
-        )
+        .create_direct_put_upload_target(namespace_id, Some(bytes.len() as u64))
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
@@ -834,12 +800,7 @@ async fn assert_gcs_cap_bound_object_moves_only_directly(
     // the only direct transport available, and the proxy will not take it.
     harness
         .client
-        .put_file_with_options(
-            &target,
-            &payload,
-            &loonfs_test_support::test_actor(),
-            &put_options("gcs-cap-bound"),
-        )
+        .put_file_with_options(&target, &payload, &put_options("gcs-cap-bound"))
         .await
         .expect("an object past the proxy cap takes the whole-object direct write");
 

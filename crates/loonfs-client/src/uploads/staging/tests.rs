@@ -442,7 +442,6 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
                 })
                 .boxed(),
             ),
-            &loonfs_test_support::test_actor(),
             &PutFileOptions::default(),
             &journal,
             None,
@@ -467,7 +466,6 @@ async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
         .put_file_stream_resumable(
             &spec(),
             source,
-            &loonfs_test_support::test_actor(),
             &PutFileOptions::default(),
             &resumed_journal,
             Some(&resume),
@@ -515,7 +513,6 @@ async fn a_resumed_multipart_put_uses_the_recorded_checksum_algorithm() {
         .put_file_stream_resumable(
             &spec(),
             source,
-            &loonfs_test_support::test_actor(),
             &PutFileOptions::default(),
             &journal,
             Some(&resume),
@@ -547,7 +544,7 @@ async fn a_direct_multipart_put_holds_only_its_window() {
         scripted_transport::script(multipart_script(TEST_PAYLOAD_PARTS, content_ref(&payload)));
 
     client(&transport)
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
+        .put_file_stream(&spec(), source)
         .await
         .expect("a scripted multipart put should succeed");
 
@@ -595,7 +592,7 @@ async fn a_proxied_put_streams_its_body() {
     ]);
 
     client(&transport)
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
+        .put_file_stream(&spec(), source)
         .await
         .expect("a scripted proxied put should succeed");
 
@@ -633,7 +630,7 @@ async fn an_unknown_length_payload_past_the_proxy_cap_takes_direct_put() {
     ]);
 
     client(&transport)
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
+        .put_file_stream(&spec(), source)
         .await
         .expect("an unmeasured payload past the proxy cap should take the direct write");
 
@@ -672,7 +669,7 @@ async fn an_unknown_length_payload_takes_direct_put_without_a_preflight_read() {
     ]);
 
     client(&transport)
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
+        .put_file_stream(&spec(), source)
         .await
         .expect("an unmeasured payload should take the direct write");
 
@@ -704,7 +701,7 @@ async fn a_direct_put_streams_its_payload_without_ever_holding_it() {
     ]);
 
     client(&transport)
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
+        .put_file_stream(&spec(), source)
         .await
         .expect("a large streamed direct put should succeed");
 
@@ -737,7 +734,7 @@ async fn a_capability_failure_does_not_downgrade_a_measured_upload_to_the_proxy(
     let transport = scripted_transport::script([Outcome::Success(b"not json".to_vec())]);
 
     let error = client(&transport)
-        .put_file(&spec(), b"payload", &loonfs_test_support::test_actor())
+        .put_file(&spec(), b"payload")
         .await
         .expect_err("capability discovery failure must remain visible");
 
@@ -768,7 +765,7 @@ async fn a_file_backed_direct_put_reads_the_file_once_without_spooling_it() {
     ]);
 
     client(&transport)
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
+        .put_file_stream(&spec(), source)
         .await
         .expect("a file-backed direct put should succeed");
 
@@ -806,6 +803,7 @@ async fn request_head_for(source: PayloadSource) -> String {
         ClientConfig {
             server_url: format!("http://{address}"),
             auth_token: None,
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: true,
             ca_cert_path: None,
@@ -815,12 +813,7 @@ async fn request_head_for(source: PayloadSource) -> String {
     .expect("valid client config");
     // The response is not the point; the request head is.
     let _ = client
-        .put_upload_content_stream(
-            &namespace_id(),
-            &loonfs_test_support::test_actor(),
-            &upload_id(),
-            source,
-        )
+        .put_upload_content_stream(&namespace_id(), &upload_id(), source)
         .await;
     served.await.expect("probe task")
 }
@@ -909,7 +902,6 @@ async fn a_part_is_signed_again_after_the_provider_refuses_it_and_not_after_a_tr
             .put_file_stream_resumable(
                 &spec(),
                 source(),
-                &loonfs_test_support::test_actor(),
                 &PutFileOptions::default(),
                 &RecordingJournal::default(),
                 None,
@@ -941,7 +933,6 @@ async fn a_part_is_signed_again_after_the_provider_refuses_it_and_not_after_a_tr
         .put_file_stream_resumable(
             &spec(),
             source(),
-            &loonfs_test_support::test_actor(),
             &PutFileOptions::default(),
             &RecordingJournal::default(),
             None,
@@ -975,7 +966,6 @@ async fn a_part_is_signed_again_after_the_provider_refuses_it_and_not_after_a_tr
         .put_file_stream_resumable(
             &spec(),
             source(),
-            &loonfs_test_support::test_actor(),
             &PutFileOptions::default(),
             &RecordingJournal::default(),
             None,
@@ -1007,7 +997,6 @@ async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() 
                 PayloadSource::stream(
                     futures::stream::once(async move { Ok(Bytes::from(bytes)) }).boxed(),
                 ),
-                &loonfs_test_support::test_actor(),
                 &PutFileOptions::default(),
                 &FailingJournal { fail_at_begin },
                 None,
@@ -1047,7 +1036,7 @@ async fn a_one_shot_upload_aborts_its_session_once_when_completion_fails() {
         }));
         let transport = scripted_transport::script(script);
         let error = client_without_retry(&transport)
-            .put_file(&spec(), &payload, &loonfs_test_support::test_actor())
+            .put_file(&spec(), &payload)
             .await
             .expect_err("the completion failed");
         assert_matches!(
@@ -1106,14 +1095,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
     options.expected_inode_id = Some(loonfs_types::InodeId(7));
     options.expected_revision_no = Some(loonfs_types::RevisionNo(9));
     client_without_retry(&transport)
-        .put_file_stream_resumable(
-            &spec(),
-            source,
-            &loonfs_test_support::test_actor(),
-            &options,
-            &journal,
-            None,
-        )
+        .put_file_stream_resumable(&spec(), source, &options, &journal, None)
         .await
         .expect_err("lost acknowledgement");
     assert_eq!(transport.attempts(), 5);
@@ -1145,7 +1127,8 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
     assert_eq!(saved.content_tokens, vec![proof]);
     let transport = scripted_transport::script(vec![commit_succeeded()]);
     client_without_retry(&transport)
-        .commit(&namespace_id(), &saved_actor, &saved)
+        .with_actor(saved_actor)
+        .commit(&namespace_id(), &saved)
         .await
         .expect("replay exact request");
     assert_eq!(transport.attempts(), 1);
@@ -1160,7 +1143,6 @@ async fn a_commit_journal_failure_prevents_submission_of_completed_content() {
             &spec(),
             content_ref(b"data"),
             None,
-            &loonfs_test_support::test_actor(),
             &PutFileOptions::default(),
             Some(&FailingJournal {
                 fail_at_begin: false,
@@ -1197,7 +1179,7 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
         let client = client_without_retry(&transport);
         client.get_capabilities().await.expect("capabilities");
         let prepared = client
-            .prepare_content(&namespace_id(), &loonfs_test_support::test_actor(), bytes)
+            .prepare_content(&namespace_id(), bytes)
             .await
             .expect("prepare");
         assert!(prepared.content_ref().is_none());
@@ -1205,12 +1187,7 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
         let mut options = PutFileOptions::default();
         options.commit.commit_id = Some(CommitId::parse("inline-retry").expect("id"));
         client
-            .put_file_prepared_with_options(
-                &spec(),
-                prepared,
-                &loonfs_test_support::test_actor(),
-                &options,
-            )
+            .put_file_prepared_with_options(&spec(), prepared, &options)
             .await
             .expect("publish");
         let journal = RecordingJournal::default();
@@ -1220,7 +1197,6 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
                 PayloadSource::stream(
                     futures::stream::iter([Ok(Bytes::copy_from_slice(bytes))]).boxed(),
                 ),
-                &loonfs_test_support::test_actor(),
                 &options,
                 &journal,
                 None,
@@ -1228,7 +1204,7 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
             .await
             .expect("stream");
         client
-            .put_file_with_options(&spec(), bytes, &loonfs_test_support::test_actor(), &options)
+            .put_file_with_options(&spec(), bytes, &options)
             .await
             .expect("put bytes");
         assert_eq!(transport.attempts(), 4);
@@ -1254,11 +1230,7 @@ async fn inline_preparation_sends_only_the_commit_and_journals_every_byte() {
         assert_eq!(recovered, request);
         let transport = scripted_transport::script([commit_succeeded()]);
         client_without_retry(&transport)
-            .commit(
-                &namespace_id(),
-                &loonfs_test_support::test_actor(),
-                &recovered,
-            )
+            .commit(&namespace_id(), &recovered)
             .await
             .expect("recover");
         assert_eq!(transport.attempts(), 1);
@@ -1277,7 +1249,7 @@ async fn streams_over_the_inline_limit_upload_the_buffered_prefix_and_remainder(
     ]);
     let (source, _) = watched_source(bytes, 11);
     client_without_retry(&transport)
-        .put_file_stream(&spec(), source, &loonfs_test_support::test_actor())
+        .put_file_stream(&spec(), source)
         .await
         .expect("put");
     let sent = transport.sent();
@@ -1324,11 +1296,7 @@ async fn staging_rejects_a_non_completed_completion_response() {
         let client = client(&transport);
 
         let error = client
-            .complete_staged(
-                &namespace_id,
-                &loonfs_test_support::test_actor(),
-                &upload_id,
-            )
+            .complete_staged(&namespace_id, &upload_id)
             .await
             .expect_err("a completion response must report completed");
         assert_matches!(

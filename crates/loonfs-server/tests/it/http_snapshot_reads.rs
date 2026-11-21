@@ -212,23 +212,19 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     let namespace = namespace_id("snapshot-read-state");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
     let deleted = NamespacePath::parse(namespace.as_str(), "/deleted.txt").expect("deleted path");
     harness
         .client
-        .put_file(&keep, b"captured bytes", &loonfs_test_support::test_actor())
+        .put_file(&keep, b"captured bytes")
         .await
         .expect("create kept file");
     harness
         .client
-        .put_file(
-            &deleted,
-            b"deleted after snapshot",
-            &loonfs_test_support::test_actor(),
-        )
+        .put_file(&deleted, b"deleted after snapshot")
         .await
         .expect("create deleted file");
     let captured_entry = harness
@@ -245,28 +241,18 @@ async fn snapshot_reads_answer_the_captured_namespace() {
 
     harness
         .client
-        .put_file_with_options(
-            &keep,
-            b"current bytes",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&keep, b"current bytes", &replace_file_options())
         .await
         .expect("replace kept file");
     let added = NamespacePath::parse(namespace.as_str(), "/added.txt").expect("added path");
     harness
         .client
-        .put_file_with_options(
-            &added,
-            b"added",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&added, b"added", &replace_file_options())
         .await
         .expect("add current file");
     harness
         .client
-        .delete_path(&deleted, &loonfs_test_support::test_actor())
+        .delete_path(&deleted)
         .await
         .expect("delete captured file");
 
@@ -374,13 +360,13 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
     let namespace = namespace_id("snapshot-inode-reads");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
     harness
         .client
-        .put_file(&keep, b"captured bytes", &loonfs_test_support::test_actor())
+        .put_file(&keep, b"captured bytes")
         .await
         .expect("create file");
     let inode_id = harness
@@ -398,7 +384,7 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
     let fork_id = namespace_id("snapshot-inode-reads-fork");
     let fork = harness
         .client
-        .fork_namespace(&namespace, &fork_id, &loonfs_test_support::test_actor())
+        .fork_namespace(&namespace, Some(&fork_id))
         .await
         .expect("fork namespace");
     let fork_point_snapshot_id = fork
@@ -407,12 +393,7 @@ async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put()
         .fork_point_snapshot_id;
     harness
         .client
-        .put_file_with_options(
-            &keep,
-            b"current bytes",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&keep, b"current bytes", &replace_file_options())
         .await
         .expect("replace file");
 
@@ -503,16 +484,15 @@ async fn snapshot_revision_listings_stop_at_the_captured_revision() {
     let namespace = namespace_id("snapshot-revisions");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
     let replace_options = replace_file_options();
-    let actor = loonfs_test_support::test_actor();
     for bytes in [b"revision 1", b"revision 2"] {
         harness
             .client
-            .put_file_with_options(&keep, bytes, &actor, &replace_options)
+            .put_file_with_options(&keep, bytes, &replace_options)
             .await
             .expect("put a revision before the snapshot");
     }
@@ -520,7 +500,7 @@ async fn snapshot_revision_listings_stop_at_the_captured_revision() {
     for bytes in [b"revision 3", b"revision 4"] {
         harness
             .client
-            .put_file_with_options(&keep, bytes, &actor, &replace_options)
+            .put_file_with_options(&keep, bytes, &replace_options)
             .await
             .expect("put a revision after the snapshot");
     }
@@ -651,7 +631,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     let namespace = namespace_id("snapshot-change-feed");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     for name in ["one", "two", "three", "four"] {
@@ -659,12 +639,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
             NamespacePath::parse(namespace.as_str(), &format!("/{name}.txt")).expect("file path");
         harness
             .client
-            .put_file_with_options(
-                &path,
-                name.as_bytes(),
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&path, name.as_bytes(), &replace_file_options())
             .await
             .expect("seed change");
     }
@@ -672,12 +647,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     let later = NamespacePath::parse(namespace.as_str(), "/later.txt").expect("later path");
     harness
         .client
-        .put_file_with_options(
-            &later,
-            b"later",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&later, b"later", &replace_file_options())
         .await
         .expect("write after snapshot");
 
@@ -749,18 +719,13 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
     let namespace = namespace_id("snapshot-read-errors");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let keep = NamespacePath::parse(namespace.as_str(), "/keep.txt").expect("keep path");
     harness
         .client
-        .put_file_with_options(
-            &keep,
-            b"kept",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&keep, b"kept", &replace_file_options())
         .await
         .expect("create file");
     let deleted = create_snapshot(&harness.server_url, namespace.as_str(), "deleted", 10_000);
@@ -952,7 +917,7 @@ async fn snapshot_page_cursors_resume_one_snapshot_directory() {
     let namespace = namespace_id("snapshot-pagination");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     for name in ["a", "c", "e", "g"] {
@@ -960,12 +925,7 @@ async fn snapshot_page_cursors_resume_one_snapshot_directory() {
             NamespacePath::parse(namespace.as_str(), &format!("/{name}.txt")).expect("file path");
         harness
             .client
-            .put_file_with_options(
-                &path,
-                name.as_bytes(),
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&path, name.as_bytes(), &replace_file_options())
             .await
             .expect("seed file");
     }
@@ -992,7 +952,7 @@ async fn snapshot_page_cursors_resume_one_snapshot_directory() {
             .expect("removed path");
         harness
             .client
-            .delete_path(&removed, &loonfs_test_support::test_actor())
+            .delete_path(&removed)
             .await
             .expect("remove captured file");
     }
@@ -1001,12 +961,7 @@ async fn snapshot_page_cursors_resume_one_snapshot_directory() {
             NamespacePath::parse(namespace.as_str(), &format!("/{name}.txt")).expect("added path");
         harness
             .client
-            .put_file_with_options(
-                &path,
-                name.as_bytes(),
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&path, name.as_bytes(), &replace_file_options())
             .await
             .expect("add current file");
     }

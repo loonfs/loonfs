@@ -145,7 +145,8 @@ impl UploadJournal {
                 upload_id.clone(),
             )
         };
-        let error = match client.commit(namespace_id, &actor_id, &request).await {
+        let client = client.with_actor(actor_id);
+        let error = match client.commit(namespace_id, &request).await {
             Ok(commit) => return Ok(commit),
             Err(error) if error.code() == Some(loonfs_types::ErrorCode::ContentNotPrepared) => {
                 error
@@ -155,9 +156,7 @@ impl UploadJournal {
         let Some(upload_id) = upload_id else {
             return Err(error.into());
         };
-        let session = client
-            .get_upload(namespace_id, &actor_id, &upload_id)
-            .await?;
+        let session = client.get_upload(namespace_id, &upload_id).await?;
         let loonfs_types::UploadSessionStatus::Completed {
             content_token: Some(token),
             ..
@@ -166,7 +165,7 @@ impl UploadJournal {
             return Err(error.into());
         };
         request.content_tokens = vec![token];
-        Ok(client.commit(namespace_id, &actor_id, &request).await?)
+        Ok(client.commit(namespace_id, &request).await?)
     }
 
     pub(crate) fn for_upload(
@@ -482,7 +481,7 @@ mod tests {
             LocalFsStore::new(directory.path().join("store")).expect("local store"),
             KeyPredicate::content_blob(),
         ));
-        let target = ResolvedTarget::over_store(
+        let mut target = ResolvedTarget::over_store(
             store.clone(),
             None,
             ConfiguredObjectStoreKind::LocalFs,
@@ -495,10 +494,11 @@ mod tests {
         )
         .await
         .expect("embedded target");
+        target.act_as(loonfs_test_support::test_actor());
         let spec = NamespacePath::parse("demo", "/file").expect("path");
         target
             .client
-            .create_namespace(spec.namespace(), &loonfs_test_support::test_actor())
+            .create_namespace(Some(spec.namespace()))
             .await
             .expect("namespace");
         let path = directory.path().join("journal.json");
@@ -508,7 +508,6 @@ mod tests {
             .put_file_stream_resumable(
                 &spec,
                 loonfs_client::PayloadSource::reader(std::io::Cursor::new(b"retained content")),
-                &journal.actor_id(),
                 &journal.options(),
                 &InterruptedUpload(&journal),
                 None,

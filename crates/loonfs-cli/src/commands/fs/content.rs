@@ -94,7 +94,7 @@ pub(crate) async fn run_filesystem_annotate(
         .profile
         .target
         .client
-        .update_attributes_with_options(&spec, context.actor(), changes, &options)
+        .update_attributes_with_options(&spec, changes, &options)
         .await
         .map_err(|error| context.fail(error))?;
 

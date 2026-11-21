@@ -119,7 +119,7 @@ async fn http_snapshots_are_listed_extended_and_deleted_idempotently() {
     let namespace = namespace_id("lifecycle");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -226,7 +226,7 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
     let namespace = namespace_id("validation");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -300,7 +300,7 @@ async fn http_user_and_maintenance_snapshot_listings_list_the_same_snapshot() {
     let namespace = namespace_id("inventory");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let expiring = create_snapshot(
@@ -315,11 +315,7 @@ async fn http_user_and_maintenance_snapshot_listings_list_the_same_snapshot() {
     assert_eq!(unexpiring.expires_at_ms, None);
     harness
         .client
-        .fork_namespace(
-            &namespace,
-            &namespace_id("inventory-fork"),
-            &loonfs_test_support::test_actor(),
-        )
+        .fork_namespace(&namespace, Some(&namespace_id("inventory-fork")))
         .await
         .expect("fork namespace");
 
@@ -403,7 +399,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
     let namespace = NamespaceId::parse("demo").expect("namespace id");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -470,7 +466,7 @@ async fn user_and_maintenance_snapshot_listings_reject_each_others_cursors() {
     let namespace = NamespaceId::parse("demo").expect("namespace id");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     for name in ["first", "second"] {
@@ -560,7 +556,7 @@ async fn user_and_maintenance_snapshot_retrieves_return_their_listed_rows() {
     let namespace = NamespaceId::parse("demo").expect("namespace id");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let created = harness

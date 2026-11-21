@@ -420,6 +420,9 @@ fn remote_client_config_from(
                 .filter(|token| !token.trim().is_empty())
                 .map(SecretString::from)
         }),
+        // A command that mutates resolves its actor and sets it with
+        // `Client::with_actor`.
+        actor: None,
         request_timeout_ms: None,
         disable_transient_retry: transient_retry == TransientRetry::NoRetry,
         ca_cert_path: ca_cert_path.map(ToOwned::to_owned),

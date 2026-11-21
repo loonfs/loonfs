@@ -26,7 +26,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -36,7 +36,6 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
         .put_file_with_options(
             &NamespacePath::parse("demo", "/first.txt").expect("first target"),
             b"first payload\n",
-            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
@@ -54,7 +53,6 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
         .put_file_with_options(
             &NamespacePath::parse("demo", "/second.txt").expect("second target"),
             b"second payload\n",
-            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
@@ -101,7 +99,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/retry.txt").expect("target");
@@ -134,7 +132,6 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .client
         .commit(
             &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
             &commit_request(staged.content_ref.clone(), token.clone()),
         )
         .await
@@ -145,7 +142,6 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .client
         .commit(
             &namespace_id("demo"),
-            &loonfs_test_support::test_actor(),
             &commit_request(staged.content_ref.clone(), token),
         )
         .await
@@ -158,7 +154,6 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .put_file_with_options(
             &target,
             b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_types::options::CommitOptions {
@@ -198,7 +193,7 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let commit_id = CommitId::parse("req-path-put").expect("valid commit id");
@@ -216,24 +211,14 @@ async fn http_put_conflict_stands_when_only_the_path_changed() {
     let first_target = NamespacePath::parse("demo", "/a.txt").expect("first target");
     let first = harness
         .client
-        .put_file_with_options(
-            &first_target,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options,
-        )
+        .put_file_with_options(&first_target, b"stable bytes\n", &options)
         .await
         .expect("first put");
 
     let second_target = NamespacePath::parse("demo", "/b.txt").expect("second target");
     match harness
         .client
-        .put_file_with_options(
-            &second_target,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options,
-        )
+        .put_file_with_options(&second_target, b"stable bytes\n", &options)
         .await
     {
         Err(ClientError::Api { response, .. }) => {
@@ -279,7 +264,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/trimmed.txt").expect("target");
@@ -297,12 +282,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
 
     let first = harness
         .client
-        .put_file_with_options(
-            &target,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options(),
-        )
+        .put_file_with_options(&target, b"stable bytes\n", &options())
         .await
         .expect("first put");
 
@@ -332,12 +312,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
 
     match harness
         .client
-        .put_file_with_options(
-            &target,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options(),
-        )
+        .put_file_with_options(&target, b"stable bytes\n", &options())
         .await
     {
         Err(ClientError::Api { response, .. }) => {
@@ -374,18 +349,13 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
 
     harness
         .client
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
     let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
     harness
         .client
-        .put_file_with_options(
-            &source,
-            b"source bytes\n",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&source, b"source bytes\n", &replace_file_options())
         .await
         .expect("seed source");
 
@@ -395,7 +365,6 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .copy_path_with_options(
             &source,
             &copied,
-            &loonfs_test_support::test_actor(),
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_types::options::CommitOptions {
@@ -414,7 +383,6 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .copy_path_with_options(
             &source,
             &copied,
-            &loonfs_test_support::test_actor(),
             &CopyOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_types::options::CommitOptions {
@@ -440,7 +408,6 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .move_path_with_options(
             &copied,
             &moved,
-            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_types::options::CommitOptions {
@@ -459,7 +426,6 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .move_path_with_options(
             &copied,
             &moved,
-            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_types::options::CommitOptions {
@@ -485,7 +451,6 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .client
         .delete_path_with_options(
             &moved,
-            &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
@@ -501,7 +466,6 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .client
         .delete_path_with_options(
             &moved,
-            &loonfs_test_support::test_actor(),
             &DeleteOptions {
                 commit: loonfs_types::options::CommitOptions {
                     preconditions: Vec::new(),
@@ -543,17 +507,12 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     let client_b = server_b.client.clone();
 
     client_a
-        .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace_id("demo")))
         .await
         .expect("create namespace");
     let host_a_target = NamespacePath::parse("demo", "/docs/host-a.txt").expect("host a target");
     client_a
-        .put_file_with_options(
-            &host_a_target,
-            b"host a\n",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&host_a_target, b"host a\n", &replace_file_options())
         .await
         .expect("host a write");
 
@@ -564,7 +523,6 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         .move_path_with_options(
             &host_a_target,
             &host_b_target,
-            &loonfs_test_support::test_actor(),
             &MoveOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit: loonfs_types::options::CommitOptions {
@@ -593,12 +551,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     ] {
         match loser
             .client
-            .put_file_with_options(
-                &host_c_target,
-                b"another write\n",
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&host_c_target, b"another write\n", &replace_file_options())
             .await
         {
             Err(ClientError::Api { response, .. }) => {
@@ -620,12 +573,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         // request opens a new one instead of failing the same way.
         loser
             .client
-            .put_file_with_options(
-                &host_c_target,
-                b"another write\n",
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&host_c_target, b"another write\n", &replace_file_options())
             .await
             .expect("next request takes the namespace back");
     }
@@ -658,7 +606,7 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
     let namespace = namespace_id("demo");
     harness
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("namespace");
     for streamed in [false, true] {
@@ -670,37 +618,23 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
                 .client
                 .prepare_content_stream(
                     &namespace,
-                    &loonfs_test_support::test_actor(),
                     loonfs_client::PayloadSource::reader(&bytes[..]),
                 )
                 .await
         } else {
-            harness
-                .client
-                .prepare_content(&namespace, &loonfs_test_support::test_actor(), bytes)
-                .await
+            harness.client.prepare_content(&namespace, bytes).await
         }
         .expect("prepare content");
         let mut options = PutFileOptions::default();
         options.commit.commit_id = Some(CommitId::generate());
         let first = harness
             .client
-            .put_file_prepared_with_options(
-                &target,
-                prepared.clone(),
-                &loonfs_test_support::test_actor(),
-                &options,
-            )
+            .put_file_prepared_with_options(&target, prepared.clone(), &options)
             .await
             .expect("first publication");
         let repeated = harness
             .client
-            .put_file_prepared_with_options(
-                &target,
-                prepared.clone(),
-                &loonfs_test_support::test_actor(),
-                &options,
-            )
+            .put_file_prepared_with_options(&target, prepared.clone(), &options)
             .await
             .expect("exact replay despite create-only behavior");
         assert_eq!(repeated, first);
@@ -725,12 +659,8 @@ async fn prepared_puts_replay_and_changed_options_conflict() {
         for (candidate_actor, candidate) in changed {
             let error = harness
                 .client
-                .put_file_prepared_with_options(
-                    &target,
-                    prepared.clone(),
-                    &candidate_actor,
-                    &candidate,
-                )
+                .with_actor(candidate_actor)
+                .put_file_prepared_with_options(&target, prepared.clone(), &candidate)
                 .await
                 .expect_err("changed options must not replay");
             assert_eq!(

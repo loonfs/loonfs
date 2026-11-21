@@ -29,7 +29,7 @@ pub(crate) async fn run_access_set(
         .profile
         .target
         .client
-        .update_access_with_options(&spec, context.actor(), access, &options)
+        .update_access_with_options(&spec, access, &options)
         .await
         .map_err(|error| context.fail(error))?;
     Ok(context.output(CommandData::file_mutation(

@@ -1073,22 +1073,14 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     assert_error_response(
         harness
             .client
-            .put_file_with_options(
-                &target,
-                b"hello",
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, b"hello", &replace_file_options())
             .await,
         404,
         "namespace_not_found",
         Some("namespace `missing` does not exist"),
     );
     assert_error_response(
-        harness
-            .client
-            .delete_path(&target, &loonfs_test_support::test_actor())
-            .await,
+        harness.client.delete_path(&target).await,
         404,
         "namespace_not_found",
         Some("namespace `missing` does not exist"),
@@ -1100,7 +1092,6 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
             .move_path_with_options(
                 &target,
                 &destination,
-                &loonfs_test_support::test_actor(),
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_types::options::CommitOptions {
@@ -1148,10 +1139,7 @@ async fn http_delete_missing_path_returns_path_not_found() {
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
     let target = NamespacePath::parse("demo", "/missing.txt").expect("target");
     assert_error_response(
-        harness
-            .client
-            .delete_path(&target, &loonfs_test_support::test_actor())
-            .await,
+        harness.client.delete_path(&target).await,
         404,
         "path_not_found",
         None,
@@ -1196,12 +1184,7 @@ async fn http_put_over_directory_returns_wrong_kind_and_move_into_existing_targe
     assert_error_response(
         harness
             .client
-            .put_file_with_options(
-                &dir_target,
-                b"not a file",
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&dir_target, b"not a file", &replace_file_options())
             .await,
         409,
         "wrong_kind",
@@ -1216,7 +1199,6 @@ async fn http_put_over_directory_returns_wrong_kind_and_move_into_existing_targe
             .move_path_with_options(
                 &from,
                 &to,
-                &loonfs_test_support::test_actor(),
                 &MoveOptions {
                     behavior: DestinationBehavior::NoReplace,
                     commit: loonfs_types::options::CommitOptions {
@@ -1256,12 +1238,12 @@ async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
     let observed = harness.client.stat(&target).await.expect("observe file");
     harness
         .client
-        .delete_path(&target, &loonfs_test_support::test_actor())
+        .delete_path(&target)
         .await
         .expect("delete observed file");
     harness
         .client
-        .put_file(&target, b"new inode", &loonfs_test_support::test_actor())
+        .put_file(&target, b"new inode")
         .await
         .expect("recreate path");
     let recreated = harness
@@ -1275,12 +1257,7 @@ async fn http_put_with_preconditions_rejects_a_delete_recreate_race() {
     with_preconditions.expected_revision_no = Some(RevisionNo(1));
     match harness
         .client
-        .put_file_with_options(
-            &target,
-            b"must not be committed",
-            &loonfs_test_support::test_actor(),
-            &with_preconditions,
-        )
+        .put_file_with_options(&target, b"must not be committed", &with_preconditions)
         .await
         .expect_err("the recreated inode must fail the precondition")
     {
@@ -1327,12 +1304,7 @@ async fn http_move_with_preconditions_rejects_a_bumped_destination_revision() {
     let observed = harness.client.stat(&to).await.expect("observe destination");
     harness
         .client
-        .put_file_with_options(
-            &to,
-            b"destination v2",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&to, b"destination v2", &replace_file_options())
         .await
         .expect("bump destination revision");
 
@@ -1342,7 +1314,6 @@ async fn http_move_with_preconditions_rejects_a_bumped_destination_revision() {
             .move_path_with_options(
                 &from,
                 &to,
-                &loonfs_test_support::test_actor(),
                 &MoveOptions {
                     behavior: DestinationBehavior::Replace,
                     expected_destination_inode_id: Some(observed.inode_id),
@@ -1376,12 +1347,7 @@ async fn http_path_mutation_retries_a_wal_put_collision() {
     let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
     let result = harness
         .client
-        .put_file_with_options(
-            &target,
-            b"race",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, b"race", &replace_file_options())
         .await
         .expect("path write retries the WAL collision");
     assert_eq!(result.committed_seq, CommitSeq(1));
@@ -1403,12 +1369,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
     let target = NamespacePath::parse("demo", "/notes/taken-over.txt").expect("target");
     let result = harness
         .client
-        .put_file_with_options(
-            &target,
-            b"taken over",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, b"taken over", &replace_file_options())
         .await
         .expect("first write takes over the namespace");
     assert_eq!(result.committed_seq, CommitSeq(1));
@@ -1445,6 +1406,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
             ClientConfig {
                 server_url: format!("http://{addr}"),
                 auth_token: auth_token.map(Into::into),
+                actor: Some(loonfs_test_support::test_actor()),
                 request_timeout_ms: None,
                 disable_transient_retry: false,
                 ca_cert_path: None,
@@ -1857,6 +1819,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         ClientConfig {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".into()),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -1873,19 +1836,13 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     let session = client
         .create_upload(
             &namespace,
-            &loonfs_test_support::test_actor(),
             &loonfs_types::CreateUploadBody::ServiceProxied {},
         )
         .await
         .expect("begin a proxied upload session");
     assert_error_response(
         client
-            .put_upload_content(
-                &namespace,
-                &loonfs_test_support::test_actor(),
-                &session.upload_id,
-                &[0u8; 4096],
-            )
+            .put_upload_content(&namespace, &session.upload_id, &[0u8; 4096])
             .await,
         413,
         "content_too_large",
@@ -1896,12 +1853,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     // direct transport on offer here, the payload has nowhere to go and the
     // refusal comes before the bytes move.
     match client
-        .put_file_with_options(
-            &target,
-            &[0u8; 4096],
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, &[0u8; 4096], &replace_file_options())
         .await
     {
         Err(ClientError::UploadTooLarge { size_bytes, .. }) => assert_eq!(size_bytes, 4096),
@@ -1910,12 +1862,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
 
     // A body inside the limit still goes through on the same route.
     client
-        .put_file_with_options(
-            &target,
-            &[0u8; 512],
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, &[0u8; 512], &replace_file_options())
         .await
         .expect("small upload fits under the limit");
 
@@ -1949,12 +1896,7 @@ async fn the_proxied_upload_route_never_holds_the_whole_payload() {
     let target = NamespacePath::parse("demo", "/streamed.bin").expect("target");
     harness
         .client
-        .put_file_with_options(
-            &target,
-            &payload,
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, &payload, &replace_file_options())
         .await
         .expect("a multi-part payload uploads through the proxied route");
 
@@ -2118,6 +2060,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let client_config = ClientConfig {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".into()),
+        actor: Some(loonfs_test_support::test_actor()),
         request_timeout_ms: None,
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
@@ -2130,12 +2073,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     let target = NamespacePath::parse("demo", "/one.bin").expect("target");
     assert_error_response(
         client
-            .put_file_with_options(
-                &target,
-                &[0u8; 64],
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, &[0u8; 64], &replace_file_options())
             .await,
         503,
         "server_busy",
@@ -2155,12 +2093,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         Client::new(client_config, loonfs_types::Context::Service).expect("valid client config");
     let target = NamespacePath::parse("demo", "/one.bin").expect("target");
     client
-        .put_file_with_options(
-            &target,
-            &[0u8; 64],
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, &[0u8; 64], &replace_file_options())
         .await
         .expect("a freed slot admits the upload");
 
@@ -2206,6 +2139,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
     let client_config = ClientConfig {
         server_url: format!("http://{addr}"),
         auth_token: Some("test-token".into()),
+        actor: Some(loonfs_test_support::test_actor()),
         request_timeout_ms: None,
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
@@ -2394,6 +2328,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         ClientConfig {
             server_url: format!("http://{addr}"),
             auth_token: Some("test-token".into()),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -2992,17 +2927,13 @@ mod direct_download {
             multipart: None,
         };
         let client = start(temp_dir.path(), "download-pointers", Some(transfers)).await;
-        let actor = loonfs_test_support::test_actor();
         let namespace = namespace_id("demo");
         client
-            .create_namespace(&namespace, &actor)
+            .create_namespace(Some(&namespace))
             .await
             .expect("namespace");
         let path = NamespacePath::parse("demo", "/report.txt").expect("namespace path");
-        client
-            .put_file(&path, b"report", &actor)
-            .await
-            .expect("put file");
+        client.put_file(&path, b"report").await.expect("put file");
         let inode_id = client.stat(&path).await.expect("stat").inode_id;
         let snapshot_id = client
             .create_snapshot_with_options(
@@ -3408,7 +3339,7 @@ mod direct_download {
 
         let namespace = namespace_id("direct-download");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace))
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/big.bin").expect("target");
@@ -3418,12 +3349,7 @@ mod direct_download {
             .take(loonfs_types::usize_from_u64(PROXY_CAP_BYTES * 3))
             .collect();
         client
-            .put_file_with_options(
-                &target,
-                &payload,
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, &payload, &replace_file_options())
             .await
             .expect("seed the oversized file");
         let entry = client.stat(&target).await.expect("stat seeded file");
@@ -3457,7 +3383,7 @@ mod direct_download {
         assert_eq!(current_grant.content_ref, grant.content_ref);
 
         client
-            .delete_path(&target, &loonfs_test_support::test_actor())
+            .delete_path(&target)
             .await
             .expect("delete current binding");
         assert_error_response(
@@ -3498,19 +3424,14 @@ mod direct_download {
 
         let namespace = namespace_id("grant-pins");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace))
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/pinned.bin").expect("target");
         let first = vec![b'a'; loonfs_types::usize_from_u64(PROXY_CAP_BYTES) * 2];
         let second = vec![b'b'; loonfs_types::usize_from_u64(PROXY_CAP_BYTES) * 2];
         client
-            .put_file_with_options(
-                &target,
-                &first,
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, &first, &replace_file_options())
             .await
             .expect("seed revision 1");
 
@@ -3521,12 +3442,7 @@ mod direct_download {
         assert_eq!(grant.revision_no, RevisionNo(1));
 
         client
-            .put_file_with_options(
-                &target,
-                &second,
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, &second, &replace_file_options())
             .await
             .expect("replace with revision 2");
 
@@ -3613,6 +3529,7 @@ mod direct_download {
             ClientConfig {
                 server_url: "http://127.0.0.1".to_owned(),
                 auth_token: Some("test-token".into()),
+                actor: Some(loonfs_test_support::test_actor()),
                 request_timeout_ms: None,
                 disable_transient_retry: false,
                 ca_cert_path: None,
@@ -3623,22 +3540,17 @@ mod direct_download {
         .expect("client");
         let namespace = namespace_id("grant-ranges");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace))
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/ranged.bin").expect("target");
         let mut payload: Vec<u8> = (0..70_000).map(|index| (index % 251) as u8).collect();
         client
-            .put_file_with_options(
-                &target,
-                &payload,
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, &payload, &replace_file_options())
             .await
             .expect("seed the file");
         client
-            .append_file(&target, b"append", &loonfs_test_support::test_actor())
+            .append_file(&target, b"append")
             .await
             .expect("append second object");
         payload.extend_from_slice(b"append");
@@ -3726,12 +3638,7 @@ mod direct_download {
         // signs no range because there is no byte to name.
         let empty = NamespacePath::parse(namespace.as_str(), "/empty.bin").expect("target");
         client
-            .put_file_with_options(
-                &empty,
-                b"",
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&empty, b"", &replace_file_options())
             .await
             .expect("seed an empty file");
         let grant = client
@@ -3770,17 +3677,12 @@ mod direct_download {
 
         let namespace = namespace_id("no-issuer");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace))
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/small.txt").expect("target");
         client
-            .put_file_with_options(
-                &target,
-                b"small enough to proxy",
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, b"small enough to proxy", &replace_file_options())
             .await
             .expect("seed a file");
 
@@ -3889,25 +3791,17 @@ mod direct_download {
         let namespace_id =
             NamespaceId::parse("direct-put-completion-shape").expect("valid namespace id");
         client
-            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace_id))
             .await
             .expect("create namespace");
         let begin = client
-            .create_direct_put_upload_target(
-                &namespace_id,
-                &loonfs_test_support::test_actor(),
-                Some(5),
-            )
+            .create_direct_put_upload_target(&namespace_id, Some(5))
             .await
             .expect("begin direct put");
 
         for _ in 0..2 {
             let session = client
-                .get_upload(
-                    &namespace_id,
-                    &loonfs_test_support::test_actor(),
-                    &begin.upload_id,
-                )
+                .get_upload(&namespace_id, &begin.upload_id)
                 .await
                 .expect("read open direct_put session");
             assert_eq!(session.mode, loonfs_types::UploadMode::DirectPut);
@@ -3924,7 +3818,6 @@ mod direct_download {
         let error = client
             .complete_upload(
                 &namespace_id,
-                &loonfs_test_support::test_actor(),
                 &begin.upload_id,
                 &loonfs_types::CompleteUploadBody::DirectMultipart {
                     content: UploadContentClaim {
@@ -3976,7 +3869,7 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-crc32c-put");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace))
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
@@ -3990,12 +3883,7 @@ mod direct_download {
             .collect();
 
         client
-            .put_file_with_options(
-                &target,
-                &payload,
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, &payload, &replace_file_options())
             .await
             .expect("a large file goes straight to object storage under a crc32c claim");
 
@@ -4036,7 +3924,7 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-direct-put");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace))
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/large.bin").expect("target");
@@ -4050,12 +3938,7 @@ mod direct_download {
             .collect();
 
         client
-            .put_file_with_options(
-                &target,
-                &payload,
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, &payload, &replace_file_options())
             .await
             .expect("a large file goes straight to object storage");
 
@@ -4092,7 +3975,7 @@ mod direct_download {
 
         let namespace = namespace_id("ladder-too-large");
         client
-            .create_namespace(&namespace, &loonfs_test_support::test_actor())
+            .create_namespace(Some(&namespace))
             .await
             .expect("create namespace");
         let target = NamespacePath::parse(namespace.as_str(), "/enormous.bin").expect("target");
@@ -4100,12 +3983,7 @@ mod direct_download {
             vec![7u8; loonfs_types::usize_from_u64(loonfs_client::MIN_STREAMING_PUT_BYTES)];
 
         let error = client
-            .put_file_with_options(
-                &target,
-                &payload,
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, &payload, &replace_file_options())
             .await
             .expect_err("no transport can carry this payload");
         match &error {

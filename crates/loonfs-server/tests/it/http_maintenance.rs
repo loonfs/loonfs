@@ -311,11 +311,7 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
     assert_eq!(repeated.expires_at_ms, first.expires_at_ms);
     assert!(repeated.created_at_ms >= first.created_at_ms);
     client
-        .fork_namespace(
-            &namespace,
-            &namespace_id("fork"),
-            &loonfs_test_support::test_actor(),
-        )
+        .fork_namespace(&namespace, Some(&namespace_id("fork")))
         .await
         .expect("fork namespace");
     let diagnostics = client
@@ -416,17 +412,12 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
 
     let namespace = namespace_id("demo");
     client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
     client
-        .put_file_with_options(
-            &target,
-            b"hello gc\n",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, b"hello gc\n", &replace_file_options())
         .await
         .expect("write file");
     post_snapshot(&server_url, namespace.as_str()).expect("snapshot");
@@ -467,7 +458,7 @@ async fn client_gc_pool_collects_a_namespace_pool_and_rejects_a_pool_without_a_r
     let client = harness.client.clone();
     let namespace = namespace_id("demo");
     let pool_id = client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace")
         .pool_id;
@@ -502,17 +493,12 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
 
     let namespace = namespace_id("demo");
     client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
     client
-        .put_file_with_options(
-            &target,
-            b"hello step\n",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, b"hello step\n", &replace_file_options())
         .await
         .expect("write file");
 
@@ -626,7 +612,7 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
 
     let namespace = namespace_id("demo");
     client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
 
@@ -669,16 +655,11 @@ async fn http_snapshot_manifest_consumption_is_strict_when_manifest_is_corrupted
     let namespace = namespace_id("demo");
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
     client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     client
-        .put_file_with_options(
-            &target,
-            b"hello\n",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&target, b"hello\n", &replace_file_options())
         .await
         .expect("write file");
     post_snapshot(&server_url, namespace.as_str()).expect("snapshot");

@@ -37,6 +37,7 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
         ClientConfig {
             server_url: "http://127.0.0.1".to_owned(),
             auth_token: Some("test-token".into()),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path: None,
@@ -46,16 +47,15 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
     )
     .expect("client");
     let target = NamespacePath::parse("demo", "/stream.bin").expect("path");
-    let actor = loonfs_test_support::test_actor();
     client
-        .create_namespace(target.namespace(), &actor)
+        .create_namespace(Some(target.namespace()))
         .await
         .expect("create namespace");
     let chunks = vec![Bytes::from(vec![42; 32 * 1024]); 4];
     let source =
         PayloadSource::stream(futures::stream::iter(chunks.clone().into_iter().map(Ok)).boxed());
     client
-        .put_file_stream(&target, source, &actor)
+        .put_file_stream(&target, source)
         .await
         .expect("upload");
     let mut stream = client.read_file_stream(&target).await.expect("download");

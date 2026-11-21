@@ -318,6 +318,7 @@ fn client(server_url: &str, auth_token: Option<String>, ca_cert_path: Option<Str
         ClientConfig {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(Into::into),
+            actor: Some(loonfs_test_support::test_actor()),
             request_timeout_ms: None,
             disable_transient_retry: false,
             ca_cert_path,
@@ -428,26 +429,16 @@ pub(crate) mod http_split_support {
         file_bytes: &[u8],
     ) -> StagedUpload {
         let begin = client
-            .create_upload(
-                namespace_id,
-                &loonfs_test_support::test_actor(),
-                &CreateUploadBody::ServiceProxied {},
-            )
+            .create_upload(namespace_id, &CreateUploadBody::ServiceProxied {})
             .await
             .expect("begin upload");
         client
-            .put_upload_content(
-                namespace_id,
-                &loonfs_test_support::test_actor(),
-                &begin.upload_id,
-                file_bytes,
-            )
+            .put_upload_content(namespace_id, &begin.upload_id, file_bytes)
             .await
             .expect("upload content");
         let complete = client
             .complete_upload(
                 namespace_id,
-                &loonfs_test_support::test_actor(),
                 &begin.upload_id,
                 &CompleteUploadBody::ServiceProxied {},
             )

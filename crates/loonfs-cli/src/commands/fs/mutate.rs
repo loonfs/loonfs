@@ -67,7 +67,7 @@ pub(crate) async fn run_filesystem_rm(
         .profile
         .target
         .client
-        .delete_path_with_options(&spec, context.actor(), &options)
+        .delete_path_with_options(&spec, &options)
         .await
         .map_err(|error| {
             let error = CliError::from(error);
@@ -143,7 +143,7 @@ async fn restore_revision(
         .profile
         .target
         .client
-        .restore_revision_with_options(&spec, revision_no, context.actor(), commit)
+        .restore_revision_with_options(&spec, revision_no, commit)
         .await
         .map_err(|error| context.fail(error))?;
 
@@ -180,7 +180,6 @@ async fn restore_deleted(
             context.namespace(),
             inode_id,
             deletion_seq,
-            context.actor(),
             &RestoreDeletedOptions {
                 commit,
                 destination,
@@ -225,7 +224,7 @@ pub(crate) async fn run_filesystem_mkdir(
             .profile
             .target
             .client
-            .create_directory_with_options(&spec, context.actor(), &options)
+            .create_directory_with_options(&spec, &options)
             .await
             .map(RemoteDirectoryOutcome::Created)
             .map_err(CliError::from)

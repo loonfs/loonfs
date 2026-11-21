@@ -10,6 +10,11 @@
 //! the requests act for. There's no default context, so each application
 //! chooses one when it builds the client.
 //!
+//! The config's `actor` is the actor that every mutation records, sent as
+//! `Loonfs-Actor`. A client without an actor can read, but a mutation fails
+//! before it is sent. [`Client::with_actor`] clones a client with another
+//! actor.
+//!
 //! Namespace logic doesn't belong here: the client sends HTTP API requests
 //! and decodes their responses, and the server does the work.
 
@@ -40,7 +45,8 @@ mod scripted_transport;
 mod snapshots;
 mod uploads;
 
-use loonfs_types::{CapabilityDocument, SecretString};
+use loonfs_types::config::ConfigFieldError;
+use loonfs_types::{ActorId, CapabilityDocument, SecretString};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tower::{util::BoxCloneSyncService, Service};
@@ -89,6 +95,8 @@ pub use uploads::staging::{
 #[derive(Debug, Clone)]
 pub struct Client {
     context: loonfs_types::Context,
+    /// The actor sent as `Loonfs-Actor` on every mutation.
+    actor: Option<ActorId>,
     base_url: String,
     auth_token: Option<SecretString>,
     transport: transport::Transport,
@@ -122,6 +130,28 @@ impl Client {
             context,
             ..self.clone()
         }
+    }
+
+    /// Returns the actor that every mutation records, sent as `Loonfs-Actor`.
+    pub fn actor(&self) -> Option<&ActorId> {
+        self.actor.as_ref()
+    }
+
+    /// Clones this client with the actor that every mutation records.
+    pub fn with_actor(&self, actor: ActorId) -> Self {
+        Self {
+            actor: Some(actor),
+            ..self.clone()
+        }
+    }
+
+    /// Returns the actor for a mutation, or an error when the client has none.
+    fn mutation_actor(&self) -> Result<&ActorId> {
+        self.actor
+            .as_ref()
+            .ok_or(ClientError::ConfigField(ConfigFieldError::Missing {
+                field: "actor",
+            }))
     }
 
     /// The configured server URL, without a trailing slash.
@@ -164,6 +194,7 @@ impl Client {
             .map(|timeout_ms| Duration::from_millis(timeout_ms.get()));
         Ok(Self {
             context,
+            actor: config.actor,
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
             transport: BoxCloneSyncService::new(service),

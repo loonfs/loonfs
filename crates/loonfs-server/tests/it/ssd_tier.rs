@@ -71,7 +71,7 @@ async fn a_restarted_server_reads_its_metadata_blocks_from_the_ssd_tier() {
     .await;
     first
         .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .create_namespace(Some(&namespace))
         .await
         .expect("create namespace");
     for index in 0..4 {
@@ -79,12 +79,7 @@ async fn a_restarted_server_reads_its_metadata_blocks_from_the_ssd_tier() {
             NamespacePath::parse("warm", &format!("/docs/file-{index}.txt")).expect("parse path");
         first
             .client
-            .put_file_with_options(
-                &target,
-                b"file",
-                &loonfs_test_support::test_actor(),
-                &replace_file_options(),
-            )
+            .put_file_with_options(&target, b"file", &replace_file_options())
             .await
             .expect("put file");
     }
@@ -104,12 +99,7 @@ async fn a_restarted_server_reads_its_metadata_blocks_from_the_ssd_tier() {
     let extra = NamespacePath::parse("warm", "/docs/after.txt").expect("parse path");
     first
         .client
-        .put_file_with_options(
-            &extra,
-            b"after",
-            &loonfs_test_support::test_actor(),
-            &replace_file_options(),
-        )
+        .put_file_with_options(&extra, b"after", &replace_file_options())
         .await
         .expect("put a file after the snapshot");
     let listed = collect_path_entries(&first.client, &listing, &Default::default())

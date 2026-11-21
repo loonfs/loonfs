@@ -5,8 +5,7 @@ use crate::{Client, ClientError, PayloadSource, Result};
 use bytes::BytesMut;
 use futures::StreamExt;
 use loonfs_types::{
-    ActorId, NamespaceId, FEATURE_COMMIT_INLINE_CONTENT,
-    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
+    NamespaceId, FEATURE_COMMIT_INLINE_CONTENT, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
 
 impl Client {
@@ -25,7 +24,6 @@ impl Client {
     pub(crate) async fn prepare_file_source(
         &self,
         namespace_id: &NamespaceId,
-        actor: &ActorId,
         mut source: PayloadSource,
         continuity: UploadContinuity<'_>,
     ) -> Result<PreparedContent> {
@@ -55,7 +53,7 @@ impl Client {
             }
             source = PayloadSource { stream, size_bytes };
         }
-        self.stage_source_as_content_ref(namespace_id, actor, source, continuity)
+        self.stage_source_as_content_ref(namespace_id, source, continuity)
             .await
     }
 }

@@ -87,9 +87,9 @@ async fn run_namespace_create(
     let namespace = context
         .target
         .client
+        .with_actor(actor_id)
         .create_namespace_with_options(
-            &namespace_id,
-            &actor_id,
+            Some(&namespace_id),
             &CreateNamespaceOptions {
                 retention_window_ms: args.retention_window_ms,
                 allow_existing: false,
@@ -166,10 +166,10 @@ async fn run_namespace_fork(
     let namespace = context
         .target
         .client
+        .with_actor(actor_id)
         .fork_namespace_with_options(
             &args.source_namespace_id,
-            &new_namespace_id,
-            &actor_id,
+            Some(&new_namespace_id),
             &ForkNamespaceOptions {
                 snapshot_id: args.snapshot_id,
             },

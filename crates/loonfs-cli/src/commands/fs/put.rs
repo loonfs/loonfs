@@ -193,7 +193,6 @@ pub(crate) async fn put_payload(
         .file_path()
         .map(|path| resume_journal(context, spec, path, options))
         .transpose()?;
-    let actor = context.actor();
     let retained_options = journal.as_ref().map(UploadJournal::options);
     let options = retained_options.as_ref().unwrap_or(options);
     let result = async {
@@ -213,7 +212,7 @@ pub(crate) async fn put_payload(
         context
             .profile
             .target
-            .put_file_stream(spec, payload, actor, options, progress, journal.as_ref())
+            .put_file_stream(spec, payload, options, progress, journal.as_ref())
             .await
     }
     .await;
@@ -266,7 +265,7 @@ async fn commit_a_finished_upload(
         .profile
         .target
         .client
-        .get_upload(context.namespace(), context.actor(), &resume.upload_id)
+        .get_upload(context.namespace(), &resume.upload_id)
         .await?;
     let UploadSessionStatus::Completed {
         content_ref,
@@ -282,14 +281,7 @@ async fn commit_a_finished_upload(
         .profile
         .target
         .client
-        .commit_completed_upload(
-            spec,
-            content_ref,
-            content_token,
-            context.actor(),
-            options,
-            Some(journal),
-        )
+        .commit_completed_upload(spec, content_ref, content_token, options, Some(journal))
         .await;
     Ok(Some(result?))
 }
@@ -326,7 +318,7 @@ pub(crate) async fn run_filesystem_append(
         .profile
         .target
         .client
-        .append_file_with_options(&spec, &bytes, context.actor(), &options)
+        .append_file_with_options(&spec, &bytes, &options)
         .await
         .map_err(|error| context.fail(error))?;
 

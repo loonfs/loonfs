@@ -9,7 +9,7 @@ use crate::uploads::UploadJournal;
 use loonfs_client::{
     DownloadOptions, NamespacePath, PutFileOptions, ReadAt, ReadFileOptions, StatOptions,
 };
-use loonfs_types::{ActorId, Commit, PathEntry, SnapshotId};
+use loonfs_types::{Commit, PathEntry, SnapshotId};
 use std::sync::Arc;
 
 impl ResolvedTarget {
@@ -81,7 +81,6 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         payload: &LocalPayload,
-        actor: &ActorId,
         options: &PutFileOptions,
         progress: &Arc<ProgressReporter>,
         journal: Option<&UploadJournal>,
@@ -90,13 +89,13 @@ impl ResolvedTarget {
         let Some(journal) = journal else {
             return Ok(self
                 .client
-                .put_file_stream_with_options(spec, source, actor, options)
+                .put_file_stream_with_options(spec, source, options)
                 .await?);
         };
         let resume = journal.resume();
         Ok(self
             .client
-            .put_file_stream_resumable(spec, source, actor, options, journal, resume.as_ref())
+            .put_file_stream_resumable(spec, source, options, journal, resume.as_ref())
             .await?)
     }
 }
