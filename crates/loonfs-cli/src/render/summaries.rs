@@ -11,7 +11,7 @@ pub(crate) enum StoreProbeRunOutcome {
 }
 
 pub(crate) fn store_probe_run_outcome(
-    response: &loonfs_types::StoreProbeResponse,
+    response: &loonfs_types::ProbeStoreResponse,
 ) -> StoreProbeRunOutcome {
     let unsupported = response
         .checks
@@ -35,7 +35,7 @@ pub(crate) fn store_probe_run_outcome(
     }
 }
 
-pub(crate) fn store_probe_summary_line(response: &loonfs_types::StoreProbeResponse) -> String {
+pub(crate) fn store_probe_summary_line(response: &loonfs_types::ProbeStoreResponse) -> String {
     let probe_id = &response.probe_id;
     let total = response.checks.len();
     match store_probe_run_outcome(response) {
@@ -49,7 +49,7 @@ pub(crate) fn store_probe_summary_line(response: &loonfs_types::StoreProbeRespon
     }
 }
 
-pub(super) fn store_probe_report_lines(response: &loonfs_types::StoreProbeResponse) -> Vec<String> {
+pub(super) fn store_probe_report_lines(response: &loonfs_types::ProbeStoreResponse) -> Vec<String> {
     let mut lines: Vec<String> = response
         .checks
         .iter()
@@ -61,7 +61,7 @@ pub(super) fn store_probe_report_lines(response: &loonfs_types::StoreProbeRespon
 
 /// Groups failed probe checks by the one-line message shown by `doctor`.
 pub(super) fn store_probe_failure_group_lines(
-    response: &loonfs_types::StoreProbeResponse,
+    response: &loonfs_types::ProbeStoreResponse,
 ) -> Vec<String> {
     let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
     for check in &response.checks {

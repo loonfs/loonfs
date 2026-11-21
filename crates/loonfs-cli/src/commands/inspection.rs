@@ -19,7 +19,7 @@ use loonfs_objectstore::keys::probe_runs_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_types::{CapabilityDocument, StoreProbeResponse, PROTOCOL_VERSION};
+use loonfs_types::{CapabilityDocument, ProbeStoreResponse, PROTOCOL_VERSION};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,7 +445,7 @@ async fn append_write_check(
     };
     match target
         .client
-        .probe_store(&loonfs_types::StoreProbeRequest {})
+        .probe_store(&loonfs_types::ProbeStoreRequest {})
         .await
     {
         Ok(response) => checks.push(store_probe_check(response)),
@@ -479,7 +479,7 @@ fn capability_document_check(result: Result<CapabilityDocument>) -> DoctorCheck 
     )
 }
 
-fn store_probe_check(response: StoreProbeResponse) -> DoctorCheck {
+fn store_probe_check(response: ProbeStoreResponse) -> DoctorCheck {
     let status = match store_probe_run_outcome(&response) {
         StoreProbeRunOutcome::Failed { .. } => DoctorStatus::Failed,
         StoreProbeRunOutcome::Unsupported { .. } => DoctorStatus::Warning,
@@ -699,8 +699,8 @@ mod tests {
         assert!(failed.message.contains("but this CLI expects"));
     }
 
-    fn probe_response(outcomes: &[StoreProbeCheckOutcome]) -> StoreProbeResponse {
-        StoreProbeResponse {
+    fn probe_response(outcomes: &[StoreProbeCheckOutcome]) -> ProbeStoreResponse {
+        ProbeStoreResponse {
             probe_id: loonfs_types::ProbeId::parse("probe_00000000000000000000000001")
                 .expect("probe run id"),
             checks: outcomes

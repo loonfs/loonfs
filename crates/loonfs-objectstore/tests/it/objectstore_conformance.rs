@@ -22,7 +22,7 @@ use loonfs_objectstore::{
 };
 use loonfs_objectstore::{ConfiguredObjectStore, MultipartPart};
 use loonfs_test_support::ids::page_limit;
-use loonfs_types::StoreProbeResponse;
+use loonfs_types::ProbeStoreResponse;
 use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, Page};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody, ReqwestConnector};
 use std::assert_matches;
@@ -744,7 +744,7 @@ fn signing_time() -> std::time::SystemTime {
 }
 
 fn probe_report_lines(report: &StoreProbeReport) -> String {
-    StoreProbeResponse::from(report.clone())
+    ProbeStoreResponse::from(report.clone())
         .checks
         .iter()
         .map(|check| format!("  {}", check.check_line()))

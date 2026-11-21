@@ -19,8 +19,8 @@ use loonfs_types::format::wal::{
 use loonfs_types::options::{CommitSplitting, DiffOptions};
 use loonfs_types::{
     u64_from_usize, AbsolutePath, AccessRevisionNo, AttributesRevisionNo, ChangeFeedPosition,
-    CommitSeq, DiffEntry, DiffEntryKind, DiffResponse, InodeId, InodeKind, NameKey, NamespaceId,
-    RevisionNo,
+    CommitSeq, DiffEntry, DiffEntryKind, InodeId, InodeKind, ListDiffResponse, NameKey,
+    NamespaceId, RevisionNo,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -29,7 +29,7 @@ use std::collections::{BTreeSet, HashMap};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffPage {
     /// The page.
-    pub response: DiffResponse,
+    pub response: ListDiffResponse,
     /// The commits that the page read, including a commit that it left for
     /// the next page.
     pub commits_scanned: u64,
@@ -171,7 +171,7 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
         }
     }
     Ok(DiffPage {
-        response: DiffResponse {
+        response: ListDiffResponse {
             namespace_id: head.namespace_id.clone(),
             from_seq,
             to_seq,

@@ -119,8 +119,8 @@ pub use loonfs_types::{
     FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
-    Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
-    FilesystemEvent, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
+    Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, FilesystemEvent,
+    ListChangesResponse, ListDiffResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
     MergeConflictVersion, NextMergeRangeOutcome, NextMergeRangeResponse, ObjectTransfer,
     ReplayForkResponse, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession,
     UploadSessionStatus,

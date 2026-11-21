@@ -12,8 +12,8 @@ use loonfs_types::{
     AbsolutePath, CapabilityDocument, Commit, CommitId, CommitSeq, DeleteNamespaceResponse,
     DeleteSnapshotResponse, FileRevision, GrepIndex, GrepMatch, InodeId, ListChangesResponse,
     ListNamespacesResponse, ListSnapshotRecordsResponse, ListSnapshotsResponse, NamespaceId,
-    NamespaceMetadata, PathEntry, RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse,
-    Snapshot, StoreProbeResponse,
+    NamespaceMetadata, PathEntry, ProbeStoreResponse, RunMaintenanceJobResponse,
+    RunPoolMaintenanceJobResponse, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 
@@ -101,7 +101,7 @@ pub(crate) struct DoctorCheck {
     pub request_id: Option<String>,
     /// Object-store probe results, present only when `--write-check` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub store_probe: Option<StoreProbeResponse>,
+    pub store_probe: Option<ProbeStoreResponse>,
 }
 
 pub(crate) struct CommandOutput {
@@ -218,7 +218,7 @@ pub(crate) enum CommandData {
     },
     /// What one store contract probe found. Failed checks are data, not an
     /// error: the probe ran and the store is what it is.
-    StoreProbed(StoreProbeResponse),
+    StoreProbed(ProbeStoreResponse),
     GrepIndexDisabled(GrepIndex),
     GrepIndexStatus(GrepIndex),
     Changes(ListChangesResponse),

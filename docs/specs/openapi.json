@@ -1176,57 +1176,6 @@
         ],
         "type": "string"
       },
-      "DiffResponse": {
-        "description": "One page of a diff: the inodes whose visible state at `to_seq` differs from their state at\n`from_seq`.\n\nA page reads the commits after `after_seq` in sequence order, and reports each inode at the\nlast commit in the range that changed it, so an inode appears on one page only.",
-        "properties": {
-          "after_seq": {
-            "$ref": "#/components/schemas/CommitSeq",
-            "description": "The sequence that this page's scan starts after. It's the request's `after_seq`, or\n`from_seq` when the request leaves `after_seq` out."
-          },
-          "entries": {
-            "description": "The inodes whose state differs, in the order of the commits that last changed them. A page\nends at a bound on the commits and on the inodes that it examines, so it can have no\nentries and still have a `next_after_seq`, when every inode it examined has a later touch.",
-            "items": {
-              "$ref": "#/components/schemas/DiffEntry"
-            },
-            "type": "array"
-          },
-          "from_seq": {
-            "$ref": "#/components/schemas/CommitSeq",
-            "description": "The sequence that the diff starts after. Each entry compares an inode's state at this\nsequence with its state at `to_seq`."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that was read."
-          },
-          "next_after_seq": {
-            "$ref": "#/components/schemas/CommitSeq",
-            "description": "The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the\npage that reaches `to_seq`. When the page ends inside a commit, it's that commit's\nsequence."
-          },
-          "next_event_index": {
-            "description": "The index of the first event of the commit at `next_after_seq` that the page didn't read,\nwhen the request set `split_commits` and the page ended inside that commit. The next\nrequest passes it as `event_index`. It's absent when the page ended at a commit boundary.",
-            "format": "int32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "retention_floor_seq": {
-            "$ref": "#/components/schemas/CommitSeq",
-            "description": "The namespace's retention floor when this page was read."
-          },
-          "to_seq": {
-            "$ref": "#/components/schemas/CommitSeq",
-            "description": "The sequence that the diff ends at, inclusive. When the request leaves out `to_seq`, it's\nthe head that the page read, and the next page's request passes it back."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "from_seq",
-          "to_seq",
-          "after_seq",
-          "retention_floor_seq",
-          "entries"
-        ],
-        "type": "object"
-      },
       "DirectoryBinding": {
         "description": "A directory entry's parent and name.",
         "properties": {
@@ -2969,6 +2918,57 @@
         ],
         "type": "object"
       },
+      "ListDiffResponse": {
+        "description": "One page of a diff: the inodes whose visible state at `to_seq` differs from their state at\n`from_seq`.\n\nA page reads the commits after `after_seq` in sequence order, and reports each inode at the\nlast commit in the range that changed it, so an inode appears on one page only.",
+        "properties": {
+          "after_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The sequence that this page's scan starts after. It's the request's `after_seq`, or\n`from_seq` when the request leaves `after_seq` out."
+          },
+          "entries": {
+            "description": "The inodes whose state differs, in the order of the commits that last changed them. A page\nends at a bound on the commits and on the inodes that it examines, so it can have no\nentries and still have a `next_after_seq`, when every inode it examined has a later touch.",
+            "items": {
+              "$ref": "#/components/schemas/DiffEntry"
+            },
+            "type": "array"
+          },
+          "from_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The sequence that the diff starts after. Each entry compares an inode's state at this\nsequence with its state at `to_seq`."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that was read."
+          },
+          "next_after_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the\npage that reaches `to_seq`. When the page ends inside a commit, it's that commit's\nsequence."
+          },
+          "next_event_index": {
+            "description": "The index of the first event of the commit at `next_after_seq` that the page didn't read,\nwhen the request set `split_commits` and the page ended inside that commit. The next\nrequest passes it as `event_index`. It's absent when the page ended at a commit boundary.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The namespace's retention floor when this page was read."
+          },
+          "to_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The sequence that the diff ends at, inclusive. When the request leaves out `to_seq`, it's\nthe head that the page read, and the next page's request passes it back."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "from_seq",
+          "to_seq",
+          "after_seq",
+          "retention_floor_seq",
+          "entries"
+        ],
+        "type": "object"
+      },
       "ListFileRevisionsResponse": {
         "description": "One page of a file's revisions.",
         "properties": {
@@ -3992,6 +3992,32 @@
         "pattern": "^probe_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
+      "ProbeStoreRequest": {
+        "additionalProperties": false,
+        "description": "A request for one run of the store contract probe, with an empty body.",
+        "type": "object"
+      },
+      "ProbeStoreResponse": {
+        "description": "The results of one store contract probe, in order.",
+        "properties": {
+          "checks": {
+            "description": "The check results, in the order that the checks ran.",
+            "items": {
+              "$ref": "#/components/schemas/StoreProbeCheck"
+            },
+            "type": "array"
+          },
+          "probe_id": {
+            "$ref": "#/components/schemas/ProbeId",
+            "description": "The ID of this probe run. The server generates the ID and writes the probe's temporary\nobjects under it."
+          }
+        },
+        "required": [
+          "probe_id",
+          "checks"
+        ],
+        "type": "object"
+      },
       "ReadConsistency": {
         "description": "How recently a live read confirms the namespace head, without a maximum\nstaleness.\n\nA runtime's default consistency and the `consistency` field of a download\nrequest take one of these values. `eventual` reads at the head that was\nconfirmed last while that confirmation is younger than the maximum\nstaleness, and `strong` confirms the head before the read.",
         "enum": [
@@ -4786,32 +4812,6 @@
         "required": [
           "outcome",
           "name"
-        ],
-        "type": "object"
-      },
-      "StoreProbeRequest": {
-        "additionalProperties": false,
-        "description": "A request for one run of the store contract probe, with an empty body.",
-        "type": "object"
-      },
-      "StoreProbeResponse": {
-        "description": "The results of one store contract probe, in order.",
-        "properties": {
-          "checks": {
-            "description": "The check results, in the order that the checks ran.",
-            "items": {
-              "$ref": "#/components/schemas/StoreProbeCheck"
-            },
-            "type": "array"
-          },
-          "probe_id": {
-            "$ref": "#/components/schemas/ProbeId",
-            "description": "The ID of this probe run. The server generates the ID and writes the probe's temporary\nobjects under it."
-          }
-        },
-        "required": [
-          "probe_id",
-          "checks"
         ],
         "type": "object"
       },
@@ -6338,7 +6338,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StoreProbeRequest"
+                "$ref": "#/components/schemas/ProbeStoreRequest"
               }
             }
           },
@@ -6350,7 +6350,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StoreProbeResponse"
+                  "$ref": "#/components/schemas/ProbeStoreResponse"
                 }
               }
             },
@@ -7427,7 +7427,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DiffResponse"
+                  "$ref": "#/components/schemas/ListDiffResponse"
                 }
               }
             },

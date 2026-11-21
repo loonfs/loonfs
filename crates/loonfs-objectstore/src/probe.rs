@@ -27,7 +27,7 @@ pub struct StoreProbeReport {
     pub checks: Vec<StoreProbeCheck>,
 }
 
-impl From<StoreProbeReport> for loonfs_types::StoreProbeResponse {
+impl From<StoreProbeReport> for loonfs_types::ProbeStoreResponse {
     fn from(report: StoreProbeReport) -> Self {
         Self {
             probe_id: report.probe_id,

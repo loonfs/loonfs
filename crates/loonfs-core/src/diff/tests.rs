@@ -777,7 +777,7 @@ async fn diff_pages(
     from_seq: CommitSeq,
     mut options: DiffOptions,
     max_touches: usize,
-) -> Vec<DiffResponse> {
+) -> Vec<ListDiffResponse> {
     let namespace = namespace_store(&history.store, &history.namespace_id);
     let view = namespace
         .load_current_metadata_view()
@@ -863,7 +863,7 @@ async fn a_commit_over_the_touch_bound_is_read_across_pages_with_split_commits()
         assert_eq!(page.next_after_seq, Some(large.committed_seq));
         assert!(page.next_event_index.is_some());
     }
-    let keyed = |pages: &[DiffResponse]| {
+    let keyed = |pages: &[ListDiffResponse]| {
         pages
             .iter()
             .flat_map(|page| page.entries.iter())
