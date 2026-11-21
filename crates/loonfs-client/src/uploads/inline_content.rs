@@ -27,6 +27,9 @@ impl Client {
         mut source: PayloadSource,
         continuity: UploadContinuity<'_>,
     ) -> Result<PreparedContent> {
+        // A missing actor fails before the source is read, so a caller
+        // streaming standard input keeps its bytes.
+        self.mutation_actor()?;
         if let Some(limit) = self
             .inline_content_limit()
             .await?

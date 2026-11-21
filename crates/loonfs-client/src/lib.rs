@@ -10,10 +10,10 @@
 //! the requests act for. There's no default context, so each application
 //! chooses one when it builds the client.
 //!
-//! The config's `actor` is the actor that every mutation records, sent as
-//! `Loonfs-Actor`. A client without an actor can read, but a mutation fails
-//! before it is sent. [`Client::with_actor`] clones a client with another
-//! actor.
+//! The config's `actor` is sent as `Loonfs-Actor` on commits, uploads, and
+//! namespace creation and forks. A client without an actor can read, but an
+//! operation that records an actor fails before it is sent.
+//! [`Client::with_actor`] clones a client with another actor.
 //!
 //! Namespace logic doesn't belong here: the client sends HTTP API requests
 //! and decodes their responses, and the server does the work.
@@ -132,12 +132,14 @@ impl Client {
         }
     }
 
-    /// Returns the actor that every mutation records, sent as `Loonfs-Actor`.
+    /// Returns the actor sent as `Loonfs-Actor` on commits, uploads, and
+    /// namespace creation and forks.
     pub fn actor(&self) -> Option<&ActorId> {
         self.actor.as_ref()
     }
 
-    /// Clones this client with the actor that every mutation records.
+    /// Clones this client with the actor that its commits, uploads, and
+    /// namespace creation and forks record.
     pub fn with_actor(&self, actor: ActorId) -> Self {
         Self {
             actor: Some(actor),
@@ -145,7 +147,8 @@ impl Client {
         }
     }
 
-    /// Returns the actor for a mutation, or an error when the client has none.
+    /// Returns the actor for an operation that records one, or an error when
+    /// the client has none.
     fn mutation_actor(&self) -> Result<&ActorId> {
         self.actor
             .as_ref()

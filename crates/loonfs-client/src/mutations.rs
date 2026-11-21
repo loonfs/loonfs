@@ -167,6 +167,9 @@ impl Client {
         namespace_id: &NamespaceId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
+        // Prepared content is committed by this client, so a missing actor
+        // fails here, before any request.
+        self.mutation_actor()?;
         if self
             .inline_content_limit()
             .await?

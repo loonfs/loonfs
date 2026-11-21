@@ -3,7 +3,7 @@
 use super::*;
 use crate::namespace_path::NamespacePath;
 use crate::operations::Operation;
-use crate::{scripted_transport, ClientConfig};
+use crate::{scripted_transport, ClientConfig, PayloadSource};
 use crate::{CommitOptions, CreateDirectoryOptions, DeleteNamespaceOptions};
 use futures::FutureExt as _;
 use loonfs_test_support::clock::ManualClock;
@@ -1034,6 +1034,34 @@ async fn a_client_without_an_actor_reads_but_refuses_a_mutation() {
     );
     assert_eq!(transport.attempts(), 1);
     assert_eq!(transport.sent()[0].header("Loonfs-Actor"), None);
+}
+
+/// Checks that a streamed write on a client without an actor fails before
+/// the source is polled or a request is sent, so a caller streaming standard
+/// input keeps its bytes.
+#[tokio::test]
+async fn a_client_without_an_actor_refuses_a_streamed_write_before_reading_it() {
+    let spec = NamespacePath::parse("demo", "/notes.txt").expect("valid namespace path");
+    let transport = scripted_transport::script(std::iter::empty());
+    let client = client_without_actor(&transport);
+    let polls = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&polls);
+    let stream = futures::stream::poll_fn(move |_| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        std::task::Poll::Ready(Some(Ok(bytes::Bytes::from_static(b"content"))))
+    });
+    let error = client
+        .put_file_stream(&spec, PayloadSource::stream(Box::pin(stream)))
+        .await
+        .expect_err("a streamed write needs an actor");
+    assert_matches!(
+        error,
+        ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Missing {
+            field: "actor"
+        })
+    );
+    assert_eq!(transport.attempts(), 0);
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
 }
 
 /// Checks that a namespace created or forked without an ID sends a body

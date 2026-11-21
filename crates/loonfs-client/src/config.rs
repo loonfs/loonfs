@@ -23,9 +23,11 @@ pub struct ClientConfig {
     pub server_url: String,
     /// Optional bearer token.
     pub auth_token: Option<SecretString>,
-    /// The actor that every mutation records, unless
+    /// The actor sent as `Loonfs-Actor` on commits, uploads, and namespace
+    /// creation and forks, unless
     /// [`Client::with_actor`](crate::Client::with_actor) replaces it. A client
-    /// without an actor can read, but a mutation fails before it is sent.
+    /// without an actor can read, delete namespaces, and manage snapshots, but
+    /// an operation that records an actor fails before it is sent.
     #[serde(default)]
     pub actor: Option<ActorId>,
     /// Optional timeout for one HTTP request, in milliseconds.
