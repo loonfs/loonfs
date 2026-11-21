@@ -163,15 +163,19 @@ pub const MAX_CONTENTION_ATTEMPTS: usize = 8;
 /// every manifest in between. The walk sends at most one GET more than this.
 pub const MAX_POSITION_MOVES: usize = 8;
 
-/// Manifest numbers that one window of a probe for newer manifests checks
-/// at once.
+/// Manifest numbers that one round of a probe for newer manifests checks at
+/// once.
 ///
 /// A publication whose manifest put lost sends one HEAD request for the
 /// number after the manifest that it built on. When that manifest exists, it
 /// sends one HEAD request for each of the next this many numbers, all at
-/// once, and probes the next window only when the last number of a window
-/// exists. A basis that lags by at most this many manifests costs one window
-/// more than the one HEAD request, which takes about one round trip.
+/// once. A basis that lags by at most this many manifests costs one window
+/// more than the one HEAD request, which takes about one round trip. When
+/// every number in that window exists, the probe sends rounds of this many
+/// HEAD requests at doubling distances until one number is missing, and then
+/// rounds of this many evenly spaced HEAD requests between the highest number
+/// found and the lowest number missing, until the two are next to each other
+/// (see `NamespaceStore::probe_highest_manifest_from`).
 pub const MANIFEST_PROBE_WINDOW: usize = 8;
 
 /// Unfolded WAL bytes that make a WAL fold due.
