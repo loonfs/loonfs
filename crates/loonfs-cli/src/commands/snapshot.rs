@@ -1,24 +1,12 @@
 //! `loonfs snapshot` commands: create, list, extend, and delete.
 
-use super::context::{Invocation, NamespaceContext, ProfileContext};
+use super::context::{Invocation, NamespaceContext};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
     SnapshotCommand, SnapshotCreateArgs, SnapshotDeleteArgs, SnapshotExtendArgs, SnapshotListArgs,
-    SnapshotTargetArgs,
 };
 use loonfs_client::CreateSnapshotOptions;
-
-/// Resolves the context of a snapshot command, which acts as the selected
-/// subject on the namespace that the command names.
-async fn resolve_snapshot_context(
-    invocation: &Invocation,
-    target: &SnapshotTargetArgs,
-) -> Result<NamespaceContext, CommandFailure> {
-    let context = ProfileContext::resolve_as_subject(invocation).await?;
-    let actor_id = context.actor(None)?;
-    Ok(context.for_namespace(target.namespace_id.clone(), actor_id))
-}
 
 pub(crate) async fn run_snapshot_command(
     invocation: &Invocation,
@@ -36,7 +24,7 @@ async fn run_snapshot_create(
     invocation: &Invocation,
     args: SnapshotCreateArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_snapshot_context(invocation, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let response = context
         .profile
         .target
@@ -57,7 +45,7 @@ async fn run_snapshot_list(
     invocation: &Invocation,
     args: SnapshotListArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_snapshot_context(invocation, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let listing = collect_or_stream_pages(
         context
             .profile
@@ -80,7 +68,7 @@ async fn run_snapshot_extend(
     invocation: &Invocation,
     args: SnapshotExtendArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_snapshot_context(invocation, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let response = context
         .profile
         .target
@@ -95,7 +83,7 @@ async fn run_snapshot_delete(
     invocation: &Invocation,
     args: SnapshotDeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_snapshot_context(invocation, &args.target).await?;
+    let context = NamespaceContext::resolve(invocation, None).await?;
     let response = context
         .profile
         .target

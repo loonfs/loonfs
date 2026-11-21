@@ -89,7 +89,7 @@ pub(crate) struct NamespaceForkArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub new_namespace_id: Option<NamespaceId>,
     /// Fork from an unexpired snapshot instead of the current head.
-    #[arg(long = "snapshot", value_name = "id")]
+    #[arg(long, value_hint = ValueHint::Other)]
     pub snapshot_id: Option<SnapshotId>,
 }
 
@@ -136,16 +136,7 @@ pub(crate) enum SnapshotCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SnapshotTargetArgs {
-    /// Namespace whose snapshots to manage.
-    #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: NamespaceId,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct SnapshotCreateArgs {
-    #[command(flatten)]
-    pub target: SnapshotTargetArgs,
     /// Snapshot label. Labels don't need to be unique. Without it, the
     /// snapshot has no label.
     #[arg(long)]
@@ -159,15 +150,11 @@ pub(crate) struct SnapshotCreateArgs {
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotListArgs {
     #[command(flatten)]
-    pub target: SnapshotTargetArgs,
-    #[command(flatten)]
     pub pagination: PaginationArgs,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotExtendArgs {
-    #[command(flatten)]
-    pub target: SnapshotTargetArgs,
     /// Snapshot ID to extend.
     #[arg(value_hint = ValueHint::Other)]
     pub snapshot_id: SnapshotId,
@@ -179,8 +166,6 @@ pub(crate) struct SnapshotExtendArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct SnapshotDeleteArgs {
-    #[command(flatten)]
-    pub target: SnapshotTargetArgs,
     /// Snapshot ID to delete.
     #[arg(value_hint = ValueHint::Other)]
     pub snapshot_id: SnapshotId,

@@ -308,6 +308,7 @@ impl Command {
                 | Self::Cp(_)
                 | Self::Trash(_)
                 | Self::Changes(_)
+                | Self::Snapshot { .. }
                 | Self::Maintenance {
                     command: MaintenanceCommand::Snapshot { .. }
                         | MaintenanceCommand::Index { .. }
