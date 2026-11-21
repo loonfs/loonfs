@@ -7,7 +7,7 @@ use crate::namespace::basis::PublicationBasis;
 use crate::namespace::boundary::at_or_below_boundary;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use futures::{stream, StreamExt};
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
@@ -15,13 +15,6 @@ use loonfs_types::format::control::{ManifestBoundary, ManifestRef, NamespaceStat
 use loonfs_types::format::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_types::{CompactorEpoch, ManifestNo, NamespaceId, MAX_PUBLIC_INTEGER};
 use std::sync::Arc;
-
-/// Maximum entries consumed from a cold manifest prefix listing before
-/// switching to exponential HEAD probing. Matches one S3/GCS/R2 `ListObjectsV2`
-/// page so namespaces with `<= 1,000` manifests above `boundary.json` resolve
-/// in one list call while busier namespaces jump in `O(log N)` HEAD rounds
-/// instead of paginating sequentially.
-const MANIFEST_LIST_PROBE_THRESHOLD: usize = 1_000;
 
 /// A namespace manifest loaded from the store, with its object key and stored
 /// length.
@@ -155,16 +148,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// read, and returns `store_contention` after [`MAX_CONTENTION_ATTEMPTS`]
     /// attempts.
     pub(crate) async fn find_newest_manifest(&self) -> crate::error::Result<NewestManifest> {
-        self.find_newest_manifest_with_list_limit(MANIFEST_LIST_PROBE_THRESHOLD)
-            .await
-    }
-
-    /// Cold manifest discovery that lists at most `list_limit` entries above
-    /// `boundary.json` before switching to [`Self::probe_highest_manifest_from`].
-    async fn find_newest_manifest_with_list_limit(
-        &self,
-        list_limit: usize,
-    ) -> crate::error::Result<NewestManifest> {
         let prefix = metadata_manifest_prefix(&self.namespace_id);
         for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
             let boundary = self.load_boundary().await?;
@@ -175,26 +158,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
             };
             let start_after = boundary_no
                 .map(|manifest_no| metadata_manifest_object(&self.namespace_id, &manifest_no));
-            let mut highest: Option<ManifestNo> = None;
-            let mut listed_entries: usize = 0;
-            let mut truncated = false;
-            {
-                let mut entries = self
-                    .store
-                    .list_entries_from_stream(&prefix, start_after.as_deref());
-                while let Some(entry) = entries.next().await {
-                    let entry = entry.map_err(|error| CoreError::store(&prefix, &error))?;
-                    listed_entries += 1;
-                    highest = manifest_no_of(&entry.key).max(highest);
-                    if listed_entries >= list_limit && highest.is_some() {
-                        // Drop the listing stream before requesting a second page;
-                        // exponential HEAD probing finds the tip in O(log N) RTTs.
-                        truncated = true;
-                        break;
-                    }
-                }
-            }
-            let Some(mut manifest_no) = highest else {
+            let highest = self
+                .store
+                .list_entries_from_stream(&prefix, start_after.as_deref())
+                .map_err(|error| CoreError::store(&prefix, &error))
+                .try_fold(None, |highest, entry| async move {
+                    Ok::<_, CoreError>(manifest_no_of(&entry.key).max(highest))
+                })
+                .await?;
+            let Some(manifest_no) = highest else {
                 if self.reload_boundary(boundary.clone()).await? != boundary {
                     continue;
                 }
@@ -207,13 +179,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 }
                 .into());
             };
-            if truncated {
-                if let Ok(next) = manifest_no.successor() {
-                    if self.manifest_exists(next).await? {
-                        manifest_no = self.probe_highest_manifest_from(next).await?;
-                    }
-                }
-            }
             let Some(manifest) = self.load_manifest_by_no(manifest_no).await? else {
                 continue;
             };
@@ -515,50 +480,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    async fn cold_discovery_switches_to_exponential_probe_after_first_list_page() {
-        let backing = MemoryStore::new(loonfs_types::ChecksumAlgorithm::Crc64nvme);
-        let namespace_id = NamespaceId::parse("cold-probe").expect("namespace id");
-        let tip = 200u64;
-        seed_manifest_keys(&backing, &namespace_id, 1..=tip - 1).await;
-
-        let mut payload = NamespaceManifestPayload::initial(
-            namespace_id.clone(),
-            loonfs_types::PoolId::generate(),
-            0,
-            loonfs_test_support::test_actor(),
-        )
-        .activated();
-        payload.manifest_no = ManifestNo(tip);
-        let (_, manifest_bytes) =
-            loonfs_types::format::manifest::encode_namespace_manifest_json(payload)
-                .expect("encode manifest")
-                .into_parts();
-        backing
-            .put(
-                &metadata_manifest_object(&namespace_id, &ManifestNo(tip)),
-                Bytes::from(manifest_bytes),
-                PutMode::CreateIfAbsent,
-            )
-            .await
-            .expect("put tip manifest");
-
-        let store = RecordingStore::new(backing, KeyPredicate::any());
-        let ns = crate::test_support::namespace_store(&store, &namespace_id);
-        let NewestManifest::Manifest(basis) = ns
-            .find_newest_manifest_with_list_limit(5)
-            .await
-            .expect("discover tip")
-        else {
-            panic!("expected manifest");
-        };
-        assert_eq!(basis.manifest.manifest().manifest_no, ManifestNo(tip));
-        assert!(
-            store.counts().heads <= 48,
-            "expected logarithmic HEADs, got {}",
-            store.counts().heads
-        );
     }
 }
