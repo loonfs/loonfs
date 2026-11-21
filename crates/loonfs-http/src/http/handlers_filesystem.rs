@@ -294,7 +294,7 @@ pub(super) struct DiffQuery {
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
-            (status = 409, description = "Path isn't a directory", body = ErrorResponse),
+            (status = 409, description = "A path component is a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -357,6 +357,7 @@ pub(super) async fn list_path_entries(
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
             (status = 404, description = "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.", body = ErrorResponse),
+            (status = 409, description = "A path component is a file", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )

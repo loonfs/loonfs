@@ -51,7 +51,7 @@
         "description": "The server can't complete the request now. Check `code` to find whether the outcome is unknown (after a deadline or a lost acknowledgment), or the cause is shutdown, load, writer session admission, store contention, required maintenance, or invalid storage credentials. When its request cap is full, the reference server returns `server_busy` with `Retry-After: 1` before it reads the body. Health and readiness probes are exempt from the cap. A mutation might still complete after a deadline or a lost acknowledgment, so check its outcome before retrying.",
         "headers": {
           "Retry-After": {
-            "description": "Seconds to wait before retrying when `code` is `server_busy`.",
+            "description": "Seconds to wait before retrying when `code` is `commit_queue_full`, `server_busy`, or `shutting_down`.",
             "schema": {
               "type": "string"
             }
@@ -8171,7 +8171,7 @@
                 }
               }
             },
-            "description": "Path isn't a directory",
+            "description": "A path component is a file",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -8350,6 +8350,21 @@
               }
             },
             "description": "Namespace, path, or snapshot not found. The ID of a deleted or expired snapshot returns `snapshot_not_found`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "A path component is a file",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -11711,7 +11726,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
       "delete": {
-        "description": "Deletes a snapshot by recording the server's current time as its delete time. From then on, the snapshot can't be read, forked, extended, or retrieved, and the snapshot listing leaves it out. Garbage collection can then reclaim its unreferenced manifest and runs after the grace window. Deleting a missing or deleted snapshot succeeds without a write, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
+        "description": "Deletes a snapshot by recording the server's current time as its delete time. From then on, the snapshot can't be read, forked, extended, or retrieved, and the snapshot listing leaves it out. Garbage collection can then reclaim its unreferenced manifest and runs after the grace window. Deleting a missing or deleted snapshot succeeds without a write, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted, except to a request with principals, which returns `namespace_deleted`.",
         "operationId": "delete_snapshot",
         "parameters": [
           {
@@ -11803,6 +11818,21 @@
               }
             },
             "description": "Namespace not found, or the ID belongs to a fork snapshot",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted, returned only to a request with principals",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -12186,21 +12216,6 @@
               }
             }
           },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
           "404": {
             "content": {
               "application/json": {
@@ -12353,21 +12368,6 @@
               }
             }
           },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
           "404": {
             "content": {
               "application/json": {
@@ -12496,21 +12496,6 @@
               }
             },
             "description": "Unauthorized",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -12656,21 +12641,6 @@
               }
             },
             "description": "Unauthorized",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -12837,21 +12807,6 @@
               }
             }
           },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
           "404": {
             "content": {
               "application/json": {
@@ -13004,21 +12959,6 @@
               }
             },
             "description": "Unauthorized",
-            "headers": {
-              "x-request-id": {
-                "$ref": "#/components/headers/RequestId"
-              }
-            }
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
