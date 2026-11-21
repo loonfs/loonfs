@@ -6,12 +6,12 @@ use crate::{GrepError, Result};
 use loonfs::engine::SegmentBlockKind;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_objectstore::{ByteRange, ObjectStore};
-use loonfs_types::format::manifest::ExtensionSegmentRef;
+use loonfs_types::format::manifest::{ExtensionSegmentRef, EXTENSION_SEGMENT_ENCODING};
 use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_filter_block, decode_index_block, BlockHandle, DecodedDataBlock,
     SegmentFilter, SegmentIndexEntry,
 };
-use loonfs_types::IndexSegmentId;
+use loonfs_types::{Checksum, IndexSegmentId};
 use std::sync::Arc;
 
 /// Largest index segment object fetched whole on first touch, in stored bytes.
@@ -160,6 +160,15 @@ async fn load_section<S: ObjectStore + ?Sized>(
         _ => &descriptor.index_block,
     };
     let load = || async {
+        if descriptor.encoding != EXTENSION_SEGMENT_ENCODING {
+            return Err(GrepError::IndexCorrupt {
+                message: format!(
+                    "index segment `{object_key}` uses unsupported encoding `{}`; this build reads \
+                     encoding `{EXTENSION_SEGMENT_ENCODING}`",
+                    descriptor.encoding
+                ),
+            });
+        }
         let object_bytes = segment_object_bytes(object_key, descriptor)?;
         let whole_object = cache.is_some() && object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES;
         let start = if whole_object { 0 } else { wanted.offset };
@@ -178,6 +187,21 @@ async fn load_section<S: ObjectStore + ?Sized>(
             crc32c: 0,
         };
         let bytes = load_index_section_bytes(store, object_key, &read).await?;
+        if whole_object {
+            let expected = &descriptor.checksum;
+            let actual = Checksum::compute(expected.algorithm(), &bytes);
+            if actual != *expected {
+                return Err(GrepError::IndexCorrupt {
+                    message: format!(
+                        "index segment `{object_key}` checksum mismatch: expected {}:{}, found {}:{}",
+                        expected.algorithm(),
+                        expected.value(),
+                        actual.algorithm(),
+                        actual.value()
+                    ),
+                });
+            }
+        }
         let decode = |kind, handle: &BlockHandle| {
             Ok::<_, GrepError>((
                 kind,
@@ -384,8 +408,9 @@ fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_key, load_data_block_span, load_index_section_bytes, BlockHandle, GrepError,
-        IndexRow, MAX_BULK_LOAD_BYTES,
+        cache_key, load_data_block_span, load_index_block, load_index_section_bytes, BlockHandle,
+        Checksum, ExtensionSegmentRef, GrepError, IndexRow, EXTENSION_SEGMENT_ENCODING,
+        MAX_BULK_LOAD_BYTES,
     };
     use crate::cache::GrepBlockCache;
     use crate::codec::Gram;
@@ -555,5 +580,58 @@ mod tests {
             GrepError::StoreUnavailable { .. },
             "expected a store failure, got {error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn whole_segment_read_verifies_checksum_and_encoding() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let object_key = "segments/small";
+        let mut builder = SegmentBlocksBuilder::new(NonZeroUsize::MIN);
+        let row = IndexRow::gram_postings(Gram(*b"abc"), &[1]).expect("valid postings");
+        builder
+            .push(&row.row_key(), &row.filter_key(), &row)
+            .expect("append row");
+        let built = builder.build().expect("build segment");
+        let good_checksum = Checksum::compute(store.checksum_algorithm(), &built.bytes);
+        store
+            .put(
+                object_key,
+                Bytes::from(built.bytes),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("write segment");
+
+        let cache = GrepBlockCache::new(DecodedBlockCacheConfig::new(1 << 20));
+        let mut descriptor = ExtensionSegmentRef {
+            owner_namespace_id: loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+            segment_id: IndexSegmentId::generate(),
+            checksum: Checksum::compute(store.checksum_algorithm(), b"wrong-bytes"),
+            encoding: EXTENSION_SEGMENT_ENCODING,
+            row_count: built.row_count,
+            min_row_key: built.min_row_key,
+            max_row_key: built.max_row_key,
+            index_block: built.index,
+            filter_block: built.filter,
+            filter_inline: None,
+        };
+        let error = load_index_block(&store, Some(&cache), object_key, &descriptor)
+            .await
+            .expect_err("wrong whole-segment checksum should fail");
+        assert_matches!(error, GrepError::IndexCorrupt { .. });
+
+        descriptor.checksum = good_checksum;
+        descriptor.encoding = EXTENSION_SEGMENT_ENCODING + 1;
+        let error = load_index_block(&store, Some(&cache), object_key, &descriptor)
+            .await
+            .expect_err("unsupported segment encoding should fail");
+        assert_matches!(error, GrepError::IndexCorrupt { .. });
+
+        descriptor.encoding = EXTENSION_SEGMENT_ENCODING;
+        let entries = load_index_block(&store, Some(&cache), object_key, &descriptor)
+            .await
+            .expect("valid checksum and encoding should load");
+        assert_eq!(entries.len(), 1);
     }
 }

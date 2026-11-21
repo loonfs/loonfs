@@ -150,6 +150,11 @@ pub(crate) fn segment_ref(number: u8) -> ExtensionSegmentRef {
     ExtensionSegmentRef {
         owner_namespace_id: namespace_id("docs"),
         segment_id: segment_id(number),
+        checksum: loonfs_types::Checksum::compute(
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+            &[number],
+        ),
+        encoding: loonfs_types::format::manifest::EXTENSION_SEGMENT_ENCODING,
         row_count: 99,
         min_row_key: "gram-616263-00000000000000000000".to_owned(),
         max_row_key: "value-00000000000000000051".to_owned(),

@@ -24,12 +24,12 @@ use loonfs::MAX_PENDING_SEGMENT_BYTES;
 use loonfs_objectstore::keys::extension_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::hex::hex_decode_bytes;
-use loonfs_types::format::manifest::ExtensionSegmentRef;
+use loonfs_types::format::manifest::{ExtensionSegmentRef, EXTENSION_SEGMENT_ENCODING};
 use loonfs_types::format::segment_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect, DecodedDataBlock,
     SegmentBlocksBuilder, SegmentFilter, SegmentIndexEntry, DEFAULT_TARGET_SEGMENT_BYTES,
 };
-use loonfs_types::{IndexSegmentId, NamespaceId};
+use loonfs_types::{Checksum, ChecksumAlgorithm, IndexSegmentId, NamespaceId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::num::NonZeroUsize;
@@ -224,12 +224,15 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
 fn prepare_segment(
     owner: &NamespaceId,
     builder: SegmentBlocksBuilder,
+    algorithm: ChecksumAlgorithm,
 ) -> (ExtensionSegmentRef, Bytes) {
     let built = builder.build().expect("a grep index segment should encode");
     let filter_inline = built.inline_filter_hex();
     let descriptor = ExtensionSegmentRef {
         owner_namespace_id: owner.clone(),
         segment_id: IndexSegmentId::generate(),
+        checksum: Checksum::compute(algorithm, &built.bytes),
+        encoding: EXTENSION_SEGMENT_ENCODING,
         row_count: built.row_count,
         min_row_key: built.min_row_key,
         max_row_key: built.max_row_key,
@@ -348,6 +351,7 @@ impl<'s, 'a, S: ObjectStore + ?Sized> RunWriter<'s, 'a, S> {
         let (descriptor, bytes) = prepare_segment(
             self.segments.namespace_id,
             std::mem::take(&mut self.builder),
+            self.segments.store.checksum_algorithm(),
         );
         let object_key = self.segments.object_key(&descriptor);
         self.written.push(descriptor);

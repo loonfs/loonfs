@@ -111,6 +111,8 @@ async fn reorganization_reads_one_span_per_refill_and_preserves_rows() {
         segments.push(ExtensionSegmentRef {
             owner_namespace_id: namespace_id.clone(),
             segment_id,
+            checksum: loonfs_types::Checksum::compute(store.checksum_algorithm(), &built.bytes),
+            encoding: loonfs_types::format::manifest::EXTENSION_SEGMENT_ENCODING,
             row_count: built.row_count,
             min_row_key: built.min_row_key.clone(),
             max_row_key: built.max_row_key.clone(),

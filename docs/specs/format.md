@@ -1674,6 +1674,8 @@ Each [extension entry](#124-extensions) lists its `runs` in order (`run_no`, `le
 | --- | --- |
 | `owner_namespace_id` | Namespace whose prefix stores the segment. |
 | `segment_id` | Immutable generated segment ID (`idx_` prefix). |
+| `checksum` | Full-object checksum in the store's algorithm (see [Content references and checksums](#a3-content-references-and-checksums)). |
+| `encoding` | Required unsigned integer segment version covering block layout and row schemas (currently `1`). |
 | `row_count` | Positive number of stored rows. |
 | `min_row_key`, `max_row_key` | Inclusive key range. |
 | `index_block`, `filter_block` | Index and Bloom filter block handles. |
