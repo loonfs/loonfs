@@ -6,7 +6,7 @@ use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::commit::validate::checks::CommitNumbering;
 use crate::error::Result;
-use crate::metadata::{DirentryBindingRecord, InodeRecord};
+use crate::metadata::{DirentryBindingRecord, InodeRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, RevisionSummary};
 use loonfs_types::format::wal::WalDelta;
@@ -106,21 +106,22 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         Ok(())
     }
 
-    /// Recovers a deleted file or subtree: revokes the deletion recorded at
-    /// `deletion_seq` (the delete's committed sequence, which the delete and
-    /// the change feed report) and binds the inode under a visible parent
-    /// directory. Scoping recovery to the observed position keeps a stale
-    /// request from cancelling a later deletion of the same inode.
+    /// Recovers a deleted file or subtree: revokes `deletion`, the root's
+    /// deletion in the trash, which the request identified by `deletion_seq`
+    /// (the delete's committed sequence, which the delete and the change feed
+    /// report), and binds the inode under a visible parent directory. Scoping
+    /// recovery to the observed position keeps a stale request from
+    /// cancelling a later deletion of the same inode.
     pub(crate) async fn restore_deleted(
         &mut self,
-        inode_id: InodeId,
+        deletion: &SubtreeTombstoneRecord,
         deletion_seq: CommitSeq,
         parent_inode_id: InodeId,
         display_name: &DisplayName,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let deltas = self
-            .validate_restore_deleted(inode_id, deletion_seq, parent_inode_id, display_name)
+            .validate_restore_deleted(deletion, deletion_seq, parent_inode_id, display_name)
             .await?;
         self.record_step(op_index, deltas);
         Ok(())
@@ -341,20 +342,19 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
 
     async fn validate_restore_deleted(
         &mut self,
-        inode_id: InodeId,
+        deletion: &SubtreeTombstoneRecord,
         deletion_seq: CommitSeq,
         parent_inode_id: InodeId,
         display_name: &DisplayName,
     ) -> Result<Vec<WalDelta>> {
+        let inode_id = deletion.root_inode_id;
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
             CommitValidationError::InodeMissing {
                 operand: CommitOperand::RestoreDeletedTarget,
                 inode_id,
             },
         )?;
-        let deletion = self
-            .resolve_tombstone_in_trash(inode_id, deletion_seq)
-            .await?;
+        self.ensure_restorable_deletion(deletion, deletion_seq)?;
         let name_key = self
             .resolve_name_absent(
                 parent_inode_id,

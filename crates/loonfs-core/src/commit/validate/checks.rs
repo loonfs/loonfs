@@ -42,30 +42,27 @@ impl CommitNumbering {
 }
 
 impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
-    /// Returns the `set` event of the deletion that `deletion_seq` identifies,
-    /// which has to be the root's latest tombstone event and above the retention
-    /// floor of the writer's basis
+    /// Ensures that `deletion`, the root's deletion in the trash, is the
+    /// deletion that `deletion_seq` identifies, that `deletion_seq` is above
+    /// the retention floor of the writer's basis, and that an earlier commit
+    /// recorded it
     /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
     /// A request for a deletion that has expired, that a later event revoked,
     /// or that a later deletion replaced, fails here, so it can't cancel a
     /// different deletion.
     ///
-    /// The floor check comes first, so a request for an expired deletion reads
-    /// no tombstone. A base compaction relies on this rule: the writer
-    /// validates against a floor that only its own epoch raises, so no
-    /// restore of a deletion at or below the floor is accepted after the
-    /// floor moves.
-    pub(super) async fn resolve_tombstone_in_trash(
+    /// A base compaction relies on the floor check: the writer validates
+    /// against a floor that only its own epoch raises, so no restore of a
+    /// deletion at or below the floor is accepted after the floor moves.
+    pub(super) fn ensure_restorable_deletion(
         &self,
-        inode_id: InodeId,
+        deletion: &SubtreeTombstoneRecord,
         deletion_seq: CommitSeq,
-    ) -> Result<SubtreeTombstoneRecord> {
+    ) -> Result<()> {
+        let inode_id = deletion.root_inode_id;
         if deletion_seq <= self.view().retention_floor_seq() {
             return Err(CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into());
         }
-        let Some(deletion) = self.view().tombstone_in_trash(inode_id).await? else {
-            return Err(CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into());
-        };
         if deletion.committed_seq >= self.committed_seq {
             return Err(
                 CommitValidationError::RestoreDeletedTargetsCurrentCommit { inode_id }.into(),
@@ -79,7 +76,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             }
             .into());
         }
-        Ok(deletion)
+        Ok(())
     }
 
     pub(super) async fn ensure_target_visible(

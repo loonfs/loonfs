@@ -1093,4 +1093,152 @@ mod tests {
             )
         );
     }
+
+    /// A namespace whose directory `/docs` was deleted, with the inode ID of
+    /// `/docs` and the sequence of each of its deletions.
+    struct DeletedDocs {
+        _temp_dir: tempfile::TempDir,
+        store: LocalFsStore,
+        namespace_id: NamespaceId,
+        docs: InodeId,
+        deletion_seqs: Vec<CommitSeq>,
+    }
+
+    fn restore_docs(docs: InodeId, deletion_seq: CommitSeq) -> FilesystemOperation {
+        FilesystemOperation::RestoreDeleted {
+            inode_id: docs,
+            deletion_seq,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
+        }
+    }
+
+    /// Deletes `/docs` once, then restores and deletes it again `redeletes`
+    /// times, and with `restore_last`, restores its last deletion.
+    async fn deleted_docs(redeletes: usize, restore_last: bool) -> DeletedDocs {
+        let (temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        fixture
+            .submit_operation(
+                CommitId::parse("create-docs").expect("valid commit id"),
+                create_dir("/docs"),
+                Vec::new(),
+            )
+            .await
+            .expect("create /docs");
+        let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+        let mut deletion_seqs = Vec::new();
+        for redelete in 0..=redeletes {
+            if let Some(&deletion_seq) = deletion_seqs.last() {
+                fixture
+                    .submit_operation(
+                        CommitId::parse(format!("restore-docs-{redelete}"))
+                            .expect("valid commit id"),
+                        restore_docs(docs, deletion_seq),
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("restore /docs");
+            }
+            let deletion = fixture.delete_path("/docs", None).await.expect("delete");
+            deletion_seqs.push(deletion.committed_seq);
+        }
+        if let Some(&deletion_seq) = deletion_seqs.last().filter(|_| restore_last) {
+            fixture
+                .submit_operation(
+                    CommitId::parse("restore-docs-last").expect("valid commit id"),
+                    restore_docs(docs, deletion_seq),
+                    Vec::new(),
+                )
+                .await
+                .expect("restore /docs");
+        }
+        DeletedDocs {
+            _temp_dir: temp_dir,
+            store,
+            namespace_id,
+            docs,
+            deletion_seqs,
+        }
+    }
+
+    /// A restore of a deleted item applies only while the deletion it names
+    /// is its root's latest tombstone event, so a stale request can't cancel
+    /// a later deletion.
+    #[tokio::test]
+    async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_roots_latest_event()
+    {
+        let not_deleted =
+            |deleted: &DeletedDocs| CommitValidationError::RestoreDeletedTargetNotDeleted {
+                inode_id: deleted.docs,
+            };
+        let mismatch =
+            |deleted: &DeletedDocs| CommitValidationError::RestoreDeletedSequenceMismatch {
+                inode_id: deleted.docs,
+                requested_seq: deleted.deletion_seqs[0],
+                actual_deletion_seq: deleted.deletion_seqs[1],
+            };
+        // Each case: its name, how often `/docs` was restored and deleted
+        // again since the first deletion, whether its last deletion was
+        // restored, the number of restores of the first deletion in the
+        // request, and the error.
+        type Expected<'a> = &'a dyn Fn(&DeletedDocs) -> CommitValidationError;
+        let cases: [(&str, usize, bool, usize, Expected); 3] = [
+            ("restored twice in one commit", 0, false, 2, &not_deleted),
+            ("already restored", 0, true, 1, &not_deleted),
+            ("deleted again since", 1, false, 1, &mismatch),
+        ];
+        for (name, redeletes, restore_last, restores, expected) in cases {
+            let deleted = deleted_docs(redeletes, restore_last).await;
+            let error = try_plan_against_current_state(
+                &deleted.store,
+                &deleted.namespace_id,
+                &CommitIntent {
+                    preconditions: Vec::new(),
+                    commit_id: CommitId::parse("restore-request").expect("valid commit id"),
+                    actor_id: loonfs_test_support::test_actor(),
+                    subject: None,
+                    message: None,
+                    operations: vec![
+                        restore_docs(deleted.docs, deleted.deletion_seqs[0]);
+                        restores
+                    ],
+                },
+            )
+            .await
+            .expect_err(name);
+            assert_eq!(error.code(), ErrorCode::NotDeleted, "{name}");
+            let operation_index = u32::try_from(restores - 1).expect("operation index");
+            assert_matches!(
+                error,
+                CoreError::FailedOperation { operation_index: index, error }
+                    if index == operation_index
+                        && matches!(
+                            &*error,
+                            CoreError::CommitValidation(actual) if *actual == expected(&deleted)
+                        ),
+                "{name}"
+            );
+        }
+
+        let deleted = deleted_docs(0, false).await;
+        let planned = plan_against_current_state(
+            &deleted.store,
+            &deleted.namespace_id,
+            &request(restore_docs(deleted.docs, deleted.deletion_seqs[0])),
+        )
+        .await;
+        assert_matches!(
+            planned.deltas.as_slice(),
+            [
+                WalCommitDelta {
+                    delta: WalDelta::RevokeSubtreeTombstone { target, .. },
+                    ..
+                },
+                WalCommitDelta {
+                    delta: WalDelta::BindDirentry { .. },
+                    ..
+                },
+            ] if target.seq == deleted.deletion_seqs[0]
+        );
+    }
 }

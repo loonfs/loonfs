@@ -6,7 +6,7 @@ use super::publish_path_planning::{is_missing_visible_path, Destination, Target}
 use crate::authorize::{check_rights, Absence};
 use crate::commit::{CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
-use crate::metadata::VisiblePathError;
+use crate::metadata::{SubtreeTombstoneRecord, VisiblePathError};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::TombstoneRowAction;
@@ -88,10 +88,16 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         destination: RestoreDeletedDestination,
     ) -> Result<()> {
         let deletion = self.view().metadata.tombstone_in_trash(inode_id).await?;
-        let deleted_binding = match deletion.map(|record| record.action) {
-            Some(TombstoneRowAction::Set {
-                deleted_binding, ..
-            }) => deleted_binding,
+        let (deletion, deleted_binding) = match &deletion {
+            Some(
+                deletion @ SubtreeTombstoneRecord {
+                    action:
+                        TombstoneRowAction::Set {
+                            deleted_binding, ..
+                        },
+                    ..
+                },
+            ) => (deletion, deleted_binding),
             _ => {
                 let authorization_target = self
                     .view()
@@ -129,7 +135,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .resolve_restore_deleted_destination(inode_id, saved_parent, destination)
             .await?;
         self.validation
-            .restore_deleted(inode_id, deletion_seq, parent_inode_id, &display_name)
+            .restore_deleted(deletion, deletion_seq, parent_inode_id, &display_name)
             .await
     }
 
