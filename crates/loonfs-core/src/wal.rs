@@ -19,13 +19,13 @@ use self::frame::{PreparedWalObject, ReplayedWalTail, ValidatedWalObject};
 pub(crate) use self::frame::{WalObjectError, WalTailLoadError};
 pub use self::projected_tail::ProjectedWalTail;
 pub(crate) use self::projected_tail::{inline_content_refs, ProjectedContent, ProjectedPiece};
+pub(crate) use self::publish::publish_wal_object;
 use self::publish::wal_object_key;
-pub(crate) use self::publish::{publish_wal_object, wal_object_is_live};
 pub use self::publish_error::{is_retryable_wal_publish, settle_publish_attempt, WalPublishError};
 pub(crate) use self::reader::{
     load_replayed_wal_tail, load_replayed_wal_tail_through_seq, replay_discovered_tail,
 };
-pub(crate) use self::reclaim::object_is_required;
+pub(crate) use self::reclaim::wal_no_is_unfolded;
 pub(crate) use self::writer::{prepare_commits_object, prepare_fence, prepare_floor_object};
 
 #[cfg(test)]

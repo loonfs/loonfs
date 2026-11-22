@@ -14,10 +14,10 @@ use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use crate::wal::object_is_required;
+use crate::wal::wal_no_is_unfolded;
 use futures::TryStreamExt;
 use loonfs_objectstore::keys::{extension_segment_object_key, metadata_segment_object_key};
-use loonfs_objectstore::layout::manifest_no_of;
+use loonfs_objectstore::layout::{manifest_no_of, wal_no_of};
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -327,9 +327,12 @@ impl LiveSet {
                 CandidateFamily::Manifests => {
                     manifest_no_of(key).is_some_and(|number| number >= self.newest_manifest_no)
                 }
-                CandidateFamily::WalObjects => self
-                    .live_folded_wal_no
-                    .is_some_and(|folded_wal_no| object_is_required(key, folded_wal_no)),
+                CandidateFamily::WalObjects => {
+                    self.live_folded_wal_no.is_some_and(|folded_wal_no| {
+                        wal_no_of(key)
+                            .is_none_or(|number| wal_no_is_unfolded(number, folded_wal_no))
+                    })
+                }
                 CandidateFamily::MetadataSegments | CandidateFamily::ExtensionSegments => false,
             }
     }

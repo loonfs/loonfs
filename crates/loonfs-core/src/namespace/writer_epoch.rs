@@ -8,7 +8,7 @@ use crate::namespace::basis::PublicationBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use crate::wal::{prepare_fence, publish_wal_object, wal_object_is_live};
+use crate::wal::{prepare_fence, publish_wal_object, wal_no_is_unfolded};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -55,7 +55,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// number (format spec, "Writer ownership").
     ///
     /// After the fence put succeeds, the call checks whether the fence is
-    /// live (see [`wal_object_is_live`]), and puts a dead fence again at the
+    /// live (see [`wal_no_is_unfolded`]), and puts a dead fence again at the
     /// new tip. A newest manifest with a higher writer epoch returns
     /// `writer_fenced`.
     ///
@@ -161,7 +161,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     anchor = self
                         .load_writer_read_anchor(acquired, clock.observe())
                         .await?;
-                    if wal_object_is_live(fenced_head.wal_no, anchor.current_manifest().payload()) {
+                    if wal_no_is_unfolded(
+                        fenced_head.wal_no,
+                        anchor.current_manifest().folded_wal_no(),
+                    ) {
                         super::control::ensure_namespace_live(
                             &anchor.read_state.namespace_id,
                             anchor.read_state.status,
