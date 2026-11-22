@@ -178,6 +178,10 @@ impl<K: Eq + std::hash::Hash + HeapBytes, V: HeapBytes> ChargedMap<K, V> {
         self.entries.values()
     }
 
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries.iter()
+    }
+
     pub(super) fn insert(&mut self, key: K, value: V) -> Result<()> {
         let key_heap_bytes = key.heap_bytes();
         let value_heap_bytes = value.heap_bytes();

@@ -89,16 +89,17 @@ impl<S: ObjectStore> PoolStore<S> {
         apply_decisions(&self.store, decisions, &mut report).await?;
         // Upload sessions are swept as pairs of records, from the listing
         // that rooted their content.
-        let decisions = stream::iter(roots.uploads.iter())
-            .then(|listed| sweep.upload(listed))
-            .boxed();
-        apply_decisions(&self.store, decisions, &mut report).await?;
+        let completed = stream::iter(roots.completed_sessions.iter())
+            .map(|(upload_id, session)| Ok(sweep.completed_session(upload_id, session)));
+        let listed = stream::iter(roots.uploads.iter()).then(|listed| sweep.upload(listed));
+        apply_decisions(&self.store, completed.chain(listed).boxed(), &mut report).await?;
         if roots.listed_objects + sweep.listed_objects.into_inner() == 0 {
             return Err(CoreError::PoolNotFound {
                 pool_id: self.pool_id.clone(),
             });
         }
-        report.listed_bytes += roots.member_list_bytes + sweep.listed_bytes.into_inner();
+        report.listed_bytes +=
+            roots.member_list_bytes + roots.upload_record_bytes + sweep.listed_bytes.into_inner();
         Ok(report)
     }
 }

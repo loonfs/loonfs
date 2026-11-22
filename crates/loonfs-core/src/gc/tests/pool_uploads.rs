@@ -298,6 +298,45 @@ async fn a_collection_reads_each_completed_session_record_once() {
     assert!(reads_by_key.values().all(|&reads| reads == 1));
 }
 
+/// Checks that a pool's collection reports the listed bytes of every upload
+/// record, whichever sweep decides the record.
+#[tokio::test]
+async fn a_pool_collection_reports_the_listed_bytes_of_every_upload_record() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("bootstrap")
+        .pool_id;
+    complete_upload_for_gc(&store, &namespace_id, b"completed\n", &setup).await;
+    stage_upload(&store, &namespace_id, &setup).await;
+    let orphan = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
+    let orphan_session_key = crate::test_support::write_upload_records(
+        &store,
+        &pool_id,
+        &orphan,
+        Some(UploadOutcome::Aborted {
+            aborted_at_ms: 1_000,
+        }),
+    )
+    .await;
+    store
+        .delete(&orphan_session_key)
+        .await
+        .expect("delete session record");
+
+    let listed_bytes = pool_listed_bytes(&store, &pool_id).await;
+    let report = collect_pool(&store, &pool_id, &context(setup.now_ms + 1)).await;
+
+    assert_eq!(report.listed_bytes, listed_bytes);
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert_eq!(report.retained.upload_session_window, 2);
+    assert_eq!(report.retained.upload_session_undecided, 0);
+}
+
 /// A copy of the pool's `ListedUpload` and its kinds, which are private to
 /// the pool's module. The queue charges `size_of` of its slot type, so the
 /// copy keeps the same fields in the same order.
@@ -336,42 +375,21 @@ impl crate::heap_bytes::HeapBytes for ListedUploadCopy {
     }
 }
 
-/// What `sessions` listed sessions charged to a pool collection's budget,
-/// with each of the three collections' reservations.
+/// What `sessions` listed sessions charged to a pool collection's budget.
 struct SessionCharge {
     sessions: usize,
     peak_bytes: usize,
-    content_id_bytes: usize,
-    completed_session_bytes: usize,
-    upload_bytes: usize,
 }
 
 impl SessionCharge {
     fn per_session(&self) -> f64 {
         self.peak_bytes as f64 / self.sessions as f64
     }
-
-    fn print(&self, label: &str) {
-        let n = self.sessions as f64;
-        println!(
-            "MEASURE {label}: n={} peak_bytes={} bytes_per_session={:.1} \
-             content_ids_per_session={:.1} completed_sessions_per_session={:.1} \
-             uploads_per_session={:.1} sessions_in_64_mib={:.0}",
-            self.sessions,
-            self.peak_bytes,
-            self.per_session(),
-            self.content_id_bytes as f64 / n,
-            self.completed_session_bytes as f64 / n,
-            self.upload_bytes as f64 / n,
-            crate::limits::MAX_COLLECTION_BYTES as f64 / self.per_session(),
-        );
-    }
 }
 
 /// Charges `sessions` listed sessions the way `PoolRoots::load` does: a
-/// completed session charges its content ID, its `CompletedUploadSession`,
-/// and its listed entry; an incomplete one its content ID and its listed
-/// entry.
+/// completed session charges its content ID and its `CompletedUploadSession`,
+/// and an incomplete one its content ID and its listed entry.
 fn charge_listed_sessions(sessions: usize, completed: bool) -> SessionCharge {
     charge_listed_sessions_until(Some(sessions), completed)
 }
@@ -395,23 +413,19 @@ fn charge_listed_sessions_until(limit: Option<usize>, completed: bool) -> Sessio
         let charged = (|| {
             content_ids.insert(content_id.clone())?;
             if completed {
-                completed_sessions.insert(
-                    upload_id.clone(),
+                return completed_sessions.insert(
+                    upload_id,
                     CompletedUploadSession {
                         namespace_id: namespace_id.clone(),
                         content_id,
                         completed_at_ms: 1_000 + sessions as u64,
                     },
-                )?;
+                );
             }
             uploads.push_back(ListedUploadCopy {
                 kind: ListedUploadKindCopy::Session {
                     upload_id,
-                    outcome_listing: if completed {
-                        OutcomeListingCopy::Listed
-                    } else {
-                        OutcomeListingCopy::Absent
-                    },
+                    outcome_listing: OutcomeListingCopy::Absent,
                 },
                 size_bytes: 400,
             })
@@ -428,9 +442,6 @@ fn charge_listed_sessions_until(limit: Option<usize>, completed: bool) -> Sessio
     SessionCharge {
         sessions,
         peak_bytes: memory.peak_bytes(),
-        content_id_bytes: content_ids.reserved_bytes(),
-        completed_session_bytes: completed_sessions.reserved_bytes(),
-        upload_bytes: uploads.reserved_bytes(),
     }
 }
 
@@ -443,8 +454,6 @@ fn a_completed_session_costs_the_pool_collection_a_measured_number_of_bytes() {
         let label = if completed { "completed" } else { "incomplete" };
         let small = charge_listed_sessions(10_000, completed);
         let large = charge_listed_sessions(100_000, completed);
-        small.print(label);
-        large.print(label);
         runs.push((label, small, large));
     }
     for (label, small, large) in &runs {
@@ -455,16 +464,16 @@ fn a_completed_session_costs_the_pool_collection_a_measured_number_of_bytes() {
              {ratio:.2} times from 10,000 to 100,000 sessions"
         );
     }
-    // A completed session charges 124 bytes of IDs (three 30-byte IDs and
-    // the 4-byte namespace ID of the fixture) and three table slots: 25 bytes
-    // in the content ID set, 81 in the session map, and 56 in the queue. A
-    // full table holds 7 entries in 8 buckets and a full queue none spare,
-    // so the slots cost 177 to 354 bytes depending on where the growth steps
-    // fall. An incomplete session charges 60 bytes of IDs and two slots, 85
-    // to 170 bytes.
+    // A completed session charges 94 bytes of IDs (the 30-byte content ID
+    // in the set, and the 30-byte upload ID, the 30-byte content ID and the
+    // 4-byte namespace ID of the fixture in the map) and two table slots: 25
+    // bytes in the content ID set and 81 in the session map. A full table
+    // holds 7 entries in 8 buckets, so the slots cost 121 to 242 bytes
+    // depending on where the growth steps fall. An incomplete session charges
+    // 60 bytes of IDs and two slots, 85 to 170 bytes.
     for (label, small, large) in &runs {
         let range = if *label == "completed" {
-            300.0..=480.0
+            210.0..=340.0
         } else {
             140.0..=230.0
         };
@@ -477,9 +486,15 @@ fn a_completed_session_costs_the_pool_collection_a_measured_number_of_bytes() {
             );
         }
     }
-    for completed in [true, false] {
-        let label = if completed { "completed" } else { "incomplete" };
-        charge_listed_sessions_until(None, completed).print(&format!("{label} fill"));
+    // The budget refuses the session that doesn't fit, after more sessions
+    // than the largest run above.
+    for (label, _, large) in &runs {
+        let fill = charge_listed_sessions_until(None, *label == "completed");
+        assert!(
+            fill.sessions > large.sessions,
+            "{label}: the budget held {} sessions",
+            fill.sessions
+        );
     }
 }
 
@@ -520,12 +535,10 @@ async fn a_real_pool_collection_charges_the_measured_per_session_cost() {
     let with_sessions = pool_collection_peak_with_completed_sessions(SESSIONS).await;
     let synthetic = charge_listed_sessions(SESSIONS, true);
     let real_per_session = (with_sessions - baseline) as f64 / SESSIONS as f64;
-    println!(
-        "MEASURE real: m={SESSIONS} baseline_peak_bytes={baseline} \
-         peak_bytes={with_sessions} bytes_per_session={real_per_session:.1} \
-         synthetic_peak_bytes={} synthetic_bytes_per_session={:.1}",
-        synthetic.peak_bytes,
-        synthetic.per_session(),
+    let ratio = real_per_session / synthetic.per_session();
+    assert!(
+        (0.8..=1.25).contains(&ratio),
+        "a real session charges {real_per_session:.1} bytes and a synthetic one {:.1}",
+        synthetic.per_session()
     );
-    synthetic.print("completed");
 }
