@@ -19,7 +19,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload,
 };
-use loonfs_types::{CommitSeq, CompactorEpoch, NamespaceId};
+use loonfs_types::{CompactorEpoch, NamespaceId};
 use std::collections::BTreeSet;
 
 pub(crate) struct CompactionPublication {
@@ -106,7 +106,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                             segments: output_segments.clone(),
                             placement: spec.placement(),
                         },
-                        spec.frozen_floor_seq(),
                     )?;
                     // The last check before the swap that makes this output reader
                     // truth. Everything above it is reads and objects nothing references.
@@ -180,12 +179,15 @@ pub(super) struct ReplacementOutput {
 }
 
 /// The surviving and new runs determine the base sequence and next run number.
+///
+/// The manifest copies its predecessor's retention floor, because only a fold
+/// or a fork's active manifest changes the floor (format spec, "Advancing the
+/// retention floor").
 pub(super) fn build_replacement_manifest(
     namespace_id: &NamespaceId,
     previous: &NamespaceManifestPayload,
     surviving: Vec<MetadataRunRef>,
     output: ReplacementOutput,
-    floor_seq: CommitSeq,
 ) -> Result<NamespaceManifestPayload> {
     let next_run_no = if output.segments.is_empty() {
         previous.next_run_no
@@ -204,7 +206,6 @@ pub(super) fn build_replacement_manifest(
     Ok(NamespaceManifestPayload {
         namespace_id: namespace_id.clone(),
         next_run_no,
-        retention_floor_seq: previous.retention_floor_seq.max(floor_seq),
         ..previous
             .successor(runs)
             .map_err(|_| no_manifest_after(previous.manifest_no))?

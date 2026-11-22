@@ -163,21 +163,37 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         Ok(inode)
     }
 
-    pub(super) async fn ensure_not_covered_by_tombstone(
+    /// Ensures that the walk up the current parent bindings from `inode_id`
+    /// reaches the root, because LoonFS never commits a change to a hidden
+    /// inode (format spec, "Row retention during a base compaction").
+    ///
+    /// The walk ends in one of three ways. If it reaches the root, the check
+    /// passes. If it reaches a hiding tombstone, the check fails with
+    /// `TargetUnderSubtreeTombstone`. If it reaches an inode without a current
+    /// parent binding, the check fails with `InodeMissing`, the error for an
+    /// operand that isn't visible. The last case occurs only below an expired
+    /// deletion, after a base compaction of the bindings group has removed the
+    /// bindings below the deleted directory while the inode rows remain.
+    pub(super) async fn ensure_ancestry_reaches_root(
         &self,
         inode_id: InodeId,
         operand: CommitOperand,
     ) -> Result<()> {
-        if let Ancestry::Hidden(tombstone) = self.view().ancestry(inode_id).await? {
-            return Err(CommitValidationError::TargetUnderSubtreeTombstone {
-                operand,
-                inode_id,
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.committed_seq,
+        match self.view().ancestry(inode_id).await? {
+            Ancestry::Root => Ok(()),
+            Ancestry::Hidden(tombstone) => {
+                Err(CommitValidationError::TargetUnderSubtreeTombstone {
+                    operand,
+                    inode_id,
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.committed_seq,
+                }
+                .into())
             }
-            .into());
+            Ancestry::Disconnected => {
+                Err(CommitValidationError::InodeMissing { operand, inode_id }.into())
+            }
         }
-        Ok(())
     }
 
     pub(super) async fn resolve_name_absent(

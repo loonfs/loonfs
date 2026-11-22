@@ -22,8 +22,10 @@ use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{metadata_segment_object_key, pool_member, pool_members_prefix};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::NamespaceStatus;
-use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
+use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner, SnapshotPayload};
+use loonfs_types::format::manifest::{
+    MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload,
+};
 use loonfs_types::{ContentId, NamespaceId, PoolId, UploadId};
 use std::sync::{Arc, Mutex};
 
@@ -355,7 +357,10 @@ async fn load_member_roots<S: ObjectStore>(
 /// until the snapshots are deleted.
 ///
 /// A snapshot whose manifest is missing makes the member's roots unreadable,
-/// because only the member's own collection decides about its snapshots.
+/// unless the snapshot protects nothing (see [`protects_nothing`]): its
+/// record is gone, it's a user snapshot, or it's a deleted member's own fork
+/// point snapshot. Pool collection doesn't delete a member's snapshots,
+/// because the member's own collection deletes them.
 async fn read_member_roots<S: ObjectStore>(
     member: &NamespaceStore<S>,
     current: PublicationBasis,
@@ -391,11 +396,16 @@ async fn read_member_roots<S: ObjectStore>(
             SnapshotManifest::Loaded(manifest) => protect_layout_segments(manifest, roots)?,
             SnapshotManifest::Rooted => {}
             SnapshotManifest::Missing(manifest_no) => {
-                return Err(missing_root_manifest(
-                    &member.namespace_id,
-                    *manifest_no,
-                    &snapshot.key,
-                ));
+                // The listing reads no record, so the collection reads this
+                // one record to find the snapshot's owner.
+                let record = member.load_listed_snapshot_record(&snapshot.key).await?;
+                if !protects_nothing(record.as_ref(), &member.namespace_id, head) {
+                    return Err(missing_root_manifest(
+                        &member.namespace_id,
+                        *manifest_no,
+                        &snapshot.key,
+                    ));
+                }
             }
         }
     }
@@ -412,6 +422,31 @@ async fn read_member_roots<S: ObjectStore>(
         protect_layout_segments(&anchor.manifest, roots)?;
     }
     Ok(status)
+}
+
+/// Returns whether a snapshot whose manifest is missing protects nothing.
+/// `record` is the snapshot's record (`None` when the record is gone),
+/// `namespace_id` is the member that lists the snapshot, and `head` is the
+/// member's current manifest.
+fn protects_nothing(
+    record: Option<&SnapshotPayload>,
+    namespace_id: &NamespaceId,
+    head: &NamespaceManifestPayload,
+) -> bool {
+    match record.map(|record| &record.owner) {
+        None => true,
+        // A verified user snapshot protects its manifest from the moment it's
+        // acknowledged, so a user snapshot whose manifest is missing was never
+        // verified (format spec, "Snapshot cleanup").
+        Some(SnapshotOwner::User { .. }) => true,
+        // A call that finishes a fork can write the fork point snapshot on a
+        // manifest that a concurrent delete and collection removed. Nothing
+        // reads a deleted namespace's fork point snapshot, and its tombstone
+        // lists the same runs (format spec, "Snapshot cleanup").
+        Some(SnapshotOwner::Fork {
+            target_namespace_id,
+        }) => target_namespace_id == namespace_id && head.status.is_deleted(),
+    }
 }
 
 /// Keeps the layout segments that `manifest` lists, whose extent filters

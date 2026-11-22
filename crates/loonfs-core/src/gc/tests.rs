@@ -1121,6 +1121,58 @@ async fn gc_retains_unrecognized_manifest_keys() {
     }
 }
 
+/// Checks that a collection of an active namespace keeps the objects under
+/// the WAL prefix whose keys don't parse as WAL objects, while it deletes the
+/// folded WAL objects beside them.
+#[tokio::test]
+async fn gc_retains_unrecognized_wal_keys() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/file", "data", &setup).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold wal");
+
+    let prefix = wal_prefix(&namespace_id);
+    // A WAL key has a twenty-digit number above zero.
+    let foreign_objects = [
+        (format!("{prefix}notes.txt"), b"foreign key".as_slice()),
+        (
+            format!("{prefix}00000000000000000000.wal.zst"),
+            b"WAL number zero".as_slice(),
+        ),
+        (format!("{prefix}1.wal.zst"), b"short WAL number".as_slice()),
+    ];
+    for (key, bytes) in &foreign_objects {
+        store
+            .put_if_absent(key, Bytes::copy_from_slice(bytes))
+            .await
+            .expect("write foreign WAL-prefix object");
+    }
+
+    let aged =
+        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
+    let report = collect(&store, &namespace_id, &aged).await;
+
+    assert_eq!(report.deleted.wal_objects, 1);
+    assert_eq!(report.retained.unrecognized_key, 3);
+    for (key, expected) in foreign_objects {
+        let actual = store
+            .get(&key, None)
+            .await
+            .expect("get foreign WAL-prefix object")
+            .expect("unrecognized object is retained");
+        assert_eq!(actual.as_ref(), expected);
+    }
+}
+
 #[tokio::test]
 async fn gc_reclaims_manifests_superseded_by_wal_folds() {
     let temp_dir = tempdir().expect("tempdir");
