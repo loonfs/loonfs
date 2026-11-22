@@ -10,7 +10,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::commit_id;
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
 };
 use loonfs_types::Checksum;
 use loonfs_types::CompleteUploadBody;
@@ -389,7 +389,7 @@ mod streamed_content {
     use loonfs_objectstore::ObjectStoreExtension;
 
     #[tokio::test]
-    async fn slow_upload_cannot_outlive_its_durable_cleanup_record() {
+    async fn a_slow_upload_that_outlives_its_records_leaves_content_for_the_content_sweep() {
         staging_cleanup_schedule(true).await;
     }
 
@@ -398,11 +398,21 @@ mod streamed_content {
         staging_cleanup_schedule(false).await;
     }
 
+    /// Returns a local store whose content objects list as last modified at
+    /// time zero, so that pool collection's content sweep finds a late object
+    /// old enough on the tests' clock, which starts at 1,000 ms.
+    fn store_with_aged_content(root: &Path) -> MetadataMapStore<LocalFsStore> {
+        MetadataMapStore::aged(
+            LocalFsStore::new(root).expect("store"),
+            KeyPredicate::content_blob(),
+        )
+    }
+
     async fn staging_cleanup_schedule(forget_before_resume: bool) {
         use loonfs_types::UploadSessionStatus;
 
         let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let store = store_with_aged_content(temp_dir.path());
         let context = default_writer();
         let namespace_id = NamespaceId::parse("slow-upload").expect("namespace");
         NamespaceFixture::new(&store, &namespace_id, &context)
@@ -474,18 +484,36 @@ mod streamed_content {
             result.expect_err("aborted session cannot stage").code(),
             ErrorCode::UploadNotFound
         );
-        collect_pool(&store, &namespace_id, &aged.clock())
+        assert!(
+            store.head(&content_key).await.expect("head").is_some(),
+            "the late body is written after the abort's cleanup"
+        );
+        assert_eq!(
+            complete_upload(&store, &namespace_id, &begin.upload_id, &context)
+                .await
+                .expect_err("an aborted session can't complete")
+                .code(),
+            ErrorCode::UploadNotFound
+        );
+        let report = collect_pool(&store, &namespace_id, &aged.clock())
             .await
             .expect("repeat GC after late content write");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
-            "late content must not survive without a session that lets active-namespace GC find it"
+            "the session's cleanup or the content sweep deletes the late object"
+        );
+        // While the records exist, the session's cleanup deletes the object.
+        // Once they're gone, the object is unreferenced, and the content sweep
+        // deletes it.
+        assert_eq!(
+            report.deleted.content_objects,
+            u64::from(forget_before_resume)
         );
     }
 
     #[tokio::test]
-    async fn slow_owned_stream_cannot_outlive_its_cleanup_record() {
+    async fn a_slow_owned_stream_that_outlives_its_records_leaves_content_for_the_content_sweep() {
         owned_stream_expiry_schedule(true).await;
     }
 
@@ -498,7 +526,7 @@ mod streamed_content {
         use loonfs_objectstore::keys::upload_session_prefix;
 
         let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let store = store_with_aged_content(temp_dir.path());
         let context = default_writer();
         let namespace_id = NamespaceId::parse("slow-owned-stream").expect("namespace");
         NamespaceFixture::new(&store, &namespace_id, &context)
@@ -571,20 +599,37 @@ mod streamed_content {
             }
             assert!(store.get(&content_key, None).await.expect("get").is_none());
             resume_tx.send(()).expect("release late input");
-            (session_key, content_key, aged)
+            (session.upload_id, session_key, content_key, aged)
         };
-        let (result, (session_key, content_key, aged)) = tokio::join!(staging, collecting);
+        let (result, (upload_id, session_key, content_key, aged)) =
+            tokio::join!(staging, collecting);
         assert_eq!(
             result.expect_err("expired owner cannot complete").code(),
             ErrorCode::UploadNotFound
         );
-        collect_pool(&store, &namespace_id, &aged.clock())
+        assert!(
+            store.head(&content_key).await.expect("head").is_some(),
+            "the late input is written after the abort's cleanup"
+        );
+        if !forget_before_resume {
+            let (_, outcome) = read_upload_records(&store, &namespace_id, &upload_id).await;
+            assert_matches!(
+                outcome,
+                Some(UploadOutcome::Aborted { .. }),
+                "the late completion doesn't replace the abort"
+            );
+        }
+        let report = collect_pool(&store, &namespace_id, &aged.clock())
             .await
             .expect("GC after failed late completion");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
-            "implicit staging must not leave content without a durable cleanup owner"
+            "the session's cleanup or the content sweep deletes the late object"
+        );
+        assert_eq!(
+            report.deleted.content_objects,
+            u64::from(forget_before_resume)
         );
     }
 

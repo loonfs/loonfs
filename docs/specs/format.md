@@ -573,7 +573,7 @@ Completed outcome records MUST match the session's `content_id` and (for direct 
 
 In `service_proxied` mode, staging writes bytes straight to the session's content object without writing a separate staging record (the stored object itself provides verified size and checksum via HEAD). Concurrent requests to the same session write the same key: [Immutable writes and retries](#32-immutable-writes-and-retries) accepts matching size and checksum as an idempotent retry and rejects different bytes.
 
-While streaming, the server computes the store's checksum. At EOF it re-checks that the session is still open before finalizing the write, and re-checks again afterward before returning `content_ref` (since a concurrent abort deletes the object). Completion verifies the object with one HEAD and writes `content_ref` into the outcome record (failing and leaving the session open if nothing was staged).
+While streaming, the server computes the store's checksum. The server checks that the session is open before the write, and checks again after the write before returning `content_ref` (since a concurrent abort deletes the object). Completion verifies the object with one HEAD and writes `content_ref` into the outcome record (failing and leaving the session open if nothing was staged).
 
 ### 5.4 Direct uploads
 

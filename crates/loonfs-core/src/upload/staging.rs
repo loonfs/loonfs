@@ -91,7 +91,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             session.content_id.clone(),
             body,
             ContentKeyOwner::FreshIdentity,
-            self.ensure_session_still_open(catalog, &session.upload_id, clock),
         )
         .await?;
         self.complete_owned_staging(catalog, &session, content_ref, clock)

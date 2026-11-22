@@ -13,9 +13,7 @@ use loonfs_objectstore::{
 use loonfs_types::{
     ChecksumAlgorithm, ChecksumDigest, ContentId, ContentRef, ContentRefKind, PoolId, UploadId,
 };
-use std::future::Future;
 use std::sync::{Arc, Mutex};
-use tokio::sync::oneshot;
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Plants test content under a fresh identity, under the prefix of the
@@ -82,58 +80,25 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     content_id: ContentId,
     body: ByteStream,
     owner: ContentKeyOwner<'_>,
-    check_ownership: impl Future<Output = Result<()>>,
 ) -> Result<ContentRef> {
     let object_key = content_blob(pool_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::new(store.checksum_algorithm())));
-    let (request_check, check_requested) = oneshot::channel();
-    let (allow_completion, completion_allowed) = oneshot::channel();
     let hashed = {
         let observed = Arc::clone(&observed);
-        let object_key = object_key.clone();
-        futures::stream::try_unfold(
-            (body, request_check, completion_allowed),
-            move |(mut body, request_check, completion_allowed)| {
-                let observed = Arc::clone(&observed);
-                let object_key = object_key.clone();
-                async move {
-                    if let Some(chunk) = body.next().await {
-                        let chunk = chunk?;
-                        observed
-                            .lock()
-                            .expect("the streamed payload lock should not be poisoned")
-                            .update(&chunk);
-                        return Ok(Some((chunk, (body, request_check, completion_allowed))));
-                    }
-                    // No caller bytes remain. A streamed write has one part in
-                    // flight, so only the final part, the precondition, and the
-                    // completion follow, each within one provider request bound.
-                    // Together they finish inside the grace window, before an
-                    // upload aborted after this check can lose its record.
-                    let _ = request_check.send(());
-                    completion_allowed.await.map_err(|_| {
-                        ObjectStoreError::transport(&object_key, "upload session check failed")
-                    })?;
-                    Ok(None)
-                }
-            },
-        )
+        body.map(move |chunk| {
+            let chunk = chunk?;
+            observed
+                .lock()
+                .expect("the streamed payload lock should not be poisoned")
+                .update(&chunk);
+            Ok(chunk)
+        })
         .boxed()
     };
 
-    // ByteStream is 'static; the session check borrows the caller's store.
-    let check = async {
-        if check_requested.await.is_ok() {
-            check_ownership.await?;
-            let _ = allow_completion.send(());
-        }
-        Ok::<_, CoreError>(())
-    };
-    let (stored, checked) = futures::join!(
-        store.put_streamed(&object_key, hashed, PutMode::CreateIfAbsent),
-        check,
-    );
-    checked?;
+    let stored = store
+        .put_streamed(&object_key, hashed, PutMode::CreateIfAbsent)
+        .await;
     let content_ref = std::mem::replace(
         &mut *observed
             .lock()

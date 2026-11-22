@@ -979,10 +979,7 @@ mod tests {
         let key = "content/failed-stream";
         let body = stream::iter([
             Ok(Bytes::from_static(b"partial content")),
-            Err(ObjectStoreError::transport(
-                key,
-                "upload session check failed",
-            )),
+            Err(ObjectStoreError::transport(key, "the body failed")),
         ])
         .boxed();
 
