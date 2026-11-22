@@ -94,15 +94,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .content_ref
             }
             ProxiedPayload::Stream(body) => {
-                stage_streamed_under_content_id(
-                    &self.store,
-                    pool_id,
-                    content_id,
-                    body,
-                    owner,
-                    self.ensure_session_still_open(catalog, upload_id, clock),
-                )
-                .await?
+                stage_streamed_under_content_id(&self.store, pool_id, content_id, body, owner)
+                    .await?
             }
         };
         // An abort during the write deletes the object it was writing, so the

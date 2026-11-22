@@ -31,7 +31,7 @@ use tempfile::tempdir;
 const BYTES: &[u8] = b"terminal states\n";
 
 #[tokio::test]
-async fn a_failed_final_session_read_publishes_no_content() {
+async fn a_failed_session_read_after_a_streamed_write_leaves_the_session_open() {
     use futures::StreamExt;
     use std::sync::Arc;
 
@@ -83,20 +83,33 @@ async fn a_failed_final_session_read_publishes_no_content() {
             &loonfs_test_support::test_actor(),
         )
         .await
-        .expect_err("the final session read must succeed");
+        .expect_err("the session read after the write must succeed");
 
     assert_matches!(error, CoreError::ControlObjectLoad(_));
     assert_eq!(recording.count(OperationSelector::Read), 2);
     assert_eq!(recording.counts().puts, 0);
-    assert!(recording
-        .get(&content_blob(&pool_id, &loaded.session.content_id), None)
-        .await
-        .expect("get content")
-        .is_none());
-    let loaded = load_session_state(&recording, &namespace_id, &session.upload_id)
+    let reloaded = load_session_state(&recording, &namespace_id, &session.upload_id)
         .await
         .expect("load the open session");
-    assert_eq!(loaded.outcome, None);
+    assert_eq!(reloaded.outcome, None);
+    // The session's own object stays, so a retry of the same bytes replays it.
+    let retried = engine_at(&recording, &namespace_id, 1_000)
+        .upload_content(
+            &catalog,
+            &session.upload_id,
+            BYTES,
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("a retry of the same bytes succeeds");
+    assert_eq!(
+        retried.content_ref().cloned(),
+        Some(ContentRef::blob_v1(
+            loaded.session.content_id,
+            BYTES,
+            ChecksumAlgorithm::Crc64nvme
+        ))
+    );
 }
 
 #[tokio::test(start_paused = true)]

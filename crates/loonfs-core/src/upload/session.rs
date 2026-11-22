@@ -8,7 +8,6 @@ use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::limits::UPLOAD_SESSION_LEASE_MS;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use bytes::Bytes;
 use loonfs_objectstore::keys::upload_session;
@@ -117,24 +116,6 @@ pub(crate) fn ensure_session_actor(
         Err(CoreError::UploadNotFound {
             upload_id: session.upload_id.clone(),
         })
-    }
-}
-
-impl<S: ObjectStore> NamespaceStore<S> {
-    /// Checks, just before a streamed write sends its final request, that the
-    /// session is still open.
-    ///
-    /// A session aborted after this check keeps its records for a grace period
-    /// longer than the final request can take, so a later cleanup removes any
-    /// object the request writes.
-    pub(crate) async fn ensure_session_still_open(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        upload_id: &UploadId,
-        clock: &OperationClock,
-    ) -> Result<()> {
-        let state = self.load_upload_session_state(catalog, upload_id).await?;
-        ensure_session_open(&state, clock.request_at_ms())
     }
 }
 
