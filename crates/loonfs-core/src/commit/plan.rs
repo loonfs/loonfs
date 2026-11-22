@@ -4,12 +4,8 @@
 use super::CommitFingerprint;
 use crate::storage::inline_content::InlineContent;
 
-use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::format::wal::{MergeRecord, WalCommitDelta, WalInlineContent};
-use loonfs_types::{
-    ActorId, CommitId, CommitSeq, ContentRef, DisplayName, InodeId, NameKey, NamespaceId,
-    WriterEpoch,
-};
+use loonfs_types::{ActorId, CommitId, CommitSeq, ContentRef, NamespaceId, WriterEpoch};
 
 /// The bytes one append adds, the reference its revision names, and what
 /// the commit records about that reference's bytes.
@@ -39,16 +35,4 @@ pub(crate) struct CommitPlan {
     pub(crate) deltas: Vec<WalCommitDelta>,
     pub(crate) appended: Vec<WalInlineContent>,
     pub(crate) inline_content: Vec<InlineContent>,
-}
-
-/// The current binding of a visible inode, as the frozen copy of the write
-/// path resolves it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedBinding {
-    pub parent_inode_id: InodeId,
-    pub name_key: NameKey,
-    pub display_name: DisplayName,
-    pub child_inode_id: InodeId,
-    /// Position of the bind event that established the binding.
-    pub bind_position: DeltaPosition,
 }

@@ -88,9 +88,6 @@ mod control_update;
 mod diff;
 mod engine;
 mod error;
-// Temporary: removed with the frozen copy of the write path before the branch
-// merges.
-mod frozen_write_path;
 mod gc;
 mod heap_bytes;
 mod in_flight;

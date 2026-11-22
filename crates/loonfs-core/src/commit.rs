@@ -17,7 +17,7 @@ mod wal_payload;
 pub(crate) mod wal_size;
 
 pub use self::error::{CommitOperand, CommitValidationError};
-pub(crate) use self::plan::{AppendedContent, CommitPlan, ResolvedBinding};
+pub(crate) use self::plan::{AppendedContent, CommitPlan};
 pub(crate) use self::session::{CommitSession, NewChild};
 pub(crate) use self::wal_payload::wal_payload_from_commit_plan;
 pub use loonfs_types::CommitFingerprint;

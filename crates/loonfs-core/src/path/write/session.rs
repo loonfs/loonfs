@@ -86,35 +86,6 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         authorizer: Authorizer<'_>,
         semantic_identity: CommitFingerprint,
     ) -> Result<CommitPlan> {
-        // Temporary: every commit is also prepared by the frozen copy of the
-        // write path and compared. This call is removed with the frozen copy.
-        let accepted_content =
-            |content_ref: &ContentRef| self.accepted_pieces.content(content_ref).cloned();
-        crate::frozen_write_path::prepare_and_compare(
-            self.prepare_commit_live(candidate, authorizer, semantic_identity.clone()),
-            &crate::frozen_write_path::PublishPlanningSession {
-                head: &self.head,
-                tail: self.tail,
-                base_view: self.base_view,
-                content_writes: self.content_writes,
-                committed_at_ms: self.committed_at_ms,
-                accepted_rows: &self.accepted_rows,
-                accepted_content: &accepted_content,
-                durable_cache: &self.durable_cache,
-            },
-            candidate,
-            authorizer,
-            semantic_identity,
-        )
-        .await
-    }
-
-    async fn prepare_commit_live(
-        &self,
-        candidate: &CommitCandidate,
-        authorizer: Authorizer<'_>,
-        semantic_identity: CommitFingerprint,
-    ) -> Result<CommitPlan> {
         let base_view = self.base_view.with_durable_cache(&self.durable_cache);
         let pre_state = base_view.with_overlay(None, &self.accepted_rows, self.head.seq);
         if let Some(merge) = candidate.merge() {

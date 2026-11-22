@@ -238,8 +238,8 @@ async fn a_dropped_publish_future_leaves_the_session_owing_a_fence() {
 /// batch is still planning, before the session sends a WAL put, leaves the
 /// session owing no fence (format spec, "Failed and unknown outcomes").
 ///
-/// A fold moves `alpha` into a metadata segment, so planning `beta` reads
-/// that segment from the store. The read is held, and the caller drops the
+/// A fold moves `alpha` into a metadata segment, so planning `beta`, which
+/// goes under `alpha`, reads that segment from the store. The read is held, and the caller drops the
 /// future. The session's next commit, `gamma`, is written at the number
 /// after the tip, and the store has no other WAL object after the tip.
 #[tokio::test]
@@ -281,7 +281,7 @@ async fn a_publish_future_dropped_while_planning_leaves_the_session_owing_no_fen
     store.block_next();
     {
         let clock = writer.clock();
-        let dropped = engine.publish_batch(vec![create_dir("beta", "beta")], &clock);
+        let dropped = engine.publish_batch(vec![create_dir("beta", "alpha/beta")], &clock);
         tokio::select! {
             _ = dropped => panic!("planning beta is held"),
             () = store.wait_until_blocked() => {}

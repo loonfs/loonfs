@@ -714,6 +714,7 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
     let view = crate::metadata::MetadataView::over_manifest_segments(&verified, CommitSeq(1));
 
     let covered = view
+        .session()
         .ancestry(InodeId(2))
         .await
         .expect_err("a cycle is not an uncovered inode");

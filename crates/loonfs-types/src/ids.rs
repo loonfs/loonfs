@@ -101,11 +101,7 @@ pub(crate) fn random_u64() -> u64 {
 /// Draws `N` fresh random bytes from the installed entropy source.
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0_u8; N];
-    // Temporary: the write path comparison replays a scope's draws here. It's
-    // removed with the frozen copy of the write path in `loonfs-core`.
-    if !crate::write_path_comparison::fill_scoped(&mut bytes) {
-        crate::installed_entropy().fill(&mut bytes);
-    }
+    crate::installed_entropy().fill(&mut bytes);
     bytes
 }
 

@@ -9,8 +9,8 @@ use crate::error::Result;
 use crate::metadata::view::latest_visible_binding;
 use crate::metadata::view::MetadataView;
 use crate::metadata::{
-    listed_trash_entry_from_record, Ancestry, DirentryBindingRecord, ListedTrashEntry,
-    MetadataState, SubtreeTombstoneRecord, TrashRange, TrashRecord,
+    listed_trash_entry_from_record, DirentryBindingRecord, ListedTrashEntry, MetadataState,
+    SubtreeTombstoneRecord, TrashRange, TrashRecord,
 };
 use crate::segment::BlocksPerRefill;
 use loonfs_objectstore::ObjectStore;
@@ -41,10 +41,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .await?;
         let latest = latest_visible_binding(bindings.iter(), self.visible_seq());
         Ok(latest)
-    }
-
-    pub(crate) async fn ancestry(&self, inode_id: InodeId) -> Result<Ancestry> {
-        visibility::ancestry(&mut self.reads(), inode_id).await
     }
 
     pub(crate) async fn would_create_directory_cycle(

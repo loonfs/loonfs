@@ -656,12 +656,12 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
         costs.push((publish, fold));
     }
     assert_eq!(costs[0], costs[1]);
-    // The receipt check reads the manifest boundary, the basis manifest and
-    // one segment, and the commit is one WAL put.
+    // The receipt check reads the manifest boundary and the basis manifest,
+    // and the commit is one WAL put.
     assert_eq!(
         costs[1].0,
         StoreCounts {
-            gets: 2,
+            gets: 1,
             gets_with_metadata: 1,
             puts: 1,
             create_if_absent_puts: 1,
