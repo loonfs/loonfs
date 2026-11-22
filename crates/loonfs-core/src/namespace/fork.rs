@@ -155,15 +155,17 @@ impl ForkDeadline {
 ///
 /// A caller finds the target once with
 /// [`NamespaceEngine::find_fork_target`], before it reads the source, and
-/// passes it to the fork, so the fork doesn't find the target again. If
-/// another call creates the target after the caller found it, the fork's
-/// manifest 1 put fails, and the fork then finds the target again.
+/// passes it to the fork. If another call creates the target after the caller
+/// found it, the fork's manifest 1 put fails, and the fork then finds the
+/// target again. A fork that finishes an initializing target finds the target
+/// again after its publication budget starts, because the budget that protects
+/// its fork snapshot has to start before the fork reads the target.
 #[derive(Clone, Debug)]
 pub struct ForkTarget {
     namespace_id: NamespaceId,
-    /// The target's newest manifest, when the target is initializing, or
-    /// `None` when no namespace has the ID.
-    initializing: Option<PublicationBasis>,
+    /// Whether the target was initializing when the caller found it, rather
+    /// than free.
+    initializing: bool,
 }
 
 /// A fork whose manifest 1 this call published.
@@ -183,14 +185,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Returns `namespace_exists` for an active namespace, and
     /// `namespace_deleted` for a tombstone or a retired ID, so a caller that
     /// finds the target first reads nothing of the source for a taken ID.
-    /// For an initializing namespace, it returns a target that includes the
-    /// namespace's newest manifest, so the fork finishes the earlier fork that
-    /// stopped before its active manifest.
+    /// For an initializing namespace, whose earlier fork stopped before its
+    /// active manifest, it returns a target that the fork finishes.
     pub async fn find_fork_target(&self, new_namespace_id: &NamespaceId) -> Result<ForkTarget> {
         let target = self.namespace.with_namespace(new_namespace_id.clone());
         let initializing = match target.find_existing_namespace().await? {
-            None => None,
-            Some(ExistingNamespace::Initializing(newest)) => Some(newest),
+            None => false,
+            Some(ExistingNamespace::Initializing(_)) => true,
             Some(ExistingNamespace::Active) => {
                 return Err(CoreError::NamespaceExists {
                     namespace_id: new_namespace_id.clone(),
@@ -273,8 +274,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// 1. The caller finds the newest manifest of the target's ID with
     ///    [`Self::find_fork_target`], which returns `namespace_exists` for an
     ///    active namespace, and `namespace_deleted` for a tombstone or a
-    ///    retired ID. An initializing namespace is finished (see
-    ///    [`Self::finish_initializing_fork`]).
+    ///    retired ID. For an initializing namespace, the call finds the
+    ///    target's newest manifest again after its publication budget starts,
+    ///    and finishes the fork (see [`Self::finish_initializing_fork`]).
     /// 2. Takes the snapshot that the fork is built from: the user snapshot
     ///    that `at` identifies, or a temporary snapshot of the manifest of
     ///    this namespace's head, without a fold, which expires
@@ -314,9 +316,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let clock = self.namespace.start_clock();
         let new_namespace_id = &target.namespace_id;
         let target_store = self.namespace.with_namespace(new_namespace_id.clone());
-        let newest = match target.initializing {
-            Some(newest) => newest,
-            None => match self
+        let newest = if target.initializing {
+            load_initializing_target(&target_store).await?
+        } else {
+            match self
                 .publish_fork_manifest_1(&target_store, actor_id, &at, &clock)
                 .await
             {
@@ -347,21 +350,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                         .map(ForkOutcome::Created);
                 }
                 Err(CoreError::NamespaceExists { .. }) => {
-                    match target_store.find_existing_namespace().await?.ok_or_else(|| {
-                        CoreError::NamespaceCorrupt(format!(
-                            "the manifest 1 put of namespace `{new_namespace_id}` lost to a manifest that isn't there"
-                        ))
-                    })? {
-                        ExistingNamespace::Initializing(newest) => newest,
-                        ExistingNamespace::Active => {
-                            return Err(CoreError::NamespaceExists {
-                                namespace_id: new_namespace_id.clone(),
-                            })
-                        }
-                    }
+                    load_initializing_target(&target_store).await?
                 }
                 Err(error) => return Err(error),
-            },
+            }
         };
         self.finish_initializing_fork(&target_store, newest, &at, &clock)
             .await
@@ -709,6 +701,28 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, clock)
             .await?;
         deadline.ensure_before(clock)
+    }
+}
+
+/// Loads the newest manifest of `target`, and returns that manifest while the
+/// target is still initializing. A fork calls this when its caller found the
+/// target initializing, or when another call's manifest 1 put succeeded before
+/// the fork's put.
+///
+/// Returns `namespace_exists` for an active namespace, and
+/// `namespace_deleted` for a tombstone or a retired ID.
+async fn load_initializing_target<S: ObjectStore>(
+    target: &NamespaceStore<S>,
+) -> Result<PublicationBasis> {
+    match target.find_existing_namespace().await? {
+        Some(ExistingNamespace::Initializing(newest)) => Ok(newest),
+        Some(ExistingNamespace::Active) => Err(CoreError::NamespaceExists {
+            namespace_id: target.namespace_id().clone(),
+        }),
+        None => Err(CoreError::NamespaceCorrupt(format!(
+            "namespace `{}` has no manifest after a call found its manifest 1",
+            target.namespace_id()
+        ))),
     }
 }
 

@@ -350,6 +350,92 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
     assert!(head_state(&store, &target).await.status.is_deleted());
 }
 
+/// Checks that a fork that finishes an initializing target reads the target
+/// again after its publication budget starts. A caller that found the target
+/// initializing, and then paused while the target was deleted and retired,
+/// gets `namespace_deleted`, and the fork writes no fork snapshot on the
+/// source that no retirement would delete.
+#[tokio::test]
+async fn a_fork_with_a_stale_initializing_target_writes_nothing_after_the_target_retires() {
+    let directory = tempdir().expect("tempdir");
+    let source = namespace_id("source");
+    let target = namespace_id("target");
+    let store = FailStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(snapshot_prefix(&target)),
+        OperationSelector::PutCreateIfAbsent,
+        InjectedError::PermissionDenied("fork point snapshot refused".to_owned()),
+    );
+    let context = default_writer();
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+    let engine = namespace_engine(&store, &source, &context);
+    let snapshot = engine
+        .create_snapshot(
+            Some("basis".to_owned()),
+            None,
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
+                .await
+                .expect("fold the WAL tail"),
+        )
+        .await
+        .expect("snapshot");
+    let actor_id = loonfs_test_support::test_actor();
+    store.fail_all();
+    engine
+        .fork_namespace_at_snapshot(
+            engine.find_fork_target(&target).await.expect("free ID"),
+            &actor_id,
+            &snapshot.snapshot_id,
+        )
+        .await
+        .expect_err("the fork point snapshot put fails");
+    store.clear();
+    let stale = engine
+        .find_fork_target(&target)
+        .await
+        .expect("the target is initializing");
+
+    namespace_engine(&store, &target, &context)
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete the initializing target");
+    let mut aged = context.clone();
+    aged.now_ms = namespace_store(&store, &target)
+        .load_read_state()
+        .await
+        .expect("target tombstone")
+        .status
+        .deleted_at_ms()
+        .expect("deletion stamp")
+        + loonfs_core::limits::GC_GRACE_WINDOW_MS;
+    namespace_store(&store, &target)
+        .gc(&aged.clock())
+        .await
+        .expect("retire the target");
+    assert_eq!(
+        namespace_store(&store, &target)
+            .load_read_state()
+            .await
+            .expect_err("the target is retired")
+            .code(),
+        ErrorCode::NamespaceDeleted
+    );
+
+    let error = engine
+        .fork_namespace_at_snapshot(stale, &actor_id, &snapshot.snapshot_id)
+        .await
+        .expect_err("the target was retired after the caller found it");
+    assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
+    assert_eq!(
+        store
+            .list_prefix(&snapshot_prefix(&source))
+            .await
+            .expect("list the source's snapshots"),
+        [snapshot_record(&source, &snapshot.snapshot_id)],
+        "no fork snapshot for the retired target"
+    );
+}
+
 async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
