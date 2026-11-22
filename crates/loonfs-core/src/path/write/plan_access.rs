@@ -2,6 +2,7 @@
 
 use super::planner::OperationPlanningSession;
 use super::planning_authorization::AccessStateRef;
+use super::preconditions::ensure_expected_access_revision;
 use super::publish_path_planning::{ResolvedTarget, Target};
 use crate::error::{CoreError, Result};
 use crate::metadata::{ResolvedVisiblePath, VisiblePathError};
@@ -55,11 +56,13 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         };
         validate_access_target(&target.resolved, boundary, grants)?;
         target.ensure_expected_inode()?;
-        let current_revision_no =
-            current.map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
-        let base_access_revision_no = expected_access_revision_no.unwrap_or(current_revision_no);
+        if let Some(expected) = expected_access_revision_no {
+            let actual =
+                current.map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
+            ensure_expected_access_revision(target.inode_id(), expected, Some(actual))?;
+        }
         self.validation
-            .update_access(target.inode_id(), base_access_revision_no, boundary, grants)
+            .update_access(target.inode_id(), boundary, grants)
             .await
     }
 }

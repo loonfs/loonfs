@@ -4,7 +4,8 @@
 use super::intent::{CommitIntent, FilesystemOperation};
 use super::planned_pieces::CommitPieces;
 use super::preconditions::{
-    validate_expected_file_state, validate_revision_precondition, PreconditionFields,
+    validate_expected_file_state, validate_revision_precondition, ExpectedFileState,
+    PreconditionFields,
 };
 use super::publish_path_planning::{Destination, PlanningView, Target};
 use crate::authorize::Authorizer;
@@ -168,7 +169,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 expected_revision_no,
             } => {
                 let content_ref = prepared_reference(content)?.clone();
-                self.plan_put_file_revision_by_inode(*inode_id, content_ref, *expected_revision_no)
+                let expected = ExpectedFileState::new(*inode_id, Some(*expected_revision_no));
+                self.plan_put_file_revision_by_inode(*inode_id, content_ref, expected)
                     .await
             }
             Op::AppendFile {
@@ -184,9 +186,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     PreconditionFields::Put,
                 )?;
                 let target = Target::path(path, expected.map(|expected| expected.inode_id));
-                let expected_revision_no = expected.and_then(|expected| expected.revision_no);
-                self.plan_append(target, expected_revision_no, inline_content)
-                    .await
+                self.plan_append(target, expected, inline_content).await
             }
             Op::AppendFileByInode {
                 inode_id,
@@ -194,7 +194,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 expected_revision_no,
             } => {
                 let target = Target::Inode(*inode_id);
-                self.plan_append(target, *expected_revision_no, inline_content)
+                let expected = ExpectedFileState::new(*inode_id, *expected_revision_no);
+                self.plan_append(target, Some(expected), inline_content)
                     .await
             }
             Op::DeletePath {
@@ -355,7 +356,8 @@ fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef
 mod tests {
     use super::*;
     use crate::commit::engine::CommitCandidate;
-    use crate::commit::CommitPlan;
+    use crate::commit::{CommitPlan, CommitValidationError};
+    use crate::error::ErrorCode;
     use crate::path::write::PublishPlanningSession;
     use crate::test_support::WriterAt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -363,7 +365,7 @@ mod tests {
     use loonfs_types::FilesystemEvent;
     use loonfs_types::{
         AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
-        CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+        AttributesRevisionNo, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
         DestinationPrecondition, PrincipalId, RevisionNo, ROOT_INODE_ID,
     };
     use std::assert_matches;
@@ -473,6 +475,33 @@ mod tests {
                 loonfs_test_support::ids::commit_fingerprint("test"),
             )
             .await
+    }
+
+    /// Returns the error of the operation that `error` reports as failed.
+    fn failed_operation_error(error: CoreError) -> CoreError {
+        match error {
+            CoreError::FailedOperation {
+                operation_index: 0,
+                error,
+            } => *error,
+            other => panic!("expected the first operation to fail, got {other:?}"),
+        }
+    }
+
+    fn set_owner_by_inode(
+        inode_id: InodeId,
+        owner: &str,
+        expected: Option<AttributesRevisionNo>,
+    ) -> FilesystemOperation {
+        FilesystemOperation::UpdateAttributesByInode {
+            inode_id,
+            set: BTreeMap::from([(
+                AttributeKey::parse("owner").expect("attribute key"),
+                AttributeValue::parse(owner).expect("attribute value"),
+            )]),
+            remove: Vec::new(),
+            expected_attributes_revision_no: expected,
+        }
     }
 
     async fn plan_against_current_state(
@@ -936,5 +965,132 @@ mod tests {
                 .collect();
             assert_eq!(kinds, expected, "{label}");
         }
+    }
+
+    #[tokio::test]
+    async fn stale_revision_precondition_is_rejected() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        for body in ["content-1", "content-2"] {
+            fixture
+                .put_file(
+                    "/docs/readme.txt",
+                    body.as_bytes(),
+                    DestinationBehavior::Replace,
+                    None,
+                )
+                .await
+                .expect("seed a revision");
+        }
+        let file =
+            crate::test_support::visible_inode_id(&store, &namespace_id, "/docs/readme.txt").await;
+        let replacement = crate::test_support::namespace_store(&store, &namespace_id)
+            .store_bytes_as_content(b"content-3")
+            .await
+            .expect("stage")
+            .into_content_ref();
+
+        let error = try_plan_against_current_state(
+            &store,
+            &namespace_id,
+            &request(FilesystemOperation::PutFileRevisionByInode {
+                inode_id: file,
+                content: loonfs_types::FileContent::Ref(replacement),
+                expected_revision_no: RevisionNo(1),
+            }),
+        )
+        .await
+        .expect_err("the expected revision is stale");
+        assert_eq!(error.code(), ErrorCode::StaleRevision);
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(CommitValidationError::BaseRevisionMismatch {
+                inode_id,
+                expected: RevisionNo(1),
+                actual: Some(RevisionNo(2)),
+            }) if inode_id == file
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondition() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        fixture
+            .put_file("/docs/a.txt", b"a", DestinationBehavior::NoReplace, None)
+            .await
+            .expect("seed a file");
+        let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+        for owner in ["ada", "grace"] {
+            fixture
+                .submit_operation(
+                    CommitId::parse(format!("seed-owner-{owner}")).expect("valid commit id"),
+                    set_owner_by_inode(docs, owner, None),
+                    Vec::new(),
+                )
+                .await
+                .expect("seed an attributes revision");
+        }
+
+        let error = try_plan_against_current_state(
+            &store,
+            &namespace_id,
+            &request(set_owner_by_inode(
+                docs,
+                "hopper",
+                Some(AttributesRevisionNo(1)),
+            )),
+        )
+        .await
+        .expect_err("the expected attributes revision is stale");
+        assert_eq!(
+            error.code(),
+            ErrorCode::StaleAttributes,
+            "the precondition reports the attribute-conflict code"
+        );
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(
+                CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+                    inode_id,
+                    expected: AttributesRevisionNo(1),
+                    actual: Some(AttributesRevisionNo(2)),
+                }
+            ) if inode_id == docs
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_attribute_write_states_revision_zero() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file("/docs/a.txt", b"a", DestinationBehavior::NoReplace, None)
+            .await
+            .expect("seed a file");
+        let docs = crate::test_support::visible_inode_id(&store, &namespace_id, "/docs").await;
+        let update = |expected: u64| {
+            request(set_owner_by_inode(
+                docs,
+                "ada",
+                Some(AttributesRevisionNo(expected)),
+            ))
+        };
+
+        try_plan_against_current_state(&store, &namespace_id, &update(0))
+            .await
+            .expect("a first write states revision zero");
+        let error = try_plan_against_current_state(&store, &namespace_id, &update(1))
+            .await
+            .expect_err("nothing has written revision 1 yet");
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(
+                CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+                    expected: AttributesRevisionNo(1),
+                    actual: Some(AttributesRevisionNo(0)),
+                    ..
+                }
+            )
+        );
     }
 }

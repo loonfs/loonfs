@@ -41,37 +41,33 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         Ok(())
     }
 
-    /// Appends a new revision to an existing file, after checking that
-    /// `base_revision_no` is still current.
+    /// Appends a new revision to an existing file, after its current one.
     ///
-    /// `append_offset` is where an append's bytes begin, which is the base
+    /// `append_offset` is where an append's bytes begin, which is the current
     /// revision's size. It's `None` for a put or a copy.
     pub(crate) async fn replace_file(
         &mut self,
         inode_id: InodeId,
-        base_revision_no: RevisionNo,
         content_ref: &ContentRef,
         append_offset: Option<u64>,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let deltas = self
-            .validate_replace_file(inode_id, base_revision_no, content_ref, append_offset)
+            .validate_replace_file(inode_id, content_ref, append_offset)
             .await?;
         self.record_step(op_index, deltas);
         Ok(())
     }
 
-    /// Restores an earlier revision as a new current revision, after
-    /// checking that `base_revision_no` is still current.
+    /// Restores an earlier revision as a new current revision.
     pub(crate) async fn restore_revision(
         &mut self,
         inode_id: InodeId,
         source_revision_no: RevisionNo,
-        base_revision_no: RevisionNo,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let deltas = self
-            .validate_restore_revision(inode_id, source_revision_no, base_revision_no)
+            .validate_restore_revision(inode_id, source_revision_no)
             .await?;
         self.record_step(op_index, deltas);
         Ok(())
@@ -151,34 +147,30 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     }
 
     /// Replaces an inode's attributes with `attributes`, the complete map
-    /// after the update, after checking that `base_attributes_revision_no`
-    /// is still current.
+    /// after the update.
     pub(crate) async fn update_attributes(
         &mut self,
         inode_id: InodeId,
-        base_attributes_revision_no: AttributesRevisionNo,
         attributes: &Attributes,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let deltas = self
-            .validate_update_attributes(inode_id, base_attributes_revision_no, attributes)
+            .validate_update_attributes(inode_id, attributes)
             .await?;
         self.record_step(op_index, deltas);
         Ok(())
     }
 
-    /// Replaces an inode's access row with `boundary` and `grants`, after
-    /// checking that `base_access_revision_no` is still current.
+    /// Replaces an inode's access row with `boundary` and `grants`.
     pub(crate) async fn update_access(
         &mut self,
         inode_id: InodeId,
-        base_access_revision_no: AccessRevisionNo,
         boundary: bool,
         grants: &AccessGrants,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let deltas = self
-            .validate_update_access(inode_id, base_access_revision_no, boundary, grants)
+            .validate_update_access(inode_id, boundary, grants)
             .await?;
         self.record_step(op_index, deltas);
         Ok(())
@@ -259,13 +251,13 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     async fn validate_replace_file(
         &mut self,
         inode_id: InodeId,
-        base_revision_no: RevisionNo,
         content_ref: &ContentRef,
         append_offset: Option<u64>,
     ) -> Result<Vec<WalDelta>> {
-        self.ensure_file_base_revision_is(inode_id, base_revision_no, CommitOperand::ReplaceTarget)
+        let current_revision_no = self
+            .resolve_current_revision_no(inode_id, CommitOperand::ReplaceTarget)
             .await?;
-        let revision_no = next_revision_no(inode_id, base_revision_no)?;
+        let revision_no = next_revision_no(inode_id, current_revision_no)?;
         self.ensure_ancestry_reaches_root(inode_id, CommitOperand::ReplaceTarget)
             .await?;
         let edge = self
@@ -284,14 +276,14 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         &mut self,
         inode_id: InodeId,
         source_revision_no: RevisionNo,
-        base_revision_no: RevisionNo,
     ) -> Result<Vec<WalDelta>> {
-        self.ensure_file_base_revision_is(inode_id, base_revision_no, CommitOperand::RestoreTarget)
+        let current_revision_no = self
+            .resolve_current_revision_no(inode_id, CommitOperand::RestoreTarget)
             .await?;
         let source_revision = self
             .resolve_restore_source_revision(inode_id, source_revision_no)
             .await?;
-        let revision_no = next_revision_no(inode_id, base_revision_no)?;
+        let revision_no = next_revision_no(inode_id, current_revision_no)?;
         self.ensure_ancestry_reaches_root(inode_id, CommitOperand::RestoreTarget)
             .await?;
         let edge = self
@@ -444,15 +436,17 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     async fn validate_update_attributes(
         &mut self,
         inode_id: InodeId,
-        base_attributes_revision_no: AttributesRevisionNo,
         attributes: &Attributes,
     ) -> Result<Vec<WalDelta>> {
         self.ensure_target_visible(inode_id, CommitOperand::AttributeTarget)
             .await?;
-        self.ensure_inode_attributes_revision_is(inode_id, base_attributes_revision_no)
-            .await?;
+        let current_attributes_revision_no = self
+            .view()
+            .attributes(inode_id)
+            .await?
+            .attributes_revision_no;
         let attributes_revision_no =
-            next_attributes_revision_no(inode_id, base_attributes_revision_no)?;
+            next_attributes_revision_no(inode_id, current_attributes_revision_no)?;
         Ok(vec![WalDelta::AppendAttributesRevision {
             delta_index: self.numbering.reserve_delta_index()?,
             inode_id,
@@ -464,15 +458,17 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     async fn validate_update_access(
         &mut self,
         inode_id: InodeId,
-        base_access_revision_no: AccessRevisionNo,
         boundary: bool,
         grants: &AccessGrants,
     ) -> Result<Vec<WalDelta>> {
         self.ensure_target_visible(inode_id, CommitOperand::AccessTarget)
             .await?;
-        self.ensure_inode_access_revision_is(inode_id, base_access_revision_no)
-            .await?;
-        let access_revision_no = next_access_revision_no(inode_id, base_access_revision_no)?;
+        let current_access_revision_no = self
+            .view()
+            .latest_access_revision(inode_id)
+            .await?
+            .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
+        let access_revision_no = next_access_revision_no(inode_id, current_access_revision_no)?;
         Ok(vec![WalDelta::AppendAccessRevision {
             delta_index: self.numbering.reserve_delta_index()?,
             inode_id,

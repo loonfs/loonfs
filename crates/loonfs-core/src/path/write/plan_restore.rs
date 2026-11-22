@@ -18,9 +18,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .resolve_authorized_target(target, required)
             .await?;
         target.ensure_file()?;
-        let revision = self.view().latest_file_revision(&target).await?;
         self.validation
-            .restore_revision(target.inode_id(), source_revision_no, revision.revision_no)
+            .restore_revision(target.inode_id(), source_revision_no)
             .await
     }
 }

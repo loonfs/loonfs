@@ -13,7 +13,7 @@ use loonfs_types::format::manifest::TombstoneRowAction;
 use loonfs_types::options::RestoreDeletedDestination;
 use loonfs_types::{
     AbsolutePath, AccessRight, CommitSeq, ContentRef, DestinationBehavior, DisplayName, InodeId,
-    InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
+    InodeKind, NameKey, ROOT_INODE_ID,
 };
 
 /// The directories above a path that a create resolved: the deepest one
@@ -160,15 +160,19 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         &mut self,
         inode_id: InodeId,
         content_ref: ContentRef,
-        expected_revision_no: RevisionNo,
+        expected: ExpectedFileState,
     ) -> Result<()> {
         let target = self
             .view()
             .resolve_authorized_target(Target::Inode(inode_id), AccessRight::Write.into())
             .await?;
         target.ensure_file()?;
+        let view = self.view();
+        expected
+            .ensure_revision(inode_id, view.current_revision_no(inode_id))
+            .await?;
         self.validation
-            .replace_file(inode_id, expected_revision_no, &content_ref, None)
+            .replace_file(inode_id, &content_ref, None)
             .await
     }
 
@@ -230,11 +234,15 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .latest_revision_head(existing.inode_id)
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
-                let base_revision_no = expected_file_state
-                    .and_then(|expected| expected.revision_no)
-                    .unwrap_or(revision.revision_no);
+                if let Some(expected) = expected_file_state {
+                    expected
+                        .ensure_revision(existing.inode_id, async {
+                            Ok(Some(revision.revision_no))
+                        })
+                        .await?;
+                }
                 self.validation
-                    .replace_file(existing.inode_id, base_revision_no, &content_ref, None)
+                    .replace_file(existing.inode_id, &content_ref, None)
                     .await
             }
             Err(error) if is_missing_visible_path(&error) => {

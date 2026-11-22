@@ -15,7 +15,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::{
     AbsolutePath, BindingVersion as BindingVersionToken, DestinationBehavior, DisplayName, InodeId,
-    InodeKind, NameKey, NamespaceId, ROOT_INODE_ID,
+    InodeKind, NameKey, NamespaceId, RevisionNo, ROOT_INODE_ID,
 };
 use loonfs_types::{AccessRight, AccessRights};
 
@@ -235,6 +235,16 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
             .latest_revision_head(target.inode_id())
             .await?
             .ok_or_else(|| target.not_found())
+    }
+
+    /// Returns the number of a file's current revision, or `None` when the
+    /// file isn't visible.
+    pub(super) async fn current_revision_no(
+        &self,
+        inode_id: InodeId,
+    ) -> Result<Option<RevisionNo>> {
+        let revision = self.metadata.latest_revision_head(inode_id).await?;
+        Ok(revision.map(|revision| revision.revision_no))
     }
 
     /// Resolves `destination` to its parent directory, its name, and the

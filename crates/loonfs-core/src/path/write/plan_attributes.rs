@@ -1,6 +1,7 @@
 //! The publish plan for one attribute update.
 
 use super::planner::OperationPlanningSession;
+use super::preconditions::ensure_expected_attributes_revision;
 use super::publish_path_planning::Target;
 use crate::error::{CoreError, Result};
 use loonfs_objectstore::ObjectStore;
@@ -24,11 +25,6 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .await?;
         let inode_id = target.inode_id();
         let current = self.view().metadata.attributes(inode_id).await?;
-        // A caller-supplied precondition replaces the freshly-read revision in
-        // the op, so commit validation rejects a raced update with the
-        // stale-attributes error and its expected/actual details.
-        let base_attributes_revision_no =
-            expected_attributes_revision_no.unwrap_or(current.attributes_revision_no);
 
         let mut updated: BTreeMap<AttributeKey, AttributeValue> =
             current.attributes.as_map().clone();
@@ -43,8 +39,15 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 "the resulting attribute map is invalid: {error}"
             ))
         })?;
+        if let Some(expected) = expected_attributes_revision_no {
+            ensure_expected_attributes_revision(
+                inode_id,
+                expected,
+                Some(current.attributes_revision_no),
+            )?;
+        }
         self.validation
-            .update_attributes(inode_id, base_attributes_revision_no, &attributes)
+            .update_attributes(inode_id, &attributes)
             .await
     }
 }

@@ -22,9 +22,9 @@ use loonfs_types::format::{
 use loonfs_types::ChecksumAlgorithm;
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    next_public_ordinal, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, CommitId,
-    CommitSeq, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
-    WriterEpoch, MAX_PUBLIC_INTEGER,
+    next_public_ordinal, AttributeKey, AttributeValue, Attributes, CommitId, CommitSeq, ContentRef,
+    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WriterEpoch,
+    MAX_PUBLIC_INTEGER,
 };
 use std::assert_matches;
 
@@ -53,20 +53,6 @@ fn test_attributes(entries: &[(&str, &str)]) -> Attributes {
             .collect(),
     )
     .expect("valid attribute map")
-}
-
-fn wal_append_attributes(
-    delta_index: u32,
-    inode_id: InodeId,
-    revision: u64,
-    entries: &[(&str, &str)],
-) -> Vec<WalDelta> {
-    vec![WalDelta::AppendAttributesRevision {
-        delta_index,
-        inode_id,
-        attributes_revision_no: AttributesRevisionNo(revision),
-        attributes: test_attributes(entries),
-    }]
 }
 
 fn test_fingerprint() -> CommitFingerprint {
@@ -291,82 +277,13 @@ async fn build_commit_plan(
 }
 
 #[tokio::test]
-async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondition() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
-        wal_append_attributes(0, InodeId(2), 1, &[("owner", "ada")]),
-        wal_append_attributes(0, InodeId(2), 2, &[("owner", "grace")]),
-    ]);
-    let context = validation_context(&metadata_state, CommitSeq(3));
-    let attributes = test_attributes(&[("owner", "hopper")]);
-
-    let error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .update_attributes(InodeId(2), AttributesRevisionNo(1), &attributes)
-            .await
-    })
-    .await
-    .expect_err("the base revision is stale");
-    assert_matches!(
-        error,
-        CommitValidationError::UpdateAttributesBaseRevisionMismatch {
-            inode_id: InodeId(2),
-            expected: AttributesRevisionNo(1),
-            actual: Some(AttributesRevisionNo(2)),
-        }
-    );
-    assert_eq!(
-        CoreError::from(error).code(),
-        ErrorCode::StaleAttributes,
-        "the precondition reports the attribute-conflict code"
-    );
-}
-
-#[tokio::test]
-async fn a_first_attribute_write_states_revision_zero() {
-    let metadata_state = metadata_state_after(&[wal_create_directory(
-        0,
-        InodeId(2),
-        ROOT_INODE_ID,
-        "docs".to_owned(),
-    )]);
-    let context = validation_context(&metadata_state, CommitSeq(1));
-    let attributes = test_attributes(&[("owner", "ada")]);
-    let update = |base: u64| {
-        let attributes = &attributes;
-        async move |session: &mut CommitValidationSession<'_, MemoryStore>| {
-            session
-                .update_attributes(InodeId(2), AttributesRevisionNo(base), attributes)
-                .await
-        }
-    };
-
-    build_commit_plan(4_200, &context, update(0))
-        .await
-        .expect("a first write states revision zero");
-    let error = build_commit_plan(4_200, &context, update(1))
-        .await
-        .expect_err("nothing has written revision 1 yet");
-    assert_matches!(
-        error,
-        CommitValidationError::UpdateAttributesBaseRevisionMismatch {
-            expected: AttributesRevisionNo(1),
-            actual: Some(AttributesRevisionNo(0)),
-            ..
-        }
-    );
-}
-
-#[tokio::test]
 async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, CommitSeq(0));
     let attributes = test_attributes(&[("owner", "ada")]);
 
     let error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .update_attributes(InodeId(9), AttributesRevisionNo(0), &attributes)
-            .await
+        session.update_attributes(InodeId(9), &attributes).await
     })
     .await
     .expect_err("the inode does not exist");
@@ -375,39 +292,6 @@ async fn an_attribute_update_of_a_missing_inode_is_rejected() {
         CommitValidationError::InodeMissing {
             operand: CommitOperand::AttributeTarget,
             inode_id: InodeId(9)
-        }
-    );
-}
-
-#[tokio::test]
-async fn stale_revision_precondition_is_rejected() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
-    ]);
-    let context = validation_context(&metadata_state, CommitSeq(3));
-    let replacement = content_ref("content-3");
-
-    let error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .replace_file(InodeId(3), RevisionNo(1), &replacement, None)
-            .await
-    })
-    .await
-    .expect_err("stale revision");
-    assert_matches!(
-        error,
-        CommitValidationError::BaseRevisionMismatch {
-            inode_id: InodeId(3),
-            expected: RevisionNo(1),
-            actual: Some(RevisionNo(2)),
         }
     );
 }
@@ -584,9 +468,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     );
 
     let replace_error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .replace_file(InodeId(3), RevisionNo(1), &replacement, None)
-            .await
+        session.replace_file(InodeId(3), &replacement, None).await
     })
     .await
     .expect_err("replace under tombstone");
@@ -614,9 +496,7 @@ async fn restore_revision_validation_rejects_missing_inode() {
     )]);
     let context = validation_context(&metadata_state, CommitSeq(1));
     let error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .restore_revision(InodeId(99), RevisionNo(1), RevisionNo(1))
-            .await
+        session.restore_revision(InodeId(99), RevisionNo(1)).await
     })
     .await
     .expect_err("restore missing inode");
@@ -639,9 +519,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
     )]);
     let context = validation_context(&metadata_state, CommitSeq(1));
     let error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .restore_revision(InodeId(2), RevisionNo(1), RevisionNo(1))
-            .await
+        session.restore_revision(InodeId(2), RevisionNo(1)).await
     })
     .await
     .expect_err("restore non-file");
@@ -657,7 +535,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
 }
 
 #[tokio::test]
-async fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
+async fn restore_revision_validation_rejects_a_missing_source_revision() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
@@ -671,33 +549,8 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
 
-    let stale_base = build_commit_plan(4_200, &context, async |session| {
-        session
-            .restore_revision(InodeId(3), RevisionNo(1), RevisionNo(1))
-            .await
-    })
-    .await
-    .expect_err("restore stale base");
-    assert_matches!(
-        &stale_base,
-        CommitValidationError::BaseRevisionMismatch {
-            inode_id: InodeId(3),
-            expected: RevisionNo(1),
-            actual: Some(RevisionNo(2)),
-        }
-    );
-    assert_eq!(
-        stale_base.to_string(),
-        format!(
-            "base revision mismatch for inode `{}`: expected revision 1, found revision 2",
-            InodeId(3)
-        )
-    );
-
     let missing_source = build_commit_plan(4_200, &context, async |session| {
-        session
-            .restore_revision(InodeId(3), RevisionNo(99), RevisionNo(2))
-            .await
+        session.restore_revision(InodeId(3), RevisionNo(99)).await
     })
     .await
     .expect_err("restore missing source");
@@ -728,12 +581,8 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     // the expectation is that reference itself.
     let expected = content_ref("content-2");
     let plan = build_commit_plan(4_200, &context, async |session| {
-        session
-            .replace_file(InodeId(3), RevisionNo(1), &expected, None)
-            .await?;
-        session
-            .restore_revision(InodeId(3), RevisionNo(2), RevisionNo(2))
-            .await
+        session.replace_file(InodeId(3), &expected, None).await?;
+        session.restore_revision(InodeId(3), RevisionNo(2)).await
     })
     .await
     .expect("replace then restore in same request should validate");
@@ -765,12 +614,8 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let context = validation_context(&metadata_state, CommitSeq(3));
 
     let plan = build_commit_plan(4_200, &context, async |session| {
-        session
-            .restore_revision(InodeId(3), RevisionNo(1), RevisionNo(2))
-            .await?;
-        session
-            .restore_revision(InodeId(3), RevisionNo(3), RevisionNo(3))
-            .await
+        session.restore_revision(InodeId(3), RevisionNo(1)).await?;
+        session.restore_revision(InodeId(3), RevisionNo(3)).await
     })
     .await
     .expect("restore then restore in same request should validate");
@@ -806,9 +651,7 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     let context = validation_context(&metadata_state, CommitSeq(3));
 
     let error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .restore_revision(InodeId(3), RevisionNo(1), RevisionNo(1))
-            .await
+        session.restore_revision(InodeId(3), RevisionNo(1)).await
     })
     .await
     .expect_err("restore under a covering tombstone");
@@ -871,9 +714,7 @@ async fn create_and_replace_under_a_disconnected_ancestry_report_a_missing_inode
     );
 
     let replace_error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .replace_file(InodeId(3), RevisionNo(1), &replacement, None)
-            .await
+        session.replace_file(InodeId(3), &replacement, None).await
     })
     .await
     .expect_err("replace below a disconnected directory");
@@ -924,11 +765,7 @@ async fn restore_revision_overflow_is_rejected() {
     let context = validation_context(&metadata_state, CommitSeq(1));
     let error = build_commit_plan(4_200, &context, async |session| {
         session
-            .restore_revision(
-                InodeId(2),
-                RevisionNo(MAX_PUBLIC_INTEGER),
-                RevisionNo(MAX_PUBLIC_INTEGER),
-            )
+            .restore_revision(InodeId(2), RevisionNo(MAX_PUBLIC_INTEGER))
             .await
     })
     .await

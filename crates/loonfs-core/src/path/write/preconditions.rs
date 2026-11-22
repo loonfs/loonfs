@@ -110,14 +110,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
             .await?
             .flatten()
             .map(|revision| revision.revision_no);
-        Ok((actual != Some(expected)).then(|| {
-            CommitValidationError::BaseRevisionMismatch {
-                inode_id,
-                expected,
-                actual,
-            }
-            .into()
-        }))
+        Ok(ensure_expected_revision(inode_id, expected, actual).err())
     }
 
     async fn find_attributes_revision_mismatch(
@@ -136,14 +129,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
                     .attributes_revision_no)
             })
             .await?;
-        Ok((actual != Some(expected)).then(|| {
-            CommitValidationError::UpdateAttributesBaseRevisionMismatch {
-                inode_id,
-                expected,
-                actual,
-            }
-            .into()
-        }))
+        Ok(ensure_expected_attributes_revision(inode_id, expected, actual).err())
     }
 
     async fn find_access_revision_mismatch(
@@ -162,14 +148,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
                     .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no))
             })
             .await?;
-        Ok((actual != Some(expected)).then(|| {
-            CommitValidationError::UpdateAccessBaseRevisionMismatch {
-                inode_id,
-                expected,
-                actual,
-            }
-            .into()
-        }))
+        Ok(ensure_expected_access_revision(inode_id, expected, actual).err())
     }
 
     async fn find_inode_binding_mismatch(
@@ -316,6 +295,62 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
     }
 }
 
+/// Requires `actual`, a file's current revision (`None` when the file isn't
+/// visible), to be the revision that the caller expects.
+pub(super) fn ensure_expected_revision(
+    inode_id: InodeId,
+    expected: RevisionNo,
+    actual: Option<RevisionNo>,
+) -> Result<()> {
+    if actual != Some(expected) {
+        return Err(CommitValidationError::BaseRevisionMismatch {
+            inode_id,
+            expected,
+            actual,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Requires `actual`, an inode's current attributes revision (`None` when
+/// the inode isn't visible), to be the revision that the caller expects.
+pub(super) fn ensure_expected_attributes_revision(
+    inode_id: InodeId,
+    expected: AttributesRevisionNo,
+    actual: Option<AttributesRevisionNo>,
+) -> Result<()> {
+    if actual != Some(expected) {
+        return Err(
+            CommitValidationError::UpdateAttributesBaseRevisionMismatch {
+                inode_id,
+                expected,
+                actual,
+            }
+            .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Requires `actual`, an inode's current access revision (`None` when the
+/// inode isn't visible), to be the revision that the caller expects.
+pub(super) fn ensure_expected_access_revision(
+    inode_id: InodeId,
+    expected: AccessRevisionNo,
+    actual: Option<AccessRevisionNo>,
+) -> Result<()> {
+    if actual != Some(expected) {
+        return Err(CommitValidationError::UpdateAccessBaseRevisionMismatch {
+            inode_id,
+            expected,
+            actual,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 pub(super) fn ensure_expected_inode(
     resolved: &ResolvedVisiblePath,
     expected: Option<InodeId>,
@@ -366,8 +401,32 @@ impl PreconditionFields {
 pub(super) struct ExpectedFileState {
     /// Destination inode required by the request.
     pub(super) inode_id: InodeId,
-    /// Destination content revision required by the request.
-    pub(super) revision_no: Option<RevisionNo>,
+    /// Destination content revision required by the request, which only
+    /// [`Self::ensure_revision`] reads.
+    revision_no: Option<RevisionNo>,
+}
+
+impl ExpectedFileState {
+    pub(super) fn new(inode_id: InodeId, revision_no: Option<RevisionNo>) -> Self {
+        Self {
+            inode_id,
+            revision_no,
+        }
+    }
+
+    /// Requires the current revision of the file `inode_id` to be the
+    /// revision that the request expects, if it expects one. `actual` reads
+    /// the current revision, and runs only when the request expects one.
+    pub(super) async fn ensure_revision(
+        &self,
+        inode_id: InodeId,
+        actual: impl Future<Output = Result<Option<RevisionNo>>>,
+    ) -> Result<()> {
+        match self.revision_no {
+            Some(expected) => ensure_expected_revision(inode_id, expected, actual.await?),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Validates a replacement precondition and returns the required file state.
@@ -396,10 +455,7 @@ pub(super) fn validate_expected_file_state(
         }
         return Ok(None);
     };
-    Ok(Some(ExpectedFileState {
-        inode_id,
-        revision_no: expected_revision_no,
-    }))
+    Ok(Some(ExpectedFileState::new(inode_id, expected_revision_no)))
 }
 
 /// Rejects a revision precondition in `revision_field` without an inode

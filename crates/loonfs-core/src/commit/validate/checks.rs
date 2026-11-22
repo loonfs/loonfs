@@ -1,5 +1,5 @@
 //! The state checks that commit operation validators run: target
-//! visibility, revision preconditions, binding state, and cycles.
+//! visibility, binding state, and cycles.
 
 use super::super::{CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
@@ -11,10 +11,7 @@ use crate::metadata::{
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 
-use loonfs_types::{
-    AccessRevisionNo, AttributesRevisionNo, CommitSeq, DisplayName, InodeId, InodeKind, NameKey,
-    RevisionNo,
-};
+use loonfs_types::{CommitSeq, DisplayName, InodeId, InodeKind, NameKey, RevisionNo};
 
 #[derive(Debug, Default)]
 pub(super) struct CommitNumbering {
@@ -92,50 +89,6 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     ) -> Result<()> {
         if self.view().visible_inode(inode_id).await?.is_none() {
             return Err(CommitValidationError::InodeMissing { operand, inode_id }.into());
-        }
-        Ok(())
-    }
-
-    pub(super) async fn ensure_inode_attributes_revision_is(
-        &self,
-        inode_id: InodeId,
-        expected: AttributesRevisionNo,
-    ) -> Result<()> {
-        let actual = self
-            .view()
-            .attributes(inode_id)
-            .await?
-            .attributes_revision_no;
-        if actual != expected {
-            return Err(
-                CommitValidationError::UpdateAttributesBaseRevisionMismatch {
-                    inode_id,
-                    expected,
-                    actual: Some(actual),
-                }
-                .into(),
-            );
-        }
-        Ok(())
-    }
-
-    pub(super) async fn ensure_inode_access_revision_is(
-        &self,
-        inode_id: InodeId,
-        expected: AccessRevisionNo,
-    ) -> Result<()> {
-        let actual = self
-            .view()
-            .latest_access_revision(inode_id)
-            .await?
-            .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
-        if actual != expected {
-            return Err(CommitValidationError::UpdateAccessBaseRevisionMismatch {
-                inode_id,
-                expected,
-                actual: Some(actual),
-            }
-            .into());
         }
         Ok(())
     }
@@ -278,28 +231,24 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         Ok(())
     }
 
-    pub(super) async fn ensure_file_base_revision_is(
+    /// Returns the current revision of the file whose next revision an
+    /// operation writes. The planner found the file with a revision, so a file
+    /// without one is corrupt.
+    pub(super) async fn resolve_current_revision_no(
         &self,
         inode_id: InodeId,
-        expected_revision_no: RevisionNo,
         operand: CommitOperand,
-    ) -> Result<()> {
+    ) -> Result<RevisionNo> {
         self.resolve_inode_kind(inode_id, InodeKind::File, operand)
             .await?;
-        let actual = self
+        let revision = self
             .view()
             .latest_revision_record(inode_id)
             .await?
-            .map(|revision| revision.revision_no);
-        if actual != Some(expected_revision_no) {
-            return Err(CommitValidationError::BaseRevisionMismatch {
-                inode_id,
-                expected: expected_revision_no,
-                actual,
-            }
-            .into());
-        }
-        Ok(())
+            .ok_or_else(|| {
+                CoreError::NamespaceCorrupt(format!("file `{inode_id}` has no current revision"))
+            })?;
+        Ok(revision.revision_no)
     }
 
     /// Returns the current binding of the file whose revision an operation

@@ -9,13 +9,11 @@ use super::publish_path_planning::{
 };
 use crate::authorize::{check_rights, Replacement};
 use crate::commit::engine::TemporaryMove;
-use crate::commit::{CommitValidationError, NewChild};
+use crate::commit::NewChild;
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{
-    AccessRight, AccessRights, AttributesRevisionNo, BindingVersion, DestinationPrecondition,
-};
+use loonfs_types::{AccessRight, AccessRights, BindingVersion, DestinationPrecondition};
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     /// Plans a move of `source` to `destination`, after checking the
@@ -256,16 +254,15 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .latest_revision_head(existing.inode_id)
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(path.clone()))?;
-                let base_revision_no = expected_destination
-                    .and_then(|state| state.revision_no)
-                    .unwrap_or(existing_revision.revision_no);
+                if let Some(expected) = expected_destination {
+                    expected
+                        .ensure_revision(existing.inode_id, async {
+                            Ok(Some(existing_revision.revision_no))
+                        })
+                        .await?;
+                }
                 self.validation
-                    .replace_file(
-                        existing.inode_id,
-                        base_revision_no,
-                        &revision.content_ref,
-                        None,
-                    )
+                    .replace_file(existing.inode_id, &revision.content_ref, None)
                     .await
             }
             ReplaceDestination::Vacant => {
@@ -301,7 +298,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 // Both steps include the one ID generated above, so they
                 // refer to the same new inode.
                 self.validation
-                    .update_attributes(child_inode_id, AttributesRevisionNo(0), &source_attributes)
+                    .update_attributes(child_inode_id, &source_attributes)
                     .await
             }
         }
@@ -312,23 +309,15 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         existing: &ResolvedVisiblePath,
         expected_destination: Option<ExpectedFileState>,
     ) -> Result<()> {
-        let Some(expected) = expected_destination.and_then(|state| state.revision_no) else {
+        let Some(expected) = expected_destination else {
             return Ok(());
         };
-        let actual = self
-            .view()
-            .metadata
-            .latest_revision_head(existing.inode_id)
-            .await?
-            .map(|revision| revision.revision_no);
-        if actual != Some(expected) {
-            return Err(CommitValidationError::BaseRevisionMismatch {
-                inode_id: existing.inode_id,
-                expected,
-                actual,
-            }
-            .into());
-        }
-        Ok(())
+        let view = self.view();
+        expected
+            .ensure_revision(
+                existing.inode_id,
+                view.current_revision_no(existing.inode_id),
+            )
+            .await
     }
 }

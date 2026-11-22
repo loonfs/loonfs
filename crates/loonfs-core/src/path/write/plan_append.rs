@@ -1,14 +1,15 @@
 //! Publish plans that add bytes to the end of a file.
 
 use super::planner::OperationPlanningSession;
+use super::preconditions::ExpectedFileState;
 use super::publish_path_planning::Target;
-use crate::commit::{AppendedContent, CommitValidationError};
+use crate::commit::AppendedContent;
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use crate::storage::tail_content::materialize_content_layout;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
-use loonfs_types::{AccessRight, Checksum, ContentId, ContentRef, ContentRefKind, RevisionNo};
+use loonfs_types::{AccessRight, Checksum, ContentId, ContentRef, ContentRefKind};
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     /// Plans the next revision of a file as its current bytes followed by
@@ -17,7 +18,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     pub(super) async fn plan_append(
         &mut self,
         target: Target<'_>,
-        expected_revision_no: Option<RevisionNo>,
+        expected: Option<ExpectedFileState>,
         bytes: &[u8],
     ) -> Result<()> {
         let target = self
@@ -26,15 +27,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .await?;
         target.ensure_file()?;
         let revision = self.view().latest_file_revision(&target).await?;
-        if let Some(expected) =
-            expected_revision_no.filter(|expected| *expected != revision.revision_no)
-        {
-            return Err(CommitValidationError::BaseRevisionMismatch {
-                inode_id: revision.inode_id,
-                expected,
-                actual: Some(revision.revision_no),
-            }
-            .into());
+        if let Some(expected) = expected {
+            expected
+                .ensure_revision(revision.inode_id, async { Ok(Some(revision.revision_no)) })
+                .await?;
         }
         let appended = self.append_to(&revision, bytes).await?;
         for piece in &appended.pieces {
@@ -46,7 +42,6 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         self.validation
             .replace_file(
                 revision.inode_id,
-                revision.revision_no,
                 &content_ref,
                 Some(revision.content_ref.size_bytes),
             )
