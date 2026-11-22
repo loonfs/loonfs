@@ -73,7 +73,8 @@ pub(super) struct PoolRoots {
     pub(super) completed_sessions: ChargedMap<UploadId, CompletedUploadSession>,
     /// The entries of the uploads prefix that the collection listed to root the
     /// sessions' content, which the session sweep decides from instead of
-    /// listing the prefix again.
+    /// listing the prefix again. A completed session isn't in the queue,
+    /// because the session sweep decides it from `completed_sessions`.
     pub(super) uploads: ChargedQueue<ListedUpload>,
     /// The layout segments that the members' rooted manifests list, keyed by
     /// object key, whose extent filters root the content that every rooted
@@ -87,6 +88,9 @@ pub(super) struct PoolRoots {
     /// The bytes of the entries that the listing of the member list returned,
     /// as the listing reported them.
     pub(super) member_list_bytes: u64,
+    /// The bytes of the upload records that the listing of the uploads
+    /// prefix returned, as the listing reported them.
+    pub(super) upload_record_bytes: u64,
     /// Every listed member that the collection has read.
     members: ChargedMap<NamespaceId, MemberState>,
     now_ms: u64,
@@ -118,6 +122,7 @@ impl PoolRoots {
             },
             listed_objects: 0,
             member_list_bytes: 0,
+            upload_record_bytes: 0,
             members: ChargedMap::new(&memory),
             memory,
             now_ms: clock.request_at_ms(),
@@ -129,17 +134,18 @@ impl PoolRoots {
             // every commit of its content.
             roots.listed_objects += pool
                 .load_upload_sessions(session_cache, |listed, session| {
+                    roots.upload_record_bytes += listed.size_bytes;
                     match session {
                         Some(ListedUploadSession::Completed { upload_id, session }) => {
                             roots.content_ids.insert(session.content_id.clone())?;
-                            roots.completed_sessions.insert(upload_id, session)?;
+                            roots.completed_sessions.insert(upload_id, session)
                         }
                         Some(ListedUploadSession::Incomplete { content_id }) => {
                             roots.content_ids.insert(content_id)?;
+                            roots.uploads.push_back(listed)
                         }
-                        None => {}
+                        None => roots.uploads.push_back(listed),
                     }
-                    roots.uploads.push_back(listed)
                 })
                 .await?;
             roots.load_members(pool, clock).await

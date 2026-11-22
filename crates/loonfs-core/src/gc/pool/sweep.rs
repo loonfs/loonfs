@@ -8,7 +8,7 @@ use super::uploads::{
 };
 use crate::error::Result;
 use crate::gc::deletes::Decision;
-use crate::gc::session_cache::CompletedUploadSessionCache;
+use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::pool_store::PoolStore;
 use crate::time::OperationClock;
@@ -65,9 +65,9 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
         self.aged(entry, |report| &mut report.deleted.temporary_objects)
     }
 
-    /// Determines what to do with one upload session's records.
+    /// Determines what to do with the records of one entry of the uploads
+    /// listing that isn't a completed session.
     pub(super) async fn upload(&self, listed: &ListedUpload) -> Result<Decision<PoolGcResponse>> {
-        self.add_listed_bytes(listed.size_bytes);
         match &listed.kind {
             ListedUploadKind::Session {
                 upload_id,
@@ -94,61 +94,74 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
         }
     }
 
+    /// Determines what to do with the records of one session that the
+    /// collection listed as completed.
+    ///
+    /// The collection listed the session as completed before the member
+    /// listing, so the status of the session's namespace decides it, including
+    /// when the listing didn't include the namespace because it has been
+    /// retired.
+    pub(super) fn completed_session(
+        &self,
+        upload_id: &UploadId,
+        session: &CompletedUploadSession,
+    ) -> Decision<PoolGcResponse> {
+        let sweep = self
+            .roots
+            .find_retirement_status(&session.namespace_id)
+            .map_or_else(retain_undated, |status| {
+                sweep_completed_session(status, self.clock.request_at_ms(), session.completed_at_ms)
+            });
+        // The sweep adds a kept session to the cache, so a later collection
+        // doesn't read its record. Adding it here instead of when the
+        // record is read means that this collection's inserts can't evict an
+        // entry that its own listing hasn't looked up yet.
+        if let (Some(cache), UploadSessionSweep::Retain { .. }) = (self.session_cache, sweep) {
+            cache.insert(upload_id.clone(), session.clone());
+        }
+        self.session_decision(upload_id, sweep)
+    }
+
+    /// Determines what to do with the records of a listed session that the
+    /// collection didn't list as completed.
+    ///
+    /// An open session can end during the collection, and an aborted
+    /// session's cleanup needs its session record, so the sweep reads these
+    /// records again.
     async fn process_upload_session(
         &self,
         upload_id: UploadId,
         outcome_listing: OutcomeListing,
     ) -> Result<Decision<PoolGcResponse>> {
-        let sweep = match self.roots.completed_sessions.get(&upload_id) {
-            // The collection listed this session as completed before the member
-            // listing, so its namespace's status decides it, including when
-            // the listing didn't include the namespace because it has been retired.
-            Some(session) => {
-                let sweep = self
-                    .roots
-                    .find_retirement_status(&session.namespace_id)
-                    .map_or_else(retain_undated, |status| {
-                        sweep_completed_session(
-                            status,
-                            self.clock.request_at_ms(),
-                            session.completed_at_ms,
-                        )
-                    });
-                // The sweep adds a kept session to the cache, so a later collection
-                // doesn't read its record. Adding it here instead of when the
-                // record is read means that this collection's inserts can't evict an
-                // entry that its own listing hasn't looked up yet.
-                if let (Some(cache), UploadSessionSweep::Retain { .. }) =
-                    (self.session_cache, sweep)
-                {
-                    cache.insert(upload_id.clone(), session.clone());
-                }
-                sweep
-            }
-            // An open session can end during the collection, and an aborted
-            // session's cleanup needs its session record, so the sweep reads
-            // these records again.
-            None => {
-                let Some(state) = self
-                    .pool
-                    .load_swept_session(&upload_id, outcome_listing)
-                    .await?
-                else {
-                    return Ok(self.retain(PoolRetainedReason::UploadSessionUndecided, None));
-                };
-                self.pool
-                    .sweep_upload_session(self.roots, self.clock, &state)
-                    .await?
-            }
+        let Some(state) = self
+            .pool
+            .load_swept_session(&upload_id, outcome_listing)
+            .await?
+        else {
+            return Ok(self.retain(PoolRetainedReason::UploadSessionUndecided, None));
         };
-        if let (Some(cache), UploadSessionSweep::Delete) = (self.session_cache, sweep) {
-            cache.invalidate(&upload_id);
-        }
-        Ok(match sweep {
-            UploadSessionSweep::Delete => Decision::Delete {
-                keys: upload_session_record_keys(&self.pool.pool_id, &upload_id).into(),
-                counter: |report| &mut report.deleted.upload_sessions,
-            },
+        let sweep = self
+            .pool
+            .sweep_upload_session(self.roots, self.clock, &state)
+            .await?;
+        Ok(self.session_decision(&upload_id, sweep))
+    }
+
+    fn session_decision(
+        &self,
+        upload_id: &UploadId,
+        sweep: UploadSessionSweep,
+    ) -> Decision<PoolGcResponse> {
+        match sweep {
+            UploadSessionSweep::Delete => {
+                if let Some(cache) = self.session_cache {
+                    cache.invalidate(upload_id);
+                }
+                Decision::Delete {
+                    keys: upload_session_record_keys(&self.pool.pool_id, upload_id).into(),
+                    counter: |report| &mut report.deleted.upload_sessions,
+                }
+            }
             UploadSessionSweep::Retain { reclaimable_at_ms } => self.retain(
                 match reclaimable_at_ms {
                     Some(_) => PoolRetainedReason::UploadSessionWindow,
@@ -156,7 +169,7 @@ impl<S: ObjectStore> PoolSweep<'_, S> {
                 },
                 reclaimable_at_ms,
             ),
-        })
+        }
     }
 
     fn aged(
