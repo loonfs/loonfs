@@ -1248,6 +1248,65 @@ async fn a_newer_claim_at_the_check_after_the_fence_fences_the_session() {
     assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
 }
 
+/// Checks that a fence whose put a fold passes is live: while a gate parks
+/// the fence put at WAL number 3, a fold of the older session's commit at 2
+/// publishes a manifest of the claim's epoch with `folded_wal_no` 2. The
+/// check after the put finds that newer manifest, the fence's number is above
+/// its `folded_wal_no`, so the acquired anchor ends with the fence at 3 and
+/// the session puts no second fence.
+#[tokio::test]
+async fn a_fence_above_a_newer_manifests_folded_wal_no_is_live() {
+    let temp_dir = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("fence-under-fold").expect("namespace");
+    let blocked = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let store = blocked.inner();
+    let setup = context(1_000);
+    crate::test_support::NamespaceFixture::new(store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("create");
+    let mut older = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, &namespace_id),
+        setup.writer_id.clone(),
+    );
+    older
+        .publish_batch([directory("before")], &setup.clock())
+        .await
+        .results
+        .remove(0)
+        .expect("the older session commits at 2");
+    blocked.block_next();
+    let newer = crate::test_support::namespace_store(&blocked, &namespace_id);
+    let newer_writer = WriterId::parse("writer-b").expect("writer");
+    let (acquired, ()) = futures::join!(newer.acquire_writer(&newer_writer), async {
+        blocked.wait_until_blocked().await;
+        crate::test_support::namespace_store(store, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold the commit at 2");
+        blocked.release();
+    });
+    let acquired = acquired.expect("the session is acquired");
+    assert_eq!(acquired.writer.writer_epoch, WriterEpoch(2));
+    let manifest = acquired.anchor.current_manifest();
+    assert_eq!(manifest.payload().writer_epoch, WriterEpoch(2));
+    assert_eq!(manifest.payload().folded_wal_no, WalNo(2));
+    assert_eq!(acquired.anchor.read_state.wal_no, WalNo(3));
+    assert_eq!(
+        fence_epoch(store, &namespace_id, WalNo(3)).await,
+        WriterEpoch(2)
+    );
+    assert!(store
+        .head(&wal_object(&namespace_id, &WalNo(4)))
+        .await
+        .expect("head")
+        .is_none());
+}
+
 /// Checks that an acquisition sends one manifest successor check, after the
 /// fence put: the tail read before the fence doesn't check the manifest.
 #[tokio::test]
@@ -1372,5 +1431,73 @@ async fn a_floor_object_at_an_emptied_number_is_dead_and_the_next_attempt_puts_a
         .await
         .expect("head");
     assert_eq!(head.wal_no, WalNo(5));
+    assert_eq!(head.retention_floor_seq, CommitSeq(1));
+}
+
+/// Checks that a floor object whose put a fold passes is live: while a gate
+/// parks the put of a process without the writer epoch at WAL number 3, a
+/// fold of the session's commit at 2 publishes a manifest with
+/// `folded_wal_no` 2. The check after the put finds that newer manifest, the
+/// floor object's number is above its `folded_wal_no`, so the advance
+/// returns the new floor from its first attempt and puts no second floor
+/// object.
+#[tokio::test]
+async fn a_floor_object_above_a_newer_manifests_folded_wal_no_is_live() {
+    let temp_dir = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("floor-under-fold").expect("namespace");
+    let blocked = BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let store = blocked.inner();
+    let setup = context(1_000);
+    crate::test_support::NamespaceFixture::new(store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("create");
+    let mut writer = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(store, &namespace_id),
+        setup.writer_id.clone(),
+    );
+    writer
+        .publish_batch([directory("before")], &setup.clock())
+        .await
+        .results
+        .remove(0)
+        .expect("the session commits at 2");
+    let advancer = crate::test_support::namespace_store(&blocked, &namespace_id);
+    let planned = advancer.load_current_manifest().await.expect("planned");
+    blocked.block_next();
+    let (report, ()) = futures::join!(
+        advancer.publish_floor_object(&planned, CommitSeq(1)),
+        async {
+            blocked.wait_until_blocked().await;
+            crate::test_support::namespace_store(store, &namespace_id)
+                .fold_wal()
+                .await
+                .expect("fold the commit at 2");
+            blocked.release();
+        }
+    );
+    let report = report.expect("the advance");
+    assert_eq!(report.retention_floor_seq, CommitSeq(1));
+    assert!(store
+        .head(&wal_object(&namespace_id, &WalNo(4)))
+        .await
+        .expect("head")
+        .is_none());
+    let namespace = crate::test_support::namespace_store(store, &namespace_id);
+    assert_eq!(
+        namespace
+            .load_current_manifest()
+            .await
+            .expect("manifest")
+            .payload()
+            .folded_wal_no,
+        WalNo(2)
+    );
+    let head = namespace.load_read_state().await.expect("head");
+    assert_eq!(head.wal_no, WalNo(3));
     assert_eq!(head.retention_floor_seq, CommitSeq(1));
 }

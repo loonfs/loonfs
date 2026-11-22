@@ -8,7 +8,7 @@ use crate::namespace::basis::PublicationBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use crate::wal::{prepare_fence, publish_wal_object};
+use crate::wal::{prepare_fence, publish_wal_object, wal_no_is_unfolded};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -54,12 +54,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// a claim manifest with the next epoch, then writes a fence at the next WAL
     /// number (format spec, "Writer ownership").
     ///
-    /// After the fence put succeeds, the call checks the manifest that the
-    /// tail read loaded. The fence is live when that manifest is still the
-    /// newest, or when the fence's number is above the newest manifest's
-    /// `folded_wal_no`. A fence at or below that number may be at a number
-    /// that a collection emptied, so the call puts a fence again at the new
-    /// tip. A newest manifest with a higher writer epoch returns
+    /// After the fence put succeeds, the call checks whether the fence is
+    /// live (see [`wal_no_is_unfolded`]), and puts a dead fence again at the
+    /// new tip. A newest manifest with a higher writer epoch returns
     /// `writer_fenced`.
     ///
     /// A writer session acquires its epoch here before its first publication.
@@ -152,27 +149,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Ok(()) => {
                     let fenced_head = head.after_wal_object(fence.envelope().payload());
                     if self.check_anchor_manifest(&mut anchor).await? {
-                        // The anchor's manifest is the newest, and the tail
-                        // was read above its `folded_wal_no`, so the fence is
-                        // live.
                         anchor.read_state = fenced_head;
                         anchor
                             .tail
                             .push_published(fence.envelope().clone(), fence.as_bytes().len());
                         return Ok(anchor);
                     }
-                    // A newer manifest. The fence is live when its number is
-                    // above the newest manifest's `folded_wal_no`, and the
-                    // anchor at that manifest then replays the fence.
-                    // Otherwise the put may have used a number that a
-                    // collection emptied, so the fence is dead, and the loop
-                    // puts a fence at the new tip (format spec, "Writer
-                    // ownership").
+                    // A newer manifest. The writer read anchor at that
+                    // manifest returns `writer_fenced` for a higher epoch,
+                    // and replays a live fence.
                     anchor = self
                         .load_writer_read_anchor(acquired, clock.observe())
                         .await?;
-                    let folded_wal_no = anchor.current_manifest().payload().folded_wal_no;
-                    if fenced_head.wal_no > folded_wal_no {
+                    if wal_no_is_unfolded(
+                        fenced_head.wal_no,
+                        anchor.current_manifest().folded_wal_no(),
+                    ) {
                         super::control::ensure_namespace_live(
                             &anchor.read_state.namespace_id,
                             anchor.read_state.status,
