@@ -157,3 +157,49 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
         expected
     );
 }
+
+/// Checks that a publication whose manifest breaks a successor rule (here, a
+/// changed pool) panics before its put, so the store has no manifest at that
+/// number.
+#[tokio::test]
+async fn a_publication_that_breaks_a_successor_rule_panics_before_its_put() {
+    use futures::FutureExt;
+    let directory = tempdir().expect("directory");
+    let (store, namespace_id) = created_namespace(directory.path()).await;
+    let basis = current_basis(store.inner(), &namespace_id).await;
+    let deadline = OperationClock::start(0, crate::test_support::std_timer());
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let Err(panic) = std::panic::AssertUnwindSafe(namespace.update_manifest(
+        Some(basis),
+        &deadline,
+        |current: LoadedManifest| async move {
+            Ok(ManifestChange::Next(
+                Box::new(NamespaceManifestPayload {
+                    pool_id: loonfs_types::PoolId::generate(),
+                    ..current.payload().clone()
+                }),
+                (),
+            ))
+        },
+    ))
+    .catch_unwind()
+    .await
+    else {
+        panic!("a manifest that changes the pool should panic");
+    };
+    let message = panic
+        .downcast_ref::<String>()
+        .expect("the assertion's message");
+    assert!(
+        message.starts_with("a candidate manifest should be a legal successor")
+            && message.contains("pool_id"),
+        "{message}"
+    );
+    assert_eq!(control_requests(&namespace_id, &store.take()), Vec::new());
+    assert!(store
+        .inner()
+        .head(&metadata_manifest_object(&namespace_id, &ManifestNo(3)))
+        .await
+        .expect("head")
+        .is_none());
+}

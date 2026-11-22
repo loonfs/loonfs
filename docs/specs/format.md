@@ -399,15 +399,6 @@ Cold discovery steps:
 
 A find failing to complete after `MAX_CONTENTION_ATTEMPTS` (8) attempts returns `store_contention`. After loading `n`, a cold read reads the WAL tail above `n.folded_wal_no`, sends a HEAD for manifest `n + 1`, and sends a conditional boundary read. If a successor exists or `n <= boundary`, discovery restarts.
 
-Every successor manifest loaded above a previously known manifest MUST satisfy:
-
-- Identical identity fields.
-- Non-decreasing `folded_wal_no`, both epochs, `head_seq`, retention floor, next run number, and activity counters.
-- Does not follow a namespace tombstone.
-- Not `initializing`, except for a fork's manifest 2 that folds the source's WAL tail, which follows the fork's initializing manifest 1 and is itself `initializing` ([Forking a namespace](#92-forking-a-namespace), step 4). Any other manifest after an initializing manifest is an active manifest or a namespace tombstone.
-
-Any violation indicates corruption.
-
 | Discovery outcome | Interpretation |
 | --- | --- |
 | Empty listing, unchanged boundary, no boundary object | Namespace does not exist. |
@@ -418,7 +409,7 @@ Any violation indicates corruption.
 | Newest manifest has status `deleted` | `namespace_deleted` for ordinary operations. |
 | Boundary is `retired` | `namespace_deleted` for all operations except collection. |
 
-Every namespace has its own manifest from creation (a new namespace's empty manifest represents `/` at seq 0, see [Publishing a manifest](#72-publishing-a-manifest)). Readers never chase `fork_basis` to change basis.
+Every namespace has its own manifest from creation (a new namespace's empty manifest represents `/` at seq 0, see [Publishing a manifest](#72-publishing-a-manifest)). Readers never chase `fork_basis` to change basis. A process that loads a manifest doesn't check it against a manifest that it loaded earlier, because every publisher checks each manifest against its basis before the put (see [Basis, collision, and boundary checks for every manifest publication](#basis-collision-and-boundary-checks-for-every-manifest-publication)).
 
 ```text
 boundary 4 --list--> 5, 6 --load 6, boundary 4--> manifest 6 is newest
@@ -803,6 +794,15 @@ Every manifest publication starts from a basis manifest in memory (checking `bou
   3. If the boundary read fails, return `outcome_unknown`.
 - **Fold retry after lost put:** Complete immediately if the winning manifest already covers `tip` (`folded_wal_no >= tip`, `head_seq >= fold.head_seq`, `manifest_no >= fold.manifest_no`). Otherwise rebuild on the winning predecessor, reusing the already-read WAL tail (and already-written layouts if at the same head) when the predecessor changed only in number, compactor epoch, floor, retention window, runs, next run number, or extensions, reloading the tail after any other manifest. If another writer claimed the namespace, the fold still folds the new writer's log, while the old session's writer position refuses to advance onto it.
 
+A publisher MUST publish only a manifest that keeps these rules against its basis:
+
+- Its manifest number is the basis's number plus one.
+- Its `namespace_id`, `created_at_ms`, `created_by`, `fork_basis`, and `pool_id` are the basis's. (`retention_window_ms` can be set, changed, or cleared.)
+- Its `folded_wal_no`, `writer_epoch`, `compactor_epoch`, `head_seq`, `retention_floor_seq`, `next_run_no`, and each activity counter are at least the basis's values, and if its `head_seq` equals the basis's, its activity is the same.
+- Its basis isn't a namespace tombstone.
+- If the basis isn't `initializing`, the manifest isn't `initializing` either.
+- If the basis is `initializing`, the manifest is one of three: a fork's initializing manifest 2 that folds the source's WAL tail ([Forking a namespace](#92-forking-a-namespace), step 4), the basis's activation, or the basis's namespace tombstone. The activation is the basis with the status set to `active`, and for a fork, with the retention floor raised to the fork point ([Forking a namespace](#92-forking-a-namespace), step 7). The tombstone is the basis with the status set to `deleted` with its `deleted_at_ms`, and with the runs of each extension entry emptied ([Extensions](#124-extensions)). Neither changes any other field except the manifest number.
+
 #### Extent assembly and the doubling rule
 
 For each chain with tail pieces, the fold constructs one new "candidate" extent from the prior layout plus ordered tail pieces:
@@ -815,8 +815,6 @@ For each chain with tail pieces, the fold constructs one new "candidate" extent 
 Each candidate is written via one put-if-absent assembly to a fresh random [span object](#15-file-contents-and-ownership) ID (except 0-byte chains, which write an empty whole object, and HEAD checks each copied source's stored checksum against the extent's object checksum, reporting `namespace_corrupt` on mismatch). Random span IDs let two pool members materialize the same pieces concurrently without conflict (at the cost of storing at most one tail's pieces twice while both layouts exist). A creator's fold may also copy shared base span extents that take their whole objects into a span object that the chain's layout lists, and those bytes are then stored twice in the pool while both layouts are listed. New layouts copy the chain's `creator` (existing layout creator, or the WAL object's `namespace_id` for new chains) and replace tail layouts in the fold's delta run.
 
 Content writes from folds, validation, merges, direct downloads, and proxied staging share `max_concurrent_content_writes` (default 32), and `STORE_WRITES_IN_FLIGHT` caps concurrency per fold or merge.
-
-Every successor manifest MUST preserve namespace identity (including `pool_id`), keep `head_seq`, epochs, `folded_wal_no`, `retention_floor_seq`, `next_run_no`, and `activity` non-decreasing (exact same `activity` at the same `head_seq`), and never follow a namespace tombstone. `retention_window_ms` may be set, changed, or cleared.
 
 ### 7.3 Recovery material and maintenance policy
 
@@ -843,7 +841,7 @@ Each manifest records three cumulative counters in `activity`:
 | `file_revisions` | Every committed file revision (including empty ones). |
 | `mutations` | Each `semantic_operation_index` group in committed WAL records. |
 
-Folds add only activity after the predecessor's position (re-counting on collision). Uploads, fences, floor objects, snapshots, content materialization, compaction, retention, deletion, and recognized retries add nothing, and all publishers copy counters forward. Forks start with zero activity counters (folding a source WAL tail during fork adds no activity). Decreasing counters indicate corruption, and values exceeding the API integer bound error.
+Folds add only activity after the predecessor's position (re-counting on collision). Uploads, fences, floor objects, snapshots, content materialization, compaction, retention, deletion, and recognized retries add nothing, and all publishers copy counters forward. Forks start with zero activity counters (folding a source WAL tail during fork adds no activity). A counter above the API integer bound is an error.
 
 Footprint metrics derived from the manifest alone (zero extra reads, extension segments excluded):
 
