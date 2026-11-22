@@ -58,8 +58,9 @@ impl From<Consistency> for HeadConfirmation {
 }
 
 impl RuntimeCore {
-    /// Returns the namespace's head, confirmed or loaded for a read with
-    /// `consistency`.
+    /// Returns the namespace's head, confirmed or loaded for a read with the
+    /// maximum staleness `max_staleness_ms`, or for a `strong` read when
+    /// it's `None`.
     ///
     /// One refresh of the namespace's head runs at a time in this runtime,
     /// and the reads that need one share it (see
@@ -79,13 +80,13 @@ impl RuntimeCore {
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
-        consistency: Consistency,
+        max_staleness_ms: Option<u64>,
     ) -> std::result::Result<Arc<CachedHead>, CoreError> {
         let cache = &self.inner.head_and_wal_tail_cache;
         cache
             .check_or_join_head(
                 namespace_id,
-                || self.eventual_head(namespace_id, consistency),
+                || self.eventual_head(namespace_id, max_staleness_ms),
                 || async {
                     let cached = cache.get_head(namespace_id);
                     self.refresh_namespace_head(namespace_id, cached.as_deref().cloned())
@@ -217,17 +218,27 @@ impl RuntimeCore {
     /// as it is while it was confirmed less than the read's maximum
     /// staleness ago (see [`Self::eventual_head`] for the cached head), and
     /// every other read confirms or loads the head.
+    ///
+    /// Every read with a caller's consistency calls this method before it
+    /// starts from a head, so a read whose maximum staleness is longer than
+    /// the revalidation bound returns `invalid_request` here, before the read
+    /// sends a request to the store (see [`Self::max_staleness_ms`]). An
+    /// eventual read therefore starts from the writer position without a new
+    /// check only while the position's last check is younger than the
+    /// revalidation bound, the same limit that [`Self::eventual_head`]
+    /// applies to the cached head's manifest check.
     pub(crate) async fn current_read_context(
         &self,
         namespace_id: &NamespaceId,
         confirmation: impl Into<HeadConfirmation>,
     ) -> Result<RuntimeReadContext> {
-        let (consistency, position_staleness_ms) = match confirmation.into() {
+        let (max_staleness_ms, position_staleness_ms) = match confirmation.into() {
             HeadConfirmation::Consistency(consistency) => {
                 let consistency = consistency.unwrap_or(self.inner.config.consistency.into());
-                (consistency, self.max_staleness_ms(consistency))
+                let max_staleness_ms = self.max_staleness_ms(consistency)?;
+                (max_staleness_ms, max_staleness_ms)
             }
-            HeadConfirmation::View => (Consistency::Strong, Some(READ_REVALIDATION_BOUND_MS)),
+            HeadConfirmation::View => (None, Some(READ_REVALIDATION_BOUND_MS)),
         };
         let (context, source) = match self
             .checked_writer_position(namespace_id, position_staleness_ms)
@@ -241,7 +252,7 @@ impl RuntimeCore {
                 ReadHeadSource::Position,
             ),
             None => {
-                let (head, source) = match self.eventual_head(namespace_id, consistency) {
+                let (head, source) = match self.eventual_head(namespace_id, max_staleness_ms) {
                     Some(head) => (head, ReadHeadSource::Eventual),
                     None => {
                         let cache = &self.inner.head_and_wal_tail_cache;
@@ -250,7 +261,7 @@ impl RuntimeCore {
                             None => ReadHeadSource::Loaded,
                         };
                         let head = self
-                            .load_namespace_head_cached(namespace_id, consistency)
+                            .load_namespace_head_cached(namespace_id, max_staleness_ms)
                             .await?;
                         (head, source)
                     }
@@ -277,9 +288,9 @@ impl RuntimeCore {
     fn eventual_head(
         &self,
         namespace_id: &NamespaceId,
-        consistency: Consistency,
+        max_staleness_ms: Option<u64>,
     ) -> Option<Arc<CachedHead>> {
-        let max_staleness_ms = self.max_staleness_ms(consistency)?;
+        let max_staleness_ms = max_staleness_ms?;
         let cached = self.inner.head_and_wal_tail_cache.get_head(namespace_id)?;
         let confirmed = cached.head_confirmed.age_ms() < max_staleness_ms
             && cached.basis_checked.is_within_revalidation_bound();
@@ -291,11 +302,25 @@ impl RuntimeCore {
 
     /// Returns the maximum staleness of a read with `consistency`, or `None`
     /// for a `strong` read.
-    fn max_staleness_ms(&self, consistency: Consistency) -> Option<u64> {
+    ///
+    /// A read's consistency becomes a maximum staleness only in this method,
+    /// so a read whose maximum staleness is longer than the revalidation
+    /// bound returns `invalid_request` from it.
+    fn max_staleness_ms(&self, consistency: Consistency) -> Result<Option<u64>> {
         let Consistency::Eventual { max_staleness_ms } = consistency else {
-            return None;
+            return Ok(None);
         };
-        Some(max_staleness_ms.unwrap_or(self.inner.config.max_staleness_ms))
+        let max_staleness_ms = max_staleness_ms.unwrap_or(self.inner.config.max_staleness_ms);
+        if max_staleness_ms > READ_REVALIDATION_BOUND_MS {
+            return Err(Error::InvalidRequest {
+                message: format!(
+                    "max_staleness_ms {max_staleness_ms} exceeds the revalidation bound \
+                     ({READ_REVALIDATION_BOUND_MS} ms)"
+                ),
+                param: "max_staleness_ms",
+            });
+        }
+        Ok(Some(max_staleness_ms))
     }
 
     /// Returns the read context of `head` and `basis`.

@@ -9,9 +9,9 @@ use loonfs::test_support::{counter, writer};
 use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs::{
     CommitSeq, Consistency, CoreError, DiffOptions, DownloadOptions, Error, ListChangesOptions,
-    ListFileRevisionsOptions, ListOptions, ListTrashOptions, LoonFs, MetadataCache, Namespace,
-    NamespaceId, ReadAt, ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadOnly,
-    SharedObjectStore, StatOptions, Writable,
+    ListFileRevisionsOptions, ListOptions, ListTrashOptions, LiveReadOptions, LoonFs,
+    MetadataCache, Namespace, NamespaceId, ReadAt, ReadConsistency, ReadFileOptions,
+    ReadFileStreamOptions, ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
@@ -146,7 +146,10 @@ fn assert_invalid_request(error: Option<Error>, expected: &str) {
 
 /// Checks that a maximum staleness above the revalidation bound fails every
 /// live read with `invalid_request` for `max_staleness_ms`, before the
-/// read sends a request.
+/// read sends a request, in a read-only runtime, whose reads start from the
+/// cached head. The read view and the merge range are also checked in a
+/// runtime with the namespace's writer session, whose reads start from the
+/// writer position.
 #[tokio::test]
 async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any_request() {
     let fixture = fixture("staleness-above-bound").await;
@@ -174,8 +177,32 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
         at: ReadAt::Live(consistency),
         ..DownloadOptions::default()
     };
+    let live = LiveReadOptions { consistency };
+    let fork_id = namespace_id("staleness-above-bound-fork");
     fixture.recording.reset();
     let errors = [
+        reader.read_view_with_options(&live).await.err(),
+        fixture.namespace.read_view_with_options(&live).await.err(),
+        reader
+            .next_merge_range_with_options(&fork_id, &live)
+            .await
+            .err(),
+        fixture
+            .namespace
+            .next_merge_range_with_options(&fork_id, &live)
+            .await
+            .err(),
+        reader.metadata_with_options(&live).await.err(),
+        reader
+            .diff_with_options(
+                CommitSeq(0),
+                &DiffOptions {
+                    consistency,
+                    ..DiffOptions::default()
+                },
+            )
+            .await
+            .err(),
         reader.stat_with_options("/file.txt", &stat).await.err(),
         reader
             .stat_by_inode_with_options(ROOT_INODE_ID, &stat)

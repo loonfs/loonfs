@@ -48,21 +48,12 @@ pub(super) fn read_at(
 
 /// Returns the consistency of a live read from its decoded `consistency`
 /// and `max_staleness_ms`, or `None`, the runtime's default, when the
-/// request sets neither.
+/// request sets neither. The runtime refuses a maximum staleness above the
+/// revalidation bound when the read starts.
 pub(super) fn live_consistency(
     consistency: Option<ReadConsistency>,
     max_staleness_ms: Option<u64>,
 ) -> Result<Option<Consistency>, ApiResponseError> {
-    if let Some(max_staleness_ms) = max_staleness_ms.filter(|ms| *ms > READ_REVALIDATION_BOUND_MS) {
-        return Err(ApiResponseError::new(
-            ErrorCode::InvalidRequest,
-            &format!(
-                "invalid max_staleness_ms `{max_staleness_ms}`: must not exceed \
-                 {READ_REVALIDATION_BOUND_MS}, the revalidation bound"
-            ),
-        )
-        .with_param("max_staleness_ms"));
-    }
     match consistency {
         Some(ReadConsistency::Eventual) => Ok(Some(Consistency::Eventual { max_staleness_ms })),
         None | Some(ReadConsistency::Strong) if max_staleness_ms.is_some() => {
