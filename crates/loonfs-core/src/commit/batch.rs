@@ -106,12 +106,19 @@ pub(crate) struct PublicationClock<'a> {
     pub(crate) attempt: Observation,
 }
 
+/// Plans `candidates` against `view`, and publishes the accepted ones in one
+/// WAL object.
+///
+/// The batch calls `sending_wal_put` immediately before it sends its WAL put,
+/// so a batch that returns, or is dropped, while it's still planning never
+/// calls it.
 pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
     candidates: &[CommitCandidate],
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
+    sending_wal_put: impl FnOnce(),
 ) -> PublishBatchReport {
     // The publisher puts a merge in a batch of its own, so the WAL object's
     // size bound applies to the merge alone, and no other commit shares a
@@ -224,6 +231,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     ) {
         return abort_batch(slots, &error);
     }
+    sending_wal_put();
     if let Err(error) = publish_wal_object(view.store(), &wal).await {
         let mut report = abort_batch(slots, &error);
         report.effect = PublishViewEffect::after_failed_put(&error);
@@ -454,6 +462,7 @@ mod tests {
                 batch: &batch,
                 attempt,
             },
+            || {},
         )
         .await;
 
@@ -515,6 +524,7 @@ mod tests {
                 batch: &batch,
                 attempt: batch.observe(),
             },
+            || {},
         )
         .await;
 

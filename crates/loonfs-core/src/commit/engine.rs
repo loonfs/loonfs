@@ -73,12 +73,15 @@ pub enum WriterSessionStatus {
     /// the session.
     Acquired(AcquiredWriter),
     /// The session holds this writer epoch and owes a fence. The session
-    /// records that it owes one before it sends a WAL put and clears the
-    /// record once it learns the put's outcome, so the session still owes a
-    /// fence after an unknown outcome, a dropped publish future, or a panic. The put may still be written at
-    /// the number the session would put next, so the session's next
-    /// publication writes a fence with this epoch before it plans a commit
-    /// (format spec, "Failed and unknown outcomes").
+    /// records that it owes one immediately before it sends a WAL put and
+    /// clears the record once it learns the put's outcome, so the session
+    /// still owes a fence after an unknown outcome, or after a publish future
+    /// that was dropped or panicked while its put was in flight. A future
+    /// dropped while the batch is still planning leaves no record, because
+    /// the session sent no put. A put in flight may still be written at the
+    /// number the session would put next, so the session's next publication
+    /// writes a fence with this epoch before it plans a commit (format spec,
+    /// "Failed and unknown outcomes").
     ///
     /// The record that the session owes a fence is one record for the
     /// session, which relies on the rule that a session publishes one WAL
@@ -437,8 +440,8 @@ impl PositionState {
         self.acquired_anchor = None;
     }
 
-    /// Records, before the session sends a WAL put, that it owes a fence
-    /// until it learns the put's outcome (see
+    /// Records, immediately before the session sends a WAL put, that it owes
+    /// a fence until it learns the put's outcome (see
     /// [`WriterSessionStatus::HoldsEpochOwesFence`]).
     fn owe_fence(&self) {
         let mut session = self.lock_session();
@@ -568,7 +571,6 @@ impl PositionState {
             attempt,
         } = loaded;
         let wal_tail_discovered = publish_view.tail_discovered;
-        self.owe_fence();
         let published = super::batch::publish_namespace_commits_batch_against_publish_view(
             candidates,
             &publish_view,
@@ -576,6 +578,7 @@ impl PositionState {
                 batch: clock,
                 attempt,
             },
+            || self.owe_fence(),
         )
         .await;
         let position = publish_view.into_position();

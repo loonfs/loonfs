@@ -5,9 +5,12 @@ use crate::authorize::{Authorizer, ReadAccess};
 use crate::manifest::FoldWalOutcome;
 use crate::wal::WalPublishError;
 use bytes::Bytes;
+use loonfs_objectstore::keys::metadata_segment_prefix;
 use loonfs_objectstore::PutMode;
 use loonfs_test_support::stores::{FailStore, InjectedError, MetadataMapStore, OperationKind};
+use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::options::AttributeInclusion;
+use loonfs_types::WalNo;
 use std::sync::Mutex;
 
 /// The store that the session writes through. It can hold a WAL put before
@@ -229,6 +232,101 @@ async fn a_dropped_publish_future_leaves_the_session_owing_a_fence() {
     .await;
     gamma.expect("gamma commits");
     assert_readable(&local, &namespace_id, &["alpha", "beta", "gamma"]).await;
+}
+
+/// Checks that a caller that drops the session's publish future while the
+/// batch is still planning, before the session sends a WAL put, leaves the
+/// session owing no fence (format spec, "Failed and unknown outcomes").
+///
+/// A fold moves `alpha` into a metadata segment, so planning `beta` reads
+/// that segment from the store. The read is held, and the caller drops the
+/// future. The session's next commit, `gamma`, is written at the number
+/// after the tip, and the store has no other WAL object after the tip.
+#[tokio::test]
+async fn a_publish_future_dropped_while_planning_leaves_the_session_owing_no_fence() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let local = LocalFsStore::new(directory.path()).expect("store");
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(metadata_segment_prefix(&namespace_id)),
+        OperationSelector::Read,
+    );
+    let writer = context("writer-a");
+    crate::test_support::NamespaceFixture::new(&local, &namespace_id, &writer)
+        .create()
+        .await
+        .expect("bootstrap");
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        writer.writer_id.clone(),
+    );
+    publish_one(&mut engine, &writer, "alpha").await;
+    let tip = engine
+        .writer_position()
+        .expect("the position after alpha")
+        .read_basis
+        .head
+        .wal_no;
+    assert_eq!(
+        crate::test_support::namespace_store(&local, &namespace_id)
+            .fold_wal()
+            .await
+            .expect("fold")
+            .outcome,
+        FoldWalOutcome::Published
+    );
+    engine.invalidate_projection();
+
+    store.block_next();
+    {
+        let clock = writer.clock();
+        let dropped = engine.publish_batch(vec![create_dir("beta", "beta")], &clock);
+        tokio::select! {
+            _ = dropped => panic!("planning beta is held"),
+            () = store.wait_until_blocked() => {}
+        }
+    }
+    store.release();
+
+    publish_one(&mut engine, &writer, "gamma").await;
+    assert_eq!(
+        commit_ids_after(&local, &namespace_id, tip).await,
+        [(
+            tip.successor().expect("a next number"),
+            vec!["gamma".to_owned()]
+        )],
+        "the session writes gamma at the number after the tip, and no fence"
+    );
+}
+
+/// Returns the number and commit IDs of each WAL object after `tip`, in
+/// order. A fence has no commit IDs.
+async fn commit_ids_after(
+    local: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    tip: WalNo,
+) -> Vec<(WalNo, Vec<String>)> {
+    let mut objects = Vec::new();
+    for key in local
+        .list_prefix(&wal_prefix(namespace_id))
+        .await
+        .expect("list WAL")
+    {
+        let bytes = local.get(&key, None).await.expect("get").expect("WAL");
+        let object = decode_wal_object_envelope_zstd(&bytes).expect("decode");
+        let payload = object.payload();
+        if payload.wal_no > tip {
+            let commit_ids = payload
+                .records
+                .iter()
+                .map(|record| record.commit_id.to_string())
+                .collect();
+            objects.push((payload.wal_no, commit_ids));
+        }
+    }
+    objects.sort();
+    objects
 }
 
 /// Checks that a lone writer session whose fence put after an unknown
