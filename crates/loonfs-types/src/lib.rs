@@ -45,6 +45,8 @@ mod secret;
 mod segment_blocks;
 mod wal;
 mod widths;
+// Temporary: removed with the frozen copy of the write path in `loonfs-core`.
+pub mod write_path_comparison;
 
 pub mod api {
     //! HTTP API request and response shapes, one module per protocol version.
