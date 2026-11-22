@@ -140,11 +140,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         // A destination in the saved parent is a restore in place, which
         // needs no read right on the inode.
         let mover = view.mover_rights(inode_id).await?;
-        if destination.parent_inode_id != saved_parent {
+        if destination.parent_inode_id() != saved_parent {
             check_rights(mover, AccessRight::Read.into(), inode_id, Absence::Inode)?;
         }
         let name = view.ensure_vacant_destination(&destination).await?;
-        view.authorize_relocation(inode_id, saved_parent, destination.parent_inode_id, mover)
+        view.authorize_relocation(inode_id, saved_parent, destination.parent_inode_id(), mover)
             .await?;
         Ok(name)
     }

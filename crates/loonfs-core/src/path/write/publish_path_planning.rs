@@ -229,17 +229,38 @@ impl<'a> Destination<'a> {
 }
 
 /// A destination resolved to its parent directory and its current occupant.
+/// Only [`PlanningView::resolve_destination`] makes one.
 pub(super) struct ResolvedDestination<'a> {
-    pub(super) parent_inode_id: InodeId,
-    pub(super) name: DisplayName,
+    parent_inode_id: InodeId,
+    name: DisplayName,
     /// The destination as error messages name it: the request's path, or
     /// the parent's path joined with the name.
-    pub(super) path: String,
-    pub(super) occupant: Option<ResolvedVisiblePath>,
-    pub(super) absence: Absence<'a>,
+    path: String,
+    occupant: Option<ResolvedVisiblePath>,
+    absence: Absence<'a>,
 }
 
-impl ResolvedDestination<'_> {
+impl<'a> ResolvedDestination<'a> {
+    pub(super) fn parent_inode_id(&self) -> InodeId {
+        self.parent_inode_id
+    }
+
+    pub(super) fn name(&self) -> &DisplayName {
+        &self.name
+    }
+
+    pub(super) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(super) fn occupant(&self) -> Option<&ResolvedVisiblePath> {
+        self.occupant.as_ref()
+    }
+
+    pub(super) fn absence(&self) -> Absence<'a> {
+        self.absence
+    }
+
     /// Returns the destination as a name that a bind can take, which is a
     /// name that nothing visible occupies, or that `rebinding`, the inode
     /// that the bind moves, occupies already.

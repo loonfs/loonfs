@@ -99,12 +99,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     ) -> Result<()> {
         let replaced =
             classify_replace_destination(&destination, precondition.behavior, source.inode_id)?;
-        let ResolvedDestination {
-            parent_inode_id,
-            name,
-            path,
-            ..
-        } = &destination;
+        let parent_inode_id = destination.parent_inode_id();
+        let name = destination.name();
+        let path = destination.path();
         let current_source_binding = self.view().source_binding(source).await?;
         // A merge's move through a temporary name changes the inode's rights
         // once, from the directory that it leaves in the first leg to the
@@ -116,7 +113,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         };
         if let Some(from_parent) = relocated_from {
             self.view()
-                .authorize_relocation(source.inode_id, from_parent, *parent_inode_id, mover)
+                .authorize_relocation(source.inode_id, from_parent, parent_inode_id, mover)
                 .await?;
         }
         let available = match replaced {
@@ -133,13 +130,13 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 // The delete unbinds the file, so the destination is vacant
                 // in the state that the delete left.
                 self.view()
-                    .resolve_destination(Destination::name(*parent_inode_id, name))
+                    .resolve_destination(Destination::name(parent_inode_id, name))
                     .await?
                     .available_name(Some(source.inode_id))?
             }
             ReplaceDestination::Vacant(available) => {
                 if expected_destination.is_some() {
-                    return Err(CoreError::PathNotFound(path.clone()));
+                    return Err(CoreError::PathNotFound(path.to_owned()));
                 }
                 available
             }
@@ -159,7 +156,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .await?;
                 if name.as_str() == source.display_name {
                     return Err(CoreError::DestinationExists {
-                        path: path.clone(),
+                        path: path.to_owned(),
                         existing_display_name: Some(source.display_name.clone()),
                     });
                 }
@@ -221,7 +218,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     ) -> Result<()> {
         let replaced =
             classify_replace_destination(&destination, precondition.behavior, source.inode_id)?;
-        let ResolvedDestination { name, path, .. } = &destination;
+        let name = destination.name();
+        let path = destination.path();
         let revision = self
             .view()
             .metadata
@@ -233,7 +231,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             // make room for its copy; that is a conflict, with or without
             // `Replace`, the same-file rule every copy tool applies.
             ReplaceDestination::SameInode(_) => Err(CoreError::DestinationExists {
-                path: path.clone(),
+                path: path.to_owned(),
                 existing_display_name: Some(source.display_name.clone()),
             }),
             ReplaceDestination::Replaced(existing) => {
@@ -247,7 +245,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .metadata
                     .latest_revision_head(existing.inode_id)
                     .await?
-                    .ok_or_else(|| CoreError::PathNotFound(path.clone()))?;
+                    .ok_or_else(|| CoreError::PathNotFound(path.to_owned()))?;
                 if let Some(expected) = expected_destination {
                     expected
                         .ensure_revision(existing.inode_id, Some(existing_revision.revision_no))?;
@@ -259,7 +257,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             }
             ReplaceDestination::Vacant(available) => {
                 if expected_destination.is_some() {
-                    return Err(CoreError::PathNotFound(path.clone()));
+                    return Err(CoreError::PathNotFound(path.to_owned()));
                 }
                 let child_inode_id = self.next_inode_id()?;
                 self.commit
