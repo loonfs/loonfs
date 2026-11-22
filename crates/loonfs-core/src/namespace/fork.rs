@@ -158,8 +158,8 @@ impl ForkDeadline {
 /// passes it to the fork. If another call creates the target after the caller
 /// found it, the fork's manifest 1 put fails, and the fork then finds the
 /// target again. A fork that finishes an initializing target finds the target
-/// again after its operation clock starts, because the publication budget of
-/// its fork snapshot has to run from before its observation of the target.
+/// again after its publication budget starts, because the budget that protects
+/// its fork snapshot has to start before the fork reads the target.
 #[derive(Clone, Debug)]
 pub struct ForkTarget {
     namespace_id: NamespaceId,
@@ -185,8 +185,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Returns `namespace_exists` for an active namespace, and
     /// `namespace_deleted` for a tombstone or a retired ID, so a caller that
     /// finds the target first reads nothing of the source for a taken ID.
-    /// For an initializing namespace, it returns a target that the fork
-    /// finishes: the earlier fork stopped before its active manifest.
+    /// For an initializing namespace, whose earlier fork stopped before its
+    /// active manifest, it returns a target that the fork finishes.
     pub async fn find_fork_target(&self, new_namespace_id: &NamespaceId) -> Result<ForkTarget> {
         let target = self.namespace.with_namespace(new_namespace_id.clone());
         let initializing = match target.find_existing_namespace().await? {
@@ -275,8 +275,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///    [`Self::find_fork_target`], which returns `namespace_exists` for an
     ///    active namespace, and `namespace_deleted` for a tombstone or a
     ///    retired ID. For an initializing namespace, the call finds the
-    ///    target's newest manifest again after its clock starts, and finishes
-    ///    the fork (see [`Self::finish_initializing_fork`]).
+    ///    target's newest manifest again after its publication budget starts,
+    ///    and finishes the fork (see [`Self::finish_initializing_fork`]).
     /// 2. Takes the snapshot that the fork is built from: the user snapshot
     ///    that `at` identifies, or a temporary snapshot of the manifest of
     ///    this namespace's head, without a fold, which expires
@@ -704,9 +704,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     }
 }
 
-/// Loads the newest manifest of `target`, a fork's target that a call found
-/// initializing, or whose manifest 1 put lost to another call's, and returns
-/// that manifest while the target is still initializing.
+/// Loads the newest manifest of `target`, and returns that manifest while the
+/// target is still initializing. A fork calls this when its caller found the
+/// target initializing, or when another call's manifest 1 put succeeded before
+/// the fork's put.
 ///
 /// Returns `namespace_exists` for an active namespace, and
 /// `namespace_deleted` for a tombstone or a retired ID.

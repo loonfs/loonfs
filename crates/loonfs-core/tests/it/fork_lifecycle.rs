@@ -351,10 +351,10 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
 }
 
 /// Checks that a fork that finishes an initializing target reads the target
-/// again after its operation clock starts: a caller that found the target
-/// initializing and then paused while the target was deleted and retired gets
-/// `namespace_deleted`, and writes no fork snapshot on the source that no
-/// retirement would delete.
+/// again after its publication budget starts. A caller that found the target
+/// initializing, and then paused while the target was deleted and retired,
+/// gets `namespace_deleted`, and the fork writes no fork snapshot on the
+/// source that no retirement would delete.
 #[tokio::test]
 async fn a_fork_with_a_stale_initializing_target_writes_nothing_after_the_target_retires() {
     let directory = tempdir().expect("tempdir");
