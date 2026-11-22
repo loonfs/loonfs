@@ -2210,8 +2210,12 @@ async fn expiry_deletes_snapshots_without_a_released_state() {
     assert_eq!(retired.retires_at_ms, Some(deleted_at + GC_GRACE_WINDOW_MS));
 }
 
+/// Checks that a fork snapshot whose manifest is missing fails the collection
+/// before it deletes anything, because its manifest is protected from the
+/// snapshot's creation. (A user snapshot without its manifest is an unverified
+/// candidate, which `snapshot_cleanup` tests.)
 #[tokio::test]
-async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
+async fn a_fork_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("missing-manifest").expect("namespace");
     let store = RecordingStore::new(
@@ -2226,10 +2230,8 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let initial = namespace
         .create_snapshot_record(
-            SnapshotOwner::User {
-                name: Some("initial".to_owned()),
-                expires_at_ms: None,
-                deleted_at_ms: None,
+            SnapshotOwner::Fork {
+                target_namespace_id: NamespaceId::parse("fork").expect("namespace"),
             },
             crate::test_support::folded_manifest(&namespace)
                 .await

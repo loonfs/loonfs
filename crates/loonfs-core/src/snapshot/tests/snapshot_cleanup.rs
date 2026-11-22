@@ -6,20 +6,34 @@ use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{replace_object, MetadataMapStore};
 use loonfs_types::format::control::SnapshotOwner;
 
+/// Checks the sequence of events where a quiet namespace's current manifest is
+/// replaced and collected between a snapshot's fold and its record put, and
+/// the creator's delete of the unverified record fails. Later collections
+/// succeed, and they delete the record once its provider age reaches the grace
+/// window, although the snapshot has no expiry.
 #[tokio::test]
-async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cleanup() {
+async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grace_window() {
     let owner = SnapshotOwner::User {
         name: Some("abandoned".to_owned()),
-        expires_at_ms: Some(2_000),
+        expires_at_ms: None,
         deleted_at_ms: None,
     };
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    // Every object is old, as in a quiet namespace, except the snapshot
+    // record, whose provider timestamp is the creator's clock.
     let store = BlockingStore::new(
         FailStore::new(
-            MetadataMapStore::aged(
-                LocalFsStore::new(directory.path()).expect("store"),
-                KeyPredicate::any(),
+            MetadataMapStore::new(
+                MetadataMapStore::aged(
+                    LocalFsStore::new(directory.path()).expect("store"),
+                    KeyPredicate::any(),
+                ),
+                KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
+                |mut metadata| {
+                    metadata.last_modified_at_ms = Some(1_000);
+                    metadata
+                },
             ),
             KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
             OperationSelector::Delete,
@@ -92,23 +106,23 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
         "failed cleanup left its unverified snapshot"
     );
 
-    let young = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&setup.clock())
-        .await;
-    // A missing basis is still an error while the record must be
-    // retained.
-    assert_eq!(
-        young.expect_err("young snapshot remains protected").code(),
-        ErrorCode::NamespaceCorrupt
-    );
+    let grace_window_ms = crate::limits::GC_GRACE_WINDOW_MS;
+    for now_ms in [1_000, 1_000 + grace_window_ms - 1] {
+        let young = crate::test_support::namespace_store(&store, &namespace_id)
+            .gc(&writer_at("collector", now_ms).clock())
+            .await
+            .expect("a record without its manifest doesn't fail the collection");
+        assert_eq!(young.deleted_snapshots_by_owner.user, 0);
+        assert!(store.head(&snapshots[0]).await.expect("snapshot").is_some());
+    }
     let collected = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_001).clock())
+        .gc(&writer_at("collector", 1_000 + grace_window_ms).clock())
         .await
-        .expect("reap abandoned snapshot once owner rules permit deletion");
+        .expect("delete the record once its provider age reaches the grace window");
     assert_eq!(collected.deleted_snapshots_by_owner.user, 1);
     assert!(store.head(&snapshots[0]).await.expect("snapshot").is_none());
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&writer_at("collector", crate::limits::GC_GRACE_WINDOW_MS + 2_002).clock())
+        .gc(&writer_at("collector", 1_001 + grace_window_ms).clock())
         .await
         .expect("next collection also succeeds");
     crate::test_support::namespace_store(&store, &namespace_id)
@@ -204,10 +218,16 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
                 head_seq: manifest.manifest().head_seq,
                 payload_checksum: manifest.manifest().payload_checksum.clone(),
                 created_at_ms: setup.now_ms,
-                owner: SnapshotOwner::User {
-                    name: Some(format!("snapshot-{index}")),
-                    expires_at_ms: (index == 0).then_some(2_000),
-                    deleted_at_ms: None,
+                owner: if index == 0 {
+                    SnapshotOwner::User {
+                        name: Some(format!("snapshot-{index}")),
+                        expires_at_ms: Some(2_000),
+                        deleted_at_ms: None,
+                    }
+                } else {
+                    SnapshotOwner::Fork {
+                        target_namespace_id: NamespaceId::parse("fork").expect("namespace"),
+                    }
                 },
             },
         )
@@ -222,8 +242,9 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
         .fold_wal()
         .await
         .expect("fold");
-    // Deliberate corruption checks must stay fail-closed, even when the first
-    // listed snapshot for this same manifest is independently eligible for deletion.
+    // A fork snapshot's manifest is protected from its creation, so losing it
+    // is corruption, even when the first listed snapshot for the same
+    // manifest is independently eligible for deletion.
     store
         .delete(&manifest.object_key)
         .await
@@ -232,7 +253,7 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
     let error = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&aged.clock())
         .await
-        .expect_err("second snapshot still requires the missing basis");
+        .expect_err("the fork snapshot still requires the missing basis");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(error.to_string().contains(ids[1].as_str()));
     store.fail_all();
