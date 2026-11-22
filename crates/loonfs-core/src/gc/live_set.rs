@@ -240,9 +240,10 @@ impl LiveSet {
                         // moment it's acknowledged, so this record is a candidate
                         // that failed verification and outlived its creator's
                         // delete, or whose put succeeded after the creator gave
-                        // up. It roots nothing, and waiting for the grace window
-                        // leaves alone a creator that is still verifying or
-                        // deleting it (format spec, "Snapshot cleanup").
+                        // up. The collection skips the record when it gathers
+                        // roots. Waiting for the grace window keeps the collection
+                        // from deleting a candidate that its creator is still
+                        // verifying or deleting (format spec, "Snapshot cleanup").
                         self.unverified_candidate(&namespace.namespace_id, &snapshot)
                     } else {
                         // A call that finishes a fork can find an initializing

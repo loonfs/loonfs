@@ -2213,7 +2213,7 @@ async fn expiry_deletes_snapshots_without_a_released_state() {
 /// Checks that a fork snapshot whose manifest is missing fails the collection
 /// before it deletes anything, because its manifest is protected from the
 /// snapshot's creation. (A user snapshot without its manifest is an unverified
-/// candidate, see `snapshot_cleanup`.)
+/// candidate, which `snapshot_cleanup` tests.)
 #[tokio::test]
 async fn a_fork_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
     let directory = tempdir().expect("directory");

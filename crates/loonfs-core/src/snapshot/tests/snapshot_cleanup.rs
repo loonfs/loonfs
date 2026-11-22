@@ -6,11 +6,11 @@ use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{replace_object, MetadataMapStore};
 use loonfs_types::format::control::SnapshotOwner;
 
-/// Checks the schedule where a quiet namespace's current manifest is replaced
-/// and collected between a snapshot's fold and its record put, and the
-/// creator's delete of the unverified record fails: collections keep working,
-/// and the record, which roots nothing, is deleted once its provider age
-/// reaches the grace window, although it has no expiry.
+/// Checks the sequence of events where a quiet namespace's current manifest is
+/// replaced and collected between a snapshot's fold and its record put, and
+/// the creator's delete of the unverified record fails. Later collections
+/// succeed, and they delete the record once its provider age reaches the grace
+/// window, although the snapshot has no expiry.
 #[tokio::test]
 async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grace_window() {
     let owner = SnapshotOwner::User {
