@@ -16,12 +16,13 @@ use loonfs_types::{
     InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
 };
 
-pub(super) struct ResolvedParents {
-    /// The directory the new entry is bound under, possibly created here.
-    pub(super) parent_inode_id: InodeId,
-    /// The deepest directory that already existed, whose `create` right
-    /// covers every directory created below it.
-    pub(super) deepest_existing: InodeId,
+/// The directories above a path that a create resolved: the deepest one
+/// that exists, and the names of the missing ones below it, from the top.
+pub(super) struct ParentDirectories {
+    /// The deepest directory that exists, whose `create` right covers every
+    /// directory created below it.
+    deepest_existing: InodeId,
+    missing: Vec<DisplayName>,
 }
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
@@ -58,7 +59,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 .await;
         }
         ensure_mutation_path(absolute_path)?;
-        let parents = self.ensure_parent_directories(absolute_path).await?;
+        let parents = self.resolve_parent_directories(absolute_path).await?;
         self.view()
             .authorize(
                 parents.deepest_existing,
@@ -68,11 +69,12 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .await?;
         self.view().ensure_vacant_path(absolute_path).await?;
         let display_name = final_component(absolute_path)?;
+        let parent_inode_id = self.create_parent_directories(parents).await?;
         let child_inode_id = self.next_inode_id()?;
         self.validation
             .create(
                 child_inode_id,
-                parents.parent_inode_id,
+                parent_inode_id,
                 &display_name,
                 NewChild::Directory,
             )
@@ -236,7 +238,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .await
             }
             Err(error) if is_missing_visible_path(&error) => {
-                let parents = self.ensure_parent_directories(absolute_path).await?;
+                let parents = self.resolve_parent_directories(absolute_path).await?;
                 self.view()
                     .authorize(
                         parents.deepest_existing,
@@ -247,11 +249,12 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 if expected_file_state.is_some() {
                     return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
                 }
+                let parent_inode_id = self.create_parent_directories(parents).await?;
                 let child_inode_id = self.next_inode_id()?;
                 self.validation
                     .create(
                         child_inode_id,
-                        parents.parent_inode_id,
+                        parent_inode_id,
                         &final_name,
                         NewChild::File(content_ref),
                     )
@@ -261,78 +264,80 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         }
     }
 
-    /// Resolves the directories above `absolute_path`, and creates the ones
-    /// that are missing.
-    async fn ensure_parent_directories(
-        &mut self,
+    /// Resolves the directories above `absolute_path`, down to the deepest
+    /// one that exists.
+    ///
+    /// A component that exists and isn't a directory is reported only after
+    /// `create` is authorized on it.
+    async fn resolve_parent_directories(
+        &self,
         absolute_path: &AbsolutePath,
-    ) -> Result<ResolvedParents> {
+    ) -> Result<ParentDirectories> {
         let components = absolute_path.components();
-        if components.len() <= 1 {
-            return Ok(ResolvedParents {
-                parent_inode_id: ROOT_INODE_ID,
-                deepest_existing: ROOT_INODE_ID,
-            });
-        }
-
+        let above = components.split_last().map_or(&[][..], |(_, above)| above);
         let mut current_inode = ROOT_INODE_ID;
         let mut current_path = AbsolutePath::root();
-        let mut creating_missing_ancestors = false;
-        let mut deepest_existing = current_inode;
-        for component in &components[..components.len() - 1] {
-            let display_name = component.to_display_name();
-            let name_key = NameKey::for_display_name(&display_name);
-            if !creating_missing_ancestors {
-                if let Some(child) = self
-                    .view()
-                    .metadata
-                    .visible_child(current_inode, &name_key)
-                    .await?
-                {
-                    current_path = current_path.join(
-                        child
-                            .display_name()
-                            .expect("visible binding should be bound"),
-                    );
-                    if child.child_kind != InodeKind::Directory {
-                        self.view()
-                            .authorize(
-                                child.child_inode_id,
-                                AccessRight::Create.into(),
-                                Absence::Path(absolute_path.as_str()),
-                            )
-                            .await?;
-                        return Err(VisiblePathError::PathComponentNotDirectory {
-                            absolute_path: current_path.to_string(),
-                            inode_id: child.child_inode_id,
-                            inode_kind: child.child_kind,
-                        }
-                        .into());
-                    }
-                    current_inode = child.child_inode_id;
-                    continue;
+        for (depth, component) in above.iter().enumerate() {
+            let name_key = NameKey::for_display_name(&component.to_display_name());
+            let Some(child) = self
+                .view()
+                .metadata
+                .visible_child(current_inode, &name_key)
+                .await?
+            else {
+                return Ok(ParentDirectories {
+                    deepest_existing: current_inode,
+                    missing: above[depth..]
+                        .iter()
+                        .map(|component| component.to_display_name())
+                        .collect(),
+                });
+            };
+            current_path = current_path.join(
+                child
+                    .display_name()
+                    .expect("visible binding should be bound"),
+            );
+            if child.child_kind != InodeKind::Directory {
+                self.view()
+                    .authorize(
+                        child.child_inode_id,
+                        AccessRight::Create.into(),
+                        Absence::Path(absolute_path.as_str()),
+                    )
+                    .await?;
+                return Err(VisiblePathError::PathComponentNotDirectory {
+                    absolute_path: current_path.to_string(),
+                    inode_id: child.child_inode_id,
+                    inode_kind: child.child_kind,
                 }
-                deepest_existing = current_inode;
-                creating_missing_ancestors = true;
+                .into());
             }
+            current_inode = child.child_inode_id;
+        }
+        Ok(ParentDirectories {
+            deepest_existing: current_inode,
+            missing: Vec::new(),
+        })
+    }
 
+    /// Creates the missing directories of `parents`, each under the one
+    /// before it, and returns the directory that the path's final entry is
+    /// bound under.
+    async fn create_parent_directories(&mut self, parents: ParentDirectories) -> Result<InodeId> {
+        let mut parent_inode_id = parents.deepest_existing;
+        for display_name in &parents.missing {
             let child_inode_id = self.next_inode_id()?;
             self.validation
                 .create(
                     child_inode_id,
-                    current_inode,
-                    &display_name,
+                    parent_inode_id,
+                    display_name,
                     NewChild::Directory,
                 )
                 .await?;
-            current_inode = child_inode_id;
+            parent_inode_id = child_inode_id;
         }
-        if !creating_missing_ancestors {
-            deepest_existing = current_inode;
-        }
-        Ok(ResolvedParents {
-            parent_inode_id: current_inode,
-            deepest_existing,
-        })
+        Ok(parent_inode_id)
     }
 }
