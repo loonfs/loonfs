@@ -612,8 +612,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 /// The session as a [`MetadataVisibilityReads`] source. Its primitives route
 /// through the per-session caches, and it overrides exactly the composite
 /// rules it memoizes (`visible_inode`, `current_parent_binding_for_child`,
-/// `ancestry`) so a cache hit short-circuits the walk;
-/// every override's miss path, and the un-overridden composites, still determine
+/// `ancestry`) so a cache hit short-circuits the walk.
+/// Every override's miss path, and the un-overridden composites, still determine
 /// through the canonical [`super::visibility`] rule bodies.
 impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_, '_, S> {
     type Error = CoreError;

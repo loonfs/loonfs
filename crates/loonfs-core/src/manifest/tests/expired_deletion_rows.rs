@@ -854,8 +854,9 @@ async fn listed_files<S: ObjectStore>(
 
 /// Checks that once a base compaction of the bindings group has removed the
 /// edges under an expired deletion, a file listing, a snapshot's file
-/// listing, and a fork's file listing leave out a file below it, whose inode
-/// row and revisions remain until their own groups compact.
+/// listing, and a fork's file listing leave out a file below the deleted
+/// directory, whose inode row and revisions remain until their own groups
+/// compact.
 #[tokio::test]
 async fn a_file_listing_leaves_out_a_file_whose_expired_ancestry_lost_its_bindings_first() {
     let temp = tempdir().expect("tempdir");

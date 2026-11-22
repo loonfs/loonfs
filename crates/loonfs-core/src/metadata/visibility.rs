@@ -262,15 +262,15 @@ impl AncestorWalk {
     }
 }
 
-/// Where the walk up the current parent bindings from an inode ends
+/// The end of a walk up the current parent bindings from an inode
 /// ([format section 4.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#43-visible-metadata)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Ancestry {
     /// The walk reached the root inode without meeting a hiding tombstone,
     /// so the inode is visible if it exists.
     Root,
-    /// The first hiding tombstone (a `set`) that the walk met, rooted at the
-    /// inode or at one of its ancestors.
+    /// The first hiding tombstone (a `set`) that the walk met, on the inode
+    /// or on one of its ancestors.
     Hidden(SubtreeTombstoneRecord),
     /// The walk reached an inode with no current parent binding before it
     /// reached the root or a hiding tombstone.
@@ -282,17 +282,18 @@ pub(crate) enum Ancestry {
 ///
 /// A `revoke` hides nothing, so the walk passes it. A deletion in the trash
 /// and an expired one both hide their subtree, so the walk doesn't read the
-/// retention floor, and the walk doesn't continue above the root of a
-/// deletion.
+/// retention floor, and the walk doesn't continue above the inode that a
+/// deletion's tombstone is on.
 ///
-/// Every live inode has bound edges up to the root, and every deleted inode
-/// has them up to its deletion's root, which has a tombstone, so a chain that
-/// breaks before either belongs to nothing the namespace can show. Base
-/// compactions remove an expired subtree's rows a family group at a time,
-/// so the bindings that lead to the expired root can be gone while the inode
-/// rows and revisions below it remain, and every reader treats a
-/// [`Ancestry::Disconnected`] inode as hidden. The root inode can't be
-/// deleted, so the walk stops there without reading its tombstones. A
+/// An inode that isn't deleted has bound edges up to the root, and a deleted
+/// inode has them up to the inode that its deletion's tombstone is on, so a
+/// chain that breaks before either occurs only below an expired deletion.
+/// Base compactions remove an expired subtree's rows a family group at a
+/// time, so the bindings that lead to the deleted directory can be gone while
+/// the inode rows and revisions below it remain. Every read therefore treats
+/// an inode whose ancestry is [`Ancestry::Disconnected`] as hidden. The root
+/// inode can't be deleted, so the walk stops there without reading its
+/// tombstones. A
 /// parent-binding cycle is corrupt stored metadata, and the walk returns an
 /// error for it, because returning any variant could show a deleted subtree.
 pub(crate) async fn ancestry<R: MetadataVisibilityReads>(
@@ -314,11 +315,12 @@ pub(crate) async fn ancestry<R: MetadataVisibilityReads>(
 /// Whether the ancestry of `inode_id` allows a read by inode ID
 /// ([format section 4.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#44-paths-listings-and-revision-reads)).
 ///
-/// A deletion at or below the view's retention floor has expired, which
-/// refuses the read. A deletion above the floor allows it, because the
-/// rights on an item under a deletion in the trash are judged on the
-/// deletion's saved ancestry. Reaching the root allows the read, and a
-/// disconnected ancestry refuses it (see [`ancestry`]).
+/// The read is refused when the walk meets a deletion at or below the view's
+/// retention floor, which has expired. The read is allowed when the walk
+/// meets a deletion above the floor, because the rights on an item under a
+/// deletion in the trash are judged on the deletion's saved ancestry. The
+/// read is allowed when the walk reaches the root, and refused when the
+/// ancestry is disconnected (see [`ancestry`]).
 pub(crate) async fn ancestry_allows_read<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
