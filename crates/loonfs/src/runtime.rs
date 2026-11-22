@@ -493,10 +493,10 @@ impl LoonFs<Writable> {
     /// returns `namespace_exists` or `namespace_deleted` when the ID is taken
     /// (see [`NamespaceWriterEngine::find_fork_target`]). A fork finds its
     /// target with this before it reads the source, so a fork into an
-    /// existing namespace writes nothing, and it passes the target to core,
-    /// which doesn't find it again. If a concurrent caller creates the target
-    /// in between, the fork's manifest 1 put fails, and core finds the target
-    /// again.
+    /// existing namespace writes nothing, and it passes the target to core.
+    /// Core finds the target again when the target was initializing, or when
+    /// a concurrent caller created the target in between and the fork's
+    /// manifest 1 put fails.
     pub(crate) async fn find_fork_target(
         &self,
         source_namespace_id: &NamespaceId,
