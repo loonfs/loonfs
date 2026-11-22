@@ -162,10 +162,11 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
     /// also requires an administrator, so any other subject gets the
     /// not-found error that a live read gives
     /// ([API section 6.8](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#authorization)).
-    /// Base compactions remove the head's rows under an expired subtree a
-    /// family group at a time, so a boundary row can be gone while a grant
-    /// above it is still stored, and judging a non-administrator's rights on
-    /// those rows could widen them. The walk is [`ancestry_allows_read`].
+    /// A base compaction can remove a hidden inode's boundary row while a grant
+    /// above it is still stored (for example, when a false positive of the kept
+    /// inode filter keeps the grant), so judging a non-administrator's rights on
+    /// the head's rows under an expired subtree could widen them. The walk is
+    /// [`ancestry_allows_read`].
     pub(crate) async fn require(
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,

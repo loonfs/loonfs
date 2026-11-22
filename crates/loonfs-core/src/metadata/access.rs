@@ -22,8 +22,9 @@ struct AccessWalk {
 /// has no current binding; while the deletion is in the trash (above the
 /// view's retention floor), its `set` event's saved parent repairs that one
 /// edge, so a deleted item's own row and boundary are evaluated before the
-/// walk continues. The walk stops at the root of an expired deletion, so an
-/// expired subtree inherits no grant from above it. The walk also stops
+/// walk continues. The root of an expired deletion has no current binding
+/// and isn't in the trash, so the walk ends there, and an expired subtree
+/// inherits no grant from above it. The walk also stops
 /// before the first inode for which `known` returns true.
 async fn walk_access_rows<R: MetadataVisibilityReads>(
     reads: &mut R,

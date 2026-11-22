@@ -104,10 +104,12 @@ pub(crate) fn same_head(
 /// instead of cutting it.
 ///
 /// A fold that folds past the head's WAL number covered a WAL object that
-/// the head hasn't read, such as another process's floor object, so the head
-/// can't move onto it, whichever process published the fold (format spec,
-/// "Replaying the visible WAL"). The head that moves keeps the higher of its
-/// own retention floor and the manifest's.
+/// the head hasn't read, such as another process's floor object. Moving onto
+/// it would leave the head's WAL number below its folded WAL number, which
+/// the tail and the head's count of unfolded WAL objects assume never
+/// happens, so the head can't move onto it, whichever process published the
+/// fold (format spec, "Replaying the visible WAL"). The head that moves
+/// keeps the higher of its own retention floor and the manifest's.
 ///
 /// The rule doesn't depend on whether this runtime or another process
 /// published the manifest, or on the order in which manifests arrive.

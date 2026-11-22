@@ -101,7 +101,7 @@ These parts of the format don't change:
 
 - `METADATA_PUBLICATION_BUDGET_MS` and `METADATA_COMPACTION_BUDGET_MS`, which keep a publication's unreferenced outputs younger than the age rules, and stop a publication that runs too long with an error.
 - `PUBLICATION_COMPLETION_BOUND_MS`, which becomes `METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS`. The value stays 25 minutes, because the metadata budget was already the larger term.
-- The rule that a writer drops a position whose manifest folds past the position's tip. That rule compares numbers, and the retention floor's invariant depends on it (see [Advancing the retention floor](../specs/format.md#101-advancing-the-retention-floor)).
+- The rule that a writer drops a position whose manifest folds past the position's tip. That rule compares numbers, and it keeps a position's tip at or above its manifest's `folded_wal_no`, which the position's WAL tail and its count of unfolded WAL objects assume (see [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal)).
 - The provider request bound and the clock allowance.
 
 ### Time rules
