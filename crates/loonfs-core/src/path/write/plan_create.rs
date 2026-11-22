@@ -2,7 +2,7 @@
 
 use super::planner::OperationPlanningSession;
 use super::preconditions::{ensure_expected_inode, ExpectedFileState};
-use super::publish_path_planning::{is_missing_visible_path, Destination, Target};
+use super::publish_path_planning::{is_missing_visible_path, AvailableName, Destination, Target};
 use crate::authorize::{check_rights, Absence};
 use crate::commit::{CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
@@ -34,16 +34,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     ) -> Result<()> {
         destination.ensure_mutation()?;
         let destination = self.view().resolve_destination(destination).await?;
-        self.view().ensure_vacant_destination(&destination).await?;
+        let name = self.view().ensure_vacant_destination(&destination).await?;
         let child_inode_id = self.next_inode_id()?;
-        self.validation
-            .create(
-                child_inode_id,
-                destination.parent_inode_id,
-                &destination.name,
-                child,
-            )
-            .await
+        self.validation.create(child_inode_id, &name, child).await
     }
 
     /// Plans a new directory at `absolute_path`, and with `parents`, the
@@ -67,17 +60,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
-        self.view().ensure_vacant_path(absolute_path).await?;
-        let display_name = final_component(absolute_path)?;
-        let parent_inode_id = self.create_parent_directories(parents).await?;
+        self.create_parent_directories(parents).await?;
+        let name = self.available_path(absolute_path).await?;
         let child_inode_id = self.next_inode_id()?;
         self.validation
-            .create(
-                child_inode_id,
-                parent_inode_id,
-                &display_name,
-                NewChild::Directory,
-            )
+            .create(child_inode_id, &name, NewChild::Directory)
             .await
     }
 
@@ -131,11 +118,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 Destination::name(saved_parent, &deleted_binding.display_name)
             }
         };
-        let (parent_inode_id, display_name) = self
+        let name = self
             .resolve_restore_deleted_destination(inode_id, saved_parent, destination)
             .await?;
         self.validation
-            .restore_deleted(deletion, deletion_seq, parent_inode_id, &display_name)
+            .restore_deleted(deletion, deletion_seq, &name)
             .await
     }
 
@@ -146,7 +133,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         inode_id: InodeId,
         saved_parent: InodeId,
         destination: Destination<'_>,
-    ) -> Result<(InodeId, DisplayName)> {
+    ) -> Result<AvailableName> {
         destination.ensure_mutation()?;
         let view = self.view();
         let destination = view.resolve_destination(destination).await?;
@@ -156,10 +143,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         if destination.parent_inode_id != saved_parent {
             check_rights(mover, AccessRight::Read.into(), inode_id, Absence::Inode)?;
         }
-        view.ensure_vacant_destination(&destination).await?;
+        let name = view.ensure_vacant_destination(&destination).await?;
         view.authorize_relocation(inode_id, saved_parent, destination.parent_inode_id, mover)
             .await?;
-        Ok((destination.parent_inode_id, destination.name))
+        Ok(name)
     }
 
     pub(super) async fn plan_put_file_revision_by_inode(
@@ -259,15 +246,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 if expected_file_state.is_some() {
                     return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
                 }
-                let parent_inode_id = self.create_parent_directories(parents).await?;
+                self.create_parent_directories(parents).await?;
+                let name = self.available_path(absolute_path).await?;
                 let child_inode_id = self.next_inode_id()?;
                 self.validation
-                    .create(
-                        child_inode_id,
-                        parent_inode_id,
-                        &final_name,
-                        NewChild::File(content_ref),
-                    )
+                    .create(child_inode_id, &name, NewChild::File(content_ref))
                     .await
             }
             Err(other) => Err(other),
@@ -332,22 +315,38 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     }
 
     /// Creates the missing directories of `parents`, each under the one
-    /// before it, and returns the directory that the path's final entry is
-    /// bound under.
-    async fn create_parent_directories(&mut self, parents: ParentDirectories) -> Result<InodeId> {
+    /// before it.
+    ///
+    /// Each name is checked for vacancy after the directory above it is
+    /// created, against the state that the create left. The caller
+    /// authorizes the `create` right that covers every new directory once,
+    /// on the deepest directory that exists.
+    async fn create_parent_directories(&mut self, parents: ParentDirectories) -> Result<()> {
         let mut parent_inode_id = parents.deepest_existing;
         for display_name in &parents.missing {
+            let destination = Destination::name(parent_inode_id, display_name);
+            let name = self
+                .view()
+                .resolve_destination(destination)
+                .await?
+                .available_name(None)?;
             let child_inode_id = self.next_inode_id()?;
             self.validation
-                .create(
-                    child_inode_id,
-                    parent_inode_id,
-                    display_name,
-                    NewChild::Directory,
-                )
+                .create(child_inode_id, &name, NewChild::Directory)
                 .await?;
             parent_inode_id = child_inode_id;
         }
-        Ok(parent_inode_id)
+        Ok(())
+    }
+
+    /// Returns `absolute_path` as a vacant name, checked against the state
+    /// that the operation's earlier creates left. The caller authorized
+    /// `create` on the deepest directory above the path that existed before
+    /// those creates.
+    async fn available_path(&self, absolute_path: &AbsolutePath) -> Result<AvailableName> {
+        self.view()
+            .resolve_destination(Destination::Path(absolute_path))
+            .await?
+            .available_name(None)
     }
 }

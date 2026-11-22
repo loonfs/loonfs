@@ -366,7 +366,8 @@ mod tests {
     use loonfs_types::{
         AbsolutePath, AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue,
         AttributesRevisionNo, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-        DestinationPrecondition, PrincipalId, RevisionNo, ROOT_INODE_ID,
+        DestinationPrecondition, DisplayName, InodeKind, NameKey, PrincipalId, RevisionNo,
+        ROOT_INODE_ID,
     };
     use std::assert_matches;
 
@@ -1241,6 +1242,58 @@ mod tests {
             docs,
             deletion_seqs,
         }
+    }
+
+    /// A bind names an inode with no current binding. A restore of a deleted
+    /// directory that a corrupt namespace binds elsewhere too is refused as
+    /// corruption, after the planner's checks pass.
+    #[tokio::test]
+    async fn a_restore_of_an_inode_that_is_still_bound_reports_corruption() {
+        let deleted = deleted_docs(0, false).await;
+        let other = DisplayName::parse("other").expect("display name");
+        crate::test_support::namespace_store(&deleted.store, &deleted.namespace_id)
+            .append_wal_commit(
+                vec![WalDelta::BindDirentry {
+                    delta_index: 0,
+                    parent_inode_id: ROOT_INODE_ID,
+                    name_key: NameKey::for_display_name(&other),
+                    display_name: other,
+                    child_inode_id: deleted.docs,
+                    child_kind: InodeKind::Directory,
+                    child_created_by: loonfs_test_support::test_actor(),
+                    child_created_at_ms: 0,
+                    revision: None,
+                }],
+                Vec::new(),
+            )
+            .await
+            .expect("bind /docs again without revoking its deletion");
+
+        let error = try_plan_against_current_state(
+            &deleted.store,
+            &deleted.namespace_id,
+            &request(FilesystemOperation::RestoreDeleted {
+                inode_id: deleted.docs,
+                deletion_seq: deleted.deletion_seqs[0],
+                destination: loonfs_types::options::RestoreDeletedDestination::Name {
+                    parent_inode_id: ROOT_INODE_ID,
+                    display_name: DisplayName::parse("restored").expect("display name"),
+                },
+            }),
+        )
+        .await
+        .expect_err("inode /docs already has a parent");
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+        let error = failed_operation_error(error);
+        assert_matches!(error, CoreError::NamespaceCorrupt(_));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "namespace corrupt: a commit binds inode `{}`, which is already bound as \
+                 `other` under parent inode `{ROOT_INODE_ID}`",
+                deleted.docs
+            )
+        );
     }
 
     /// A restore of a deleted item applies only while the deletion it names

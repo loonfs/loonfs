@@ -1,17 +1,15 @@
-//! The state checks that commit operation validators run: target
-//! visibility, binding state, and cycles.
+//! The rules that the steps of a commit check against the commit's state,
+//! and the numbering of the commit's operations and deltas.
 
 use super::super::CommitValidationError;
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::error::{CoreError, Result};
-use crate::metadata::{
-    Ancestry, DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
-};
+use crate::metadata::{DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 
-use loonfs_types::{CommitSeq, DisplayName, InodeId, InodeKind, NameKey, RevisionNo};
+use loonfs_types::{CommitSeq, InodeId, InodeKind, RevisionNo};
 
 #[derive(Debug, Default)]
 pub(super) struct CommitNumbering {
@@ -77,91 +75,6 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             .into());
         }
         Ok(())
-    }
-
-    pub(super) async fn resolve_inode_kind(
-        &self,
-        inode_id: InodeId,
-        expected: InodeKind,
-        operand: CommitOperand,
-    ) -> Result<InodeRecord> {
-        let inode = self
-            .view()
-            .inode_at_seq(inode_id)
-            .await?
-            .ok_or(CommitValidationError::InodeMissing { operand, inode_id })?;
-        if inode.inode_kind != expected {
-            return Err(CommitValidationError::InodeWrongKind {
-                operand,
-                inode_id,
-                expected,
-                actual: inode.inode_kind,
-            }
-            .into());
-        }
-        Ok(inode)
-    }
-
-    /// Ensures that the walk up the current parent bindings from `inode_id`
-    /// reaches the root, because LoonFS never commits a change to a hidden
-    /// inode (format spec, "Row retention during a base compaction").
-    ///
-    /// The walk ends in one of three ways. If it reaches the root, the check
-    /// passes. If it reaches a hiding tombstone, the check fails with
-    /// `TargetUnderSubtreeTombstone`. If it reaches an inode without a current
-    /// parent binding, the check fails with `InodeMissing`, the error for an
-    /// operand that isn't visible. The last case occurs only below an expired
-    /// deletion, after a base compaction of the bindings group has removed the
-    /// bindings below the deleted directory while the inode rows remain.
-    pub(super) async fn ensure_ancestry_reaches_root(
-        &self,
-        inode_id: InodeId,
-        operand: CommitOperand,
-    ) -> Result<()> {
-        match self.view().ancestry(inode_id).await? {
-            Ancestry::Root => Ok(()),
-            Ancestry::Hidden(tombstone) => {
-                Err(CommitValidationError::TargetUnderSubtreeTombstone {
-                    operand,
-                    inode_id,
-                    root_inode_id: tombstone.root_inode_id,
-                    tombstone_seq: tombstone.committed_seq,
-                }
-                .into())
-            }
-            Ancestry::Disconnected => {
-                Err(CommitValidationError::InodeMissing { operand, inode_id }.into())
-            }
-        }
-    }
-
-    pub(super) async fn resolve_name_absent(
-        &self,
-        parent_inode_id: InodeId,
-        display_name: &DisplayName,
-        rebinding_inode_id: Option<InodeId>,
-        operand: CommitOperand,
-    ) -> Result<NameKey> {
-        self.resolve_inode_kind(parent_inode_id, InodeKind::Directory, operand)
-            .await?;
-
-        let name_key = NameKey::for_display_name(display_name);
-        if let Some(existing) = self
-            .view()
-            .visible_child(parent_inode_id, &name_key)
-            .await?
-        {
-            if rebinding_inode_id != Some(existing.child_inode_id) {
-                return Err(CommitValidationError::NameTaken {
-                    operand,
-                    parent_inode_id,
-                    name_key,
-                    child_inode_id: existing.child_inode_id,
-                }
-                .into());
-            }
-        }
-        Ok(name_key)
     }
 
     /// One parent per child: a bind names an inode with no current binding, or

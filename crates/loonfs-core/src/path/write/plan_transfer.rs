@@ -57,7 +57,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         }
         // Replace is an atomic delete-plus-rename: the destination file's
         // delete and the source's rebind are written in one commit, and the
-        // rename's target-name check observes the in-commit unbind. Mirrors
+        // destination is checked for vacancy again after the delete. Mirrors
         // put: only a file destination can be replaced, and a path never
         // replaces itself.
         let destination = self.view().resolve_destination(destination).await?;
@@ -97,15 +97,14 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         precondition: &DestinationPrecondition,
         expected_destination: Option<ExpectedFileState>,
     ) -> Result<()> {
+        let replaced =
+            classify_replace_destination(&destination, precondition.behavior, source.inode_id)?;
         let ResolvedDestination {
             parent_inode_id,
             name,
             path,
-            occupant,
             ..
-        } = destination;
-        let replaced =
-            classify_replace_destination(occupant, precondition.behavior, source.inode_id, &path)?;
+        } = &destination;
         let current_source_binding = self.view().source_binding(source).await?;
         // A merge's move through a temporary name changes the inode's rights
         // once, from the directory that it leaves in the first leg to the
@@ -117,25 +116,32 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         };
         if let Some(from_parent) = relocated_from {
             self.view()
-                .authorize_relocation(source.inode_id, from_parent, parent_inode_id, mover)
+                .authorize_relocation(source.inode_id, from_parent, *parent_inode_id, mover)
                 .await?;
         }
-        match &replaced {
+        let available = match replaced {
             ReplaceDestination::Replaced(existing) => {
                 ensure_expected_inode(
                     existing,
                     expected_destination.map(|expected| expected.inode_id),
-                    &name,
+                    name,
                 )?;
                 self.ensure_expected_destination_revision(existing, expected_destination)
                     .await?;
                 let existing_binding = self.view().source_binding(existing).await?;
                 self.validation.delete(&existing_binding).await?;
+                // The delete unbinds the file, so the destination is vacant
+                // in the state that the delete left.
+                self.view()
+                    .resolve_destination(Destination::name(*parent_inode_id, name))
+                    .await?
+                    .available_name(Some(source.inode_id))?
             }
-            ReplaceDestination::Vacant => {
+            ReplaceDestination::Vacant(available) => {
                 if expected_destination.is_some() {
-                    return Err(CoreError::PathNotFound(path));
+                    return Err(CoreError::PathNotFound(path.clone()));
                 }
+                available
             }
             // The destination is the source's own binding: a same-slot
             // respelling (case-only rename, normalization-equal spelling).
@@ -143,24 +149,25 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             // there is nothing to delete; the rename alone rebinds the new
             // spelling. An unchanged spelling stays a conflict: there is
             // nothing to rename.
-            ReplaceDestination::SameInode => {
+            ReplaceDestination::SameInode(available) => {
                 ensure_expected_inode(
                     source,
                     expected_destination.map(|expected| expected.inode_id),
-                    &name,
+                    name,
                 )?;
                 self.ensure_expected_destination_revision(source, expected_destination)
                     .await?;
                 if name.as_str() == source.display_name {
                     return Err(CoreError::DestinationExists {
-                        path,
+                        path: path.clone(),
                         existing_display_name: Some(source.display_name.clone()),
                     });
                 }
+                available
             }
-        }
+        };
         self.validation
-            .rename(&current_source_binding, parent_inode_id, &name)
+            .rename(&current_source_binding, &available)
             .await
     }
 
@@ -212,34 +219,28 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         precondition: &DestinationPrecondition,
         expected_destination: Option<ExpectedFileState>,
     ) -> Result<()> {
-        let ResolvedDestination {
-            parent_inode_id,
-            name,
-            path,
-            occupant,
-            ..
-        } = destination;
         let replaced =
-            classify_replace_destination(occupant, precondition.behavior, source.inode_id, &path)?;
+            classify_replace_destination(&destination, precondition.behavior, source.inode_id)?;
+        let ResolvedDestination { name, path, .. } = &destination;
         let revision = self
             .view()
             .metadata
             .latest_revision_head(source.inode_id)
             .await?
             .ok_or_else(|| CoreError::PathNotFound(source.absolute_path.to_string()))?;
-        match &replaced {
+        match replaced {
             // Copying a file onto its own binding would delete the source to
             // make room for its copy; that is a conflict, with or without
             // `Replace`, the same-file rule every copy tool applies.
-            ReplaceDestination::SameInode => Err(CoreError::DestinationExists {
-                path,
+            ReplaceDestination::SameInode(_) => Err(CoreError::DestinationExists {
+                path: path.clone(),
                 existing_display_name: Some(source.display_name.clone()),
             }),
             ReplaceDestination::Replaced(existing) => {
                 ensure_expected_inode(
                     existing,
                     expected_destination.map(|expected| expected.inode_id),
-                    &name,
+                    name,
                 )?;
                 let existing_revision = self
                     .view()
@@ -256,16 +257,15 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .replace_file(&binding, &revision.content_ref, None)
                     .await
             }
-            ReplaceDestination::Vacant => {
+            ReplaceDestination::Vacant(available) => {
                 if expected_destination.is_some() {
-                    return Err(CoreError::PathNotFound(path));
+                    return Err(CoreError::PathNotFound(path.clone()));
                 }
                 let child_inode_id = self.next_inode_id()?;
                 self.validation
                     .create(
                         child_inode_id,
-                        parent_inode_id,
-                        &name,
+                        &available,
                         NewChild::File(revision.content_ref),
                     )
                     .await?;

@@ -225,6 +225,49 @@ pub(super) struct ResolvedDestination<'a> {
     pub(super) absence: Absence<'a>,
 }
 
+impl ResolvedDestination<'_> {
+    /// Returns the destination as a name that a bind can take, which is a
+    /// name that nothing visible occupies, or that `rebinding`, the inode
+    /// that the bind moves, occupies already.
+    pub(super) fn available_name(&self, rebinding: Option<InodeId>) -> Result<AvailableName> {
+        match &self.occupant {
+            Some(existing) if Some(existing.inode_id) != rebinding => {
+                Err(CoreError::DestinationExists {
+                    path: self.path.clone(),
+                    existing_display_name: Some(existing.display_name.clone()),
+                })
+            }
+            _ => Ok(AvailableName {
+                parent_inode_id: self.parent_inode_id,
+                display_name: self.name.clone(),
+            }),
+        }
+    }
+}
+
+/// A name under a visible directory that a bind can take. Only
+/// [`ResolvedDestination::available_name`] makes one, so a step that takes
+/// one binds under a visible directory, at a name that no other visible
+/// inode occupies.
+pub(crate) struct AvailableName {
+    parent_inode_id: InodeId,
+    display_name: DisplayName,
+}
+
+impl AvailableName {
+    pub(crate) fn parent_inode_id(&self) -> InodeId {
+        self.parent_inode_id
+    }
+
+    pub(crate) fn display_name(&self) -> &DisplayName {
+        &self.display_name
+    }
+
+    pub(crate) fn name_key(&self) -> NameKey {
+        NameKey::for_display_name(&self.display_name)
+    }
+}
+
 /// Rejects the root, which only an access update may name as its target.
 pub(super) fn ensure_mutation_inode(inode_id: InodeId) -> Result<()> {
     if inode_id == ROOT_INODE_ID {
@@ -394,36 +437,19 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         }
     }
 
-    /// Authorizes `create` on the destination's parent and then requires the
-    /// destination to be vacant.
+    /// Authorizes `create` on the destination's parent and then returns the
+    /// destination as a vacant name.
     pub(super) async fn ensure_vacant_destination(
         &self,
         destination: &ResolvedDestination<'_>,
-    ) -> Result<()> {
+    ) -> Result<AvailableName> {
         self.authorize(
             destination.parent_inode_id,
             AccessRight::Create.into(),
             destination.absence,
         )
         .await?;
-        match &destination.occupant {
-            Some(existing) => Err(CoreError::DestinationExists {
-                path: destination.path.clone(),
-                existing_display_name: Some(existing.display_name.clone()),
-            }),
-            None => Ok(()),
-        }
-    }
-
-    pub(super) async fn ensure_vacant_path(&self, path: &AbsolutePath) -> Result<()> {
-        match self.metadata.resolve_visible_path(path).await {
-            Ok(existing) => Err(CoreError::DestinationExists {
-                path: path.as_str().to_owned(),
-                existing_display_name: Some(existing.display_name),
-            }),
-            Err(error) if is_missing_visible_path(&error) => Ok(()),
-            Err(error) => Err(error),
-        }
+        destination.available_name(None)
     }
 
     pub(super) async fn resolve_visible_inode(
@@ -583,40 +609,38 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
 }
 
 /// How the shared move/copy destination rule resolved.
-pub(super) enum ReplaceDestination {
+pub(super) enum ReplaceDestination<'d> {
     /// Nothing visible occupies the destination.
-    Vacant,
+    Vacant(AvailableName),
     /// A distinct file occupies it and `Replace` accepted it.
-    Replaced(ResolvedVisiblePath),
+    Replaced(&'d ResolvedVisiblePath),
     /// The destination resolves to the moving inode itself: a same-slot
     /// respelling, such as a case-only rename, whose name key already
     /// belongs to the source.
-    SameInode,
+    SameInode(AvailableName),
 }
 
-pub(super) fn classify_replace_destination(
-    occupant: Option<ResolvedVisiblePath>,
+pub(super) fn classify_replace_destination<'d>(
+    destination: &'d ResolvedDestination<'_>,
     behavior: DestinationBehavior,
     source_inode_id: InodeId,
-    destination_path: &str,
-) -> Result<ReplaceDestination> {
-    Ok(match occupant {
-        Some(existing) if existing.inode_id == source_inode_id => ReplaceDestination::SameInode,
-        Some(existing) if behavior == DestinationBehavior::Replace => {
+) -> Result<ReplaceDestination<'d>> {
+    if let Some(existing) = &destination.occupant {
+        if existing.inode_id != source_inode_id && behavior == DestinationBehavior::Replace {
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
-                    target: destination_path.to_owned(),
+                    target: destination.path.clone(),
                     kind: existing.inode_kind,
                 });
             }
-            ReplaceDestination::Replaced(existing)
+            return Ok(ReplaceDestination::Replaced(existing));
         }
-        Some(existing) => {
-            return Err(CoreError::DestinationExists {
-                path: destination_path.to_owned(),
-                existing_display_name: Some(existing.display_name),
-            })
-        }
-        None => ReplaceDestination::Vacant,
+    }
+    // Any other occupant is the source itself, or a conflict that
+    // `available_name` reports.
+    let available = destination.available_name(Some(source_inode_id))?;
+    Ok(match destination.occupant {
+        Some(_) => ReplaceDestination::SameInode(available),
+        None => ReplaceDestination::Vacant(available),
     })
 }

@@ -8,8 +8,6 @@ mod checks;
 mod error;
 mod operations;
 mod session;
-#[cfg(test)]
-mod tests;
 
 pub use error::{CommitOperand, CommitValidationError};
 pub(crate) use operations::NewChild;

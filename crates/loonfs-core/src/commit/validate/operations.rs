@@ -7,13 +7,13 @@ use super::session::CommitValidationSession;
 use crate::commit::validate::checks::CommitNumbering;
 use crate::error::Result;
 use crate::metadata::{DirentryBindingRecord, InodeRecord, SubtreeTombstoneRecord};
-use crate::path::write::{ResolvedBinding, ResolvedTarget};
+use crate::path::write::{AvailableName, ResolvedBinding, ResolvedTarget};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, RevisionSummary};
 use loonfs_types::format::wal::WalDelta;
 use loonfs_types::{
     next_public_ordinal, AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo,
-    CommitSeq, ContentRef, DisplayName, InodeId, InodeKind, RevisionNo,
+    CommitSeq, ContentRef, InodeId, InodeKind, RevisionNo,
 };
 
 /// The kind of inode a create makes, with a file's initial content.
@@ -26,18 +26,15 @@ pub(crate) enum NewChild {
 }
 
 impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
-    /// Creates a directory or file under a parent inode.
+    /// Creates a directory or file at `name`.
     pub(crate) async fn create(
         &mut self,
         child_inode_id: InodeId,
-        parent_inode_id: InodeId,
-        display_name: &DisplayName,
+        name: &AvailableName,
         child: NewChild,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self
-            .validate_create(child_inode_id, parent_inode_id, display_name, child)
-            .await?;
+        let deltas = self.validate_create(child_inode_id, name, child).await?;
         self.record_step(op_index, deltas);
         Ok(())
     }
@@ -84,18 +81,14 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         Ok(())
     }
 
-    /// Rebinds the inode that `source_binding` binds under
-    /// `new_parent_inode_id` as `new_display_name`.
+    /// Rebinds the inode that `source_binding` binds at `destination`.
     pub(crate) async fn rename(
         &mut self,
         source_binding: &ResolvedBinding,
-        new_parent_inode_id: InodeId,
-        new_display_name: &DisplayName,
+        destination: &AvailableName,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self
-            .validate_rename(source_binding, new_parent_inode_id, new_display_name)
-            .await?;
+        let deltas = self.validate_rename(source_binding, destination).await?;
         self.record_step(op_index, deltas);
         Ok(())
     }
@@ -103,19 +96,18 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     /// Recovers a deleted file or subtree: revokes `deletion`, the root's
     /// deletion in the trash, which the request identified by `deletion_seq`
     /// (the delete's committed sequence, which the delete and the change feed
-    /// report), and binds the inode under a visible parent directory. Scoping
-    /// recovery to the observed position keeps a stale request from
-    /// cancelling a later deletion of the same inode.
+    /// report), and binds the inode at `destination`. Scoping recovery to
+    /// the observed position keeps a stale request from cancelling a later
+    /// deletion of the same inode.
     pub(crate) async fn restore_deleted(
         &mut self,
         deletion: &SubtreeTombstoneRecord,
         deletion_seq: CommitSeq,
-        parent_inode_id: InodeId,
-        display_name: &DisplayName,
+        destination: &AvailableName,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let deltas = self
-            .validate_restore_deleted(deletion, deletion_seq, parent_inode_id, display_name)
+            .validate_restore_deleted(deletion, deletion_seq, destination)
             .await?;
         self.record_step(op_index, deltas);
         Ok(())
@@ -154,21 +146,13 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     async fn validate_create(
         &mut self,
         child_inode_id: InodeId,
-        parent_inode_id: InodeId,
-        display_name: &DisplayName,
+        name: &AvailableName,
         child: NewChild,
     ) -> Result<Vec<WalDelta>> {
-        let name_key = self
-            .resolve_name_absent(
-                parent_inode_id,
-                display_name,
-                None,
-                CommitOperand::CreateParent,
-            )
-            .await?;
+        let parent_inode_id = name.parent_inode_id();
+        let display_name = name.display_name();
+        let name_key = name.name_key();
         self.ensure_child_unbound(child_inode_id, None).await?;
-        self.ensure_ancestry_reaches_root(parent_inode_id, CommitOperand::CreateParent)
-            .await?;
         let (inode_kind, revision) = match &child {
             NewChild::Directory => (InodeKind::Directory, None),
             NewChild::File(content_ref) => (
@@ -279,9 +263,9 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     async fn validate_rename(
         &mut self,
         source_binding: &ResolvedBinding,
-        new_parent_inode_id: InodeId,
-        new_display_name: &DisplayName,
+        destination: &AvailableName,
     ) -> Result<Vec<WalDelta>> {
+        let new_parent_inode_id = destination.parent_inode_id();
         let inode_id = source_binding.child_inode_id();
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
             CommitValidationError::InodeMissing {
@@ -289,19 +273,9 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 inode_id,
             },
         )?;
-        let new_name_key = self
-            .resolve_name_absent(
-                new_parent_inode_id,
-                new_display_name,
-                Some(inode_id),
-                CommitOperand::RenameTargetParent,
-            )
-            .await?;
         self.ensure_child_unbound(inode_id, Some(source_binding.bind_position()))
             .await?;
         self.ensure_rename_does_not_cycle(&inode, new_parent_inode_id)
-            .await?;
-        self.ensure_ancestry_reaches_root(new_parent_inode_id, CommitOperand::RenameTargetParent)
             .await?;
         let revision = self.resolve_revision_summary(&inode).await?;
         Ok(vec![
@@ -309,8 +283,8 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             WalDelta::BindDirentry {
                 delta_index: self.numbering.reserve_delta_index()?,
                 parent_inode_id: new_parent_inode_id,
-                name_key: new_name_key,
-                display_name: new_display_name.clone(),
+                name_key: destination.name_key(),
+                display_name: destination.display_name().clone(),
                 child_inode_id: inode_id,
                 child_kind: inode.inode_kind,
                 child_created_by: inode.committed_by,
@@ -324,8 +298,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         &mut self,
         deletion: &SubtreeTombstoneRecord,
         deletion_seq: CommitSeq,
-        parent_inode_id: InodeId,
-        display_name: &DisplayName,
+        destination: &AvailableName,
     ) -> Result<Vec<WalDelta>> {
         let inode_id = deletion.root_inode_id;
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
@@ -335,17 +308,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             },
         )?;
         self.ensure_restorable_deletion(deletion, deletion_seq)?;
-        let name_key = self
-            .resolve_name_absent(
-                parent_inode_id,
-                display_name,
-                None,
-                CommitOperand::RestoreDeletedTarget,
-            )
-            .await?;
         self.ensure_child_unbound(inode_id, None).await?;
-        self.ensure_ancestry_reaches_root(parent_inode_id, CommitOperand::RestoreDeletedTarget)
-            .await?;
         let revision = self.resolve_revision_summary(&inode).await?;
         Ok(vec![
             WalDelta::RevokeSubtreeTombstone {
@@ -355,9 +318,9 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             },
             WalDelta::BindDirentry {
                 delta_index: self.numbering.reserve_delta_index()?,
-                parent_inode_id,
-                name_key,
-                display_name: display_name.clone(),
+                parent_inode_id: destination.parent_inode_id(),
+                name_key: destination.name_key(),
+                display_name: destination.display_name().clone(),
                 child_inode_id: inode_id,
                 child_kind: inode.inode_kind,
                 child_created_by: inode.committed_by,
