@@ -1,5 +1,5 @@
-//! [`CommitValidationError`]: every way a commit request can fail
-//! validation.
+//! [`CommitValidationError`]: errors that the checks of a commit's operations
+//! return, which a client sees after the prefix `commit validation failed:`.
 
 use loonfs_types::{
     AccessRevisionNo, AttributesRevisionNo, CommitSeq, ErrorCode, ErrorDetails, InodeId, RevisionNo,

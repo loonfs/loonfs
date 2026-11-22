@@ -592,8 +592,7 @@ where
 ///
 /// Every [`MetadataVisibilityReads`] method on the in-memory implementors
 /// returns without awaiting, so the composed future finishes on its first
-/// poll; `now_or_never` performs exactly that single poll (the same pattern
-/// commit validation uses to stay synchronous over its in-memory preview).
+/// poll, and `now_or_never` performs exactly that single poll.
 pub(crate) fn resolve_in_memory_read<T>(future: impl Future<Output = T>) -> T {
     future
         .now_or_never()

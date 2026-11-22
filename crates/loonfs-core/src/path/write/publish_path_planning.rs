@@ -110,13 +110,7 @@ impl<'a> ResolvedTarget<'a> {
     }
 
     pub(super) fn ensure_file(&self) -> Result<()> {
-        if self.resolved.inode_kind != InodeKind::File {
-            return Err(CoreError::ExpectedFile {
-                target: self.label(),
-                kind: self.resolved.inode_kind,
-            });
-        }
-        Ok(())
+        ensure_file(&self.resolved, &self.label())
     }
 
     /// Requires the inode that the request expects at a path target.
@@ -356,6 +350,19 @@ impl AvailableName {
     pub(crate) fn name_key(&self) -> NameKey {
         NameKey::for_display_name(&self.display_name)
     }
+}
+
+/// Requires `resolved` to be a file, the only kind of inode whose content an
+/// operation replaces or copies. `target` is the target as the error message
+/// shows it.
+pub(super) fn ensure_file(resolved: &ResolvedVisiblePath, target: &str) -> Result<()> {
+    if resolved.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            target: target.to_owned(),
+            kind: resolved.inode_kind,
+        });
+    }
+    Ok(())
 }
 
 /// Rejects the root, which only an access update may name as its target.
@@ -753,12 +760,7 @@ pub(super) fn classify_replace_destination<'d>(
     source_inode_id: InodeId,
 ) -> Result<ReplaceDestination<'d>> {
     if let Some(existing) = destination.replaced_occupant(behavior, source_inode_id) {
-        if existing.inode_kind != InodeKind::File {
-            return Err(CoreError::ExpectedFile {
-                target: destination.path.clone(),
-                kind: existing.inode_kind,
-            });
-        }
+        ensure_file(existing, &destination.path)?;
         return Ok(ReplaceDestination::Replaced(existing));
     }
     // Any other occupant is the source itself, or a conflict that

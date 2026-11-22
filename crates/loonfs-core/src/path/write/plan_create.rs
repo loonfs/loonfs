@@ -2,7 +2,9 @@
 
 use super::planner::OperationPlanningSession;
 use super::preconditions::{ensure_expected_inode, ExpectedFileState};
-use super::publish_path_planning::{AvailableName, Destination, ResolvedDestination, Target};
+use super::publish_path_planning::{
+    ensure_file, AvailableName, Destination, ResolvedDestination, Target,
+};
 use crate::authorize::{check_rights, Absence};
 use crate::commit::{CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
@@ -12,7 +14,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, TombstoneRowAction};
 use loonfs_types::options::RestoreDeletedDestination;
 use loonfs_types::{
-    AbsolutePath, AccessRight, CommitSeq, ContentRef, DestinationBehavior, InodeId, InodeKind,
+    AbsolutePath, AccessRight, CommitSeq, ContentRef, DestinationBehavior, InodeId,
 };
 
 /// A deleted item's deletion in the trash: the latest tombstone event of the
@@ -232,12 +234,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     expected_file_state.map(|expected| expected.inode_id),
                     &final_name,
                 )?;
-                if existing.inode_kind != InodeKind::File {
-                    return Err(CoreError::ExpectedFile {
-                        target: absolute_path.as_str().to_owned(),
-                        kind: existing.inode_kind,
-                    });
-                }
+                ensure_file(&existing, absolute_path.as_str())?;
                 let revision = self
                     .view()
                     .metadata
