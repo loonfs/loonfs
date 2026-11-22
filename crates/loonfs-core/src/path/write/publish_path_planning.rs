@@ -585,24 +585,21 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
     }
 
     /// Returns the current binding of `resolved`, a visible inode other than
-    /// the root.
+    /// the root. The root has no binding.
     pub(super) async fn source_binding(
         &self,
         resolved: &ResolvedVisiblePath,
     ) -> Result<ResolvedBinding> {
-        let parent_inode_id = resolved
-            .parent_inode_id
-            .ok_or(CoreError::RootMutationForbidden)?;
         let binding = self
             .metadata
             .current_parent_binding_for_child(resolved.inode_id)
             .await?
             .ok_or_else(|| CoreError::PathNotFound(resolved.absolute_path.to_string()))?;
-        if binding.parent_inode_id != parent_inode_id {
+        if Some(binding.parent_inode_id) != resolved.parent_inode_id {
             return Err(CoreError::PathNotFound(resolved.absolute_path.to_string()));
         }
         Ok(ResolvedBinding {
-            parent_inode_id,
+            parent_inode_id: binding.parent_inode_id,
             name_key: binding.name_key.clone(),
             display_name: binding
                 .display_name()
