@@ -368,6 +368,42 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
     assert_eq!(second["outcome"], "not_found");
 }
 
+/// A second recorder on the same file appends its samples after the first
+/// recorder's, so a process that opens the file while another process writes
+/// to it erases nothing.
+#[tokio::test]
+async fn jsonl_recorder_appends_to_an_existing_file() {
+    let temp_dir = tempdir().expect("tempdir");
+    let metrics_path = temp_dir.path().join("object-store.ndjson");
+    let namespace_id = loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id");
+
+    let first = Arc::new(JsonlObjectStoreMetricsRecorder::create(&metrics_path).expect("recorder"));
+    instrumented_object_store(temp_dir.path(), first.clone())
+        .put_if_absent(&boundary(&namespace_id), bytes(b"head"))
+        .await
+        .expect("put object");
+    first.flush().expect("flush the first recorder");
+
+    let second =
+        Arc::new(JsonlObjectStoreMetricsRecorder::create(&metrics_path).expect("second recorder"));
+    assert!(instrumented_object_store(temp_dir.path(), second.clone())
+        .get(&secret_key(), None)
+        .await
+        .expect("get missing")
+        .is_none());
+    second.flush().expect("flush the second recorder");
+
+    let jsonl = std::fs::read_to_string(metrics_path).expect("read metrics");
+    let operations = jsonl
+        .lines()
+        .map(|line| {
+            let sample: serde_json::Value = serde_json::from_str(line).expect("sample");
+            sample["operation"].as_str().expect("operation").to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(operations, ["put", "get"]);
+}
+
 fn instrumented_object_store<R>(
     root: &std::path::Path,
     recorder: Arc<R>,
