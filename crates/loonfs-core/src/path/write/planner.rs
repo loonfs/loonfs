@@ -1095,6 +1095,74 @@ mod tests {
         );
     }
 
+    /// A revision restore of a file whose current revision is the largest
+    /// public integer has no next revision to write.
+    #[tokio::test]
+    async fn a_revision_restore_past_the_largest_revision_number_is_rejected() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/file.txt",
+                b"content-1",
+                DestinationBehavior::Replace,
+                None,
+            )
+            .await
+            .expect("seed a revision");
+        let file = crate::test_support::visible_inode_id(&store, &namespace_id, "/file.txt").await;
+        let maximum = RevisionNo(loonfs_types::MAX_PUBLIC_INTEGER);
+        let content_id = loonfs_types::ContentId::generate();
+        let checksum = loonfs_types::Checksum::crc64nvme(b"content-max");
+        let layout = loonfs_types::ContentLayout {
+            creator_namespace_id: namespace_id.clone(),
+            extents: vec![loonfs_types::ContentExtent {
+                content_id: content_id.clone(),
+                object: loonfs_types::ExtentObject::Whole,
+                object_checksum: checksum.clone(),
+                offset: 0,
+                length: 11,
+            }],
+        };
+        let content_ref = ContentRef {
+            kind: loonfs_types::ContentRefKind::BlobV1,
+            content_id,
+            size_bytes: 11,
+            checksum,
+        };
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .append_wal_commit(
+                vec![crate::test_support::file_revision_delta(
+                    0,
+                    file,
+                    maximum,
+                    content_ref,
+                    Some(layout),
+                )],
+                Vec::new(),
+            )
+            .await
+            .expect("write a revision at the largest revision number");
+
+        let error = try_plan_against_current_state(
+            &store,
+            &namespace_id,
+            &request(FilesystemOperation::RestoreRevisionByInode {
+                inode_id: file,
+                source_revision_no: maximum,
+            }),
+        )
+        .await
+        .expect_err("revision numbers stop at the largest public integer");
+        assert_eq!(error.code(), ErrorCode::ServerError);
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(CommitValidationError::RevisionOverflow {
+                inode_id,
+                base_revision_no,
+            }) if inode_id == file && base_revision_no == maximum
+        );
+    }
+
     #[tokio::test]
     async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondition() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
