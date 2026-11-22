@@ -1,16 +1,15 @@
-//! Commit fingerprinting and the planning of one filesystem operation into
-//! the commit operations it needs.
+//! Commit fingerprinting and the planning of one filesystem operation, which
+//! calls the steps that write its rows.
 
 use super::intent::{CommitIntent, FilesystemOperation};
 use super::planned_pieces::CommitPieces;
 use super::preconditions::{
     validate_expected_file_state, validate_revision_precondition, PreconditionFields,
 };
-use super::publish_path_planning::{
-    CompiledFilesystemOperation, Destination, PlanningView, Target,
-};
+use super::publish_path_planning::{Destination, PlanningView, Target};
+use crate::authorize::Authorizer;
 use crate::commit::engine::TemporaryMove;
-use crate::commit::{CommitFingerprint, NewChild};
+use crate::commit::{CommitFingerprint, CommitValidationSession, NewChild};
 use crate::error::{CoreError, Result};
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
@@ -58,12 +57,15 @@ pub(crate) fn merge_fingerprint(
     .fingerprint()
 }
 
-/// The planning of one operation: the planning view, the commit's pieces,
-/// where content writes go, the commit's sequence, and where the IDs of the
-/// inodes it creates come from.
-pub(super) struct OperationPlanningSession<'p, S: ObjectStore + ?Sized> {
-    pub(super) view: PlanningView<'p, S>,
-    pub(super) pieces: &'p CommitPieces<'p, S>,
+/// The planning of one operation: the namespace, the request's authorizer,
+/// the commit's state, which the operation's steps write, the commit's
+/// pieces, where content writes go, the commit's sequence, and where the IDs
+/// of the inodes it creates come from.
+pub(super) struct OperationPlanningSession<'p, 'c, S: ObjectStore + ?Sized> {
+    pub(super) namespace_id: &'p NamespaceId,
+    pub(super) authorizer: Authorizer<'p>,
+    pub(super) validation: &'p mut CommitValidationSession<'c, S>,
+    pub(super) pieces: &'p mut CommitPieces<'c, S>,
     pub(super) content_writes: ContentWrites<'p, S>,
     /// The sequence that the commit is assigned.
     pub(super) committed_seq: CommitSeq,
@@ -84,7 +86,17 @@ pub(super) enum CreatedInodeIds<'p> {
     Merge(Option<InodeId>),
 }
 
-impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
+    /// Returns what the operation reads and authorizes against: the
+    /// metadata as the commit's steps so far have left it.
+    pub(super) fn view(&self) -> PlanningView<'_, S> {
+        PlanningView {
+            namespace_id: self.namespace_id,
+            authorizer: self.authorizer,
+            metadata: self.validation.view(),
+        }
+    }
+
     /// Returns the ID of the next inode that the commit creates.
     ///
     /// A merge whose operation creates an inode without an assigned ID, or
@@ -110,11 +122,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     }
 
     /// Plans `operation`, mapping its path or inode address onto the one
-    /// planner for its kind.
-    pub(super) async fn plan(
-        &mut self,
-        operation: &FilesystemOperation,
-    ) -> Result<CompiledFilesystemOperation> {
+    /// planner for its kind, which calls the steps that write its rows.
+    pub(super) async fn plan(&mut self, operation: &FilesystemOperation) -> Result<()> {
         use FilesystemOperation as Op;
         match operation {
             Op::CreateDirectory { path, parents } => {

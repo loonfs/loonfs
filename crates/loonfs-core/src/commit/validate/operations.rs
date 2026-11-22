@@ -1,7 +1,7 @@
-//! The validator of each commit operation: the checks an operation runs and
-//! the WAL deltas it produces.
+//! The steps of a commit: the checks that each step runs and the WAL deltas
+//! that it writes.
 
-use super::super::{CommitOperation, CommitValidationError, NewChild, ResolvedBinding};
+use super::super::{CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::commit::validate::checks::CommitNumbering;
@@ -15,106 +15,173 @@ use loonfs_types::{
     CommitSeq, ContentRef, DisplayName, InodeId, InodeKind, RevisionNo,
 };
 
+/// The kind of inode a create makes, with a file's initial content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NewChild {
+    Directory,
+    /// Immutable initial bytes, which must have valid preparation proof
+    /// before publication.
+    File(ContentRef),
+}
+
 impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
-    pub(super) async fn validate_operation(
+    /// Creates a directory or file under a parent inode.
+    pub(crate) async fn create(
         &mut self,
-        op: &CommitOperation,
-    ) -> Result<Vec<WalDelta>> {
-        match op {
-            CommitOperation::Create {
-                child_inode_id,
-                parent_inode_id,
-                display_name,
-                child,
-            } => {
-                self.validate_create(
-                    *child_inode_id,
-                    *parent_inode_id,
-                    display_name,
-                    child.clone(),
-                )
-                .await
-            }
-            CommitOperation::ReplaceFile {
-                inode_id,
-                base_revision_no,
-                content_ref,
-                append_offset,
-            } => {
-                self.validate_replace_file(
-                    *inode_id,
-                    *base_revision_no,
-                    content_ref,
-                    *append_offset,
-                )
-                .await
-            }
-            CommitOperation::RestoreRevision {
-                inode_id,
-                source_revision_no,
-                base_revision_no,
-            } => {
-                self.validate_restore_revision(*inode_id, *source_revision_no, *base_revision_no)
-                    .await
-            }
-            CommitOperation::DeleteFile {
-                inode_id,
-                source_binding,
-            } => self.validate_delete_file(*inode_id, source_binding).await,
-            CommitOperation::Rename {
+        child_inode_id: InodeId,
+        parent_inode_id: InodeId,
+        display_name: &DisplayName,
+        child: NewChild,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self
+            .validate_create(child_inode_id, parent_inode_id, display_name, child)
+            .await?;
+        self.record_step(op_index, deltas);
+        Ok(())
+    }
+
+    /// Appends a new revision to an existing file, after checking that
+    /// `base_revision_no` is still current.
+    ///
+    /// `append_offset` is where an append's bytes begin, which is the base
+    /// revision's size. It's `None` for a put or a copy.
+    pub(crate) async fn replace_file(
+        &mut self,
+        inode_id: InodeId,
+        base_revision_no: RevisionNo,
+        content_ref: &ContentRef,
+        append_offset: Option<u64>,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self
+            .validate_replace_file(inode_id, base_revision_no, content_ref, append_offset)
+            .await?;
+        self.record_step(op_index, deltas);
+        Ok(())
+    }
+
+    /// Restores an earlier revision as a new current revision, after
+    /// checking that `base_revision_no` is still current.
+    pub(crate) async fn restore_revision(
+        &mut self,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        base_revision_no: RevisionNo,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self
+            .validate_restore_revision(inode_id, source_revision_no, base_revision_no)
+            .await?;
+        self.record_step(op_index, deltas);
+        Ok(())
+    }
+
+    /// Deletes a file inode, after checking that `source_binding`, the
+    /// parent binding observed during planning, is still current.
+    pub(crate) async fn delete_file(
+        &mut self,
+        inode_id: InodeId,
+        source_binding: &ResolvedBinding,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self.validate_delete_file(inode_id, source_binding).await?;
+        self.record_step(op_index, deltas);
+        Ok(())
+    }
+
+    /// Rebinds an inode under `new_parent_inode_id` as `new_display_name`,
+    /// after checking that `source_binding`, the parent binding observed
+    /// during planning, is still current.
+    pub(crate) async fn rename(
+        &mut self,
+        inode_id: InodeId,
+        source_binding: &ResolvedBinding,
+        new_parent_inode_id: InodeId,
+        new_display_name: &DisplayName,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self
+            .validate_rename(
                 inode_id,
                 source_binding,
                 new_parent_inode_id,
                 new_display_name,
-            } => {
-                self.validate_rename(
-                    *inode_id,
-                    source_binding,
-                    *new_parent_inode_id,
-                    new_display_name,
-                )
-                .await
-            }
-            CommitOperation::DeleteSubtree {
-                root_inode_id,
-                source_binding,
-                require_empty,
-            } => {
-                self.validate_delete_subtree(*root_inode_id, source_binding, *require_empty)
-                    .await
-            }
-            CommitOperation::RestoreDeleted {
-                inode_id,
-                deletion_seq,
-                parent_inode_id,
-                display_name,
-            } => {
-                self.validate_restore_deleted(
-                    *inode_id,
-                    *deletion_seq,
-                    *parent_inode_id,
-                    display_name,
-                )
-                .await
-            }
-            CommitOperation::UpdateAttributes {
-                inode_id,
-                base_attributes_revision_no,
-                attributes,
-            } => {
-                self.validate_update_attributes(*inode_id, *base_attributes_revision_no, attributes)
-                    .await
-            }
-            CommitOperation::UpdateAccess {
-                inode_id,
-                base_access_revision_no,
-                boundary,
-                grants,
-            } => {
-                self.validate_update_access(*inode_id, *base_access_revision_no, *boundary, grants)
-                    .await
-            }
-        }
+            )
+            .await?;
+        self.record_step(op_index, deltas);
+        Ok(())
+    }
+
+    /// Deletes a directory subtree, after checking that `source_binding`,
+    /// the parent binding observed during planning, is still current, and
+    /// with `require_empty`, that the directory has no visible children.
+    pub(crate) async fn delete_subtree(
+        &mut self,
+        root_inode_id: InodeId,
+        source_binding: &ResolvedBinding,
+        require_empty: bool,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self
+            .validate_delete_subtree(root_inode_id, source_binding, require_empty)
+            .await?;
+        self.record_step(op_index, deltas);
+        Ok(())
+    }
+
+    /// Recovers a deleted file or subtree: revokes the deletion recorded at
+    /// `deletion_seq` (the delete's committed sequence, which the delete and
+    /// the change feed report) and binds the inode under a visible parent
+    /// directory. Scoping recovery to the observed position keeps a stale
+    /// request from cancelling a later deletion of the same inode.
+    pub(crate) async fn restore_deleted(
+        &mut self,
+        inode_id: InodeId,
+        deletion_seq: CommitSeq,
+        parent_inode_id: InodeId,
+        display_name: &DisplayName,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self
+            .validate_restore_deleted(inode_id, deletion_seq, parent_inode_id, display_name)
+            .await?;
+        self.record_step(op_index, deltas);
+        Ok(())
+    }
+
+    /// Replaces an inode's attributes with `attributes`, the complete map
+    /// after the update, after checking that `base_attributes_revision_no`
+    /// is still current.
+    pub(crate) async fn update_attributes(
+        &mut self,
+        inode_id: InodeId,
+        base_attributes_revision_no: AttributesRevisionNo,
+        attributes: &Attributes,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self
+            .validate_update_attributes(inode_id, base_attributes_revision_no, attributes)
+            .await?;
+        self.record_step(op_index, deltas);
+        Ok(())
+    }
+
+    /// Replaces an inode's access row with `boundary` and `grants`, after
+    /// checking that `base_access_revision_no` is still current.
+    pub(crate) async fn update_access(
+        &mut self,
+        inode_id: InodeId,
+        base_access_revision_no: AccessRevisionNo,
+        boundary: bool,
+        grants: &AccessGrants,
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let deltas = self
+            .validate_update_access(inode_id, base_access_revision_no, boundary, grants)
+            .await?;
+        self.record_step(op_index, deltas);
+        Ok(())
     }
 
     async fn validate_create(

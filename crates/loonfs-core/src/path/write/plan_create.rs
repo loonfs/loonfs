@@ -2,11 +2,9 @@
 
 use super::planner::OperationPlanningSession;
 use super::preconditions::{ensure_expected_inode, ExpectedFileState};
-use super::publish_path_planning::{
-    is_missing_visible_path, CompiledFilesystemOperation, Destination, Target,
-};
+use super::publish_path_planning::{is_missing_visible_path, Destination, Target};
 use crate::authorize::{check_rights, Absence};
-use crate::commit::{CommitOperation, CommitValidationError, NewChild};
+use crate::commit::{CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
 use crate::metadata::VisiblePathError;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
@@ -26,26 +24,25 @@ pub(super) struct ResolvedParents {
     pub(super) deepest_existing: InodeId,
 }
 
-impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     /// Plans a new directory or file at a vacant `destination`.
     pub(super) async fn plan_create(
         &mut self,
         destination: Destination<'_>,
         child: NewChild,
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         destination.ensure_mutation()?;
-        let destination = self.view.resolve_destination(destination).await?;
-        self.view.ensure_vacant_destination(&destination).await?;
+        let destination = self.view().resolve_destination(destination).await?;
+        self.view().ensure_vacant_destination(&destination).await?;
         let child_inode_id = self.next_inode_id()?;
-        let parent_inode_id = destination.parent_inode_id;
-        let display_name = destination.name;
-        let op = CommitOperation::Create {
-            child_inode_id,
-            parent_inode_id,
-            display_name,
-            child,
-        };
-        Ok(CompiledFilesystemOperation::new(vec![op]))
+        self.validation
+            .create(
+                child_inode_id,
+                destination.parent_inode_id,
+                &destination.name,
+                child,
+            )
+            .await
     }
 
     /// Plans a new directory at `absolute_path`, and with `parents`, the
@@ -54,55 +51,53 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         &mut self,
         absolute_path: &AbsolutePath,
         parents: bool,
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         if !parents {
             return self
                 .plan_create(Destination::Path(absolute_path), NewChild::Directory)
                 .await;
         }
         ensure_mutation_path(absolute_path)?;
-        let mut ops = Vec::new();
-        let parents = self
-            .ensure_parent_directories(absolute_path, &mut ops)
-            .await?;
-        self.view
+        let parents = self.ensure_parent_directories(absolute_path).await?;
+        self.view()
             .authorize(
                 parents.deepest_existing,
                 AccessRight::Create.into(),
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
-        self.view.ensure_vacant_path(absolute_path).await?;
+        self.view().ensure_vacant_path(absolute_path).await?;
         let display_name = final_component(absolute_path)?;
         let child_inode_id = self.next_inode_id()?;
-        ops.push(CommitOperation::Create {
-            child_inode_id,
-            parent_inode_id: parents.parent_inode_id,
-            display_name,
-            child: NewChild::Directory,
-        });
-        Ok(CompiledFilesystemOperation::new(ops))
+        self.validation
+            .create(
+                child_inode_id,
+                parents.parent_inode_id,
+                &display_name,
+                NewChild::Directory,
+            )
+            .await
     }
 
     pub(super) async fn plan_restore_deleted(
-        &self,
+        &mut self,
         inode_id: InodeId,
         deletion_seq: CommitSeq,
         destination: RestoreDeletedDestination,
-    ) -> Result<CompiledFilesystemOperation> {
-        let deletion = self.view.metadata.tombstone_in_trash(inode_id).await?;
+    ) -> Result<()> {
+        let deletion = self.view().metadata.tombstone_in_trash(inode_id).await?;
         let deleted_binding = match deletion.map(|record| record.action) {
             Some(TombstoneRowAction::Set {
                 deleted_binding, ..
             }) => deleted_binding,
             _ => {
                 let authorization_target = self
-                    .view
+                    .view()
                     .metadata
                     .current_parent_binding_for_child(inode_id)
                     .await?
                     .map_or(inode_id, |binding| binding.parent_inode_id);
-                self.view
+                self.view()
                     .authorize(
                         authorization_target,
                         AccessRight::Remove.into(),
@@ -115,7 +110,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             }
         };
         let saved_parent = deleted_binding.parent_inode_id;
-        self.view
+        self.view()
             .authorize(saved_parent, AccessRight::Remove.into(), Absence::Inode)
             .await?;
         let destination = match &destination {
@@ -131,14 +126,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         let (parent_inode_id, display_name) = self
             .resolve_restore_deleted_destination(inode_id, saved_parent, destination)
             .await?;
-        Ok(CompiledFilesystemOperation::new(vec![
-            CommitOperation::RestoreDeleted {
-                inode_id,
-                deletion_seq,
-                parent_inode_id,
-                display_name,
-            },
-        ]))
+        self.validation
+            .restore_deleted(inode_id, deletion_seq, parent_inode_id, &display_name)
+            .await
     }
 
     /// Resolves the destination of a restore, which has to be vacant, and
@@ -150,39 +140,34 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         destination: Destination<'_>,
     ) -> Result<(InodeId, DisplayName)> {
         destination.ensure_mutation()?;
-        let destination = self.view.resolve_destination(destination).await?;
+        let view = self.view();
+        let destination = view.resolve_destination(destination).await?;
         // A destination in the saved parent is a restore in place, which
         // needs no read right on the inode.
-        let mover = self.view.mover_rights(inode_id).await?;
+        let mover = view.mover_rights(inode_id).await?;
         if destination.parent_inode_id != saved_parent {
             check_rights(mover, AccessRight::Read.into(), inode_id, Absence::Inode)?;
         }
-        self.view.ensure_vacant_destination(&destination).await?;
-        self.view
-            .authorize_relocation(inode_id, saved_parent, destination.parent_inode_id, mover)
+        view.ensure_vacant_destination(&destination).await?;
+        view.authorize_relocation(inode_id, saved_parent, destination.parent_inode_id, mover)
             .await?;
         Ok((destination.parent_inode_id, destination.name))
     }
 
     pub(super) async fn plan_put_file_revision_by_inode(
-        &self,
+        &mut self,
         inode_id: InodeId,
         content_ref: ContentRef,
         expected_revision_no: RevisionNo,
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         let target = self
-            .view
+            .view()
             .resolve_authorized_target(Target::Inode(inode_id), AccessRight::Write.into())
             .await?;
         target.ensure_file()?;
-        Ok(CompiledFilesystemOperation::new(vec![
-            CommitOperation::ReplaceFile {
-                inode_id,
-                base_revision_no: expected_revision_no,
-                content_ref,
-                append_offset: None,
-            },
-        ]))
+        self.validation
+            .replace_file(inode_id, expected_revision_no, &content_ref, None)
+            .await
     }
 
     pub(super) async fn plan_put_file_content_ref(
@@ -191,10 +176,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         content_ref: ContentRef,
         behavior: DestinationBehavior,
         expected_file_state: Option<ExpectedFileState>,
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         ensure_mutation_path(absolute_path)?;
         let target = self
-            .view
+            .view()
             .resolve_visible_path_for_authorization(
                 absolute_path,
                 AccessRight::Create.into(),
@@ -202,13 +187,12 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             )
             .await;
 
-        let mut ops = Vec::new();
         let final_name = final_component(absolute_path)?;
 
         match target {
             Ok(existing) => {
                 if behavior == DestinationBehavior::NoReplace {
-                    self.view
+                    self.view()
                         .authorize(
                             existing.parent_inode_id.unwrap_or(ROOT_INODE_ID),
                             AccessRight::Create.into(),
@@ -220,7 +204,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                         existing_display_name: Some(existing.display_name.clone()),
                     });
                 }
-                self.view
+                self.view()
                     .authorize(
                         existing.inode_id,
                         AccessRight::Write.into(),
@@ -239,7 +223,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     });
                 }
                 let revision = self
-                    .view
+                    .view()
                     .metadata
                     .latest_revision_head(existing.inode_id)
                     .await?
@@ -247,18 +231,13 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 let base_revision_no = expected_file_state
                     .and_then(|expected| expected.revision_no)
                     .unwrap_or(revision.revision_no);
-                ops.push(CommitOperation::ReplaceFile {
-                    inode_id: existing.inode_id,
-                    base_revision_no,
-                    content_ref: content_ref.clone(),
-                    append_offset: None,
-                });
+                self.validation
+                    .replace_file(existing.inode_id, base_revision_no, &content_ref, None)
+                    .await
             }
             Err(error) if is_missing_visible_path(&error) => {
-                let parents = self
-                    .ensure_parent_directories(absolute_path, &mut ops)
-                    .await?;
-                self.view
+                let parents = self.ensure_parent_directories(absolute_path).await?;
+                self.view()
                     .authorize(
                         parents.deepest_existing,
                         AccessRight::Create.into(),
@@ -269,23 +248,24 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
                 }
                 let child_inode_id = self.next_inode_id()?;
-                ops.push(CommitOperation::Create {
-                    child_inode_id,
-                    parent_inode_id: parents.parent_inode_id,
-                    display_name: final_name.clone(),
-                    child: NewChild::File(content_ref),
-                });
+                self.validation
+                    .create(
+                        child_inode_id,
+                        parents.parent_inode_id,
+                        &final_name,
+                        NewChild::File(content_ref),
+                    )
+                    .await
             }
-            Err(other) => return Err(other),
+            Err(other) => Err(other),
         }
-
-        Ok(CompiledFilesystemOperation::new(ops))
     }
 
+    /// Resolves the directories above `absolute_path`, and creates the ones
+    /// that are missing.
     async fn ensure_parent_directories(
         &mut self,
         absolute_path: &AbsolutePath,
-        ops: &mut Vec<CommitOperation>,
     ) -> Result<ResolvedParents> {
         let components = absolute_path.components();
         if components.len() <= 1 {
@@ -304,7 +284,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             let name_key = NameKey::for_display_name(&display_name);
             if !creating_missing_ancestors {
                 if let Some(child) = self
-                    .view
+                    .view()
                     .metadata
                     .visible_child(current_inode, &name_key)
                     .await?
@@ -315,7 +295,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                             .expect("visible binding should be bound"),
                     );
                     if child.child_kind != InodeKind::Directory {
-                        self.view
+                        self.view()
                             .authorize(
                                 child.child_inode_id,
                                 AccessRight::Create.into(),
@@ -337,12 +317,14 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             }
 
             let child_inode_id = self.next_inode_id()?;
-            ops.push(CommitOperation::Create {
-                child_inode_id,
-                parent_inode_id: current_inode,
-                display_name,
-                child: NewChild::Directory,
-            });
+            self.validation
+                .create(
+                    child_inode_id,
+                    current_inode,
+                    &display_name,
+                    NewChild::Directory,
+                )
+                .await?;
             current_inode = child_inode_id;
         }
         if !creating_missing_ancestors {

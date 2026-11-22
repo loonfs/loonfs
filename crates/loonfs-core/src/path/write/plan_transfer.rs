@@ -5,12 +5,11 @@ use super::preconditions::{
     ensure_expected_inode, validate_expected_file_state, ExpectedFileState, PreconditionFields,
 };
 use super::publish_path_planning::{
-    classify_replace_destination, CompiledFilesystemOperation, Destination, ReplaceDestination,
-    ResolvedDestination, Target,
+    classify_replace_destination, Destination, ReplaceDestination, ResolvedDestination, Target,
 };
 use crate::authorize::{check_rights, Replacement};
 use crate::commit::engine::TemporaryMove;
-use crate::commit::{CommitOperation, CommitValidationError, NewChild};
+use crate::commit::{CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use loonfs_objectstore::ObjectStore;
@@ -18,16 +17,16 @@ use loonfs_types::{
     AccessRight, AccessRights, AttributesRevisionNo, BindingVersion, DestinationPrecondition,
 };
 
-impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     /// Plans a move of `source` to `destination`, after checking the
     /// source's binding version when the request names one.
     pub(super) async fn plan_move(
-        &self,
+        &mut self,
         source: Target<'_>,
         expected_binding_version: Option<&BindingVersion>,
         destination: Destination<'_>,
         precondition: &DestinationPrecondition,
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         let expected_destination = validate_expected_file_state(
             precondition.behavior,
             precondition.expected_inode_id,
@@ -36,7 +35,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         )?;
         destination.ensure_mutation()?;
         let remove = AccessRights::from(AccessRight::Remove);
-        let source = self.view.resolve_target(source, remove).await?;
+        let source = self.view().resolve_target(source, remove).await?;
         // The second leg of a merge's move through a temporary name leaves
         // the temporary directory, which the subject needs no right on,
         // because the temporary binding doesn't survive the commit. The first
@@ -46,9 +45,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         // conflict check, so a subject with no right on the inode gets the
         // not-found error.
         let parent_inode_id = source.parent_inode_id()?;
-        let mover = self.view.mover_rights(source.inode_id()).await?;
+        let mover = self.view().mover_rights(source.inode_id()).await?;
         if !matches!(self.temporary_move, Some(TemporaryMove::Back { .. })) {
-            self.view
+            self.view()
                 .authorize(parent_inode_id, remove, source.absence())
                 .await?;
             check_rights(
@@ -58,18 +57,18 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 source.absence(),
             )?;
         }
-        // Replace compiles to an atomic delete-plus-rename: the destination
-        // file's delete and the source's rebind are written in one commit, and the
+        // Replace is an atomic delete-plus-rename: the destination file's
+        // delete and the source's rebind are written in one commit, and the
         // rename's target-name check observes the in-commit unbind. Mirrors
         // put: only a file destination can be replaced, and a path never
         // replaces itself.
-        let destination = self.view.resolve_destination(destination).await?;
+        let destination = self.view().resolve_destination(destination).await?;
         // The first leg of a merge's move through a temporary name enters
         // the temporary directory, which needs no create right for the same
         // reason. The second leg checks the create right on the inode's new
         // directory.
         if self.temporary_move != Some(TemporaryMove::Away) {
-            self.view
+            self.view()
                 .authorize_destination(
                     &destination,
                     precondition.behavior,
@@ -79,7 +78,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 .await?;
         }
         if let Some(expected) = expected_binding_version {
-            self.view
+            self.view()
                 .ensure_binding_version(&source.resolved, expected)?;
         }
         self.plan_rename(
@@ -93,13 +92,13 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     }
 
     async fn plan_rename(
-        &self,
+        &mut self,
         source: &ResolvedVisiblePath,
         mover: AccessRights,
         destination: ResolvedDestination<'_>,
         precondition: &DestinationPrecondition,
         expected_destination: Option<ExpectedFileState>,
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         let ResolvedDestination {
             parent_inode_id,
             name,
@@ -109,8 +108,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         } = destination;
         let replaced =
             classify_replace_destination(occupant, precondition.behavior, source.inode_id, &path)?;
-        let mut ops = Vec::new();
-        let current_source_binding = self.view.source_binding(source).await?;
+        let current_source_binding = self.view().source_binding(source).await?;
         // A merge's move through a temporary name changes the inode's rights
         // once, from the directory that it leaves in the first leg to the
         // directory that it enters in the second.
@@ -120,7 +118,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             Some(TemporaryMove::Back { from_parent }) => Some(from_parent),
         };
         if let Some(from_parent) = relocated_from {
-            self.view
+            self.view()
                 .authorize_relocation(source.inode_id, from_parent, parent_inode_id, mover)
                 .await?;
         }
@@ -133,10 +131,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 )?;
                 self.ensure_expected_destination_revision(existing, expected_destination)
                     .await?;
-                ops.push(CommitOperation::DeleteFile {
-                    inode_id: existing.inode_id,
-                    source_binding: self.view.source_binding(existing).await?,
-                });
+                let existing_binding = self.view().source_binding(existing).await?;
+                self.validation
+                    .delete_file(existing.inode_id, &existing_binding)
+                    .await?;
             }
             ReplaceDestination::Vacant => {
                 if expected_destination.is_some() {
@@ -165,13 +163,14 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 }
             }
         }
-        ops.push(CommitOperation::Rename {
-            inode_id: source.inode_id,
-            source_binding: current_source_binding,
-            new_parent_inode_id: parent_inode_id,
-            new_display_name: name,
-        });
-        Ok(CompiledFilesystemOperation::new(ops))
+        self.validation
+            .rename(
+                source.inode_id,
+                &current_source_binding,
+                parent_inode_id,
+                &name,
+            )
+            .await
     }
 
     /// Plans a copy of the file `source` to `destination`.
@@ -180,7 +179,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         source: Target<'_>,
         destination: Destination<'_>,
         precondition: &DestinationPrecondition,
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         let expected_destination = validate_expected_file_state(
             precondition.behavior,
             precondition.expected_inode_id,
@@ -189,7 +188,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         )?;
         destination.ensure_mutation()?;
         let source = self
-            .view
+            .view()
             .resolve_authorized_target(source, AccessRight::Read.into())
             .await?;
         source.ensure_file()?;
@@ -197,8 +196,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         // revision to the destination inode, keeping its identity and revision
         // history. Only a file destination can be replaced, and a path never
         // replaces itself.
-        let destination = self.view.resolve_destination(destination).await?;
-        self.view
+        let destination = self.view().resolve_destination(destination).await?;
+        self.view()
             .authorize_destination(
                 &destination,
                 precondition.behavior,
@@ -221,7 +220,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         destination: ResolvedDestination<'_>,
         precondition: &DestinationPrecondition,
         expected_destination: Option<ExpectedFileState>,
-    ) -> Result<CompiledFilesystemOperation> {
+    ) -> Result<()> {
         let ResolvedDestination {
             parent_inode_id,
             name,
@@ -232,22 +231,19 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         let replaced =
             classify_replace_destination(occupant, precondition.behavior, source.inode_id, &path)?;
         let revision = self
-            .view
+            .view()
             .metadata
             .latest_revision_head(source.inode_id)
             .await?
             .ok_or_else(|| CoreError::PathNotFound(source.absolute_path.to_string()))?;
-        let mut ops = Vec::new();
         match &replaced {
             // Copying a file onto its own binding would delete the source to
             // make room for its copy; that is a conflict, with or without
             // `Replace`, the same-file rule every copy tool applies.
-            ReplaceDestination::SameInode => {
-                return Err(CoreError::DestinationExists {
-                    path,
-                    existing_display_name: Some(source.display_name.clone()),
-                })
-            }
+            ReplaceDestination::SameInode => Err(CoreError::DestinationExists {
+                path,
+                existing_display_name: Some(source.display_name.clone()),
+            }),
             ReplaceDestination::Replaced(existing) => {
                 ensure_expected_inode(
                     existing,
@@ -255,7 +251,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     &name,
                 )?;
                 let existing_revision = self
-                    .view
+                    .view()
                     .metadata
                     .latest_revision_head(existing.inode_id)
                     .await?
@@ -263,24 +259,28 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 let base_revision_no = expected_destination
                     .and_then(|state| state.revision_no)
                     .unwrap_or(existing_revision.revision_no);
-                ops.push(CommitOperation::ReplaceFile {
-                    inode_id: existing.inode_id,
-                    base_revision_no,
-                    content_ref: revision.content_ref.clone(),
-                    append_offset: None,
-                });
+                self.validation
+                    .replace_file(
+                        existing.inode_id,
+                        base_revision_no,
+                        &revision.content_ref,
+                        None,
+                    )
+                    .await
             }
             ReplaceDestination::Vacant => {
                 if expected_destination.is_some() {
                     return Err(CoreError::PathNotFound(path));
                 }
                 let child_inode_id = self.next_inode_id()?;
-                ops.push(CommitOperation::Create {
-                    child_inode_id,
-                    parent_inode_id,
-                    display_name: name,
-                    child: NewChild::File(revision.content_ref.clone()),
-                });
+                self.validation
+                    .create(
+                        child_inode_id,
+                        parent_inode_id,
+                        &name,
+                        NewChild::File(revision.content_ref),
+                    )
+                    .await?;
                 // A copy to a vacant destination is a new resource that
                 // stands for the source, so it starts with the source's
                 // attributes. The new inode is at revision 0 with an empty
@@ -290,23 +290,21 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                 // destination is a resource that already exists and keeps
                 // what it contains.
                 let source_attributes = self
-                    .view
+                    .view()
                     .metadata
                     .attributes(source.inode_id)
                     .await?
                     .attributes;
-                if !source_attributes.is_empty() {
-                    // Both operations include the one ID generated above, so
-                    // they refer to the same new inode.
-                    ops.push(CommitOperation::UpdateAttributes {
-                        inode_id: child_inode_id,
-                        base_attributes_revision_no: AttributesRevisionNo(0),
-                        attributes: source_attributes,
-                    });
+                if source_attributes.is_empty() {
+                    return Ok(());
                 }
+                // Both steps include the one ID generated above, so they
+                // refer to the same new inode.
+                self.validation
+                    .update_attributes(child_inode_id, AttributesRevisionNo(0), &source_attributes)
+                    .await
             }
         }
-        Ok(CompiledFilesystemOperation::new(ops))
     }
 
     async fn ensure_expected_destination_revision(
@@ -318,7 +316,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             return Ok(());
         };
         let actual = self
-            .view
+            .view()
             .metadata
             .latest_revision_head(existing.inode_id)
             .await?

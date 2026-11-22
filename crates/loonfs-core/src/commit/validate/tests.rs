@@ -1,15 +1,17 @@
-//! Commit validation tests driving the operation validator directly over an
-//! in-memory metadata view.
+//! Commit validation tests calling the steps directly over an in-memory
+//! metadata view.
 //!
-//! These tests are kept in the crate because the operation types are internal.
+//! These tests are kept in the crate because the steps are internal.
 
-use super::super::{CommitOperation, NewChild, ResolvedBinding};
+use super::super::{NewChild, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
+use crate::commit::engine::CommitCandidate;
 use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError};
 use crate::error::{CoreError, ErrorCode, Result};
 use crate::metadata::{MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
+use crate::path::write::CommitIntent;
 use crate::segment::VerifiedMetadataSegments;
 use loonfs_test_support::stores::MemoryStore;
 use loonfs_types::format::control::{NamespaceStatus, WriterBlock};
@@ -65,10 +67,6 @@ fn wal_append_attributes(
         attributes_revision_no: AttributesRevisionNo(revision),
         attributes: test_attributes(entries),
     }]
-}
-
-fn planned(ops: Vec<CommitOperation>) -> Vec<CommitOperation> {
-    ops
 }
 
 fn test_fingerprint() -> CommitFingerprint {
@@ -232,35 +230,44 @@ fn validated_commit_id() -> CommitId {
     CommitId::parse("validated-commit").expect("valid commit id")
 }
 
-async fn validate_planned_ops(
-    ops: &[CommitOperation],
+/// Runs `steps` on a new commit's validation session and returns the deltas
+/// that they wrote.
+async fn validate_steps(
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
+    steps: impl AsyncFnOnce(&mut CommitValidationSession<'_, MemoryStore>) -> Result<()>,
 ) -> Result<Vec<WalCommitDelta>> {
     let accepted_rows = MetadataState::default();
     let base = crate::wal::ProjectedWalTail::from_rows(context.metadata_state.clone());
-    let commit_id = validated_commit_id();
-    let actor_id = loonfs_test_support::test_actor();
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let candidate = CommitCandidate::new(CommitIntent {
+        commit_id: validated_commit_id(),
+        actor_id: loonfs_test_support::test_actor(),
+        subject: None,
+        message: None,
+        operations: Vec::new(),
+        preconditions: Vec::new(),
+    });
     let store = MemoryStore::new(ChecksumAlgorithm::Crc64nvme);
     let manifest = VerifiedMetadataSegments::initial(&store);
-    CommitValidationSession::new(
+    let mut session = CommitValidationSession::new(
         MetadataView::in_memory(&manifest, &base, None, context.head.seq),
         &accepted_rows,
+        &namespace_id,
+        &candidate,
         committed_seq(context),
-        &commit_id,
-        &actor_id,
         committed_at_ms,
-    )
-    .validate(ops, |_| None)
-    .await
+    );
+    steps(&mut session).await?;
+    Ok(session.take_deltas())
 }
 
 async fn build_commit_plan(
-    ops: &[CommitOperation],
     committed_at_ms: u64,
     context: &TestValidationContext<'_>,
+    steps: impl AsyncFnOnce(&mut CommitValidationSession<'_, MemoryStore>) -> Result<()>,
 ) -> std::result::Result<CommitPlan, CommitValidationError> {
-    let deltas = validate_planned_ops(ops, committed_at_ms, context)
+    let deltas = validate_steps(committed_at_ms, context, steps)
         .await
         .map_err(|error| match error {
             CoreError::CommitValidation(error) => error,
@@ -291,15 +298,15 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondi
         wal_append_attributes(0, InodeId(2), 2, &[("owner", "grace")]),
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
-    let request = planned(vec![CommitOperation::UpdateAttributes {
-        inode_id: InodeId(2),
-        base_attributes_revision_no: AttributesRevisionNo(1),
-        attributes: test_attributes(&[("owner", "hopper")]),
-    }]);
+    let attributes = test_attributes(&[("owner", "hopper")]);
 
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("the base revision is stale");
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .update_attributes(InodeId(2), AttributesRevisionNo(1), &attributes)
+            .await
+    })
+    .await
+    .expect_err("the base revision is stale");
     assert_matches!(
         error,
         CommitValidationError::UpdateAttributesBaseRevisionMismatch {
@@ -324,18 +331,20 @@ async fn a_first_attribute_write_states_revision_zero() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, CommitSeq(1));
-    let request = |base: u64| {
-        planned(vec![CommitOperation::UpdateAttributes {
-            inode_id: InodeId(2),
-            base_attributes_revision_no: AttributesRevisionNo(base),
-            attributes: test_attributes(&[("owner", "ada")]),
-        }])
+    let attributes = test_attributes(&[("owner", "ada")]);
+    let update = |base: u64| {
+        let attributes = &attributes;
+        async move |session: &mut CommitValidationSession<'_, MemoryStore>| {
+            session
+                .update_attributes(InodeId(2), AttributesRevisionNo(base), attributes)
+                .await
+        }
     };
 
-    build_commit_plan(&request(0), 4_200, &context)
+    build_commit_plan(4_200, &context, update(0))
         .await
         .expect("a first write states revision zero");
-    let error = build_commit_plan(&request(1), 4_200, &context)
+    let error = build_commit_plan(4_200, &context, update(1))
         .await
         .expect_err("nothing has written revision 1 yet");
     assert_matches!(
@@ -352,15 +361,15 @@ async fn a_first_attribute_write_states_revision_zero() {
 async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, CommitSeq(0));
-    let request = planned(vec![CommitOperation::UpdateAttributes {
-        inode_id: InodeId(9),
-        base_attributes_revision_no: AttributesRevisionNo(0),
-        attributes: test_attributes(&[("owner", "ada")]),
-    }]);
+    let attributes = test_attributes(&[("owner", "ada")]);
 
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("the inode does not exist");
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .update_attributes(InodeId(9), AttributesRevisionNo(0), &attributes)
+            .await
+    })
+    .await
+    .expect_err("the inode does not exist");
     assert_matches!(
         error,
         CommitValidationError::InodeMissing {
@@ -384,16 +393,15 @@ async fn stale_revision_precondition_is_rejected() {
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
-    let request = planned(vec![CommitOperation::ReplaceFile {
-        inode_id: InodeId(3),
-        base_revision_no: RevisionNo(1),
-        content_ref: content_ref("content-3"),
-        append_offset: None,
-    }]);
+    let replacement = content_ref("content-3");
 
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("stale revision");
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .replace_file(InodeId(3), RevisionNo(1), &replacement, None)
+            .await
+    })
+    .await
+    .expect_err("stale revision");
     assert_matches!(
         error,
         CommitValidationError::BaseRevisionMismatch {
@@ -413,16 +421,20 @@ async fn a_create_for_a_bound_name_is_rejected() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, CommitSeq(1));
-    let request = planned(vec![CommitOperation::Create {
-        child_inode_id: InodeId(3),
-        parent_inode_id: ROOT_INODE_ID,
-        display_name: test_display_name("docs"),
-        child: NewChild::Directory,
-    }]);
+    let display_name = test_display_name("docs");
 
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("the name is already bound");
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .create(
+                InodeId(3),
+                ROOT_INODE_ID,
+                &display_name,
+                NewChild::Directory,
+            )
+            .await
+    })
+    .await
+    .expect_err("the name is already bound");
     assert_matches!(
         error,
         CommitValidationError::NameTaken {
@@ -457,23 +469,28 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
             delta_index: 1,
         },
     };
-    let reused_inode = CommitOperation::Create {
-        child_inode_id: InodeId(3),
-        parent_inode_id: ROOT_INODE_ID,
-        display_name: test_display_name("copy.txt"),
-        child: NewChild::File(content_ref("content-2")),
-    };
-    let unbinds_another_child = CommitOperation::Rename {
-        inode_id: InodeId(3),
-        source_binding: docs_binding,
-        new_parent_inode_id: ROOT_INODE_ID,
-        new_display_name: test_display_name("moved.txt"),
-    };
-
-    for op in [reused_inode, unbinds_another_child] {
-        let error = validate_planned_ops(&[op], 4_200, &context)
+    let copy_name = test_display_name("copy.txt");
+    let moved_name = test_display_name("moved.txt");
+    let reused_inode = validate_steps(4_200, &context, async |session| {
+        session
+            .create(
+                InodeId(3),
+                ROOT_INODE_ID,
+                &copy_name,
+                NewChild::File(content_ref("content-2")),
+            )
             .await
-            .expect_err("inode 3 already has a parent");
+    })
+    .await;
+    let unbinds_another_child = validate_steps(4_200, &context, async |session| {
+        session
+            .rename(InodeId(3), &docs_binding, ROOT_INODE_ID, &moved_name)
+            .await
+    })
+    .await;
+
+    for result in [reused_inode, unbinds_another_child] {
+        let error = result.expect_err("inode 3 already has a parent");
         assert_matches!(error, CoreError::NamespaceCorrupt(_));
         assert_eq!(
             error.to_string(),
@@ -496,25 +513,25 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, CommitSeq(1));
-    let request = vec![CommitOperation::Rename {
-        source_binding: ResolvedBinding {
-            parent_inode_id: ROOT_INODE_ID,
-            name_key: NameKey::parse("missing.txt").expect("valid name key"),
-            display_name: test_display_name("missing.txt"),
-            child_inode_id: InodeId(9),
-            bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: CommitSeq(1),
-                delta_index: 0,
-            },
+    let source_binding = ResolvedBinding {
+        parent_inode_id: ROOT_INODE_ID,
+        name_key: NameKey::parse("missing.txt").expect("valid name key"),
+        display_name: test_display_name("missing.txt"),
+        child_inode_id: InodeId(9),
+        bind_position: loonfs_types::format::manifest::DeltaPosition {
+            seq: CommitSeq(1),
+            delta_index: 0,
         },
-        inode_id: InodeId(2),
-        new_parent_inode_id: ROOT_INODE_ID,
-        new_display_name: test_display_name("renamed"),
-    }];
+    };
+    let renamed = test_display_name("renamed");
 
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("the observed binding is gone");
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .rename(InodeId(2), &source_binding, ROOT_INODE_ID, &renamed)
+            .await
+    })
+    .await
+    .expect_err("the observed binding is gone");
     assert_matches!(
         error,
         CommitValidationError::BindingPreconditionMissing {
@@ -538,17 +555,19 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
         wal_tombstone(0, InodeId(2)),
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
+    let new_name = test_display_name("new.txt");
+    let replacement = content_ref("content-2");
 
-    let create_error = build_commit_plan(
-        &planned(vec![CommitOperation::Create {
-            child_inode_id: InodeId(4),
-            parent_inode_id: InodeId(2),
-            display_name: test_display_name("new.txt"),
-            child: NewChild::File(content_ref("content-2")),
-        }]),
-        4_200,
-        &context,
-    )
+    let create_error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .create(
+                InodeId(4),
+                InodeId(2),
+                &new_name,
+                NewChild::File(content_ref("content-2")),
+            )
+            .await
+    })
     .await
     .expect_err("create under tombstone");
     assert_matches!(
@@ -564,16 +583,11 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
         ErrorCode::NamespaceCorrupt
     );
 
-    let replace_error = build_commit_plan(
-        &planned(vec![CommitOperation::ReplaceFile {
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-2"),
-            append_offset: None,
-        }]),
-        4_200,
-        &context,
-    )
+    let replace_error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .replace_file(InodeId(3), RevisionNo(1), &replacement, None)
+            .await
+    })
     .await
     .expect_err("replace under tombstone");
     assert_matches!(
@@ -599,15 +613,13 @@ async fn restore_revision_validation_rejects_missing_inode() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, CommitSeq(1));
-    let request = planned(vec![CommitOperation::RestoreRevision {
-        inode_id: InodeId(99),
-        source_revision_no: RevisionNo(1),
-        base_revision_no: RevisionNo(1),
-    }]);
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("restore missing inode");
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .restore_revision(InodeId(99), RevisionNo(1), RevisionNo(1))
+            .await
+    })
+    .await
+    .expect_err("restore missing inode");
     assert_matches!(
         error,
         CommitValidationError::InodeMissing {
@@ -626,15 +638,13 @@ async fn restore_revision_validation_rejects_non_file_target() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, CommitSeq(1));
-    let request = planned(vec![CommitOperation::RestoreRevision {
-        inode_id: InodeId(2),
-        source_revision_no: RevisionNo(1),
-        base_revision_no: RevisionNo(1),
-    }]);
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("restore non-file");
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .restore_revision(InodeId(2), RevisionNo(1), RevisionNo(1))
+            .await
+    })
+    .await
+    .expect_err("restore non-file");
     assert_matches!(
         error,
         CommitValidationError::InodeWrongKind {
@@ -661,15 +671,11 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
 
-    let stale_base = build_commit_plan(
-        &planned(vec![CommitOperation::RestoreRevision {
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(1),
-        }]),
-        4_200,
-        &context,
-    )
+    let stale_base = build_commit_plan(4_200, &context, async |session| {
+        session
+            .restore_revision(InodeId(3), RevisionNo(1), RevisionNo(1))
+            .await
+    })
     .await
     .expect_err("restore stale base");
     assert_matches!(
@@ -688,15 +694,11 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         )
     );
 
-    let missing_source = build_commit_plan(
-        &planned(vec![CommitOperation::RestoreRevision {
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(99),
-            base_revision_no: RevisionNo(2),
-        }]),
-        4_200,
-        &context,
-    )
+    let missing_source = build_commit_plan(4_200, &context, async |session| {
+        session
+            .restore_revision(InodeId(3), RevisionNo(99), RevisionNo(2))
+            .await
+    })
     .await
     .expect_err("restore missing source");
     assert_matches!(
@@ -725,22 +727,16 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     // The restore must resolve to the very object the replace attached, so
     // the expectation is that reference itself.
     let expected = content_ref("content-2");
-    let request = planned(vec![
-        CommitOperation::ReplaceFile {
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: expected.clone(),
-            append_offset: None,
-        },
-        CommitOperation::RestoreRevision {
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(2),
-            base_revision_no: RevisionNo(2),
-        },
-    ]);
-    let plan = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect("replace then restore in same request should validate");
+    let plan = build_commit_plan(4_200, &context, async |session| {
+        session
+            .replace_file(InodeId(3), RevisionNo(1), &expected, None)
+            .await?;
+        session
+            .restore_revision(InodeId(3), RevisionNo(2), RevisionNo(2))
+            .await
+    })
+    .await
+    .expect("replace then restore in same request should validate");
     assert_matches!(
         &plan.deltas[1].delta,
         WalDelta::AppendFileRevision {
@@ -768,21 +764,16 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
 
-    let request = planned(vec![
-        CommitOperation::RestoreRevision {
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(2),
-        },
-        CommitOperation::RestoreRevision {
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(3),
-            base_revision_no: RevisionNo(3),
-        },
-    ]);
-    let plan = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect("restore then restore in same request should validate");
+    let plan = build_commit_plan(4_200, &context, async |session| {
+        session
+            .restore_revision(InodeId(3), RevisionNo(1), RevisionNo(2))
+            .await?;
+        session
+            .restore_revision(InodeId(3), RevisionNo(3), RevisionNo(3))
+            .await
+    })
+    .await
+    .expect("restore then restore in same request should validate");
     assert_matches!(
         &plan.deltas[0].delta,
         WalDelta::AppendFileRevision {
@@ -814,15 +805,11 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
 
-    let error = build_commit_plan(
-        &planned(vec![CommitOperation::RestoreRevision {
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(1),
-        }]),
-        4_200,
-        &context,
-    )
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .restore_revision(InodeId(3), RevisionNo(1), RevisionNo(1))
+            .await
+    })
     .await
     .expect_err("restore under a covering tombstone");
     assert_matches!(
@@ -860,17 +847,19 @@ async fn create_and_replace_under_a_disconnected_ancestry_report_a_missing_inode
         unbind_docs,
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
+    let new_name = test_display_name("new.txt");
+    let replacement = content_ref("content-2");
 
-    let create_error = build_commit_plan(
-        &planned(vec![CommitOperation::Create {
-            child_inode_id: InodeId(4),
-            parent_inode_id: InodeId(2),
-            display_name: test_display_name("new.txt"),
-            child: NewChild::File(content_ref("content-2")),
-        }]),
-        4_200,
-        &context,
-    )
+    let create_error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .create(
+                InodeId(4),
+                InodeId(2),
+                &new_name,
+                NewChild::File(content_ref("content-2")),
+            )
+            .await
+    })
     .await
     .expect_err("create under a disconnected directory");
     assert_matches!(
@@ -881,16 +870,11 @@ async fn create_and_replace_under_a_disconnected_ancestry_report_a_missing_inode
         }
     );
 
-    let replace_error = build_commit_plan(
-        &planned(vec![CommitOperation::ReplaceFile {
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-2"),
-            append_offset: None,
-        }]),
-        4_200,
-        &context,
-    )
+    let replace_error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .replace_file(InodeId(3), RevisionNo(1), &replacement, None)
+            .await
+    })
     .await
     .expect_err("replace below a disconnected directory");
     assert_matches!(
@@ -938,15 +922,17 @@ async fn restore_revision_overflow_is_rejected() {
             &deltas,
         );
     let context = validation_context(&metadata_state, CommitSeq(1));
-    let request = planned(vec![CommitOperation::RestoreRevision {
-        inode_id: InodeId(2),
-        source_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
-        base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
-    }]);
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("restore overflow");
+    let error = build_commit_plan(4_200, &context, async |session| {
+        session
+            .restore_revision(
+                InodeId(2),
+                RevisionNo(MAX_PUBLIC_INTEGER),
+                RevisionNo(MAX_PUBLIC_INTEGER),
+            )
+            .await
+    })
+    .await
+    .expect_err("restore overflow");
     assert_matches!(
         error,
         CommitValidationError::RevisionOverflow {
@@ -983,11 +969,19 @@ async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_root
         delta_index,
     };
     let deletion = position(2, 1);
-    let restore_deleted_at = |seq| CommitOperation::RestoreDeleted {
-        inode_id: InodeId(2),
-        deletion_seq: CommitSeq(seq),
-        parent_inode_id: ROOT_INODE_ID,
-        display_name: test_display_name("docs"),
+    let docs = test_display_name("docs");
+    // Restores inode 2 as `/docs` once for each deletion sequence in
+    // `deletion_seqs`, in order.
+    let restore_deleted_at = |deletion_seqs: Vec<u64>| {
+        let docs = &docs;
+        async move |session: &mut CommitValidationSession<'_, MemoryStore>| {
+            for seq in deletion_seqs {
+                session
+                    .restore_deleted(InodeId(2), CommitSeq(seq), ROOT_INODE_ID, docs)
+                    .await?;
+            }
+            Ok(())
+        }
     };
     // A restore at sequence 3: the revoke, then the binding at delta 1.
     let mut restored = vec![WalDelta::RevokeSubtreeTombstone {
@@ -1007,19 +1001,19 @@ async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_root
         (
             "restored twice in one commit",
             Vec::new(),
-            vec![restore_deleted_at(2), restore_deleted_at(2)],
+            vec![2, 2],
             not_deleted.clone(),
         ),
         (
             "already restored",
             vec![restored.clone()],
-            vec![restore_deleted_at(2)],
+            vec![2],
             not_deleted,
         ),
         (
             "deleted again since",
             vec![restored, wal_delete_docs(position(3, 1))],
-            vec![restore_deleted_at(2)],
+            vec![2],
             CommitValidationError::RestoreDeletedSequenceMismatch {
                 inode_id: InodeId(2),
                 requested_seq: CommitSeq(2),
@@ -1035,12 +1029,12 @@ async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_root
         history.extend(later);
         history
     };
-    for (name, later, ops, expected) in cases {
+    for (name, later, deletion_seqs, expected) in cases {
         let history = history(later);
         let metadata_state = metadata_state_after(&history);
         let head_seq = CommitSeq(u64::try_from(history.len()).expect("seq"));
         let context = validation_context(&metadata_state, head_seq);
-        let error = build_commit_plan(&ops, 4_200, &context)
+        let error = build_commit_plan(4_200, &context, restore_deleted_at(deletion_seqs))
             .await
             .expect_err(name);
         assert_eq!(error, expected, "{name}");
@@ -1053,7 +1047,7 @@ async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_root
 
     let metadata_state = metadata_state_after(&history(Vec::new()));
     let context = validation_context(&metadata_state, CommitSeq(2));
-    let plan = build_commit_plan(&[restore_deleted_at(2)], 4_200, &context)
+    let plan = build_commit_plan(4_200, &context, restore_deleted_at(vec![2]))
         .await
         .expect("restore the latest deletion");
     assert_matches!(

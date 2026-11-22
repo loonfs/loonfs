@@ -5,7 +5,7 @@
 use super::preconditions::ensure_expected_inode;
 use crate::authorize::{Absence, Authorizer};
 use crate::binding_version;
-use crate::commit::{AppendedContent, CommitOperation, ResolvedBinding};
+use crate::commit::ResolvedBinding;
 use crate::error::{CoreError, Result};
 
 use crate::metadata::{MetadataView, ResolvedVisiblePath, RevisionRecord, VisiblePathError};
@@ -23,22 +23,6 @@ use std::collections::HashMap;
 
 pub(super) fn is_missing_visible_path(error: &CoreError) -> bool {
     matches!(error, CoreError::PathNotFound(_))
-}
-
-/// One filesystem operation compiled into the commit operations it needs,
-/// with the bytes it appends when it is an append.
-pub(super) struct CompiledFilesystemOperation {
-    pub(super) ops: Vec<CommitOperation>,
-    pub(super) appended: Option<AppendedContent>,
-}
-
-impl CompiledFilesystemOperation {
-    pub(super) fn new(ops: Vec<CommitOperation>) -> Self {
-        Self {
-            ops,
-            appended: None,
-        }
-    }
 }
 
 /// What one operation plans against: the namespace, the request's

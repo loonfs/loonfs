@@ -6,7 +6,7 @@ use super::planner::{CreatedInodeIds, OperationPlanningSession};
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, MergeIntent};
-use crate::commit::{AppendedContent, CommitFingerprint, CommitPlan, CommitValidationSession};
+use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationSession};
 use crate::error::{CoreError, Result};
 use crate::merge::merge_start;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
@@ -168,10 +168,10 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         }
     }
 
-    /// Plans each operation against the view, validates its compiled
-    /// operations at once, and applies the accepted effects, so later
-    /// operations observe earlier ones. The first failure aborts the request
-    /// and attaches the failing operation's index.
+    /// Plans each operation against the commit's state, whose steps write
+    /// the operation's rows at once, so later operations observe earlier
+    /// ones. The first failure aborts the request and attaches the failing
+    /// operation's index.
     ///
     /// The head is the validated source of the namespace and writer epoch:
     /// `load_publish_metadata_view` fences on epoch equality, and the batch
@@ -198,17 +198,14 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         let mut validation = CommitValidationSession::new(
             base_view,
             &self.accepted_rows,
+            &head.namespace_id,
+            candidate,
             committed_seq,
-            &request.commit_id,
-            &request.actor_id,
             self.committed_at_ms,
         );
-        let mut deltas = Vec::new();
         let mut operation_indexes = Vec::new();
-        let mut appended: Vec<AppendedContent> = Vec::new();
         let mut pieces = CommitPieces::new(self);
         let mut next_create_no = NonZeroU32::MIN;
-        let proofs = candidate.proofs_by_reference();
         for value in candidate.inline_content() {
             pieces.insert_piece(
                 value.content_ref(),
@@ -239,14 +236,16 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 },
             };
             let mut operation_session = OperationPlanningSession {
-                view: self.planning_view(authorizer, validation.view()),
-                pieces: &pieces,
+                namespace_id: &head.namespace_id,
+                authorizer,
+                validation: &mut validation,
+                pieces: &mut pieces,
                 content_writes: self.content_writes,
                 committed_seq,
                 created_inode_ids,
                 temporary_move,
             };
-            let compiled = operation_session
+            operation_session
                 .plan(operation)
                 .await
                 .map_err(|error| error.at_operation(index))?;
@@ -260,28 +259,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 ))
                 .at_operation(index));
             }
-            if let Some(value) = &compiled.appended {
-                for piece in &value.pieces {
-                    pieces.insert_piece(&value.content_ref, piece, committed_seq);
-                }
-            }
-            appended.extend(compiled.appended);
-            let operation_deltas = validation
-                .validate(&compiled.ops, |content_ref| {
-                    if let Some(value) = appended
-                        .iter()
-                        .find(|value| value.content_ref == *content_ref)
-                    {
-                        return value.layout.clone();
-                    }
-                    proofs
-                        .get(content_ref)
-                        .and_then(|proof| proof.revision_layout(&head.namespace_id))
-                })
-                .await
-                .map_err(|error| error.at_operation(index))?;
-            operation_indexes.extend(std::iter::repeat_n(index, operation_deltas.len()));
-            deltas.extend(operation_deltas);
+            operation_indexes.resize(validation.deltas().len(), index);
         }
 
         let mut plan = CommitPlan {
@@ -295,8 +273,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             apply_after_seq: head.seq,
             assigned_seq: committed_seq,
             committed_at_ms: self.committed_at_ms,
-            deltas,
-            appended: appended
+            deltas: validation.take_deltas(),
+            appended: validation
+                .take_appended()
                 .into_iter()
                 .flat_map(|value| value.pieces)
                 .collect(),

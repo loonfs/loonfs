@@ -1,7 +1,7 @@
-//! Commit operation validation.
+//! The steps that check and write a commit's rows.
 //!
-//! [`session`] layers rows accepted earlier in the commit over the loaded
-//! metadata. [`operations`] validates each operation the planner compiles,
+//! [`session`] layers the rows that the commit's earlier steps wrote over the
+//! loaded metadata. [`operations`] defines each step that a planner calls,
 //! through the state checks in [`checks`].
 
 mod checks;
@@ -12,4 +12,5 @@ mod session;
 mod tests;
 
 pub use error::{CommitOperand, CommitValidationError};
+pub(crate) use operations::NewChild;
 pub(crate) use session::CommitValidationSession;
