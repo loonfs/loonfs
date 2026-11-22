@@ -1,6 +1,6 @@
-//! [`CommitValidationSession`]: the state of one commit that its steps check
-//! and write, over the loaded metadata and the rows that the commit's earlier
-//! steps would persist.
+//! [`CommitSession`]: the state of one commit that its writes check and
+//! change, over the loaded metadata and the rows that the commit's earlier
+//! writes would persist.
 
 use super::checks::CommitNumbering;
 use crate::commit::engine::CommitCandidate;
@@ -12,11 +12,11 @@ use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
 use loonfs_types::{ActorId, CommitId, CommitSeq, ContentLayout, ContentRef, NamespaceId};
 use std::collections::HashMap;
 
-/// One commit's validation: the loaded [`MetadataView`], the rows the
-/// batch's earlier commits and this commit's earlier steps would persist,
-/// the commit's numbering and header, the deltas that its steps wrote, and
-/// the content that it appends.
-pub(crate) struct CommitValidationSession<'a, S: ObjectStore + ?Sized> {
+/// One commit's state: the loaded [`MetadataView`], the rows the batch's
+/// earlier commits and this commit's earlier writes would persist, the
+/// commit's numbering and header, the deltas that its writes built, and the
+/// content that it appends.
+pub(crate) struct CommitSession<'a, S: ObjectStore + ?Sized> {
     base_view: MetadataView<'a, 'a, S>,
     batch_accepted: &'a MetadataState,
     pub(super) committed_seq: CommitSeq,
@@ -31,7 +31,7 @@ pub(crate) struct CommitValidationSession<'a, S: ObjectStore + ?Sized> {
     deltas: Vec<WalCommitDelta>,
 }
 
-impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
+impl<'a, S: ObjectStore + ?Sized> CommitSession<'a, S> {
     pub(crate) fn new(
         base_view: MetadataView<'a, 'a, S>,
         batch_accepted: &'a MetadataState,
@@ -58,15 +58,15 @@ impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
     }
 
     /// The metadata the next read resolves against: the loaded publish view
-    /// plus every row that this commit's earlier steps would persist. The
+    /// plus every row that this commit's earlier writes would persist. The
     /// planner reads through this, so an operation resolves paths against
-    /// what the steps before it wrote.
+    /// what the writes before it built.
     pub(crate) fn view(&self) -> MetadataView<'_, 'a, S> {
         self.base_view
             .with_overlay(Some(&self.overlay), self.batch_accepted, self.committed_seq)
     }
 
-    /// The deltas that the commit's steps have written so far, in order.
+    /// The deltas that the commit's writes have built so far, in order.
     pub(crate) fn deltas(&self) -> &[WalCommitDelta] {
         &self.deltas
     }
@@ -87,12 +87,13 @@ impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
         std::mem::take(&mut self.appended)
     }
 
-    /// Records the deltas of the step that `op_index` identifies. It sets
-    /// the layout of each revision that the step builds, applies the deltas
-    /// to the overlay so that later reads see them, and records them with the
-    /// index. Each step reserves its index before it checks anything, so an
-    /// index overflow is reported before the step's own errors.
-    pub(super) fn record_step(&mut self, op_index: u32, mut deltas: Vec<WalDelta>) {
+    /// Records the deltas of the operation that `op_index` identifies. It
+    /// sets the layout of each revision that the deltas write, applies the
+    /// deltas to the overlay so that later reads see them, and records them
+    /// with the index. Each write reserves its index before it checks
+    /// anything, so an index overflow is reported before the write's own
+    /// errors.
+    pub(super) fn record_operation(&mut self, op_index: u32, mut deltas: Vec<WalDelta>) {
         for delta in &mut deltas {
             if let WalDelta::AppendFileRevision {
                 content_ref,

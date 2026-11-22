@@ -1,9 +1,8 @@
-//! The rules that the steps of a commit check against the commit's state,
+//! The rules that the writes of a commit check against the commit's state,
 //! and the numbering of the commit's operations and deltas.
 
-use super::super::CommitValidationError;
-use super::error::CommitOperand;
-use super::session::CommitValidationSession;
+use super::commit_session::CommitSession;
+use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::{DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
@@ -39,7 +38,7 @@ impl CommitNumbering {
     }
 }
 
-impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
+impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// Ensures that `deletion`, the root's deletion in the trash, is the
     /// deletion that `deletion_seq` identifies, that `deletion_seq` is above
     /// the retention floor of the writer's basis, and that an earlier commit

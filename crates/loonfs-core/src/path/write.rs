@@ -1,6 +1,6 @@
 //! Path-oriented writes: the mutation request language, the planner that
-//! compiles it into one commit's operations, and the publish planning
-//! session.
+//! checks each operation and writes its rows into one commit, and the
+//! publish planning session.
 
 mod intent;
 mod plan_access;

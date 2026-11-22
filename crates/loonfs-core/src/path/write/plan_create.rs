@@ -36,7 +36,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         let destination = self.view().resolve_destination(destination).await?;
         let name = self.view().ensure_vacant_destination(&destination).await?;
         let child_inode_id = self.next_inode_id()?;
-        self.validation.create(child_inode_id, &name, child).await
+        self.commit.create(child_inode_id, &name, child).await
     }
 
     /// Plans a new directory at `absolute_path`, and with `parents`, the
@@ -63,7 +63,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         self.create_parent_directories(parents).await?;
         let name = self.available_path(absolute_path).await?;
         let child_inode_id = self.next_inode_id()?;
-        self.validation
+        self.commit
             .create(child_inode_id, &name, NewChild::Directory)
             .await
     }
@@ -121,7 +121,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         let name = self
             .resolve_restore_deleted_destination(inode_id, saved_parent, destination)
             .await?;
-        self.validation
+        self.commit
             .restore_deleted(deletion, deletion_seq, &name)
             .await
     }
@@ -163,9 +163,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         let actual = self.view().current_revision_no(inode_id).await?;
         expected.ensure_revision(inode_id, actual)?;
         let binding = self.view().source_binding(target.resolved()).await?;
-        self.validation
-            .replace_file(&binding, &content_ref, None)
-            .await
+        self.commit.replace_file(&binding, &content_ref, None).await
     }
 
     pub(super) async fn plan_put_file_content_ref(
@@ -230,9 +228,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     expected.ensure_revision(existing.inode_id, Some(revision.revision_no))?;
                 }
                 let binding = self.view().source_binding(&existing).await?;
-                self.validation
-                    .replace_file(&binding, &content_ref, None)
-                    .await
+                self.commit.replace_file(&binding, &content_ref, None).await
             }
             Err(error) if is_missing_visible_path(&error) => {
                 let parents = self.resolve_parent_directories(absolute_path).await?;
@@ -249,7 +245,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 self.create_parent_directories(parents).await?;
                 let name = self.available_path(absolute_path).await?;
                 let child_inode_id = self.next_inode_id()?;
-                self.validation
+                self.commit
                     .create(child_inode_id, &name, NewChild::File(content_ref))
                     .await
             }
@@ -331,7 +327,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 .await?
                 .available_name(None)?;
             let child_inode_id = self.next_inode_id()?;
-            self.validation
+            self.commit
                 .create(child_inode_id, &name, NewChild::Directory)
                 .await?;
             parent_inode_id = child_inode_id;

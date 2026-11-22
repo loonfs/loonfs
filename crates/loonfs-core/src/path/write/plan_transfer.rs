@@ -129,7 +129,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 self.ensure_expected_destination_revision(existing, expected_destination)
                     .await?;
                 let existing_binding = self.view().source_binding(existing).await?;
-                self.validation.delete(&existing_binding).await?;
+                self.commit.delete(&existing_binding).await?;
                 // The delete unbinds the file, so the destination is vacant
                 // in the state that the delete left.
                 self.view()
@@ -166,7 +166,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 available
             }
         };
-        self.validation
+        self.commit
             .rename(&current_source_binding, &available)
             .await
     }
@@ -253,7 +253,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                         .ensure_revision(existing.inode_id, Some(existing_revision.revision_no))?;
                 }
                 let binding = self.view().source_binding(existing).await?;
-                self.validation
+                self.commit
                     .replace_file(&binding, &revision.content_ref, None)
                     .await
             }
@@ -262,7 +262,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     return Err(CoreError::PathNotFound(path.clone()));
                 }
                 let child_inode_id = self.next_inode_id()?;
-                self.validation
+                self.commit
                     .create(
                         child_inode_id,
                         &available,
@@ -293,7 +293,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .view()
                     .resolve_target(Target::Inode(child_inode_id), AccessRight::Write.into())
                     .await?;
-                self.validation
+                self.commit
                     .update_attributes(&child, &source_attributes)
                     .await
             }

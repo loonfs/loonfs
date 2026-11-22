@@ -1,5 +1,5 @@
 //! Commit fingerprinting and the planning of one filesystem operation, which
-//! calls the steps that write its rows.
+//! calls the commit's writes for its rows.
 
 use super::intent::{CommitIntent, FilesystemOperation};
 use super::planned_pieces::CommitPieces;
@@ -10,7 +10,7 @@ use super::preconditions::{
 use super::publish_path_planning::{Destination, PlanningView, Target};
 use crate::authorize::Authorizer;
 use crate::commit::engine::TemporaryMove;
-use crate::commit::{CommitFingerprint, CommitValidationSession, NewChild};
+use crate::commit::{CommitFingerprint, CommitSession, NewChild};
 use crate::error::{CoreError, Result};
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
@@ -59,13 +59,13 @@ pub(crate) fn merge_fingerprint(
 }
 
 /// The planning of one operation: the namespace, the request's authorizer,
-/// the commit's state, which the operation's steps write, the commit's
+/// the commit's state, which the operation's writes change, the commit's
 /// pieces, where content writes go, the commit's sequence, and where the IDs
 /// of the inodes it creates come from.
 pub(super) struct OperationPlanningSession<'p, 'c, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: &'p NamespaceId,
     pub(super) authorizer: Authorizer<'p>,
-    pub(super) validation: &'p mut CommitValidationSession<'c, S>,
+    pub(super) commit: &'p mut CommitSession<'c, S>,
     pub(super) pieces: &'p mut CommitPieces<'c, S>,
     pub(super) content_writes: ContentWrites<'p, S>,
     /// The sequence that the commit is assigned.
@@ -89,12 +89,12 @@ pub(super) enum CreatedInodeIds<'p> {
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     /// Returns what the operation reads and authorizes against: the
-    /// metadata as the commit's steps so far have left it.
+    /// metadata as the commit's writes so far have left it.
     pub(super) fn view(&self) -> PlanningView<'_, S> {
         PlanningView {
             namespace_id: self.namespace_id,
             authorizer: self.authorizer,
-            metadata: self.validation.view(),
+            metadata: self.commit.view(),
         }
     }
 
@@ -123,7 +123,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     }
 
     /// Plans `operation`, mapping its path or inode address onto the one
-    /// planner for its kind, which calls the steps that write its rows.
+    /// planner for its kind, which calls the commit's writes for its rows.
     pub(super) async fn plan(&mut self, operation: &FilesystemOperation) -> Result<()> {
         use FilesystemOperation as Op;
         match operation {

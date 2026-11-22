@@ -53,7 +53,7 @@ impl MetadataState {
     ///
     /// This is the only WAL-delta to metadata-row mapping in the crate:
     /// durable replay ([`Self::apply_committed_wal_record_mut`]), the
-    /// commit validation overlay (`CommitValidationSession::validate`), and
+    /// overlay of a commit's earlier writes (`CommitSession`), and
     /// a publish batch's accepted rows (`PublishPlanningSession`) all append
     /// rows through it, so the effects a batch validates against cannot
     /// diverge from what replay later persists.

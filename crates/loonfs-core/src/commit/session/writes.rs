@@ -1,10 +1,10 @@
-//! The steps of a commit: the checks that each step runs and the WAL deltas
-//! that it writes.
+//! The writes of one commit: each write reserves its operation index,
+//! checks the rules about its own rows, and records the WAL deltas that it
+//! builds.
 
-use super::super::CommitValidationError;
-use super::error::CommitOperand;
-use super::session::CommitValidationSession;
-use crate::commit::validate::checks::CommitNumbering;
+use super::checks::CommitNumbering;
+use super::commit_session::CommitSession;
+use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::Result;
 use crate::metadata::{DirentryBindingRecord, InodeRecord, SubtreeTombstoneRecord};
 use crate::path::write::{AvailableName, ResolvedBinding, ResolvedTarget};
@@ -25,7 +25,7 @@ pub(crate) enum NewChild {
     File(ContentRef),
 }
 
-impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
+impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// Creates a directory or file at `name`.
     pub(crate) async fn create(
         &mut self,
@@ -34,125 +34,9 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         child: NewChild,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self.validate_create(child_inode_id, name, child).await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    /// Appends a new revision to the file that `binding` binds, after its
-    /// current one.
-    ///
-    /// `append_offset` is where an append's bytes begin, which is the current
-    /// revision's size. It's `None` for a put or a copy.
-    pub(crate) async fn replace_file(
-        &mut self,
-        binding: &ResolvedBinding,
-        content_ref: &ContentRef,
-        append_offset: Option<u64>,
-    ) -> Result<()> {
-        let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self
-            .validate_replace_file(binding.child_inode_id(), content_ref, append_offset)
-            .await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    /// Restores an earlier revision of the file that `binding` binds as a new
-    /// current revision.
-    pub(crate) async fn restore_revision(
-        &mut self,
-        binding: &ResolvedBinding,
-        source_revision_no: RevisionNo,
-    ) -> Result<()> {
-        let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self
-            .validate_restore_revision(binding.child_inode_id(), source_revision_no)
-            .await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    /// Deletes the file or directory subtree that `binding` binds.
-    pub(crate) async fn delete(&mut self, binding: &ResolvedBinding) -> Result<()> {
-        let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self.validate_delete(binding).await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    /// Rebinds the inode that `source_binding` binds at `destination`.
-    pub(crate) async fn rename(
-        &mut self,
-        source_binding: &ResolvedBinding,
-        destination: &AvailableName,
-    ) -> Result<()> {
-        let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self.validate_rename(source_binding, destination).await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    /// Recovers a deleted file or subtree: revokes `deletion`, the root's
-    /// deletion in the trash, which the request identified by `deletion_seq`
-    /// (the delete's committed sequence, which the delete and the change feed
-    /// report), and binds the inode at `destination`. Scoping recovery to
-    /// the observed position keeps a stale request from cancelling a later
-    /// deletion of the same inode.
-    pub(crate) async fn restore_deleted(
-        &mut self,
-        deletion: &SubtreeTombstoneRecord,
-        deletion_seq: CommitSeq,
-        destination: &AvailableName,
-    ) -> Result<()> {
-        let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self
-            .validate_restore_deleted(deletion, deletion_seq, destination)
-            .await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    /// Replaces the attributes of `target` with `attributes`, the complete
-    /// map after the update.
-    pub(crate) async fn update_attributes(
-        &mut self,
-        target: &ResolvedTarget<'_>,
-        attributes: &Attributes,
-    ) -> Result<()> {
-        let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self
-            .validate_update_attributes(target.inode_id(), attributes)
-            .await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    /// Replaces the access row of `target` with `boundary` and `grants`.
-    pub(crate) async fn update_access(
-        &mut self,
-        target: &ResolvedTarget<'_>,
-        boundary: bool,
-        grants: &AccessGrants,
-    ) -> Result<()> {
-        let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self
-            .validate_update_access(target.inode_id(), boundary, grants)
-            .await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    async fn validate_create(
-        &mut self,
-        child_inode_id: InodeId,
-        name: &AvailableName,
-        child: NewChild,
-    ) -> Result<Vec<WalDelta>> {
-        let parent_inode_id = name.parent_inode_id();
-        let display_name = name.display_name();
-        let name_key = name.name_key();
         self.ensure_child_unbound(child_inode_id, None).await?;
+        let parent_inode_id = name.parent_inode_id();
+        let name_key = name.name_key();
         let (inode_kind, revision) = match &child {
             NewChild::Directory => (InodeKind::Directory, None),
             NewChild::File(content_ref) => (
@@ -180,7 +64,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 delta_index: bind_position.delta_index,
                 parent_inode_id,
                 name_key: name_key.clone(),
-                display_name: display_name.clone(),
+                display_name: name.display_name().clone(),
                 child_inode_id,
                 child_kind: inode_kind,
                 child_created_by: self.actor_id.clone(),
@@ -194,7 +78,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 inode_id: child_inode_id,
                 parent_inode_id,
                 name_key,
-                display_name: display_name.clone(),
+                display_name: name.display_name().clone(),
                 bind_position,
                 child_created_by: self.actor_id.clone(),
                 child_created_at_ms: self.committed_at_ms,
@@ -204,34 +88,48 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 append_offset: None,
             });
         }
-        Ok(deltas)
+        self.record_operation(op_index, deltas);
+        Ok(())
     }
 
-    async fn validate_replace_file(
+    /// Appends a new revision to the file that `binding` binds, after its
+    /// current one.
+    ///
+    /// `append_offset` is where an append's bytes begin, which is the current
+    /// revision's size. It's `None` for a put or a copy.
+    pub(crate) async fn replace_file(
         &mut self,
-        inode_id: InodeId,
+        binding: &ResolvedBinding,
         content_ref: &ContentRef,
         append_offset: Option<u64>,
-    ) -> Result<Vec<WalDelta>> {
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let inode_id = binding.child_inode_id();
         let current_revision_no = self.resolve_current_revision_no(inode_id).await?;
         let revision_no = next_revision_no(inode_id, current_revision_no)?;
         let edge = self
             .resolve_current_binding(inode_id, CommitOperand::ReplaceTarget)
             .await?;
-        Ok(vec![revision_delta(
+        let delta = revision_delta(
             &mut self.numbering,
             &edge,
             revision_no,
             content_ref.clone(),
             append_offset,
-        )?])
+        )?;
+        self.record_operation(op_index, vec![delta]);
+        Ok(())
     }
 
-    async fn validate_restore_revision(
+    /// Restores an earlier revision of the file that `binding` binds as a new
+    /// current revision.
+    pub(crate) async fn restore_revision(
         &mut self,
-        inode_id: InodeId,
+        binding: &ResolvedBinding,
         source_revision_no: RevisionNo,
-    ) -> Result<Vec<WalDelta>> {
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let inode_id = binding.child_inode_id();
         let current_revision_no = self.resolve_current_revision_no(inode_id).await?;
         let source_revision = self
             .resolve_restore_source_revision(inode_id, source_revision_no)
@@ -240,16 +138,20 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         let edge = self
             .resolve_current_binding(inode_id, CommitOperand::RestoreTarget)
             .await?;
-        Ok(vec![revision_delta(
+        let delta = revision_delta(
             &mut self.numbering,
             &edge,
             revision_no,
             source_revision.content_ref,
             None,
-        )?])
+        )?;
+        self.record_operation(op_index, vec![delta]);
+        Ok(())
     }
 
-    async fn validate_delete(&mut self, binding: &ResolvedBinding) -> Result<Vec<WalDelta>> {
+    /// Deletes the file or directory subtree that `binding` binds.
+    pub(crate) async fn delete(&mut self, binding: &ResolvedBinding) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
         let inode_id = binding.child_inode_id();
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
             CommitValidationError::InodeMissing {
@@ -257,14 +159,30 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 inode_id,
             },
         )?;
-        delete_deltas(&mut self.numbering, &inode, binding)
+        let deltas = vec![
+            unbind_delta(&mut self.numbering, binding, &inode)?,
+            WalDelta::TombstoneSubtree {
+                delta_index: self.numbering.reserve_delta_index()?,
+                root_inode_id: inode.inode_id,
+                root_kind: inode.inode_kind,
+                deleted_binding: DeletedBinding {
+                    parent_inode_id: binding.parent_inode_id(),
+                    name_key: binding.name_key().clone(),
+                    display_name: binding.display_name().clone(),
+                },
+            },
+        ];
+        self.record_operation(op_index, deltas);
+        Ok(())
     }
 
-    async fn validate_rename(
+    /// Rebinds the inode that `source_binding` binds at `destination`.
+    pub(crate) async fn rename(
         &mut self,
         source_binding: &ResolvedBinding,
         destination: &AvailableName,
-    ) -> Result<Vec<WalDelta>> {
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
         let new_parent_inode_id = destination.parent_inode_id();
         let inode_id = source_binding.child_inode_id();
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
@@ -278,7 +196,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         self.ensure_rename_does_not_cycle(&inode, new_parent_inode_id)
             .await?;
         let revision = self.resolve_revision_summary(&inode).await?;
-        Ok(vec![
+        let deltas = vec![
             unbind_delta(&mut self.numbering, source_binding, &inode)?,
             WalDelta::BindDirentry {
                 delta_index: self.numbering.reserve_delta_index()?,
@@ -291,15 +209,24 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 child_created_at_ms: inode.committed_at_ms,
                 revision,
             },
-        ])
+        ];
+        self.record_operation(op_index, deltas);
+        Ok(())
     }
 
-    async fn validate_restore_deleted(
+    /// Recovers a deleted file or subtree: revokes `deletion`, the root's
+    /// deletion in the trash, which the request identified by `deletion_seq`
+    /// (the delete's committed sequence, which the delete and the change feed
+    /// report), and binds the inode at `destination`. Scoping recovery to
+    /// the observed position keeps a stale request from cancelling a later
+    /// deletion of the same inode.
+    pub(crate) async fn restore_deleted(
         &mut self,
         deletion: &SubtreeTombstoneRecord,
         deletion_seq: CommitSeq,
         destination: &AvailableName,
-    ) -> Result<Vec<WalDelta>> {
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
         let inode_id = deletion.root_inode_id;
         let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
             CommitValidationError::InodeMissing {
@@ -310,7 +237,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         self.ensure_restorable_deletion(deletion, deletion_seq)?;
         self.ensure_child_unbound(inode_id, None).await?;
         let revision = self.resolve_revision_summary(&inode).await?;
-        Ok(vec![
+        let deltas = vec![
             WalDelta::RevokeSubtreeTombstone {
                 delta_index: self.numbering.reserve_delta_index()?,
                 root_inode_id: inode_id,
@@ -327,14 +254,20 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 child_created_at_ms: inode.committed_at_ms,
                 revision,
             },
-        ])
+        ];
+        self.record_operation(op_index, deltas);
+        Ok(())
     }
 
-    async fn validate_update_attributes(
+    /// Replaces the attributes of `target` with `attributes`, the complete
+    /// map after the update.
+    pub(crate) async fn update_attributes(
         &mut self,
-        inode_id: InodeId,
+        target: &ResolvedTarget<'_>,
         attributes: &Attributes,
-    ) -> Result<Vec<WalDelta>> {
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let inode_id = target.inode_id();
         let current_attributes_revision_no = self
             .view()
             .attributes(inode_id)
@@ -342,33 +275,40 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             .attributes_revision_no;
         let attributes_revision_no =
             next_attributes_revision_no(inode_id, current_attributes_revision_no)?;
-        Ok(vec![WalDelta::AppendAttributesRevision {
+        let delta = WalDelta::AppendAttributesRevision {
             delta_index: self.numbering.reserve_delta_index()?,
             inode_id,
             attributes_revision_no,
             attributes: attributes.clone(),
-        }])
+        };
+        self.record_operation(op_index, vec![delta]);
+        Ok(())
     }
 
-    async fn validate_update_access(
+    /// Replaces the access row of `target` with `boundary` and `grants`.
+    pub(crate) async fn update_access(
         &mut self,
-        inode_id: InodeId,
+        target: &ResolvedTarget<'_>,
         boundary: bool,
         grants: &AccessGrants,
-    ) -> Result<Vec<WalDelta>> {
+    ) -> Result<()> {
+        let op_index = self.numbering.reserve_op_index()?;
+        let inode_id = target.inode_id();
         let current_access_revision_no = self
             .view()
             .latest_access_revision(inode_id)
             .await?
             .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
         let access_revision_no = next_access_revision_no(inode_id, current_access_revision_no)?;
-        Ok(vec![WalDelta::AppendAccessRevision {
+        let delta = WalDelta::AppendAccessRevision {
             delta_index: self.numbering.reserve_delta_index()?,
             inode_id,
             access_revision_no,
             boundary,
             grants: grants.clone(),
-        }])
+        };
+        self.record_operation(op_index, vec![delta]);
+        Ok(())
     }
 }
 
@@ -418,59 +358,39 @@ fn unbind_delta(
     })
 }
 
-fn delete_deltas(
-    numbering: &mut CommitNumbering,
-    inode: &InodeRecord,
-    binding: &ResolvedBinding,
-) -> Result<Vec<WalDelta>> {
-    Ok(vec![
-        unbind_delta(numbering, binding, inode)?,
-        WalDelta::TombstoneSubtree {
-            delta_index: numbering.reserve_delta_index()?,
-            root_inode_id: inode.inode_id,
-            root_kind: inode.inode_kind,
-            deleted_binding: DeletedBinding {
-                parent_inode_id: binding.parent_inode_id(),
-                name_key: binding.name_key().clone(),
-                display_name: binding.display_name().clone(),
-            },
-        },
-    ])
-}
-
 fn next_access_revision_no(
     inode_id: InodeId,
-    base_access_revision_no: AccessRevisionNo,
+    current_access_revision_no: AccessRevisionNo,
 ) -> std::result::Result<AccessRevisionNo, CommitValidationError> {
-    next_public_ordinal(base_access_revision_no.0)
+    next_public_ordinal(current_access_revision_no.0)
         .map(AccessRevisionNo)
         .ok_or(CommitValidationError::UpdateAccessRevisionOverflow {
             inode_id,
-            base_access_revision_no,
+            base_access_revision_no: current_access_revision_no,
         })
 }
 
 fn next_revision_no(
     inode_id: InodeId,
-    base_revision_no: RevisionNo,
+    current_revision_no: RevisionNo,
 ) -> std::result::Result<RevisionNo, CommitValidationError> {
-    next_public_ordinal(base_revision_no.0)
+    next_public_ordinal(current_revision_no.0)
         .map(RevisionNo)
         .ok_or(CommitValidationError::RevisionOverflow {
             inode_id,
-            base_revision_no,
+            base_revision_no: current_revision_no,
         })
 }
 
 fn next_attributes_revision_no(
     inode_id: InodeId,
-    base_attributes_revision_no: AttributesRevisionNo,
+    current_attributes_revision_no: AttributesRevisionNo,
 ) -> std::result::Result<AttributesRevisionNo, CommitValidationError> {
-    next_public_ordinal(base_attributes_revision_no.0)
+    next_public_ordinal(current_attributes_revision_no.0)
         .map(AttributesRevisionNo)
         .ok_or(CommitValidationError::UpdateAttributesRevisionOverflow {
             inode_id,
-            base_attributes_revision_no,
+            base_attributes_revision_no: current_attributes_revision_no,
         })
 }
 

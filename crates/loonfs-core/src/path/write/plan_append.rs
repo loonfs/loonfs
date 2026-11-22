@@ -36,9 +36,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 .insert_piece(&appended.content_ref, piece, self.committed_seq);
         }
         let content_ref = appended.content_ref.clone();
-        self.validation.record_appended(appended);
+        self.commit.record_appended(appended);
         let binding = self.view().source_binding(target.resolved()).await?;
-        self.validation
+        self.commit
             .replace_file(
                 &binding,
                 &content_ref,

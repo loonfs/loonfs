@@ -1,4 +1,4 @@
-//! The plan of one commit: its validated deltas and what its WAL record
+//! The plan of one commit: its deltas and what its WAL record
 //! needs for publication.
 
 use super::CommitFingerprint;
@@ -20,9 +20,9 @@ pub(crate) struct AppendedContent {
     pub(crate) pieces: Vec<WalInlineContent>,
 }
 
-/// One planned and validated commit, ready for its WAL record.
+/// One planned commit, ready for its WAL record.
 ///
-/// The request's identity moves in here when validation succeeds, so there
+/// The request's identity moves in here when planning succeeds, so there
 /// is no second copy that would need an equality check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitPlan {

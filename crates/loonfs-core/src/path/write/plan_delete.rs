@@ -45,6 +45,6 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             }
             .into());
         }
-        self.validation.delete(&source_binding).await
+        self.commit.delete(&source_binding).await
     }
 }

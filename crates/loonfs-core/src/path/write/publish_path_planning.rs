@@ -66,7 +66,7 @@ impl<'a> Target<'a> {
 }
 
 /// A target resolved to its visible inode. Only the resolutions in this
-/// module make one, so a step that takes one writes to a visible inode.
+/// module make one, so a write that takes one changes a visible inode.
 pub(crate) struct ResolvedTarget<'a> {
     resolved: ResolvedVisiblePath,
     target: Target<'a>,
@@ -154,7 +154,8 @@ pub(super) struct AccessUpdateTarget<'a> {
 
 /// The current binding of a visible inode other than the root, as
 /// [`PlanningView::source_binding`] read it. Only that function makes one,
-/// so a step that takes one unbinds or writes under a current binding.
+/// so a write that takes one unbinds a current binding or writes a revision
+/// under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedBinding {
     parent_inode_id: InodeId,
@@ -246,7 +247,7 @@ impl ResolvedDestination<'_> {
 }
 
 /// A name under a visible directory that a bind can take. Only
-/// [`ResolvedDestination::available_name`] makes one, so a step that takes
+/// [`ResolvedDestination::available_name`] makes one, so a write that takes
 /// one binds under a visible directory, at a name that no other visible
 /// inode occupies.
 pub(crate) struct AvailableName {

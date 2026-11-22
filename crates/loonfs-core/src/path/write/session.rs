@@ -6,7 +6,7 @@ use super::planner::{CreatedInodeIds, OperationPlanningSession};
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, MergeIntent};
-use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationSession};
+use crate::commit::{CommitFingerprint, CommitPlan, CommitSession};
 use crate::error::{CoreError, Result};
 use crate::merge::merge_start;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
@@ -77,9 +77,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         &self.durable_cache
     }
 
-    /// Checks a candidate's preconditions and plans and validates its
-    /// operations in one pass, against the batch's state before the
-    /// candidate.
+    /// Checks a candidate's preconditions and plans its operations, which
+    /// check their rules and write their rows in one pass, against the
+    /// batch's state before the candidate.
     pub(crate) async fn prepare_commit(
         &self,
         candidate: &CommitCandidate,
@@ -134,11 +134,11 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
     }
 
     /// Folds an accepted commit into the session so later candidates in the
-    /// same batch plan and validate against it.
+    /// same batch are planned against it.
     pub(crate) fn apply_accepted_commit(&mut self, preview: &WalCommitPayload, plan: &CommitPlan) {
         // A plan belongs to the head it was planned against, and accepting it
         // at another head would apply its deltas to a state they weren't
-        // validated against.
+        // planned against.
         assert_eq!(
             plan.apply_after_seq, self.head.seq,
             "a commit plan should be accepted at the head it was planned against"
@@ -168,7 +168,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         }
     }
 
-    /// Plans each operation against the commit's state, whose steps write
+    /// Plans each operation against the commit's state, whose writes apply
     /// the operation's rows at once, so later operations observe earlier
     /// ones. The first failure aborts the request and attaches the failing
     /// operation's index.
@@ -195,7 +195,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                     head.seq
                 ))
             })?;
-        let mut validation = CommitValidationSession::new(
+        let mut commit = CommitSession::new(
             base_view,
             &self.accepted_rows,
             &head.namespace_id,
@@ -225,7 +225,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 Some(merge) => {
                     let assigned = merge.created_inode_ids.get(&index).copied();
                     if let Some(inode_id) = assigned {
-                        ensure_merged_inode_is_new(&validation.view(), inode_id)
+                        ensure_merged_inode_is_new(&commit.view(), inode_id)
                             .await
                             .map_err(|error| error.at_operation(index))?;
                     }
@@ -238,7 +238,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             let mut operation_session = OperationPlanningSession {
                 namespace_id: &head.namespace_id,
                 authorizer,
-                validation: &mut validation,
+                commit: &mut commit,
                 pieces: &mut pieces,
                 content_writes: self.content_writes,
                 committed_seq,
@@ -259,7 +259,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 ))
                 .at_operation(index));
             }
-            operation_indexes.resize(validation.deltas().len(), index);
+            operation_indexes.resize(commit.deltas().len(), index);
         }
 
         let mut plan = CommitPlan {
@@ -273,8 +273,8 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             apply_after_seq: head.seq,
             assigned_seq: committed_seq,
             committed_at_ms: self.committed_at_ms,
-            deltas: validation.take_deltas(),
-            appended: validation
+            deltas: commit.take_deltas(),
+            appended: commit
                 .take_appended()
                 .into_iter()
                 .flat_map(|value| value.pieces)
@@ -282,7 +282,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             inline_content: candidate.inline_content().to_vec(),
         };
         self.carry_revision_layouts(
-            &validation.view(),
+            &commit.view(),
             pre_state,
             &pieces,
             candidate,
