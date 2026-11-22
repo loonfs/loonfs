@@ -52,8 +52,11 @@ impl CandidateFamily {
     /// a collection deletes the object.
     pub(super) fn min_age_ms(self) -> u64 {
         match self {
-            // A compaction may publish output that is exactly the grace
-            // window old, so a segment must be strictly older before it goes.
+            // A segment has to be strictly older than the grace window
+            // (format spec, "Candidate and age rules"). Safety doesn't need
+            // the extra millisecond, because a compaction publishes its
+            // output well before the output is that old (format spec,
+            // "Publication and collection timing").
             Self::MetadataSegments | Self::ExtensionSegments => GC_GRACE_WINDOW_MS + 1,
             Self::Manifests | Self::WalObjects => GC_GRACE_WINDOW_MS,
         }
