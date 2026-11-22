@@ -7,7 +7,9 @@ use crate::path::read::loaded_view::LoadedMetadataView;
 use crate::storage::content::{content_object_key_for_ref, DurableContentValidationError};
 use crate::storage::content_location::extent_object_key;
 use crate::storage::content_location::ContentLocation;
-use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
+use crate::storage::tail_content::{
+    assemble_tail_content, write_tail_content, CombinePolicy, ContentWrites,
+};
 use crate::Permits;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreErrorKind;
@@ -250,6 +252,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 &self.metadata_view(),
                 &content,
                 assemble_tail_content(&self.head.pool_id, &content)?,
+                CombinePolicy::OwnExtents,
             )
             .await
             .map_err(cannot_write)?

@@ -151,7 +151,7 @@ The namespace whose commit created a chain, recorded in its [layout](#layout). O
 
 A byte range inside one content object representing part of a chain, storing the object reference, offset, length, and the provider's stored whole-object checksum ("object checksum").
 
-Extents are either "own extents" (written for the chain itself) or "shared base extents" (borrowed from an earlier chain when a fork or branched revision appends). Folds never coalesce shared base extents into own extents, avoiding byte copies across forks.
+Extents are either "own extents" (written for the chain itself) or "shared base extents" (borrowed from an earlier chain when a fork or branched revision appends). A fold in the chain's creator may merge a shared base extent that takes the whole of its object into a new own extent, which copies those bytes. A shared base extent that takes part of its object is never merged, and no other write of a chain's pieces merges shared base extents.
 
 ### Layout
 

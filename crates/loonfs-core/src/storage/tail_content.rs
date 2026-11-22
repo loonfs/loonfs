@@ -1,4 +1,4 @@
-//! Writes WAL pieces as immutable extents and combines the chain's own extents.
+//! Writes WAL pieces as immutable extents and combines a chain's extents.
 
 use super::content::{
     content_object_key_for_ref, describe_checksum, DurableContentValidationError,
@@ -96,6 +96,20 @@ impl<S: ?Sized> Clone for ContentWrites<'_, S> {
 
 impl<S: ?Sized> Copy for ContentWrites<'_, S> {}
 
+/// Which of a chain's extents a write of the chain's tail may merge with the
+/// tail's pieces.
+///
+/// `OwnExtents` lets the write merge the extents that store the chain's own
+/// bytes, and `OwnAndSharedBaseExtents` also lets it merge a shared base
+/// extent that takes the whole of its object. Only the fold combines shared
+/// base extents, because validation, merges, append planning, and direct
+/// downloads must not copy a chain's inherited bytes on a request path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CombinePolicy {
+    OwnExtents,
+    OwnAndSharedBaseExtents,
+}
+
 /// Returns the layout of the first `content_ref.size_bytes` bytes of a chain
 /// in the view that `lookup` and `content` describe, after writing the
 /// chain's pending pieces to content objects.
@@ -119,6 +133,7 @@ pub(crate) async fn materialize_content_layout<S: ObjectStore + ?Sized, L: Layou
                 lookup,
                 content,
                 assemble_tail_content(content_writes.pool_id, content)?,
+                CombinePolicy::OwnExtents,
             )
             .await?
             .layout
@@ -175,11 +190,13 @@ pub(crate) fn cut_layout(layout: &mut ContentLayout, size_bytes: u64) {
 /// WAL object started it. When `content_writes.namespace_id` didn't create the
 /// chain, the pieces are written as one extent that is never combined with
 /// the chain's existing extents (format spec, "Publishing a manifest").
+/// Otherwise `policy` says which of the chain's extents the write may merge.
 pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>(
     content_writes: ContentWrites<'_, S>,
     lookup: &L,
     content: &ProjectedContent,
     pieces: Vec<Bytes>,
+    policy: CombinePolicy,
 ) -> Result<ContentLayoutRecord> {
     let newest = &content.content_ref;
     let pool_id = content_writes.pool_id;
@@ -190,7 +207,7 @@ pub(crate) async fn write_tail_content<S: ObjectStore + ?Sized, L: LayoutLookup>
         object,
         length,
         candidate,
-    } = tail_extent_plan(lookup, content_writes, content, pieces).await?;
+    } = tail_extent_plan(lookup, content_writes, content, pieces, policy).await?;
     let object_key = chain_object_key(pool_id, &newest.content_id, &object);
     let _permit = content_writes.permits.acquire().await;
     let (sources, expected) = assembly_sources(
@@ -282,6 +299,7 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     content_writes: ContentWrites<'_, S>,
     content: &ProjectedContent,
     pieces: Vec<Bytes>,
+    policy: CombinePolicy,
 ) -> Result<TailExtentPlan> {
     let newest = &content.content_ref;
     let pool_id = content_writes.pool_id;
@@ -340,11 +358,20 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
             .collect();
     }
     let extents = location.extents;
+    // An assembly copies whole objects, so a shared base extent that takes
+    // part of its object can't be merged. The restoration above makes an
+    // own extent whole.
+    let combinable = |extent: &ContentExtent| {
+        own(extent)
+            || (created_here
+                && policy == CombinePolicy::OwnAndSharedBaseExtents
+                && takes_whole_object(extent))
+    };
     let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();
     let CombinePlan {
         retained,
         candidate_length,
-    } = combine_plan(&extents, tail_length, own);
+    } = combine_plan(&extents, tail_length, own, combinable);
     let combined_length = candidate_length - tail_length;
     start -= combined_length;
     // A layout of zero bytes is one whole extent of length zero. Every other
@@ -369,6 +396,16 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     })
 }
 
+/// Returns whether `extent` takes every byte of its object. A whole object
+/// exists only for an upload or a chain of zero bytes, and stores the chain's
+/// bytes from offset 0, so no layout takes part of one.
+fn takes_whole_object(extent: &ContentExtent) -> bool {
+    match extent.object {
+        ExtentObject::Whole => true,
+        ExtentObject::Span { start, end, .. } => extent.offset == 0 && extent.length == end - start,
+    }
+}
+
 fn checksum_pieces(pieces: &[Bytes], algorithm: ChecksumAlgorithm) -> Checksum {
     let mut checksum = ChecksumDigest::new(algorithm);
     for piece in pieces {
@@ -377,23 +414,40 @@ fn checksum_pieces(pieces: &[Bytes], algorithm: ChecksumAlgorithm) -> Checksum {
     checksum.finish()
 }
 
-/// How a fold combines the chain's newest own extents with the tail's pieces.
+/// How a write combines the chain's newest extents with the tail's pieces.
 ///
-/// `retained` counts the leading extents that the fold keeps, and
+/// `retained` counts the leading extents that the write keeps, and
 /// `candidate_length` is the length of the extent that combines the rest.
 struct CombinePlan {
     retained: usize,
     candidate_length: u64,
 }
 
-/// Returns which of `extents` a fold keeps, and how long the extent is that
-/// combines the newest own extents with `tail_length` bytes of tail pieces.
-/// `own` returns whether an extent is one the fold may combine.
+/// Returns which of `extents` a write keeps, and how long the extent is that
+/// combines the newest combinable extents with `tail_length` bytes of tail
+/// pieces.
+///
+/// `combinable` returns whether the write may merge an extent, and `own`
+/// returns whether an extent stores the chain's own bytes. Two rules choose
+/// the extents to merge (format spec, "Publishing a manifest"):
+///
+/// - The doubling rule merges the newest extent into the candidate while that
+///   extent is combinable and at most twice the candidate's length.
+/// - When more than [`MAX_LAYOUT_EXTENTS`] combinable extents after the last
+///   extent that the write can't combine would remain, the cap keeps the
+///   longest prefix of those extents, of fewer than [`MAX_LAYOUT_EXTENTS`],
+///   in which each extent is at least as long as every extent after it and
+///   the candidate together, and merges the rest.
+///   Each merged span is then at most as long as the extent before it, so a
+///   later cap copies the span again only after the extents behind it have
+///   grown to its length.
 fn combine_plan(
     extents: &[LocatedExtent],
     tail_length: u64,
     own: impl Fn(&ContentExtent) -> bool,
+    combinable: impl Fn(&ContentExtent) -> bool,
 ) -> CombinePlan {
+    let length = |located: &LocatedExtent| located.extent.length;
     let mut retained = extents.len();
     let mut candidate_length = tail_length;
     if tail_length == 0 {
@@ -404,28 +458,35 @@ fn combine_plan(
     }
     for located in extents[..retained].iter().rev() {
         let extent = &located.extent;
-        // A fresh chain keeps its base's extents shared.
-        if !own(extent) || extent.length > 2 * candidate_length {
+        if !combinable(extent) || extent.length > 2 * candidate_length {
             break;
         }
         candidate_length += extent.length;
         retained -= 1;
     }
-    let own_located = |located: &&LocatedExtent| own(&located.extent);
-    if extents[..retained].iter().filter(own_located).count() + 1 > MAX_LAYOUT_EXTENTS {
-        let largest = extents
+    // No write can merge an extent before the last one that it can't
+    // combine, so the cap counts only the extents after that one.
+    let run_start = extents[..retained]
+        .iter()
+        .rposition(|located| !combinable(&located.extent))
+        .map_or(0, |index| index + 1);
+    if retained - run_start + 1 > MAX_LAYOUT_EXTENTS {
+        let mut after =
+            extents[run_start..retained].iter().map(length).sum::<u64>() + candidate_length;
+        let mut kept = run_start;
+        // The prefix leaves room for the candidate under the cap.
+        for located in extents[run_start..retained]
             .iter()
-            .enumerate()
-            .filter(|(_, extent)| own_located(extent))
-            .max_by_key(|(index, extent)| (extent.extent.length, std::cmp::Reverse(*index)))
-            .map(|(index, _)| index)
-            .expect("a chain over its extent bound should have own extents");
-        retained = retained.min(largest + 1);
-        candidate_length = tail_length
-            + extents[retained..]
-                .iter()
-                .map(|located| located.extent.length)
-                .sum::<u64>();
+            .take(MAX_LAYOUT_EXTENTS - 1)
+        {
+            after -= located.extent.length;
+            if located.extent.length < after {
+                break;
+            }
+            kept += 1;
+        }
+        retained = kept;
+        candidate_length = tail_length + extents[retained..].iter().map(length).sum::<u64>();
     }
     CombinePlan {
         retained,

@@ -4,7 +4,9 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::content_location::{extent_object_key, ContentLocation, LayoutLookup};
-use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
+use crate::storage::tail_content::{
+    assemble_tail_content, write_tail_content, CombinePolicy, ContentWrites,
+};
 use crate::test_support::WriterAt;
 use crate::ObjectRange;
 use loonfs_objectstore::keys::{content_blob, content_span};
@@ -375,6 +377,7 @@ async fn an_early_write_and_the_later_fold_store_two_objects_with_the_same_bytes
         &view.metadata_view(),
         &content,
         assemble_tail_content(&pool_id, &content).expect("pieces"),
+        CombinePolicy::OwnExtents,
     )
     .await
     .expect("early write");
@@ -449,6 +452,7 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
         &view.metadata_view(),
         &content,
         assemble_tail_content(&pool_id, &content).expect("pieces"),
+        CombinePolicy::OwnExtents,
     )
     .await
     .expect("span before manifest");

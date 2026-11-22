@@ -66,42 +66,87 @@ fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -
     }
 }
 
+/// Which chain's object an extent of a [`fixture_of`] layout reads, and how
+/// much of the object it takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// A span object of the chain itself.
+    Own,
+    /// A span object of a base chain, taken whole.
+    Shared,
+    /// A span object of a base chain that stores `extra` more bytes after the
+    /// bytes that the extent takes.
+    SharedSlice { extra: usize },
+    /// The whole object of a base chain's upload.
+    SharedUpload,
+}
+
 async fn fixture<S: ObjectStore>(
     store: &S,
     lengths: &[usize],
     shared: bool,
     tail_length: usize,
 ) -> (Layout, ProjectedWalTail, ContentRef) {
+    let extents: Vec<_> = (0..)
+        .zip(lengths)
+        .map(|(index, &length)| {
+            let source = if shared && index == 0 {
+                Source::Shared
+            } else {
+                Source::Own
+            };
+            (length, source)
+        })
+        .collect();
+    fixture_of(store, &extents, tail_length).await
+}
+
+/// Returns a layout of a chain whose extents have the lengths and sources of
+/// `extents`, with their objects in `store`, a WAL tail with one piece of
+/// `tail_length` bytes after them, and the reference that the piece ends.
+async fn fixture_of<S: ObjectStore>(
+    store: &S,
+    extents: &[(usize, Source)],
+    tail_length: usize,
+) -> (Layout, ProjectedWalTail, ContentRef) {
     let content_id = ContentId::generate();
-    let mut extents = Vec::new();
+    let base_id = ContentId::generate();
+    let mut layout_extents = Vec::new();
     let mut offset = 0;
     let mut crc = Checksum::crc64nvme(&[]);
-    for (index, &length) in (0_u8..).zip(lengths) {
-        let bytes = Bytes::from(vec![b'a' + index; length]);
+    for (index, &(length, source)) in (0_u8..).zip(extents) {
+        let taken = vec![b'a' + index % 26; length];
+        let extra = match source {
+            Source::SharedSlice { extra } => extra,
+            _ => 0,
+        };
+        let bytes = Bytes::from([taken.as_slice(), &vec![b'#'; extra]].concat());
+        let span = ExtentObject::Span {
+            object_id: SpanObjectId::generate(),
+            start: offset,
+            end: offset + bytes.len() as u64,
+        };
+        let (content_id, object) = match source {
+            Source::Own => (content_id.clone(), span),
+            Source::Shared | Source::SharedSlice { .. } => (base_id.clone(), span),
+            Source::SharedUpload => (ContentId::generate(), ExtentObject::Whole),
+        };
         let extent = ContentExtent {
-            content_id: if shared && index == 0 {
-                ContentId::generate()
-            } else {
-                content_id.clone()
-            },
-            object: ExtentObject::Span {
-                object_id: SpanObjectId::generate(),
-                start: offset,
-                end: offset + length as u64,
-            },
+            content_id,
+            object,
             object_checksum: Checksum::crc64nvme(&bytes),
             offset: 0,
             length: length as u64,
         };
         store
-            .put_immutable_verified(&extent_object_key(&HEAD.pool_id, &extent), bytes.clone())
+            .put_immutable_verified(&extent_object_key(&HEAD.pool_id, &extent), bytes)
             .await
             .expect("source");
         crc = crc
-            .crc_combine(&Checksum::crc64nvme(&bytes), length as u64)
+            .crc_combine(&Checksum::crc64nvme(&taken), length as u64)
             .expect("combine");
         offset += length as u64;
-        extents.push(extent);
+        layout_extents.push(extent);
     }
     let layout = Layout(ContentLayoutRecord {
         content_id: content_id.clone(),
@@ -109,26 +154,61 @@ async fn fixture<S: ObjectStore>(
         size_bytes: offset,
         layout: ContentLayout {
             creator_namespace_id: HEAD.namespace_id.clone(),
-            extents,
+            extents: layout_extents,
         },
     });
-    let bytes = vec![b'z'; tail_length];
-    let reference = ContentRef {
+    let mut reference = ContentRef {
         kind: loonfs_types::ContentRefKind::BlobV1,
-        content_id: content_id.clone(),
-        size_bytes: offset + tail_length as u64,
-        checksum: crc
-            .crc_combine(&Checksum::crc64nvme(&bytes), tail_length as u64)
-            .expect("tail checksum"),
+        content_id,
+        size_bytes: offset,
+        checksum: crc,
     };
+    let tail = append_tail(&mut reference, tail_length, 2);
+    (layout, tail, reference)
+}
+
+/// Extends `reference` by `length` bytes and returns a WAL tail whose one
+/// piece, committed at `seq`, stores those bytes.
+fn append_tail(reference: &mut ContentRef, length: usize, seq: u64) -> ProjectedWalTail {
+    let bytes = vec![b'z'; length];
+    let offset = reference.size_bytes;
+    reference.size_bytes += length as u64;
+    reference.checksum = reference
+        .checksum
+        .crc_combine(&Checksum::crc64nvme(&bytes), length as u64)
+        .expect("tail checksum");
     let mut tail = ProjectedWalTail::default();
     tail.push_object(
         &HEAD.namespace_id,
-        &[piece_commit(&reference, offset, bytes, 2)],
+        &[piece_commit(reference, offset, bytes, seq)],
         0,
     )
     .expect("tail");
-    (layout, tail, reference)
+    tail
+}
+
+/// Writes the tail's pieces of `reference` as the fold does, with `policy`.
+async fn fold<S: ObjectStore>(
+    store: &S,
+    layout: &Layout,
+    tail: &ProjectedWalTail,
+    reference: &ContentRef,
+    policy: CombinePolicy,
+) -> ContentLayoutRecord {
+    let content = tail.content(reference).expect("content");
+    write_tail_content(
+        ContentWrites::new(
+            store,
+            &Permits::new(std::num::NonZeroUsize::MIN, None),
+            &HEAD,
+        ),
+        layout,
+        &content,
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
+        policy,
+    )
+    .await
+    .expect("fold's write")
 }
 
 /// Checks that a large write sends only the sources' HEAD requests before its
@@ -152,6 +232,7 @@ async fn large_extents_assemble_with_only_source_heads_and_write_again_under_a_n
         &layout,
         &content,
         assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
+        CombinePolicy::OwnExtents,
     )
     .await
     .expect("assembly");
@@ -186,6 +267,7 @@ async fn large_extents_assemble_with_only_source_heads_and_write_again_under_a_n
         &layout,
         &content,
         assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
+        CombinePolicy::OwnExtents,
     )
     .await
     .expect("second write");
@@ -202,55 +284,261 @@ async fn large_extents_assemble_with_only_source_heads_and_write_again_under_a_n
     assert_eq!(again_extent.object_checksum, extent.object_checksum);
 }
 
+/// Checks that the extent cap keeps the longest prefix in which each extent
+/// is at least as long as every extent after it and the candidate together:
+/// with extents of 200 (shared), 100, and 31 of 3 bytes and a 1-byte tail, the
+/// write keeps 200 and 100 and assembles one 94-byte extent, whether or not
+/// it may combine the shared extent.
 #[tokio::test]
-async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_extents() {
+async fn extent_cap_keeps_the_prefix_in_which_each_extent_covers_the_rest() {
+    for policy in [
+        CombinePolicy::OwnExtents,
+        CombinePolicy::OwnAndSharedBaseExtents,
+    ] {
+        let directory = tempfile::tempdir().expect("directory");
+        let store = RecordingStore::new(
+            FakeMultipartStore::new(LocalFsStore::new(directory.path()).expect("store")),
+            KeyPredicate::any(),
+        );
+        let mut lengths = vec![200, 100];
+        lengths.extend(vec![3; MAX_LAYOUT_EXTENTS - 1]);
+        let (layout, tail, reference) = fixture(&store, &lengths, true, 1).await;
+        store.reset();
+        let written = fold(&store, &layout, &tail, &reference, policy).await;
+        let lengths: Vec<_> = written
+            .layout
+            .extents
+            .iter()
+            .map(|extent| extent.length)
+            .collect();
+        assert_eq!(lengths, [200, 100, 94], "{policy:?}");
+        assert_eq!(&written.layout.extents[..2], &layout.0.layout.extents[..2]);
+        let operations = store.snapshot();
+        assert_matches!(
+            operations.last(),
+            Some(RecordedOperation::Assemble { sources, .. }) if sources.len() == MAX_LAYOUT_EXTENTS - 1
+        );
+        let new_object = store
+            .head(&extent_object_key(
+                &HEAD.pool_id,
+                &written.layout.extents[2],
+            ))
+            .await
+            .expect("head")
+            .expect("the new object");
+        assert_eq!(
+            Some(written.layout.extents[2].object_checksum.clone()),
+            new_object.checksum,
+            "the new extent records the checksum that the store keeps for the assembled object"
+        );
+        assert_eq!(store.counts().gets, 0);
+    }
+}
+
+/// Checks that a fold in the chain's creator merges a shared base extent that
+/// takes its whole object, a span object or an upload's whole object, under
+/// the doubling rule, with one HEAD request for the source before the
+/// assembly, and that the new extent records the checksum that the store
+/// keeps. Validation and a direct download write only the pieces.
+#[tokio::test]
+async fn a_creators_fold_combines_whole_shared_base_extents_and_other_writes_keep_them() {
+    for source in [Source::Shared, Source::SharedUpload] {
+        for write in ["fold", "validation", "download"] {
+            let directory = tempfile::tempdir().expect("directory");
+            let store = RecordingStore::new(
+                LocalFsStore::new(directory.path()).expect("store"),
+                KeyPredicate::any(),
+            );
+            // The 6-byte extent is at most twice the 4 tail bytes.
+            let (layout, tail, reference) = fixture_of(&store, &[(6, source)], 4).await;
+            let shared = layout.0.layout.extents[0].clone();
+            store.reset();
+            let written = match write {
+                "fold" => {
+                    let policy = CombinePolicy::OwnAndSharedBaseExtents;
+                    fold(&store, &layout, &tail, &reference, policy)
+                        .await
+                        .layout
+                }
+                "validation" => materialize_content_layout(
+                    ContentWrites::new(
+                        &store,
+                        &Permits::new(std::num::NonZeroUsize::MIN, None),
+                        &HEAD,
+                    ),
+                    &layout,
+                    tail.content(&reference).as_ref(),
+                    &reference,
+                )
+                .await
+                .expect("validation's write"),
+                _ => {
+                    let policy = CombinePolicy::OwnExtents;
+                    fold(&store, &layout, &tail, &reference, policy)
+                        .await
+                        .layout
+                }
+            };
+            let operations = store.snapshot();
+            let context = format!("{source:?} {write}");
+            if write == "fold" {
+                assert_eq!(written.extents.len(), 1, "{context}");
+                let extent = &written.extents[0];
+                assert_eq!(extent.content_id, reference.content_id, "{context}");
+                assert_eq!(span_bounds(&extent.object), Some((0, 10)), "{context}");
+                assert_eq!(extent.object_checksum, reference.checksum, "{context}");
+                let key = extent_object_key(&HEAD.pool_id, extent);
+                let stored = store.head(&key).await.expect("head").expect("span");
+                assert_eq!(stored.checksum.as_ref(), Some(&reference.checksum));
+                assert_matches!(
+                    operations.as_slice(),
+                    [
+                        RecordedOperation::Head { key },
+                        RecordedOperation::Assemble { sources, expected, .. },
+                    ] if *key == extent_object_key(&HEAD.pool_id, &shared)
+                        && sources.len() == 1
+                        && *expected == reference.checksum,
+                    "{context}"
+                );
+            } else {
+                assert_eq!(written.extents.len(), 2, "{context}");
+                assert_eq!(written.extents[0], shared, "{context}");
+                assert_eq!(written.extents[1].length, 4, "{context}");
+                assert_matches!(
+                    operations.as_slice(),
+                    [RecordedOperation::Assemble { sources, .. }] if sources.is_empty(),
+                    "{context}"
+                );
+            }
+        }
+    }
+}
+
+/// Checks that a shared base extent that takes part of its object stops both
+/// rules: a fold keeps it and the 31 extents before it, which the doubling
+/// rule would otherwise merge, and combines only the extents after it. The
+/// cap counts only the extents after it, so twelve 1-byte folds leave the
+/// doubling rule's extents of 8, 3, and 1 bytes after it.
+#[tokio::test]
+async fn a_shared_base_extent_that_takes_part_of_its_object_stops_both_rules() {
     let directory = tempfile::tempdir().expect("directory");
     let store = RecordingStore::new(
-        FakeMultipartStore::new(LocalFsStore::new(directory.path()).expect("store")),
+        LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    let mut lengths = vec![200, 100];
-    lengths.extend(vec![3; MAX_LAYOUT_EXTENTS - 1]);
-    let (layout, tail, reference) = fixture(&store, &lengths, true, 1).await;
-    let content = tail.content(&reference).expect("content");
-    store.reset();
-    let written = write_tail_content(
-        ContentWrites::new(
-            &store,
-            &Permits::new(std::num::NonZeroUsize::MIN, None),
-            &HEAD,
-        ),
-        &layout,
-        &content,
-        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
-    )
-    .await
-    .expect("bounded layout");
-    assert_eq!(written.layout.extents.len(), 3);
-    assert_eq!(&written.layout.extents[..2], &layout.0.layout.extents[..2]);
+    let mut extents = vec![(1, Source::Shared); MAX_LAYOUT_EXTENTS - 1];
+    extents.push((2, Source::SharedSlice { extra: 2 }));
+    let (mut layout, mut tail, mut reference) = fixture_of(&store, &extents, 1).await;
+    let frozen = layout.0.layout.extents.clone();
+    let frozen_keys: Vec<_> = frozen
+        .iter()
+        .map(|extent| extent_object_key(&HEAD.pool_id, extent))
+        .collect();
+    for seq in 3..15 {
+        store.reset();
+        let policy = CombinePolicy::OwnAndSharedBaseExtents;
+        let written = fold(&store, &layout, &tail, &reference, policy).await;
+        assert_eq!(&written.layout.extents[..frozen.len()], frozen.as_slice());
+        let operations = store.snapshot();
+        let Some(RecordedOperation::Assemble { sources, .. }) = operations.last() else {
+            panic!("the fold ends with an assembly: {operations:?}");
+        };
+        assert!(sources
+            .iter()
+            .all(|source| !frozen_keys.contains(&source.key)));
+        layout.0 = written;
+        tail = append_tail(&mut reference, 1, seq);
+    }
+    let after: Vec<_> = layout.0.layout.extents[frozen.len()..]
+        .iter()
+        .map(|extent| extent.length)
+        .collect();
+    assert_eq!(after, [8, 3, 1]);
+}
+
+/// Checks that the cap counts the shared base extents that a fold can combine:
+/// 31 shared extents and two own extents with a 1-byte tail exceed the cap, so
+/// the fold assembles the whole chain into one extent, while a write that may
+/// combine only own extents keeps all 34.
+#[tokio::test]
+async fn the_cap_counts_whole_shared_base_extents() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let mut extents = vec![(1000, Source::Shared); MAX_LAYOUT_EXTENTS - 1];
+    extents.extend([(100, Source::Own), (10, Source::Own)]);
+    let (layout, tail, reference) = fixture_of(&store, &extents, 1).await;
+    let policy = CombinePolicy::OwnAndSharedBaseExtents;
+    let folded = fold(&store, &layout, &tail, &reference, policy).await;
+    assert_eq!(folded.layout.extents.len(), 1);
     assert_eq!(
-        written.layout.extents[2].length,
-        3 * (MAX_LAYOUT_EXTENTS as u64 - 1) + 1
+        span_bounds(&folded.layout.extents[0].object),
+        Some((0, reference.size_bytes))
     );
-    let operations = store.snapshot();
-    assert_matches!(
-        operations.last(),
-        Some(RecordedOperation::Assemble { sources, .. }) if sources.len() == MAX_LAYOUT_EXTENTS - 1
-    );
-    let new_object = store
-        .head(&extent_object_key(
-            &HEAD.pool_id,
-            &written.layout.extents[2],
-        ))
-        .await
-        .expect("head")
-        .expect("the new object");
+    assert_eq!(folded.layout.extents[0].object_checksum, reference.checksum);
+    let policy = CombinePolicy::OwnExtents;
+    let kept = fold(&store, &layout, &tail, &reference, policy).await;
+    assert_eq!(kept.layout.extents.len(), MAX_LAYOUT_EXTENTS + 2);
     assert_eq!(
-        Some(written.layout.extents[2].object_checksum.clone()),
-        new_object.checksum,
-        "the new extent records the checksum that the store keeps for the assembled object"
+        &kept.layout.extents[..MAX_LAYOUT_EXTENTS + 1],
+        layout.0.layout.extents.as_slice()
     );
-    assert_eq!(store.counts().gets, 0);
+}
+
+/// Returns a located extent of `length` bytes of the chain `content_id`, in a
+/// span object that it takes whole.
+fn located(content_id: &ContentId, length: u64) -> LocatedExtent {
+    let extent = ContentExtent {
+        content_id: content_id.clone(),
+        object: ExtentObject::Span {
+            object_id: SpanObjectId::generate(),
+            start: 0,
+            end: length,
+        },
+        object_checksum: Checksum::crc64nvme(&[]),
+        offset: 0,
+        length,
+    };
+    LocatedExtent {
+        object_key: extent_object_key(&HEAD.pool_id, &extent),
+        extent,
+    }
+}
+
+/// Checks the cap through repeated fork, append, and merge cycles. A 1 MB
+/// uploaded base is followed in each cycle by a fork's 1,000-byte extent,
+/// which a merge writes without combining, and `main`'s fold of 10 appended
+/// bytes, which the doubling rule can't merge into the fork's extent. The
+/// cap fires at cycle 16 and keeps the base, so it copies the appended
+/// history once (16,160 bytes). At cycle 32 it keeps that span, which is as
+/// long as everything after it, and at cycle 47 the extents after it have
+/// reached its length, so it copies the span again with the rest.
+#[test]
+fn the_cap_copies_each_span_again_only_after_the_extents_behind_it_reach_its_length() {
+    let chain = ContentId::generate();
+    let fork = ContentId::generate();
+    let own = |extent: &ContentExtent| extent.content_id == chain;
+    let mut base = located(&ContentId::generate(), 1_000_000);
+    base.extent.object = ExtentObject::Whole;
+    let mut layout = vec![base];
+    let mut firings = Vec::new();
+    for cycle in 1..=47 {
+        layout.push(located(&fork, 1_000));
+        let CombinePlan {
+            retained,
+            candidate_length,
+        } = combine_plan(&layout, 10, own, |extent| {
+            own(extent) || takes_whole_object(extent)
+        });
+        assert!(retained < MAX_LAYOUT_EXTENTS, "cycle {cycle}");
+        if retained < layout.len() - 1 {
+            firings.push((cycle, retained, candidate_length));
+        }
+        layout.truncate(retained);
+        layout.push(located(&chain, candidate_length));
+    }
+    assert_eq!(firings, [(16, 1, 16_160), (32, 2, 16_160), (47, 1, 47_470)]);
+    let lengths: Vec<_> = layout.iter().map(|located| located.extent.length).collect();
+    assert_eq!(lengths, [1_000_000, 47_470]);
 }
 
 #[tokio::test]
@@ -346,6 +634,7 @@ async fn local_large_tail_assembles_without_sources() {
         &layout,
         &content,
         pieces,
+        CombinePolicy::OwnExtents,
     )
     .await
     .expect("streamed tail");
@@ -454,6 +743,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
             &layout,
             &content,
             assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
+            CombinePolicy::OwnExtents,
         )
         .await
         .expect("write");
@@ -529,10 +819,16 @@ async fn another_members_chain_keeps_its_creator_and_its_extents() {
                     .expect("validation's write")
             } else {
                 let pieces = assemble_tail_content(&HEAD.pool_id, &content).expect("pieces");
-                write_tail_content(content_writes, &layout, &content, pieces)
-                    .await
-                    .expect("fold's write")
-                    .layout
+                write_tail_content(
+                    content_writes,
+                    &layout,
+                    &content,
+                    pieces,
+                    CombinePolicy::OwnAndSharedBaseExtents,
+                )
+                .await
+                .expect("fold's write")
+                .layout
             };
             assert_eq!(written.creator_namespace_id, HEAD.namespace_id);
             let operations = store.snapshot();
@@ -596,6 +892,7 @@ async fn a_fold_onto_a_source_object_with_other_bytes_writes_no_span_object() {
         &layout,
         &content,
         assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
+        CombinePolicy::OwnExtents,
     )
     .await
     .expect_err("a fold onto a source object with other bytes");
@@ -630,6 +927,7 @@ async fn a_chain_that_started_in_another_members_tail_records_that_member_as_cre
         &layout,
         &content,
         assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
+        CombinePolicy::OwnExtents,
     )
     .await
     .expect("write");
