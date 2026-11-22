@@ -30,6 +30,12 @@ pub(super) fn route_label(matched_route: Option<&str>) -> &'static str {
     }
 }
 
+/// The recorder of the HTTP API's request metrics, which a host renders on
+/// its `/metrics` route
+/// ([`GET /metrics`](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#619-get-metrics)).
+///
+/// A runtime built with [`HttpMetrics::recorder`] records its metrics here
+/// too.
 pub struct HttpMetrics {
     recorder: Arc<DefaultMetricsRecorder>,
     requests: Mutex<HashMap<&'static str, RequestInstruments>>,
@@ -46,6 +52,9 @@ struct RequestInstruments {
 }
 
 impl HttpMetrics {
+    /// Builds a recorder with the counters of requests, uploads, and downloads
+    /// refused with `server_busy` at zero. A route's instruments are
+    /// registered when it first serves a request.
     pub fn new() -> Arc<Self> {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let busy = |kind: &'static str| {
@@ -97,6 +106,8 @@ impl HttpMetrics {
         self.busy_requests.increment(1);
     }
 
+    /// Returns the current value of every metric that the HTTP API and the
+    /// runtime have recorded.
     pub fn snapshot(&self) -> MetricsSnapshot {
         self.recorder.snapshot()
     }

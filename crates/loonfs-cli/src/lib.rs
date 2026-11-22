@@ -7,6 +7,7 @@
 //! Storage and protocol logic don't belong here: commands call the `loonfs`
 //! runtime or the `loonfs-client` client and render what they return.
 
+#![warn(missing_docs)]
 // The embedded runtime's composed async graph keeps growing; even with
 // the boxed entrypoint, rustc's future-layout query depth needs headroom
 // here. This is the raise rustc itself prescribes.
@@ -41,6 +42,14 @@ use std::process::ExitCode;
 /// command started and failed" without reading the message.
 const USAGE_EXIT_CODE: u8 = 2;
 
+/// Parses the command line, runs the command, drains each runtime that an
+/// embedded profile opened, and renders the result.
+///
+/// The exit code is 0 when the command succeeded, or when the command line
+/// asked for `--help` or `--version`. It is 1 when the command ran and
+/// failed, when its output couldn't be written, or when a recursive transfer
+/// reported a failed item. It is 2 when the command line was rejected, so
+/// the command never ran.
 pub async fn main() -> ExitCode {
     let cli = match args::Cli::try_parse() {
         Ok(cli) => cli,

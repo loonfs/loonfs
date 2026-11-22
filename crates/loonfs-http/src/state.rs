@@ -19,14 +19,27 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Semaphore;
 
+/// How the HTTP API authenticates a request to a contract route, or to a
+/// host route wrapped with [`authenticate_routes`](crate::authenticate_routes)
+/// ([Authentication and transport](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#authentication-and-transport)).
 #[derive(Clone, Debug)]
 pub enum AuthPolicy {
+    /// Admits every request without checking credentials.
     Open,
+    /// Requires the `Authorization: Bearer <token>` header with this token,
+    /// and refuses any other request with 401 `unauthorized` before the
+    /// request's headers, query, or body are parsed.
     BearerToken(SecretString),
 }
 
+/// The default of [`HttpConfig::max_concurrent_uploads`], which the
+/// reference server's config and the CLI's embedded profile use.
 pub const DEFAULT_MAX_CONCURRENT_UPLOADS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+/// The default of [`HttpConfig::max_concurrent_downloads`], which the
+/// reference server's config and the CLI's embedded profile use.
 pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: NonZeroUsize = NonZeroUsize::new(16).unwrap();
+/// The default of [`HttpConfig::request_deadline_ms`], which the reference
+/// server's config and the CLI's embedded profile use.
 pub const DEFAULT_REQUEST_DEADLINE_MS: u64 = 60_000;
 
 /// Which of two jobs a host does for one subsystem: serve its requests, do
@@ -73,6 +86,9 @@ impl JobMode {
     }
 }
 
+/// The options that a host sets for the HTTP API: the API groups it serves,
+/// its transfer and request limits, its content token secret, and its
+/// authentication.
 #[derive(Clone, Debug)]
 pub struct HttpConfig {
     /// Whether the HTTP API serves the maintenance API group. The host runs
@@ -82,26 +98,66 @@ pub struct HttpConfig {
     pub max_download_bytes: Option<u64>,
     /// Largest body a service-proxied upload accepts, or `None` for no limit.
     pub max_upload_bytes: Option<u64>,
+    /// Service-proxied uploads that the HTTP API streams at once, shared by
+    /// every caller. An upload beyond the limit fails with 503 `server_busy`,
+    /// and 0 refuses every proxied upload. The capability document reports
+    /// the value as `upload.service_proxied.max_concurrent_requests`
+    /// ([The capability document](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#21-the-capability-document)).
     pub max_concurrent_uploads: usize,
+    /// Service-proxied content reads that the HTTP API streams at once,
+    /// shared by every caller. A read holds its slot until its response body
+    /// finishes or is dropped, a read beyond the limit fails with 503
+    /// `server_busy`, and 0 refuses every proxied read. The capability
+    /// document reports the value as
+    /// `download.service_proxied.max_concurrent_requests`
+    /// ([The capability document](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#21-the-capability-document)).
     pub max_concurrent_downloads: usize,
     /// Most requests the HTTP API serves at once, or `None` for no limit.
     pub max_in_flight_requests: Option<NonZeroUsize>,
+    /// The secret that the HTTP API signs a completed upload's content token
+    /// with, and that a commit checks each content token against
+    /// ([Content references and tokens](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#content-references-and-tokens)).
+    /// A server that accepts commits with tokens that another server issued
+    /// needs that server's secret, and changing the secret makes the tokens
+    /// already issued fail.
     pub content_token_secret: SecretString,
+    /// Milliseconds that a request runs before the HTTP API cancels it and
+    /// returns 503 `outcome_unknown` with cause `deadline`. Content reads,
+    /// proxied uploads, maintenance jobs, and the store probe aren't
+    /// cancelled.
     pub request_deadline_ms: u64,
+    /// How the HTTP API authenticates requests.
     pub auth_policy: AuthPolicy,
 }
 
 /// The handles that a host supplies to the HTTP API: one runtime over one
 /// store, and the grep handles.
 pub struct HttpHandles {
+    /// The runtime that the HTTP API reads with, creates and forks
+    /// namespaces with, and builds the capability document from. Each
+    /// request uses a copy of the runtime that acts in the request's context.
     pub runtime: LoonFs<Writable>,
+    /// The writer sessions that every write request opens its namespace's
+    /// writable handle through. Deleting a namespace drops its session, and
+    /// enabling or disabling its grep index marks the session for the host's
+    /// maintenance. A host usually passes a [`Namespaces`] table.
     pub namespaces: Arc<dyn WriterSessions>,
+    /// The handle that the namespace and pool maintenance job routes run
+    /// their jobs with. The HTTP API mounts those routes only when
+    /// [`HttpConfig::serves_maintenance`] is set.
     pub maintenance: Maintenance,
+    /// The issuers that presign direct uploads and downloads, or `None` when
+    /// the store can't presign them. Without an issuer, the capability
+    /// document turns the matching direct transfer feature off, and a request
+    /// for that transfer fails with `not_supported`.
     pub direct_transfers: Option<DirectTransferIssuers>,
     /// The service that serves grep queries, or `None` when the HTTP API doesn't serve grep.
     pub grep_service: Option<Arc<GrepService>>,
     /// The worker that maintains the grep index, or `None` when the HTTP API doesn't maintain grep.
     pub grep_worker: Option<GrepWorker<SharedObjectStore>>,
+    /// The metrics that the HTTP API records each served request and each
+    /// `server_busy` refusal in. A host that passes [`HttpMetrics::recorder`]
+    /// to its runtime records the runtime's metrics in the same place.
     pub metrics: Arc<HttpMetrics>,
     /// The recorder of one usage report for each namespace request, or `None` to record none.
     pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
@@ -111,14 +167,23 @@ pub struct HttpHandles {
 /// concurrency limits in its options.
 #[derive(Clone)]
 pub struct HttpState {
+    /// The options that the host passed to [`HttpState::new`].
     pub options: Arc<HttpConfig>,
+    /// The [`HttpHandles::runtime`] that the host passed.
     pub runtime: LoonFs<Writable>,
+    /// The [`HttpHandles::namespaces`] that the host passed.
     pub namespaces: Arc<dyn WriterSessions>,
+    /// The [`HttpHandles::maintenance`] that the host passed.
     pub maintenance: Maintenance,
+    /// The [`HttpHandles::direct_transfers`] that the host passed.
     pub direct_transfers: Option<DirectTransferIssuers>,
+    /// The [`HttpHandles::grep_service`] that the host passed.
     pub grep_service: Option<Arc<GrepService>>,
+    /// The [`HttpHandles::grep_worker`] that the host passed.
     pub grep_worker: Option<GrepWorker<SharedObjectStore>>,
+    /// The [`HttpHandles::metrics`] that the host passed.
     pub metrics: Arc<HttpMetrics>,
+    /// The [`HttpHandles::usage_recorder`] that the host passed.
     pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
     request_limit: Option<RequestLimit>,
     upload_permits: Arc<Semaphore>,
@@ -252,12 +317,16 @@ pub struct Namespaces<S> {
 /// One writer session that the table keeps, and the state that its host
 /// keeps beside the session.
 pub struct HeldNamespace<S> {
+    /// The session's writable handle, which an open returns while the
+    /// session is open.
     pub handle: Namespace<Writable>,
     last_opened_at_ms: u64,
     closing: Option<NamespaceClose>,
     /// Whether the grep index has work that the host's maintenance hasn't
     /// done. The grep enable and disable routes set this flag.
     pub index_dirty: bool,
+    /// The host's state for the session, which [`HostState::new`] creates
+    /// when the table opens the session.
     pub host_state: S,
 }
 

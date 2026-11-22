@@ -2,6 +2,8 @@
 //! LoonFS runtime, and the OpenAPI document that describes them.
 //! Hosts own configuration, listeners, shutdown, and operational routes.
 
+#![warn(missing_docs)]
+
 mod http;
 mod state;
 
