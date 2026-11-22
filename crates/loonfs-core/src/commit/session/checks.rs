@@ -2,9 +2,9 @@
 //! and the numbering of the commit's operations and deltas.
 
 use super::commit_session::CommitSession;
-use crate::commit::{CommitOperand, CommitValidationError};
+use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
-use crate::metadata::{DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use crate::metadata::{InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 
@@ -114,24 +114,6 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
                 CoreError::NamespaceCorrupt(format!("file `{inode_id}` has no current revision"))
             })?;
         Ok(revision.revision_no)
-    }
-
-    /// Returns the current binding of the file whose revision an operation
-    /// writes. The revision delta includes the binding's edge, and replay
-    /// writes the new revision's summary row under that edge
-    /// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
-    /// A file with no current binding is deleted or disconnected, and can't
-    /// take a revision.
-    pub(super) async fn resolve_current_binding(
-        &self,
-        inode_id: InodeId,
-        operand: CommitOperand,
-    ) -> Result<DirentryBindingRecord> {
-        Ok(self
-            .view()
-            .current_parent_binding_for_child(inode_id)
-            .await?
-            .ok_or(CommitValidationError::InodeMissing { operand, inode_id })?)
     }
 
     /// Returns the revision summary that a bind of `inode` copies into the

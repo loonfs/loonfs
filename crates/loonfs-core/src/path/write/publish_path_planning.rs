@@ -16,8 +16,8 @@ use crate::path::read;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::{
-    AbsolutePath, BindingVersion as BindingVersionToken, DestinationBehavior, DisplayName, InodeId,
-    InodeKind, NameKey, NamespaceId, RevisionNo, ROOT_INODE_ID,
+    AbsolutePath, ActorId, BindingVersion as BindingVersionToken, DestinationBehavior, DisplayName,
+    InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, ROOT_INODE_ID,
 };
 use loonfs_types::{AccessRight, AccessRights};
 
@@ -164,6 +164,11 @@ pub(crate) struct ResolvedBinding {
     child_inode_id: InodeId,
     /// Position of the bind event that established the binding.
     bind_position: DeltaPosition,
+    /// Actor of the child's creating commit, as the binding records it.
+    child_created_by: ActorId,
+    /// Unix milliseconds of the child's creating commit, as the binding
+    /// records it.
+    child_created_at_ms: u64,
 }
 
 impl ResolvedBinding {
@@ -185,6 +190,14 @@ impl ResolvedBinding {
 
     pub(crate) fn bind_position(&self) -> DeltaPosition {
         self.bind_position
+    }
+
+    pub(crate) fn child_created_by(&self) -> &ActorId {
+        &self.child_created_by
+    }
+
+    pub(crate) fn child_created_at_ms(&self) -> u64 {
+        self.child_created_at_ms
     }
 }
 
@@ -576,6 +589,8 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
                 .clone(),
             child_inode_id: binding.child_inode_id,
             bind_position: binding.bind_position,
+            child_created_by: binding.child_created_by.clone(),
+            child_created_at_ms: binding.child_created_at_ms,
         })
     }
 

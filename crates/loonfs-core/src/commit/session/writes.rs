@@ -6,7 +6,7 @@ use super::checks::CommitNumbering;
 use super::commit_session::CommitSession;
 use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::Result;
-use crate::metadata::{DirentryBindingRecord, InodeRecord, SubtreeTombstoneRecord};
+use crate::metadata::{InodeRecord, SubtreeTombstoneRecord};
 use crate::path::write::{AvailableName, ResolvedBinding, ResolvedTarget};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, RevisionSummary};
@@ -107,12 +107,9 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         let inode_id = binding.child_inode_id();
         let current_revision_no = self.resolve_current_revision_no(inode_id).await?;
         let revision_no = next_revision_no(inode_id, current_revision_no)?;
-        let edge = self
-            .resolve_current_binding(inode_id, CommitOperand::ReplaceTarget)
-            .await?;
         let delta = revision_delta(
             &mut self.numbering,
-            &edge,
+            binding,
             revision_no,
             content_ref.clone(),
             append_offset,
@@ -135,12 +132,9 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
             .resolve_restore_source_revision(inode_id, source_revision_no)
             .await?;
         let revision_no = next_revision_no(inode_id, current_revision_no)?;
-        let edge = self
-            .resolve_current_binding(inode_id, CommitOperand::RestoreTarget)
-            .await?;
         let delta = revision_delta(
             &mut self.numbering,
-            &edge,
+            binding,
             revision_no,
             source_revision.content_ref,
             None,
@@ -312,27 +306,26 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     }
 }
 
-/// The delta of a file's next revision, which writes the revision's summary
-/// row under the file's current binding `edge`.
+/// The delta of a file's next revision. The delta includes the file's
+/// current binding, and replay writes the revision's summary row under that
+/// binding
+/// ([format section 1.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#13-directory-bindings)).
 fn revision_delta(
     numbering: &mut CommitNumbering,
-    edge: &DirentryBindingRecord,
+    binding: &ResolvedBinding,
     revision_no: RevisionNo,
     content_ref: ContentRef,
     append_offset: Option<u64>,
 ) -> std::result::Result<WalDelta, CommitValidationError> {
     Ok(WalDelta::AppendFileRevision {
         delta_index: numbering.reserve_delta_index()?,
-        inode_id: edge.child_inode_id,
-        parent_inode_id: edge.parent_inode_id,
-        name_key: edge.name_key.clone(),
-        display_name: edge
-            .display_name()
-            .expect("a current binding should be bound")
-            .clone(),
-        bind_position: edge.bind_position,
-        child_created_by: edge.child_created_by.clone(),
-        child_created_at_ms: edge.child_created_at_ms,
+        inode_id: binding.child_inode_id(),
+        parent_inode_id: binding.parent_inode_id(),
+        name_key: binding.name_key().clone(),
+        display_name: binding.display_name().clone(),
+        bind_position: binding.bind_position(),
+        child_created_by: binding.child_created_by().clone(),
+        child_created_at_ms: binding.child_created_at_ms(),
         revision_no,
         content_ref,
         layout: None,
