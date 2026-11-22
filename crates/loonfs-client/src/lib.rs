@@ -11,8 +11,9 @@
 //! chooses one when it builds the client.
 //!
 //! The config's `actor` is sent as `Loonfs-Actor` on commits, uploads, and
-//! namespace creation and forks. A client without an actor can read, but an
-//! operation that records an actor fails before it is sent.
+//! namespace creation and forks. A client without an actor can read, delete
+//! namespaces, and manage snapshots, but an operation that records an actor
+//! fails before it is sent.
 //! [`Client::with_actor`] clones a client with another actor.
 //!
 //! Namespace logic doesn't belong here: the client sends HTTP API requests

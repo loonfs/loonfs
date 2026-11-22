@@ -279,8 +279,8 @@ impl LoonFs<Writable> {
     /// the session from here on (see [`Namespace`]). Fails with
     /// `writer_session_closed` while a [`Namespace::close`] of this
     /// namespace's session drains or a fenced session finishes its work. Once
-    /// that work ends, opening starts a new session even if old clones are
-    /// still exist. Fails with `shutting_down` after shutdown begins.
+    /// that work ends, opening starts a new session even if clones of the old
+    /// session still exist. Fails with `shutting_down` after shutdown begins.
     pub fn open_namespace(&self, namespace_id: &NamespaceId) -> Result<Namespace<Writable>> {
         trace::in_operation_sync(
             operation_span!(self.core, "open_namespace", namespace_id),
