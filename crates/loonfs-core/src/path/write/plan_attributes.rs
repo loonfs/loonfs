@@ -47,7 +47,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             )?;
         }
         self.validation
-            .update_attributes(inode_id, &attributes)
+            .update_attributes(&target, &attributes)
             .await
     }
 }

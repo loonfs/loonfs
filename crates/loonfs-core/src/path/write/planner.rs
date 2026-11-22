@@ -1012,6 +1012,88 @@ mod tests {
         );
     }
 
+    /// A revision restore copies the revision it identifies, which an earlier
+    /// operation of the same commit may have written, and fails when the file
+    /// has no such revision.
+    #[tokio::test]
+    async fn a_revision_restore_copies_a_revision_that_the_same_commit_wrote() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+            .put_file(
+                "/docs/readme.txt",
+                b"content-1",
+                DestinationBehavior::Replace,
+                None,
+            )
+            .await
+            .expect("seed a revision");
+        let file =
+            crate::test_support::visible_inode_id(&store, &namespace_id, "/docs/readme.txt").await;
+        let replacement = crate::test_support::namespace_store(&store, &namespace_id)
+            .store_bytes_as_content(b"content-2")
+            .await
+            .expect("stage")
+            .into_content_ref();
+        let restore = |source_revision_no| FilesystemOperation::RestoreRevisionByInode {
+            inode_id: file,
+            source_revision_no: RevisionNo(source_revision_no),
+        };
+
+        // The put writes revision 2, the first restore copies it as revision
+        // 3, and the second restore copies revision 3 as revision 4.
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &CommitIntent {
+                preconditions: Vec::new(),
+                commit_id: CommitId::parse("restore-request").expect("valid commit id"),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                operations: vec![
+                    FilesystemOperation::PutFileRevisionByInode {
+                        inode_id: file,
+                        content: loonfs_types::FileContent::Ref(replacement.clone()),
+                        expected_revision_no: RevisionNo(1),
+                    },
+                    restore(2),
+                    restore(3),
+                ],
+            },
+        )
+        .await;
+        let copied: Vec<_> = planned
+            .deltas
+            .iter()
+            .map(|delta| match &delta.delta {
+                WalDelta::AppendFileRevision {
+                    revision_no,
+                    content_ref,
+                    ..
+                } => (*revision_no, content_ref),
+                other => panic!("expected a revision delta, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            copied,
+            [2, 3, 4].map(|revision_no| (RevisionNo(revision_no), &replacement))
+        );
+
+        let error = try_plan_against_current_state(&store, &namespace_id, &request(restore(99)))
+            .await
+            .expect_err("the file has no revision 99");
+        assert_eq!(error.code(), ErrorCode::RevisionNotFound);
+        assert_matches!(
+            failed_operation_error(error),
+            CoreError::CommitValidation(
+                CommitValidationError::RestoreRevisionSourceRevisionMissing {
+                    inode_id,
+                    source_revision_no: RevisionNo(99),
+                }
+            ) if inode_id == file
+        );
+    }
+
     #[tokio::test]
     async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondition() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;

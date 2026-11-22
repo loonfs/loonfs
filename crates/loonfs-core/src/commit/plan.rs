@@ -41,6 +41,8 @@ pub(crate) struct CommitPlan {
     pub(crate) inline_content: Vec<InlineContent>,
 }
 
+/// The current binding of a visible inode, as the frozen copy of the write
+/// path resolves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedBinding {
     pub parent_inode_id: InodeId,

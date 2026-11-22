@@ -28,9 +28,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         target.ensure_expected_inode()?;
         if let Some(expected) = expected_binding_version {
             self.view()
-                .ensure_binding_version(&target.resolved, expected)?;
+                .ensure_binding_version(target.resolved(), expected)?;
         }
-        let resolved = &target.resolved;
+        let resolved = target.resolved();
         let source_binding = self.view().source_binding(resolved).await?;
         if resolved.inode_kind == InodeKind::Directory
             && behavior == DeleteDirectoryBehavior::NonRecursive

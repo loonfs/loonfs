@@ -1,7 +1,7 @@
 //! The state checks that commit operation validators run: target
 //! visibility, binding state, and cycles.
 
-use super::super::{CommitValidationError, ResolvedBinding};
+use super::super::CommitValidationError;
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::error::{CoreError, Result};
@@ -75,17 +75,6 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 actual_deletion_seq: deletion.committed_seq,
             }
             .into());
-        }
-        Ok(())
-    }
-
-    pub(super) async fn ensure_target_visible(
-        &self,
-        inode_id: InodeId,
-        operand: CommitOperand,
-    ) -> Result<()> {
-        if self.view().visible_inode(inode_id).await?.is_none() {
-            return Err(CommitValidationError::InodeMissing { operand, inode_id }.into());
         }
         Ok(())
     }
@@ -198,46 +187,13 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         }
     }
 
-    pub(super) async fn ensure_source_binding(&self, expected: &ResolvedBinding) -> Result<()> {
-        let Some(existing) = self
-            .view()
-            .visible_child(expected.parent_inode_id, &expected.name_key)
-            .await?
-        else {
-            return Err(CommitValidationError::BindingPreconditionMissing {
-                parent_inode_id: expected.parent_inode_id,
-                name_key: expected.name_key.clone(),
-            }
-            .into());
-        };
-        if existing.parent_inode_id != expected.parent_inode_id
-            || existing.name_key != expected.name_key
-            || existing.child_inode_id != expected.child_inode_id
-            || existing.bind_position != expected.bind_position
-        {
-            return Err(CommitValidationError::BindingPreconditionMismatch {
-                target: format!(
-                    "name `{}` under parent inode `{}`",
-                    expected.name_key, expected.parent_inode_id
-                ),
-                expected_inode_id: Some(expected.child_inode_id),
-                actual_inode_id: Some(existing.child_inode_id),
-            }
-            .into());
-        }
-        Ok(())
-    }
-
     /// Returns the current revision of the file whose next revision an
     /// operation writes. The planner found the file with a revision, so a file
     /// without one is corrupt.
     pub(super) async fn resolve_current_revision_no(
         &self,
         inode_id: InodeId,
-        operand: CommitOperand,
     ) -> Result<RevisionNo> {
-        self.resolve_inode_kind(inode_id, InodeKind::File, operand)
-            .await?;
         let revision = self
             .view()
             .latest_revision_record(inode_id)

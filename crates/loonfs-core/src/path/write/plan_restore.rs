@@ -18,8 +18,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .resolve_authorized_target(target, required)
             .await?;
         target.ensure_file()?;
+        let binding = self.view().source_binding(target.resolved()).await?;
         self.validation
-            .restore_revision(target.inode_id(), source_revision_no)
+            .restore_revision(&binding, source_revision_no)
             .await
     }
 }

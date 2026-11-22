@@ -77,10 +77,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         }
         if let Some(expected) = expected_binding_version {
             self.view()
-                .ensure_binding_version(&source.resolved, expected)?;
+                .ensure_binding_version(source.resolved(), expected)?;
         }
         self.plan_rename(
-            &source.resolved,
+            source.resolved(),
             mover,
             destination,
             precondition,
@@ -111,7 +111,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         // once, from the directory that it leaves in the first leg to the
         // directory that it enters in the second.
         let relocated_from = match self.temporary_move {
-            None => Some(current_source_binding.parent_inode_id),
+            None => Some(current_source_binding.parent_inode_id()),
             Some(TemporaryMove::Away) => None,
             Some(TemporaryMove::Back { from_parent }) => Some(from_parent),
         };
@@ -160,12 +160,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             }
         }
         self.validation
-            .rename(
-                source.inode_id,
-                &current_source_binding,
-                parent_inode_id,
-                &name,
-            )
+            .rename(&current_source_binding, parent_inode_id, &name)
             .await
     }
 
@@ -202,7 +197,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             )
             .await?;
         self.plan_copy_into(
-            &source.resolved,
+            source.resolved(),
             destination,
             precondition,
             expected_destination,
@@ -256,8 +251,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     expected
                         .ensure_revision(existing.inode_id, Some(existing_revision.revision_no))?;
                 }
+                let binding = self.view().source_binding(existing).await?;
                 self.validation
-                    .replace_file(existing.inode_id, &revision.content_ref, None)
+                    .replace_file(&binding, &revision.content_ref, None)
                     .await
             }
             ReplaceDestination::Vacant => {
@@ -290,10 +286,15 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 if source_attributes.is_empty() {
                     return Ok(());
                 }
-                // Both steps include the one ID generated above, so they
-                // refer to the same new inode.
+                // The attribute update resolves the inode that the create
+                // wrote, after the create, so both write to the same new
+                // inode.
+                let child = self
+                    .view()
+                    .resolve_target(Target::Inode(child_inode_id), AccessRight::Write.into())
+                    .await?;
                 self.validation
-                    .update_attributes(child_inode_id, &source_attributes)
+                    .update_attributes(&child, &source_attributes)
                     .await
             }
         }

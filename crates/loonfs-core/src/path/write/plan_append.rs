@@ -37,9 +37,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         }
         let content_ref = appended.content_ref.clone();
         self.validation.record_appended(appended);
+        let binding = self.view().source_binding(target.resolved()).await?;
         self.validation
             .replace_file(
-                revision.inode_id,
+                &binding,
                 &content_ref,
                 Some(revision.content_ref.size_bytes),
             )

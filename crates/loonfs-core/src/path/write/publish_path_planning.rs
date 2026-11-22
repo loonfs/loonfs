@@ -2,13 +2,15 @@
 //! the target and destination resolution that the planners share. The
 //! authorization checks are in [`super::planning_authorization`].
 
+use super::planning_authorization::AccessStateRef;
 use super::preconditions::ensure_expected_inode;
 use crate::authorize::{Absence, Authorizer};
 use crate::binding_version;
-use crate::commit::ResolvedBinding;
 use crate::error::{CoreError, Result};
 
-use crate::metadata::{MetadataView, ResolvedVisiblePath, RevisionRecord, VisiblePathError};
+use crate::metadata::{
+    AccessRevisionRecord, MetadataView, ResolvedVisiblePath, RevisionRecord, VisiblePathError,
+};
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use crate::path::read;
 use loonfs_objectstore::ObjectStore;
@@ -63,15 +65,20 @@ impl<'a> Target<'a> {
     }
 }
 
-/// A target resolved to its visible inode.
-pub(super) struct ResolvedTarget<'a> {
-    pub(super) resolved: ResolvedVisiblePath,
-    pub(super) target: Target<'a>,
+/// A target resolved to its visible inode. Only the resolutions in this
+/// module make one, so a step that takes one writes to a visible inode.
+pub(crate) struct ResolvedTarget<'a> {
+    resolved: ResolvedVisiblePath,
+    target: Target<'a>,
 }
 
 impl<'a> ResolvedTarget<'a> {
-    pub(super) fn inode_id(&self) -> InodeId {
+    pub(crate) fn inode_id(&self) -> InodeId {
         self.resolved.inode_id
+    }
+
+    pub(super) fn resolved(&self) -> &ResolvedVisiblePath {
+        &self.resolved
     }
 
     pub(super) fn absence(&self) -> Absence<'a> {
@@ -135,6 +142,48 @@ impl<'a> ResolvedTarget<'a> {
             ),
             _ => Ok(()),
         }
+    }
+}
+
+/// The target of an access update, with the access row that the update
+/// replaces.
+pub(super) struct AccessUpdateTarget<'a> {
+    pub(super) target: ResolvedTarget<'a>,
+    pub(super) current: Option<AccessRevisionRecord>,
+}
+
+/// The current binding of a visible inode other than the root, as
+/// [`PlanningView::source_binding`] read it. Only that function makes one,
+/// so a step that takes one unbinds or writes under a current binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedBinding {
+    parent_inode_id: InodeId,
+    name_key: NameKey,
+    display_name: DisplayName,
+    child_inode_id: InodeId,
+    /// Position of the bind event that established the binding.
+    bind_position: DeltaPosition,
+}
+
+impl ResolvedBinding {
+    pub(crate) fn parent_inode_id(&self) -> InodeId {
+        self.parent_inode_id
+    }
+
+    pub(crate) fn name_key(&self) -> &NameKey {
+        &self.name_key
+    }
+
+    pub(crate) fn display_name(&self) -> &DisplayName {
+        &self.display_name
+    }
+
+    pub(crate) fn child_inode_id(&self) -> InodeId {
+        self.child_inode_id
+    }
+
+    pub(crate) fn bind_position(&self) -> DeltaPosition {
+        self.bind_position
     }
 }
 
@@ -224,6 +273,50 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
             .await?;
         target.ensure_expected_inode()?;
         Ok(target)
+    }
+
+    /// Resolves the target of an access update to its visible inode, after
+    /// authorizing the update from the inode's current access to `next`.
+    ///
+    /// A path whose middle component is not a directory is reported only
+    /// after the update is authorized on that component, so the error that
+    /// identifies it reaches only a subject allowed to learn of it.
+    pub(super) async fn resolve_access_update_target<'t>(
+        &self,
+        target: Target<'t>,
+        next: AccessStateRef<'_>,
+    ) -> Result<AccessUpdateTarget<'t>> {
+        let (authorized_inode_id, resolved) = match target {
+            Target::Path { path, .. } => match self.metadata.resolve_visible_path(path).await {
+                Ok(resolved) => (resolved.inode_id, Ok(resolved)),
+                Err(
+                    error @ CoreError::VisiblePath(VisiblePathError::PathComponentNotDirectory {
+                        inode_id,
+                        ..
+                    }),
+                ) => (inode_id, Err(error)),
+                Err(error) => return Err(error),
+            },
+            Target::Inode(inode_id) => (inode_id, Ok(self.resolve_visible_inode(inode_id).await?)),
+        };
+        let current = self
+            .metadata
+            .latest_access_revision(authorized_inode_id)
+            .await?;
+        self.authorize_access_update(
+            authorized_inode_id,
+            AccessStateRef::from_row(current.as_ref()),
+            next,
+            target.absence(),
+        )
+        .await?;
+        Ok(AccessUpdateTarget {
+            target: ResolvedTarget {
+                resolved: resolved?,
+                target,
+            },
+            current,
+        })
     }
 
     /// Returns the latest revision of a resolved file target.
@@ -430,6 +523,8 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         })
     }
 
+    /// Returns the current binding of `resolved`, a visible inode other than
+    /// the root.
     pub(super) async fn source_binding(
         &self,
         resolved: &ResolvedVisiblePath,

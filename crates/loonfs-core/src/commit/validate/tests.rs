@@ -3,7 +3,7 @@
 //!
 //! These tests are kept in the crate because the steps are internal.
 
-use super::super::{NewChild, ResolvedBinding};
+use super::super::NewChild;
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::commit::engine::CommitCandidate;
@@ -22,9 +22,8 @@ use loonfs_types::format::{
 use loonfs_types::ChecksumAlgorithm;
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    next_public_ordinal, AttributeKey, AttributeValue, Attributes, CommitId, CommitSeq, ContentRef,
-    DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WriterEpoch,
-    MAX_PUBLIC_INTEGER,
+    next_public_ordinal, CommitId, CommitSeq, ContentRef, DisplayName, InodeId, InodeKind, NameKey,
+    NamespaceId, RevisionNo, WriterEpoch,
 };
 use std::assert_matches;
 
@@ -38,21 +37,6 @@ fn content_ref(seed: &str) -> ContentRef {
 
 fn commit_id_for_seq(seq: CommitSeq) -> CommitId {
     CommitId::parse(format!("c_validation_{}", seq.0)).expect("commit id")
-}
-
-fn test_attributes(entries: &[(&str, &str)]) -> Attributes {
-    Attributes::new(
-        entries
-            .iter()
-            .map(|(key, value)| {
-                (
-                    AttributeKey::parse(key).expect("valid attribute key"),
-                    AttributeValue::parse(value).expect("valid attribute value"),
-                )
-            })
-            .collect(),
-    )
-    .expect("valid attribute map")
 }
 
 fn test_fingerprint() -> CommitFingerprint {
@@ -119,21 +103,6 @@ fn wal_create_file(
             None,
         ),
     ]
-}
-
-fn wal_append_revision(
-    delta_index: u32,
-    inode_id: InodeId,
-    revision_no: RevisionNo,
-    content_ref: ContentRef,
-) -> Vec<WalDelta> {
-    vec![crate::test_support::file_revision_delta(
-        delta_index,
-        inode_id,
-        revision_no,
-        content_ref,
-        None,
-    )]
 }
 
 fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
@@ -277,26 +246,6 @@ async fn build_commit_plan(
 }
 
 #[tokio::test]
-async fn an_attribute_update_of_a_missing_inode_is_rejected() {
-    let metadata_state = metadata_state_after(&[]);
-    let context = validation_context(&metadata_state, CommitSeq(0));
-    let attributes = test_attributes(&[("owner", "ada")]);
-
-    let error = build_commit_plan(4_200, &context, async |session| {
-        session.update_attributes(InodeId(9), &attributes).await
-    })
-    .await
-    .expect_err("the inode does not exist");
-    assert_matches!(
-        error,
-        CommitValidationError::InodeMissing {
-            operand: CommitOperand::AttributeTarget,
-            inode_id: InodeId(9)
-        }
-    );
-}
-
-#[tokio::test]
 async fn a_create_for_a_bound_name_is_rejected() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
         0,
@@ -343,19 +292,8 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
         ),
     ]);
     let context = validation_context(&metadata_state, CommitSeq(2));
-    let docs_binding = ResolvedBinding {
-        parent_inode_id: ROOT_INODE_ID,
-        name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: test_display_name("docs"),
-        child_inode_id: InodeId(2),
-        bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: CommitSeq(1),
-            delta_index: 1,
-        },
-    };
     let copy_name = test_display_name("copy.txt");
-    let moved_name = test_display_name("moved.txt");
-    let reused_inode = validate_steps(4_200, &context, async |session| {
+    let error = validate_steps(4_200, &context, async |session| {
         session
             .create(
                 InodeId(3),
@@ -365,68 +303,22 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
             )
             .await
     })
-    .await;
-    let unbinds_another_child = validate_steps(4_200, &context, async |session| {
-        session
-            .rename(InodeId(3), &docs_binding, ROOT_INODE_ID, &moved_name)
-            .await
-    })
-    .await;
-
-    for result in [reused_inode, unbinds_another_child] {
-        let error = result.expect_err("inode 3 already has a parent");
-        assert_matches!(error, CoreError::NamespaceCorrupt(_));
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "namespace corrupt: a commit binds inode `{}`, which is already bound as \
-                 `readme.txt` under parent inode `{}`",
-                InodeId(3),
-                InodeId(2)
-            )
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
-    let metadata_state = metadata_state_after(&[wal_create_directory(
-        0,
-        InodeId(2),
-        ROOT_INODE_ID,
-        "docs".to_owned(),
-    )]);
-    let context = validation_context(&metadata_state, CommitSeq(1));
-    let source_binding = ResolvedBinding {
-        parent_inode_id: ROOT_INODE_ID,
-        name_key: NameKey::parse("missing.txt").expect("valid name key"),
-        display_name: test_display_name("missing.txt"),
-        child_inode_id: InodeId(9),
-        bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: CommitSeq(1),
-            delta_index: 0,
-        },
-    };
-    let renamed = test_display_name("renamed");
-
-    let error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .rename(InodeId(2), &source_binding, ROOT_INODE_ID, &renamed)
-            .await
-    })
     .await
-    .expect_err("the observed binding is gone");
-    assert_matches!(
-        error,
-        CommitValidationError::BindingPreconditionMissing {
-            parent_inode_id: ROOT_INODE_ID,
-            ..
-        }
+    .expect_err("inode 3 already has a parent");
+    assert_matches!(error, CoreError::NamespaceCorrupt(_));
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "namespace corrupt: a commit binds inode `{}`, which is already bound as \
+             `readme.txt` under parent inode `{}`",
+            InodeId(3),
+            InodeId(2)
+        )
     );
 }
 
 #[tokio::test]
-async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
+async fn a_create_under_an_ancestor_tombstone_reports_corruption() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
         wal_create_file(
@@ -440,7 +332,6 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
     let new_name = test_display_name("new.txt");
-    let replacement = content_ref("content-2");
 
     let create_error = build_commit_plan(4_200, &context, async |session| {
         session
@@ -466,213 +357,14 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
         CoreError::from(create_error).code(),
         ErrorCode::NamespaceCorrupt
     );
-
-    let replace_error = build_commit_plan(4_200, &context, async |session| {
-        session.replace_file(InodeId(3), &replacement, None).await
-    })
-    .await
-    .expect_err("replace under tombstone");
-    assert_matches!(
-        replace_error,
-        CommitValidationError::TargetUnderSubtreeTombstone {
-            operand: CommitOperand::ReplaceTarget,
-            inode_id: InodeId(3),
-            ..
-        }
-    );
-    assert_eq!(
-        CoreError::from(replace_error).code(),
-        ErrorCode::NamespaceCorrupt
-    );
 }
 
+/// Checks that a create under a directory whose ancestry is disconnected
+/// fails validation with `InodeMissing`. A base compaction of the bindings
+/// group leaves inodes disconnected below an expired deletion, and this test
+/// builds the same state by unbinding `/docs` without recording a tombstone.
 #[tokio::test]
-async fn restore_revision_validation_rejects_missing_inode() {
-    let metadata_state = metadata_state_after(&[wal_create_directory(
-        0,
-        InodeId(2),
-        ROOT_INODE_ID,
-        "docs".to_owned(),
-    )]);
-    let context = validation_context(&metadata_state, CommitSeq(1));
-    let error = build_commit_plan(4_200, &context, async |session| {
-        session.restore_revision(InodeId(99), RevisionNo(1)).await
-    })
-    .await
-    .expect_err("restore missing inode");
-    assert_matches!(
-        error,
-        CommitValidationError::InodeMissing {
-            operand: CommitOperand::RestoreTarget,
-            inode_id: InodeId(99),
-        }
-    );
-}
-
-#[tokio::test]
-async fn restore_revision_validation_rejects_non_file_target() {
-    let metadata_state = metadata_state_after(&[wal_create_directory(
-        0,
-        InodeId(2),
-        ROOT_INODE_ID,
-        "docs".to_owned(),
-    )]);
-    let context = validation_context(&metadata_state, CommitSeq(1));
-    let error = build_commit_plan(4_200, &context, async |session| {
-        session.restore_revision(InodeId(2), RevisionNo(1)).await
-    })
-    .await
-    .expect_err("restore non-file");
-    assert_matches!(
-        error,
-        CommitValidationError::InodeWrongKind {
-            operand: CommitOperand::RestoreTarget,
-            inode_id: InodeId(2),
-            expected: InodeKind::File,
-            actual: InodeKind::Directory,
-        }
-    );
-}
-
-#[tokio::test]
-async fn restore_revision_validation_rejects_a_missing_source_revision() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
-    ]);
-    let context = validation_context(&metadata_state, CommitSeq(3));
-
-    let missing_source = build_commit_plan(4_200, &context, async |session| {
-        session.restore_revision(InodeId(3), RevisionNo(99)).await
-    })
-    .await
-    .expect_err("restore missing source");
-    assert_matches!(
-        missing_source,
-        CommitValidationError::RestoreRevisionSourceRevisionMissing {
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(99),
-        }
-    );
-}
-
-#[tokio::test]
-async fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-    ]);
-    let context = validation_context(&metadata_state, CommitSeq(2));
-
-    // The restore must resolve to the very object the replace attached, so
-    // the expectation is that reference itself.
-    let expected = content_ref("content-2");
-    let plan = build_commit_plan(4_200, &context, async |session| {
-        session.replace_file(InodeId(3), &expected, None).await?;
-        session.restore_revision(InodeId(3), RevisionNo(2)).await
-    })
-    .await
-    .expect("replace then restore in same request should validate");
-    assert_matches!(
-        &plan.deltas[1].delta,
-        WalDelta::AppendFileRevision {
-            content_ref,
-            ..
-        } if *content_ref == expected
-    );
-}
-
-#[tokio::test]
-async fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
-    // Each restore resolves to an object an earlier revision already named,
-    // so the expectations are those references themselves.
-    let expected = content_ref("content-1");
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            expected.clone(),
-        ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
-    ]);
-    let context = validation_context(&metadata_state, CommitSeq(3));
-
-    let plan = build_commit_plan(4_200, &context, async |session| {
-        session.restore_revision(InodeId(3), RevisionNo(1)).await?;
-        session.restore_revision(InodeId(3), RevisionNo(3)).await
-    })
-    .await
-    .expect("restore then restore in same request should validate");
-    assert_matches!(
-        &plan.deltas[0].delta,
-        WalDelta::AppendFileRevision {
-            content_ref,
-            ..
-        } if *content_ref == expected
-    );
-    assert_matches!(
-        &plan.deltas[1].delta,
-        WalDelta::AppendFileRevision {
-            content_ref,
-            ..
-        } if *content_ref == expected
-    );
-}
-
-#[tokio::test]
-async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-        wal_tombstone(0, InodeId(2)),
-    ]);
-    let context = validation_context(&metadata_state, CommitSeq(3));
-
-    let error = build_commit_plan(4_200, &context, async |session| {
-        session.restore_revision(InodeId(3), RevisionNo(1)).await
-    })
-    .await
-    .expect_err("restore under a covering tombstone");
-    assert_matches!(
-        error,
-        CommitValidationError::TargetUnderSubtreeTombstone {
-            operand: CommitOperand::RestoreTarget,
-            inode_id: InodeId(3),
-            ..
-        }
-    );
-    assert_eq!(CoreError::from(error).code(), ErrorCode::NamespaceCorrupt);
-}
-
-/// Checks that a create under a directory whose ancestry is disconnected, and
-/// a replace of a file below that directory, fail validation with
-/// `InodeMissing`. A base compaction of the bindings group leaves inodes
-/// disconnected below an expired deletion, and this test builds the same state
-/// by unbinding `/docs` without recording a tombstone.
-#[tokio::test]
-async fn create_and_replace_under_a_disconnected_ancestry_report_a_missing_inode() {
+async fn a_create_under_a_disconnected_ancestry_reports_a_missing_inode() {
     let mut unbind_docs = wal_delete_docs(DeltaPosition {
         seq: CommitSeq(1),
         delta_index: 1,
@@ -691,7 +383,6 @@ async fn create_and_replace_under_a_disconnected_ancestry_report_a_missing_inode
     ]);
     let context = validation_context(&metadata_state, CommitSeq(3));
     let new_name = test_display_name("new.txt");
-    let replacement = content_ref("content-2");
 
     let create_error = build_commit_plan(4_200, &context, async |session| {
         session
@@ -710,71 +401,6 @@ async fn create_and_replace_under_a_disconnected_ancestry_report_a_missing_inode
         CommitValidationError::InodeMissing {
             operand: CommitOperand::CreateParent,
             inode_id: InodeId(2),
-        }
-    );
-
-    let replace_error = build_commit_plan(4_200, &context, async |session| {
-        session.replace_file(InodeId(3), &replacement, None).await
-    })
-    .await
-    .expect_err("replace below a disconnected directory");
-    assert_matches!(
-        replace_error,
-        CommitValidationError::InodeMissing {
-            operand: CommitOperand::ReplaceTarget,
-            inode_id: InodeId(3),
-        }
-    );
-}
-
-#[tokio::test]
-async fn restore_revision_overflow_is_rejected() {
-    let mut deltas = wal_create_file(
-        0,
-        InodeId(2),
-        ROOT_INODE_ID,
-        "overflow.txt".to_owned(),
-        content_ref("content-max"),
-    );
-    deltas[2] = crate::test_support::file_revision_delta(
-        2,
-        InodeId(2),
-        RevisionNo(MAX_PUBLIC_INTEGER),
-        content_ref("content-max"),
-        None,
-    );
-    let metadata_state = MetadataState::default()
-        .apply_committed_wal_deltas(
-            CommitSeq(0),
-            &commit_id_for_seq(CommitSeq(0)),
-            &loonfs_test_support::test_actor(),
-            4_200,
-            &[WalDelta::CreateInode {
-                delta_index: 0,
-                inode_id: ROOT_INODE_ID,
-                inode_kind: InodeKind::Directory,
-            }],
-        )
-        .apply_committed_wal_deltas(
-            CommitSeq(1),
-            &commit_id_for_seq(CommitSeq(1)),
-            &loonfs_test_support::test_actor(),
-            4_200,
-            &deltas,
-        );
-    let context = validation_context(&metadata_state, CommitSeq(1));
-    let error = build_commit_plan(4_200, &context, async |session| {
-        session
-            .restore_revision(InodeId(2), RevisionNo(MAX_PUBLIC_INTEGER))
-            .await
-    })
-    .await
-    .expect_err("restore overflow");
-    assert_matches!(
-        error,
-        CommitValidationError::RevisionOverflow {
-            inode_id: InodeId(2),
-            base_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
         }
     );
 }
