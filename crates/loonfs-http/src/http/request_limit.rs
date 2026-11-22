@@ -30,6 +30,9 @@ pub struct RequestLimit {
 }
 
 impl RequestLimit {
+    /// Builds a limit that admits `capacity` requests at once, and one
+    /// `/metrics` scrape beside them. A request beyond the limit fails with
+    /// 503 `server_busy`.
     pub fn new(capacity: NonZeroUsize) -> Self {
         // `settle` acquires every permit in one call, which counts in `u32`.
         let capacity =
@@ -42,6 +45,8 @@ impl RequestLimit {
         }
     }
 
+    /// Returns the number of admitted requests that haven't sent their last
+    /// response frame, not counting a `/metrics` scrape.
     pub fn in_flight(&self) -> usize {
         self.capacity as usize - self.permits.available_permits()
     }
