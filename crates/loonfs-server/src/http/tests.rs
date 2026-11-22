@@ -14,7 +14,6 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
-use loonfs_types::config::ConfigFieldError;
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
 use loonfs_types::{CapabilityDocument, API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0};
 use std::assert_matches;
@@ -709,29 +708,92 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
         .expect_err("the listener stops accepting after the slow request finishes");
 }
 
-/// Holds the configured port, so a server that bound before it built its app
-/// would fail with `Bind`, and gives the store a root that is a regular file,
-/// which fails the app's build.
+/// Holds the configured port and gives the store a root that is a regular
+/// file. The reservation of the address fails first, so the build, which
+/// would fail on the store root, doesn't run.
 #[tokio::test]
-async fn serve_builds_the_app_before_it_binds() {
+async fn serve_reserves_the_address_before_it_builds_the_app() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store-root-is-a-file");
     std::fs::write(&store_root, b"not a directory").expect("write the store root file");
     let held = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind a port to hold");
-    let mut config = test_config(&store_root, "build-before-bind-writer");
+    let mut config = test_config(&store_root, "reserve-before-build-writer");
     config.bind = held.local_addr().expect("held address").to_string();
 
-    let error = super::serve(config.validate().expect("validate the test config"))
-        .await
-        .expect_err("the app build fails");
+    let error = super::serve::serve_on_address(
+        config.validate().expect("validate the test config"),
+        AppConfig::default(),
+        std::future::pending(),
+    )
+    .await
+    .expect_err("the address is held");
 
     assert_matches!(
         error,
-        ServerError::Config(ConfigFieldError::Invalid { field: "store", .. }),
-        "the port was held, so a server that bound first would report `Bind`"
+        ServerError::Bind { .. },
+        "a server that built first would report the store root"
     );
+}
+
+/// Serves on a configured address, which the server binds itself, and
+/// answers a health probe once it listens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_listens_on_the_configured_address_after_it_builds_the_app() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let addr = {
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a free port");
+        free.local_addr().expect("free address")
+    };
+    let mut config = test_config(temp_dir.path(), "listen-after-build-writer");
+    config.bind = addr.to_string();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(super::serve::serve_on_address(
+        config.validate().expect("validate the test config"),
+        AppConfig::default(),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    // A connection is refused until the socket listens, so the probe retries.
+    let mut stream = loop {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(stream) => break stream,
+            Err(_) => {
+                assert!(
+                    !server.is_finished(),
+                    "the server stopped before it listened"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    };
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("send the probe");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read the probe's response");
+    let response = String::from_utf8(response).expect("the response is utf-8");
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK\r\n"),
+        "the health probe is answered: {response}"
+    );
+
+    shutdown_tx.send(()).expect("trigger shutdown");
+    server
+        .await
+        .expect("the server task finishes")
+        .expect("the server shuts down");
 }
 
 fn options_with_store(store: SharedObjectStore) -> AppConfig {

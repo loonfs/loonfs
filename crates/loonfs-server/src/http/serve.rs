@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use std::pin::{pin, Pin};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::Notify;
 use tokio::task::{JoinError, JoinSet};
 use tower::ServiceExt as _;
@@ -283,21 +283,50 @@ pub async fn probe_store(config: &ValidatedServerConfig) -> Result<StoreProbeRep
 /// Serves on the configured address until ctrl-c or SIGTERM, then shuts down
 /// gracefully.
 ///
-/// The app is built before the port is bound, so a connection that arrives
-/// while the store client and the SSD cache are being built is refused and
-/// retried instead of waiting in the backlog, and the listening line means
-/// the server answers. Admission closes while the listener remains available
-/// to probes, and a request that arrives during the drain is answered
-/// `shutting_down`. After admitted requests drain, the listener closes and
-/// accepted work settles.
+/// The address is bound before the app is built, and the socket listens
+/// after it. A second server on the same address fails before the build
+/// opens any file, and a connection that arrives while the store client and
+/// the SSD cache are being built is refused and retried instead of waiting
+/// in the backlog, so the listening line means the server answers.
+/// Admission closes while the listener remains available to probes, and a
+/// request that arrives during the drain is answered `shutting_down`. After
+/// admitted requests drain, the listener closes and accepted work settles.
 pub async fn serve(config: ValidatedServerConfig) -> Result<()> {
     let shutdown = shutdown_signal().map_err(ServerError::Signal)?;
+    serve_on_address(config, AppConfig::default(), shutdown).await
+}
+
+/// [`serve`] with a caller-supplied shutdown trigger instead of process
+/// signals.
+pub(super) async fn serve_on_address(
+    config: ValidatedServerConfig,
+    options: AppConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let bind = config.bind;
-    let server = BuiltServer::build(config, AppConfig::default()).await?;
-    let listener = TcpListener::bind(bind)
-        .await
-        .map_err(|source| ServerError::Bind { addr: bind, source })?;
+    let bind_error = |source| ServerError::Bind { addr: bind, source };
+    let socket = reserve(bind).map_err(bind_error)?;
+    let server = BuiltServer::build(config, options).await?;
+    let listener = socket.listen(LISTEN_BACKLOG).map_err(bind_error)?;
     server.serve(listener, shutdown).await
+}
+
+/// The listen backlog, which is the value `TcpListener::bind` uses.
+const LISTEN_BACKLOG: u32 = 1024;
+
+/// Binds a socket to `bind` without listening on it, so the address is taken
+/// and a connection to it is refused until the socket listens.
+fn reserve(bind: SocketAddr) -> std::io::Result<TcpSocket> {
+    let socket = match bind {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    // `TcpListener::bind` sets this on Unix, so a restarted server can bind
+    // while the last run's connections are in TIME_WAIT.
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(bind)?;
+    Ok(socket)
 }
 
 /// [`serve`] on a listener the caller bound, with the store and transfer
