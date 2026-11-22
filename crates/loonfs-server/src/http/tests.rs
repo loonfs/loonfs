@@ -4,7 +4,7 @@ mod admission;
 
 use super::serve::{build_handles, RuntimeHandles, Settlement};
 use super::{app, serve_with_shutdown, AppConfig};
-use crate::{AuthConfig, ServerConfig, StoreConfig};
+use crate::{AuthConfig, ServerConfig, ServerError, StoreConfig};
 use axum::http::StatusCode;
 use loonfs::metrics::MetricValue;
 use loonfs::{ConfiguredObjectStoreKind, LoonFs, SharedObjectStore, TraceMode, Writable};
@@ -14,8 +14,10 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_types::config::ConfigFieldError;
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
 use loonfs_types::{CapabilityDocument, API_GROUP_FILESYSTEM_V0, API_GROUP_QUERY_V0};
+use std::assert_matches;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -705,6 +707,31 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
     tokio::net::TcpStream::connect(addr)
         .await
         .expect_err("the listener stops accepting after the slow request finishes");
+}
+
+/// Holds the configured port, so a server that bound before it built its app
+/// would fail with `Bind`, and gives the store a root that is a regular file,
+/// which fails the app's build.
+#[tokio::test]
+async fn serve_builds_the_app_before_it_binds() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store_root = temp_dir.path().join("store-root-is-a-file");
+    std::fs::write(&store_root, b"not a directory").expect("write the store root file");
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a port to hold");
+    let mut config = test_config(&store_root, "build-before-bind-writer");
+    config.bind = held.local_addr().expect("held address").to_string();
+
+    let error = super::serve(config.validate().expect("validate the test config"))
+        .await
+        .expect_err("the app build fails");
+
+    assert_matches!(
+        error,
+        ServerError::Config(ConfigFieldError::Invalid { field: "store", .. }),
+        "the port was held, so a server that bound first would report `Bind`"
+    );
 }
 
 fn options_with_store(store: SharedObjectStore) -> AppConfig {

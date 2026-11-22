@@ -13,7 +13,9 @@ use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
-use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable, WriterId};
+use loonfs::{
+    ConfiguredObjectStoreKind, LoonFs, Maintenance, SharedObjectStore, Writable, WriterId,
+};
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
 use loonfs_http::{HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, RequestLimit};
 use loonfs_objectstore::presign::DirectTransferIssuers;
@@ -25,7 +27,7 @@ use std::net::SocketAddr;
 use std::pin::{pin, Pin};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio::task::{JoinError, JoinSet};
 use tower::ServiceExt as _;
@@ -281,16 +283,21 @@ pub async fn probe_store(config: &ValidatedServerConfig) -> Result<StoreProbeRep
 /// Serves on the configured address until ctrl-c or SIGTERM, then shuts down
 /// gracefully.
 ///
-/// Admission closes while the listener remains available to probes, and a
-/// request that arrives during the drain is answered `shutting_down`. After
-/// admitted requests drain, the listener closes and accepted work settles.
+/// The app is built before the port is bound, so a connection that arrives
+/// while the store client and the SSD cache are being built is refused and
+/// retried instead of waiting in the backlog, and the listening line means
+/// the server answers. Admission closes while the listener remains available
+/// to probes, and a request that arrives during the drain is answered
+/// `shutting_down`. After admitted requests drain, the listener closes and
+/// accepted work settles.
 pub async fn serve(config: ValidatedServerConfig) -> Result<()> {
     let shutdown = shutdown_signal().map_err(ServerError::Signal)?;
     let bind = config.bind;
-    let listener = tokio::net::TcpListener::bind(bind)
+    let server = BuiltServer::build(config, AppConfig::default()).await?;
+    let listener = TcpListener::bind(bind)
         .await
         .map_err(|source| ServerError::Bind { addr: bind, source })?;
-    serve_with_shutdown(config, AppConfig::default(), listener, shutdown).await
+    server.serve(listener, shutdown).await
 }
 
 /// [`serve`] on a listener the caller bound, with the store and transfer
@@ -302,26 +309,128 @@ pub async fn serve(config: ValidatedServerConfig) -> Result<()> {
 pub async fn serve_with_shutdown(
     config: ValidatedServerConfig,
     options: AppConfig,
-    listener: tokio::net::TcpListener,
+    listener: TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let tls = tls_server_config(&config.config)?;
-    let bind = listener.local_addr().map_err(|source| ServerError::Bind {
-        addr: config.bind,
-        source,
-    })?;
-    // The first line a deployment sees. An idle server logs nothing until
-    // a request arrives, so without this line a container that started
-    // correctly and a container that is stuck look the same. This one says
-    // the config loaded and the process holds the port.
-    tracing::info!(
-        bind = %bind,
-        store = config.config.store.kind().as_str(),
-        "loonfs-server is listening"
-    );
-    match tls {
-        Some(tls) => serve_on(TlsListener::new(listener, tls), config, options, shutdown).await,
-        None => serve_on(listener.tap_io(set_nodelay), config, options, shutdown).await,
+    BuiltServer::build(config, options)
+        .await?
+        .serve(listener, shutdown)
+        .await
+}
+
+/// A server whose app is built and which has not yet bound or accepted a
+/// connection.
+struct BuiltServer {
+    /// The configured bind address, which a failed read of the listener's
+    /// address reports.
+    bind: SocketAddr,
+    store_kind: ConfiguredObjectStoreKind,
+    tls: Option<rustls::ServerConfig>,
+    router: Router,
+    state: AppState,
+    max_connections: usize,
+    connection_idle_timeout_ms: u64,
+    shutdown_deadline_ms: u64,
+}
+
+impl BuiltServer {
+    /// Builds the TLS identity and the app that a server for `config` serves.
+    async fn build(config: ValidatedServerConfig, options: AppConfig) -> Result<Self> {
+        let bind = config.bind;
+        let store_kind = config.config.store.kind();
+        // The first line a deployment sees. An idle server logs nothing until
+        // a request arrives, so without this line a container stuck building
+        // its store client or scanning its SSD cache and a container that
+        // never started look the same. This one says the config loaded.
+        tracing::info!(
+            bind = %bind,
+            store = store_kind.as_str(),
+            "loonfs-server is starting"
+        );
+        let tls = tls_server_config(&config.config)?;
+        let max_connections = config.config.max_connections.get();
+        let connection_idle_timeout_ms = config.config.connection_idle_timeout_ms.get();
+        let shutdown_deadline_ms = config.config.shutdown_deadline_ms.get();
+        let (router, state) = app(config, options).await?;
+        Ok(Self {
+            bind,
+            store_kind,
+            tls,
+            router,
+            state,
+            max_connections,
+            connection_idle_timeout_ms,
+            shutdown_deadline_ms,
+        })
+    }
+
+    /// Serves on `listener` until `shutdown` resolves, then settles what the
+    /// server owns.
+    async fn serve(
+        mut self,
+        listener: TcpListener,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        let bind = listener.local_addr().map_err(|source| ServerError::Bind {
+            addr: self.bind,
+            source,
+        })?;
+        tracing::info!(
+            bind = %bind,
+            store = self.store_kind.as_str(),
+            "loonfs-server is listening"
+        );
+        match self.tls.take() {
+            Some(tls) => {
+                self.serve_on(TlsListener::new(listener, tls), shutdown)
+                    .await
+            }
+            None => self.serve_on(listener.tap_io(set_nodelay), shutdown).await,
+        }
+    }
+
+    /// The one serving body, over whichever listener the deployment
+    /// configured.
+    ///
+    /// Plaintext and TLS differ in what `accept` returns and in nothing else.
+    /// Both start the maintenance scheduler, close admission, drain requests,
+    /// close the listener, stop the scheduler, and settle the runtime in the
+    /// same order.
+    async fn serve_on<L>(
+        self,
+        listener: L,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<()>
+    where
+        L: axum::serve::Listener<Addr = SocketAddr>,
+    {
+        let Self {
+            router,
+            state,
+            max_connections,
+            connection_idle_timeout_ms,
+            shutdown_deadline_ms,
+            ..
+        } = self;
+        let listener = super::connection_limit::ConnectionLimit::new(
+            listener,
+            max_connections,
+            state.http.metrics.recorder().as_ref(),
+        );
+        let settlement = Settlement {
+            requests: state.http.request_limit().cloned(),
+            runtime: state.http.runtime,
+            scheduler: state.scheduler,
+            deadline_ms: shutdown_deadline_ms,
+        };
+        serve_and_settle(
+            listener,
+            router,
+            connection_idle_timeout_ms,
+            settlement,
+            shutdown,
+        )
+        .await
     }
 }
 
@@ -340,45 +449,6 @@ pub(super) fn set_nodelay(stream: &mut TcpStream) {
     }
 }
 
-/// The one serving body, over whichever listener the deployment configured.
-/// Plaintext and TLS differ in what `accept` returns and in nothing else.
-/// Both start the maintenance scheduler, close admission, drain requests,
-/// close the listener, stop the scheduler, and settle the runtime in the same
-/// order.
-async fn serve_on<L>(
-    listener: L,
-    config: ValidatedServerConfig,
-    options: AppConfig,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<()>
-where
-    L: axum::serve::Listener<Addr = SocketAddr>,
-{
-    let deadline_ms = config.config.shutdown_deadline_ms.get();
-    let max_connections = config.config.max_connections.get();
-    let connection_idle_timeout_ms = config.config.connection_idle_timeout_ms.get();
-    let (router, state) = app(config, options).await?;
-    let listener = super::connection_limit::ConnectionLimit::new(
-        listener,
-        max_connections,
-        state.http.metrics.recorder().as_ref(),
-    );
-    let settlement = Settlement {
-        requests: state.http.request_limit().cloned(),
-        runtime: state.http.runtime,
-        scheduler: state.scheduler,
-        deadline_ms,
-    };
-    serve_and_settle(
-        listener,
-        router,
-        connection_idle_timeout_ms,
-        settlement,
-        shutdown,
-    )
-    .await
-}
-
 /// What a server settles after it stops serving, and how long the drain and
 /// the scheduler's stop may take, counted from the shutdown signal.
 pub(super) struct Settlement {
@@ -393,8 +463,8 @@ pub(super) struct Settlement {
 /// Starts `scheduler`, serves until the shutdown trigger fires, then settles
 /// what this process owns, in the order it has to be settled in.
 ///
-/// Kept apart from [`serve_on`] so the settling order is a thing a test can
-/// drive with handles it keeps.
+/// Kept apart from [`BuiltServer::serve_on`] so the settling order is a thing
+/// a test can drive with handles it keeps.
 #[expect(
     clippy::disallowed_methods,
     reason = "monotonic time is used only to limit graceful shutdown"
