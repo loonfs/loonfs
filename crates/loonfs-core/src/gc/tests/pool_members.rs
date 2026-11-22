@@ -422,35 +422,37 @@ async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_
     }
 }
 
-/// Checks that a member's user snapshot whose manifest is missing doesn't make
-/// the member unreadable, because it's a candidate that was never verified, and
-/// that pool collection leaves the snapshot's record for the member's own
-/// collection. A fork snapshot whose manifest is missing still makes the member
-/// unreadable.
+/// Checks which member snapshots whose manifest is missing make the member
+/// unreadable. A user snapshot doesn't, because it's a candidate that was
+/// never verified, and neither does a deleted member's own fork point
+/// snapshot, which nothing reads. A fork snapshot for another namespace does,
+/// and so does an active member's own fork point snapshot. Pool collection leaves
+/// every snapshot's record for the member's own collection.
 #[tokio::test]
-async fn only_a_fork_snapshot_whose_manifest_is_missing_makes_its_member_unreadable() {
-    let owners = [
-        (
-            SnapshotOwner::User {
-                name: Some("unverified".to_owned()),
-                expires_at_ms: None,
-                deleted_at_ms: None,
-            },
-            vec![],
-        ),
-        (
-            SnapshotOwner::Fork {
-                target_namespace_id: NamespaceId::parse("fork").expect("namespace"),
-            },
-            vec![GcSkippedWork::ContentDeletionUnreadableMember],
-        ),
+async fn a_snapshot_whose_manifest_is_missing_makes_its_member_unreadable_unless_it_protects_nothing(
+) {
+    let member = NamespaceId::parse("member").expect("namespace");
+    let user = SnapshotOwner::User {
+        name: Some("unverified".to_owned()),
+        expires_at_ms: None,
+        deleted_at_ms: None,
+    };
+    let fork_of = |target: &str| SnapshotOwner::Fork {
+        target_namespace_id: NamespaceId::parse(target).expect("namespace"),
+    };
+    let unreadable = vec![GcSkippedWork::ContentDeletionUnreadableMember];
+    // The owner, whether the member is deleted, and the skipped work.
+    let cases = [
+        (user, false, vec![]),
+        (fork_of("fork"), false, unreadable.clone()),
+        (fork_of("member"), false, unreadable),
+        (fork_of("member"), true, vec![]),
     ];
-    for (owner, skipped) in owners {
+    for (owner, deleted, skipped) in cases {
         let directory = tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let (pool_id, members) = pool(&store, &["member"]).await;
-        let member = &members[0];
-        let namespace = crate::test_support::namespace_store(&store, member);
+        let namespace = crate::test_support::namespace_store(&store, &member);
         let snapshot = namespace
             .create_snapshot_record(
                 owner,
@@ -464,18 +466,23 @@ async fn only_a_fork_snapshot_whose_manifest_is_missing_makes_its_member_unreada
             .expect("snapshot");
         let content_id = numbered_content_id(1);
         let referenced = plant(&store, &pool_id, &content_id).await;
-        publish_layout(&store, member, &content_id).await;
+        publish_layout(&store, &member, &content_id).await;
         store
-            .delete(&metadata_manifest_object(member, &snapshot.manifest_no))
+            .delete(&metadata_manifest_object(&member, &snapshot.manifest_no))
             .await
             .expect("delete the snapshot's manifest");
         let unreferenced = plant(&store, &pool_id, &numbered_content_id(2)).await;
         let aged = aged_context(&store, &members).await;
+        // A deletion at the collection's clock keeps the tombstone's view a
+        // root, so the referenced content stays in every case.
+        if deleted {
+            delete_namespace(&store, &member, aged.now_ms).await;
+        }
         let report = collect_pool(&store, &pool_id, &aged).await;
-        assert_eq!(report.skipped, skipped, "{snapshot:?}");
+        assert_eq!(report.skipped, skipped, "deleted: {deleted}, {snapshot:?}");
         assert_eq!(exists(&store, &unreferenced).await, !skipped.is_empty());
         assert!(exists(&store, &referenced).await);
-        let record = loonfs_objectstore::keys::snapshot_record(member, &snapshot.snapshot_id);
+        let record = loonfs_objectstore::keys::snapshot_record(&member, &snapshot.snapshot_id);
         assert!(exists(&store, &record).await, "`{record}`");
     }
 }
