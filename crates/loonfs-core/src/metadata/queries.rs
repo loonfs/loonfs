@@ -158,17 +158,6 @@ impl MetadataState {
         )
     }
 
-    pub fn covering_subtree_tombstone(
-        &self,
-        inode_id: InodeId,
-        base_seq: CommitSeq,
-    ) -> Option<SubtreeTombstoneRecord> {
-        read_now(visibility::covering_subtree_tombstone(
-            &mut self.reads_at_seq(base_seq),
-            inode_id,
-        ))
-    }
-
     pub fn visible_inode(&self, inode_id: InodeId, base_seq: CommitSeq) -> Option<InodeRecord> {
         read_now(visibility::visible_inode(
             &mut self.reads_at_seq(base_seq),

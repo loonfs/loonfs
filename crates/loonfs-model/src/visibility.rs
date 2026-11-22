@@ -46,8 +46,9 @@ pub struct ListedEntry<'a> {
 }
 
 impl MetadataState {
-    /// The inode, when it was created by `seq` and no tombstone that hides
-    /// its subtree is rooted at it or at any ancestor.
+    /// The inode, when it was created by `seq`, its parent bindings lead up
+    /// to the root, and no tombstone that hides its subtree is rooted at it
+    /// or at any ancestor.
     pub fn visible_inode(&self, inode_id: InodeId, seq: CommitSeq) -> Result<Option<&InodeRecord>> {
         let Some(inode) = self
             .inodes
@@ -56,7 +57,11 @@ impl MetadataState {
         else {
             return Ok(None);
         };
-        for member in self.ancestry(inode_id, seq)? {
+        let ancestry = self.ancestry(inode_id, seq)?;
+        if ancestry.last() != Some(&ROOT_INODE_ID) {
+            return Ok(None);
+        }
+        for member in ancestry {
             if self.is_hidden_root(member, seq) {
                 return Ok(None);
             }

@@ -4,7 +4,7 @@
 //! memoizes the inputs and results of those rules.
 
 use super::durable_cache::ParentNameCacheKey;
-use super::visibility::{self, MetadataVisibilityReads};
+use super::visibility::{self, Ancestry, MetadataVisibilityReads};
 use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, ListedTrashEntry, MetadataView,
     ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord, TrashRange,
@@ -138,7 +138,7 @@ pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     attributes_cache: HashMap<InodeId, AttributesProjection>,
     access_row_cache: HashMap<InodeId, Option<AccessRevisionRecord>>,
     pub(crate) hiding_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
-    covering_tombstone_cache: HashMap<InodeId, Option<SubtreeTombstoneRecord>>,
+    ancestry_cache: HashMap<InodeId, Ancestry>,
     pub(crate) counters: MetadataViewSessionCounters,
 }
 
@@ -158,7 +158,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             attributes_cache: HashMap::new(),
             access_row_cache: HashMap::new(),
             hiding_tombstone_cache: HashMap::new(),
-            covering_tombstone_cache: HashMap::new(),
+            ancestry_cache: HashMap::new(),
             counters: MetadataViewSessionCounters::default(),
         }
     }
@@ -545,20 +545,16 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(latest)
     }
 
-    pub(crate) async fn covering_subtree_tombstone(
-        &mut self,
-        inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>> {
+    pub(crate) async fn ancestry(&mut self, inode_id: InodeId) -> Result<Ancestry> {
         self.counters.covering_tombstone_calls =
             self.counters.covering_tombstone_calls.saturating_add(1);
-        if let Some(cached) = self.covering_tombstone_cache.get(&inode_id).cloned() {
+        if let Some(cached) = self.ancestry_cache.get(&inode_id).cloned() {
             return Ok(cached);
         }
 
-        let tombstone = visibility::covering_subtree_tombstone(self, inode_id).await?;
-        self.covering_tombstone_cache
-            .insert(inode_id, tombstone.clone());
-        Ok(tombstone)
+        let ancestry = visibility::ancestry(self, inode_id).await?;
+        self.ancestry_cache.insert(inode_id, ancestry.clone());
+        Ok(ancestry)
     }
 
     /// One page of the namespace's deletions in `range` that no restore has
@@ -616,7 +612,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 /// The session as a [`MetadataVisibilityReads`] source. Its primitives route
 /// through the per-session caches, and it overrides exactly the composite
 /// rules it memoizes (`visible_inode`, `current_parent_binding_for_child`,
-/// `covering_subtree_tombstone`) so a cache hit short-circuits the walk;
+/// `ancestry`) so a cache hit short-circuits the walk;
 /// every override's miss path, and the un-overridden composites, still determine
 /// through the canonical [`super::visibility`] rule bodies.
 impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_, '_, S> {
@@ -669,11 +665,8 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
         MetadataViewSession::current_parent_binding_for_child(self, child_inode_id).await
     }
 
-    async fn covering_subtree_tombstone(
-        &mut self,
-        inode_id: InodeId,
-    ) -> std::result::Result<Option<SubtreeTombstoneRecord>, Self::Error> {
-        MetadataViewSession::covering_subtree_tombstone(self, inode_id).await
+    async fn ancestry(&mut self, inode_id: InodeId) -> std::result::Result<Ancestry, Self::Error> {
+        MetadataViewSession::ancestry(self, inode_id).await
     }
 
     async fn visible_inode(

@@ -78,15 +78,12 @@ pub(crate) trait MetadataVisibilityReads {
         active_child_binding(self, parent_inode_id, name_key).await
     }
 
-    /// Composite rule; see [`covering_subtree_tombstone`].
-    async fn covering_subtree_tombstone(
-        &mut self,
-        inode_id: InodeId,
-    ) -> Result<Option<SubtreeTombstoneRecord>, Self::Error>
+    /// Composite rule; see [`ancestry`].
+    async fn ancestry(&mut self, inode_id: InodeId) -> Result<Ancestry, Self::Error>
     where
         Self: Sized,
     {
-        covering_subtree_tombstone(self, inode_id).await
+        ancestry(self, inode_id).await
     }
 
     /// Composite rule; see [`visible_inode`].
@@ -265,57 +262,72 @@ impl AncestorWalk {
     }
 }
 
-/// The first hiding subtree tombstone rooted at `inode_id` or at any of its
-/// current ancestors (following current parent bindings upward). A
-/// deletion in the trash and an expired one both hide their subtree, so the
-/// rule doesn't read the retention floor. A parent-binding cycle is corrupt
-/// stored metadata: returning "not covered" could show a deleted subtree.
-pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
+/// Where the walk up the current parent bindings from an inode ends
+/// ([format section 4.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#43-visible-metadata)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Ancestry {
+    /// The walk reached the root inode without meeting a hiding tombstone,
+    /// so the inode is visible if it exists.
+    Root,
+    /// The first hiding tombstone (a `set`) that the walk met, rooted at the
+    /// inode or at one of its ancestors.
+    Hidden(SubtreeTombstoneRecord),
+    /// The walk reached an inode with no current parent binding before it
+    /// reached the root or a hiding tombstone.
+    Disconnected,
+}
+
+/// Walks the current bound parent bindings up from `inode_id` to the root
+/// or the first hiding tombstone, whichever comes first.
+///
+/// A `revoke` hides nothing, so the walk passes it. A deletion in the trash
+/// and an expired one both hide their subtree, so the walk doesn't read the
+/// retention floor, and the walk doesn't continue above the root of a
+/// deletion.
+///
+/// Every live inode has bound edges up to the root, and every deleted inode
+/// has them up to its deletion's root, which has a tombstone, so a chain that
+/// breaks before either belongs to nothing the namespace can show. Base
+/// compactions remove an expired subtree's rows a family group at a time,
+/// so the bindings that lead to the expired root can be gone while the inode
+/// rows and revisions below it remain, and every reader treats a
+/// [`Ancestry::Disconnected`] inode as hidden. The root inode can't be
+/// deleted, so the walk stops there without reading its tombstones. A
+/// parent-binding cycle is corrupt stored metadata, and the walk returns an
+/// error for it, because returning any variant could show a deleted subtree.
+pub(crate) async fn ancestry<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
-) -> Result<Option<SubtreeTombstoneRecord>, R::Error> {
+) -> Result<Ancestry, R::Error> {
     let mut walk = AncestorWalk::new(inode_id);
     while let Some(ancestor) = walk.next(reads).await? {
+        if ancestor == ROOT_INODE_ID {
+            return Ok(Ancestry::Root);
+        }
         if let Some(tombstone) = reads.find_hiding_subtree_tombstone(ancestor).await? {
-            return Ok(Some(tombstone));
+            return Ok(Ancestry::Hidden(tombstone));
         }
     }
-    Ok(None)
+    Ok(Ancestry::Disconnected)
 }
 
 /// Whether the ancestry of `inode_id` allows a read by inode ID
 /// ([format section 4.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#44-paths-listings-and-revision-reads)).
 ///
-/// The walk follows current bound edges up from the inode and stops at the
-/// first tombstone that hides the inode or an ancestor (a `set`; a `revoke`
-/// hides nothing, so the walk passes it). A deletion at or below the view's
-/// retention floor has expired, which refuses the read. A deletion above the
-/// floor allows it, because the rights on an item under a deletion in the
-/// trash are judged on the deletion's saved ancestry, so the walk doesn't
-/// continue above the root of a deletion in the trash. Reaching the root
-/// inode without a tombstone allows the read.
-/// Reaching an inode with no bound edge before any tombstone means the
-/// ancestry is disconnected, which refuses the read. Every live inode has
-/// bound edges up to the root, and every deleted inode has them up to its
-/// deletion's root, which has a tombstone, so a chain that breaks before
-/// either belongs to nothing the namespace can show. And base compactions
-/// remove an expired subtree's rows a family group at a time, so the
-/// bindings that lead to the expired root can be gone while the revisions
-/// remain. A parent-binding cycle is corrupt stored metadata.
+/// A deletion at or below the view's retention floor has expired, which
+/// refuses the read. A deletion above the floor allows it, because the
+/// rights on an item under a deletion in the trash are judged on the
+/// deletion's saved ancestry. Reaching the root allows the read, and a
+/// disconnected ancestry refuses it (see [`ancestry`]).
 pub(crate) async fn ancestry_allows_read<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
 ) -> Result<bool, R::Error> {
-    let mut walk = AncestorWalk::new(inode_id);
-    while let Some(ancestor) = walk.next(reads).await? {
-        if ancestor == ROOT_INODE_ID {
-            return Ok(true);
-        }
-        if let Some(tombstone) = reads.find_hiding_subtree_tombstone(ancestor).await? {
-            return Ok(tombstone.committed_seq > reads.retention_floor_seq());
-        }
-    }
-    Ok(false)
+    Ok(match reads.ancestry(inode_id).await? {
+        Ancestry::Root => true,
+        Ancestry::Hidden(tombstone) => tombstone.committed_seq > reads.retention_floor_seq(),
+        Ancestry::Disconnected => false,
+    })
 }
 
 /// Whether binding `inode_id` under `new_parent_inode_id` would make the
@@ -335,8 +347,8 @@ pub(crate) async fn would_create_directory_cycle<R: MetadataVisibilityReads>(
     Ok(false)
 }
 
-/// An inode is visible iff it exists at the read seq and no subtree
-/// tombstone covers it or any of its current ancestors.
+/// An inode is visible iff it exists at the read seq and its current parent
+/// bindings lead to the root without a hiding tombstone ([`Ancestry::Root`]).
 pub(crate) async fn visible_inode<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
@@ -344,7 +356,7 @@ pub(crate) async fn visible_inode<R: MetadataVisibilityReads>(
     let Some(inode) = reads.find_inode(inode_id).await? else {
         return Ok(None);
     };
-    if reads.covering_subtree_tombstone(inode_id).await?.is_some() {
+    if reads.ancestry(inode_id).await? != Ancestry::Root {
         return Ok(None);
     }
     Ok(Some(inode))
@@ -400,8 +412,8 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
 /// in the same commit as its first binding, and retention removes an inode row
 /// only when an expired deletion hides the inode, which no visible directory
 /// binds. A bound binding under a visible directory therefore implies the
-/// child inode exists at that sequence, leaving a covering subtree tombstone
-/// as the only way it can be invisible.
+/// child inode exists at that sequence, leaving the child's ancestry as the
+/// only way it can be invisible.
 pub(crate) async fn visible_page_child<R: MetadataVisibilityReads>(
     reads: &mut R,
     direntry: DirentryBindingRecord,
@@ -414,11 +426,7 @@ pub(crate) async fn visible_page_child<R: MetadataVisibilityReads>(
         );
         return Ok(None);
     }
-    if reads
-        .covering_subtree_tombstone(direntry.child_inode_id)
-        .await?
-        .is_some()
-    {
+    if reads.ancestry(direntry.child_inode_id).await? != Ancestry::Root {
         trace_absent_leg(
             AbsentVisibilityLeg::ChildInode,
             direntry.parent_inode_id,
