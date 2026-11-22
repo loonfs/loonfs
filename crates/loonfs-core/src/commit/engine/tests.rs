@@ -6,6 +6,7 @@ mod deletion;
 mod inline;
 mod merge;
 mod retention_floor;
+mod unknown_outcome;
 
 use super::*;
 use crate::cache::MetadataSegmentCache;

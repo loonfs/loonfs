@@ -45,12 +45,31 @@ pub(crate) enum PublishViewEffect {
     /// The batch may have left durable state the loaded projection does not
     /// account for, so that projection must be dropped.
     Invalidated,
+    /// The WAL put's outcome is unknown, so the put may still be written at
+    /// the number it was sent to. The session drops the projection and still
+    /// owes a fence, which its next publication writes with the epoch it
+    /// holds (format spec, "Failed and unknown outcomes").
+    OutcomeUnknown,
     Advanced {
         records: Vec<WalCommitPayload>,
         head: NamespaceReadState,
         /// The published WAL object's size in the store.
         wal_bytes: usize,
     },
+}
+
+impl PublishViewEffect {
+    /// The effect of a WAL put that failed with `error`.
+    pub(crate) fn after_failed_put(error: &CoreError) -> Self {
+        if matches!(
+            error,
+            CoreError::WalPublish(WalPublishError::OutcomeUnknown(_))
+        ) {
+            Self::OutcomeUnknown
+        } else {
+            Self::Invalidated
+        }
+    }
 }
 
 impl PublishBatchReport {
@@ -87,12 +106,19 @@ pub(crate) struct PublicationClock<'a> {
     pub(crate) attempt: Observation,
 }
 
+/// Plans `candidates` against `view`, and publishes the accepted ones in one
+/// WAL object.
+///
+/// The batch calls `sending_wal_put` immediately before it sends its WAL put,
+/// so a batch that returns, or is dropped, while it's still planning never
+/// calls it.
 pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
     candidates: &[CommitCandidate],
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
+    sending_wal_put: impl FnOnce(),
 ) -> PublishBatchReport {
     // The publisher puts a merge in a batch of its own, so the WAL object's
     // size bound applies to the merge alone, and no other commit shares a
@@ -205,8 +231,11 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     ) {
         return abort_batch(slots, &error);
     }
+    sending_wal_put();
     if let Err(error) = publish_wal_object(view.store(), &wal).await {
-        return abort_batch(slots, &error);
+        let mut report = abort_batch(slots, &error);
+        report.effect = PublishViewEffect::after_failed_put(&error);
+        return report;
     }
 
     let wal_bytes = wal.as_bytes().len();
@@ -433,6 +462,7 @@ mod tests {
                 batch: &batch,
                 attempt,
             },
+            || {},
         )
         .await;
 
@@ -494,6 +524,7 @@ mod tests {
                 batch: &batch,
                 attempt: batch.observe(),
             },
+            || {},
         )
         .await;
 

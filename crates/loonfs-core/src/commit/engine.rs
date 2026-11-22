@@ -72,6 +72,25 @@ pub enum WriterSessionStatus {
     /// Writer epoch acquired on the first publish and reused for the rest of
     /// the session.
     Acquired(AcquiredWriter),
+    /// The session holds this writer epoch and owes a fence. The session
+    /// records that it owes one immediately before it sends a WAL put and
+    /// clears the record once it learns the put's outcome, so the session
+    /// still owes a fence after an unknown outcome, or after a publish future
+    /// that was dropped or panicked while its put was in flight. A future
+    /// dropped while the batch is still planning leaves no record, because
+    /// the session sent no put. A put in flight may still be written at the
+    /// number the session would put next, so the session's next publication
+    /// writes a fence with this epoch before it plans a commit (format spec,
+    /// "Failed and unknown outcomes").
+    ///
+    /// The record that the session owes a fence is one record for the
+    /// session, which relies on the rule that a session publishes one WAL
+    /// object at a time. The runtime publishes through one engine per
+    /// session. If two engines that share a session had puts in flight at
+    /// the same time, a known outcome of one put would clear the record that
+    /// the other put left, so this record doesn't
+    /// protect a host that overlaps puts from two engines of one session.
+    HoldsEpochOwesFence(AcquiredWriter),
     /// Permanent fencing record for this session. Later publishes return
     /// `writer_fenced` without accessing the store. Acquiring a new writer epoch
     /// requires an explicit caller action.
@@ -330,7 +349,9 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// session does (see [`NamespaceStore::publish_floor_object`]), and the
     /// advance claims no epoch. A session that discovery finds fenced does
     /// the same, and so does a session whose put finds the number taken,
-    /// after the put drops the position. The call
+    /// after the put drops the position. Like a commit's put, the floor
+    /// object's put leaves the session owing a fence until it learns the
+    /// put's outcome. The call
     /// writes nothing when the view's floor is already at or above `target`.
     pub async fn publish_floor_object(
         &mut self,
@@ -419,6 +440,16 @@ impl PositionState {
         self.acquired_anchor = None;
     }
 
+    /// Records, immediately before the session sends a WAL put, that it owes
+    /// a fence until it learns the put's outcome (see
+    /// [`WriterSessionStatus::HoldsEpochOwesFence`]).
+    fn owe_fence(&self) {
+        let mut session = self.lock_session();
+        if let WriterSessionStatus::Acquired(acquired_writer) = &*session {
+            *session = WriterSessionStatus::HoldsEpochOwesFence(acquired_writer.clone());
+        }
+    }
+
     /// Records that the session found its namespace deleted or missing, when
     /// `error` says so. Every caller passes an error from a read of the
     /// session's own namespace, so an error about another namespace, such as
@@ -435,30 +466,43 @@ impl PositionState {
         }
     }
 
-    /// Returns the session's writer epoch, acquiring it on first use. A fenced
-    /// session fails immediately without accessing the store or acquiring a new
-    /// epoch.
+    /// Returns the session's writer epoch, acquiring it on first use. A
+    /// session that owes a fence writes it with the epoch it holds first. A
+    /// fenced session fails immediately without accessing the store or
+    /// acquiring a new epoch, and a session whose fence's tail read finds a
+    /// higher epoch is recorded as fenced.
     async fn session_writer_epoch<S: ObjectStore>(
         &mut self,
         namespace: &NamespaceStore<S>,
         writer_id: &WriterId,
     ) -> Result<AcquiredWriter> {
-        let already_acquired = match &*self.lock_session() {
+        let owes_fence = match &*self.lock_session() {
             WriterSessionStatus::Fenced(fence) => {
                 return Err(CoreError::WriterFenced(fence.clone()))
             }
-            WriterSessionStatus::Acquired(acquired_writer) => Some(acquired_writer.clone()),
+            WriterSessionStatus::Acquired(acquired_writer) => return Ok(acquired_writer.clone()),
+            WriterSessionStatus::HoldsEpochOwesFence(held) => Some(held.clone()),
             WriterSessionStatus::Unacquired | WriterSessionStatus::NamespaceGone => None,
         };
-        if let Some(acquired_writer) = already_acquired {
-            return Ok(acquired_writer);
-        }
-        let acquisition = namespace
-            .acquire_writer(writer_id)
-            .await
-            .inspect_err(|error| self.record_namespace_gone(error))?;
-        let acquired_writer = acquisition.writer;
-        self.acquired_anchor = Some(acquisition.anchor);
+        let (acquired_writer, anchor) = match owes_fence {
+            None => {
+                let acquisition = namespace
+                    .acquire_writer(writer_id)
+                    .await
+                    .inspect_err(|error| self.record_namespace_gone(error))?;
+                (acquisition.writer, acquisition.anchor)
+            }
+            Some(held) => {
+                let anchor = namespace.fence_writer(&held).await.inspect_err(|error| {
+                    if let CoreError::WriterFenced(fence) = error {
+                        *self.lock_session() = WriterSessionStatus::Fenced(fence.clone());
+                    }
+                    self.record_namespace_gone(error);
+                })?;
+                (held, anchor)
+            }
+        };
+        self.acquired_anchor = Some(anchor);
         let mut session = self.lock_session();
         if let WriterSessionStatus::Fenced(fence) = &*session {
             // Another engine fenced the shared session while this engine was acquiring
@@ -534,6 +578,7 @@ impl PositionState {
                 batch: clock,
                 attempt,
             },
+            || self.owe_fence(),
         )
         .await;
         let position = publish_view.into_position();
@@ -577,13 +622,14 @@ impl PositionState {
             });
         }
         let floor_object = prepare_floor_object(&head, view.acquired_writer.writer_epoch, target)?;
+        self.owe_fence();
         let published = publish_wal_object(view.store(), &floor_object).await;
         let position = view.into_position();
         if let Err(error) = published {
             self.update_publish_tail_projection(
                 &namespace.namespace_id,
                 position,
-                PublishViewEffect::Invalidated,
+                PublishViewEffect::after_failed_put(&error),
             );
             return Err(error);
         }
@@ -613,9 +659,20 @@ impl PositionState {
         mut position: WriterPosition,
         effect: PublishViewEffect,
     ) -> TailProjectionUpdate {
+        // An unknown outcome leaves the session owing a fence. Every other
+        // effect means that the session knows its put's outcome, or sent no
+        // put, so it owes none.
+        if matches!(effect, PublishViewEffect::OutcomeUnknown) {
+            self.owe_fence();
+        } else {
+            let mut session = self.lock_session();
+            if let WriterSessionStatus::HoldsEpochOwesFence(held) = &*session {
+                *session = WriterSessionStatus::Acquired(held.clone());
+            }
+        }
         match effect {
             PublishViewEffect::Unchanged => {}
-            PublishViewEffect::Invalidated => {
+            PublishViewEffect::Invalidated | PublishViewEffect::OutcomeUnknown => {
                 self.invalidate_projection();
                 return TailProjectionUpdate {
                     wal_tail_objects: position.wal_tail_objects(),
@@ -702,7 +759,11 @@ async fn classify_replaced_basis<S: ObjectStore>(
             });
         }
     }
-    report.effect = PublishViewEffect::Invalidated;
+    // A put with an unknown outcome in the same batch still leaves the
+    // session owing a fence.
+    if !matches!(report.effect, PublishViewEffect::OutcomeUnknown) {
+        report.effect = PublishViewEffect::Invalidated;
+    }
     report
 }
 

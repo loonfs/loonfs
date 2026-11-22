@@ -7,6 +7,7 @@ use crate::manifest::{PublicationReport, PublishedManifest};
 use crate::namespace::basis::PublicationBasis;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
+use crate::time::OperationClock;
 use crate::wal::{prepare_fence, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
@@ -99,7 +100,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // The tail read before the fence put doesn't check the manifest: the
         // check after the put does, and it also tells whether the fence is
         // live.
-        let mut anchor = self
+        let anchor = self
             .load_unchecked_read_anchor(
                 update.current.manifest,
                 update.current.boundary,
@@ -107,6 +108,37 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Some(&acquired),
             )
             .await?;
+        let anchor = self.put_fence(&acquired, anchor, &clock).await?;
+        Ok(WriterAcquisition {
+            writer: acquired,
+            claim,
+            anchor,
+        })
+    }
+
+    /// Writes a fence with `held`, the writer epoch that a writer session
+    /// already holds, at the next WAL number, as the second step of an
+    /// acquisition does, and returns the read anchor whose tip is the fence
+    /// (format spec, "Failed and unknown outcomes"). A session owes such a
+    /// fence after a WAL put of its own whose outcome it doesn't know. The
+    /// tail read before the put returns `writer_fenced` when the manifest
+    /// has a higher epoch, as every tail read of a session does.
+    pub(crate) async fn fence_writer(&self, held: &AcquiredWriter) -> Result<NamespaceReadAnchor> {
+        let clock = self.start_clock();
+        let anchor = self.load_writer_read_anchor(held, clock.observe()).await?;
+        self.put_fence(held, anchor, &clock).await
+    }
+
+    /// Puts a fence with `acquired`'s epoch at the tip of `anchor`, checks
+    /// it after the put, and puts it again at the new tip while it's dead or
+    /// its number is taken (format spec, "Writer ownership"). Returns the
+    /// read anchor whose tip is the live fence.
+    async fn put_fence(
+        &self,
+        acquired: &AcquiredWriter,
+        mut anchor: NamespaceReadAnchor,
+        clock: &OperationClock,
+    ) -> Result<NamespaceReadAnchor> {
         // Bounded by both the publication time budget and
         // `MAX_UNFOLDED_WAL_OBJECTS`: an old writer can never race more than
         // the write-stop ceiling of WAL objects without folding, while the
@@ -127,11 +159,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         anchor
                             .tail
                             .push_published(fence.envelope().clone(), fence.as_bytes().len());
-                        return Ok(WriterAcquisition {
-                            writer: acquired,
-                            claim,
-                            anchor,
-                        });
+                        return Ok(anchor);
                     }
                     // A newer manifest. The fence is live when its number is
                     // above the newest manifest's `folded_wal_no`, and the
@@ -141,7 +169,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     // puts a fence at the new tip (format spec, "Writer
                     // ownership").
                     anchor = self
-                        .load_writer_read_anchor(&acquired, clock.observe())
+                        .load_writer_read_anchor(acquired, clock.observe())
                         .await?;
                     let folded_wal_no = anchor.current_manifest().payload().folded_wal_no;
                     if fenced_head.wal_no > folded_wal_no {
@@ -149,18 +177,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                             &anchor.read_state.namespace_id,
                             anchor.read_state.status,
                         )?;
-                        return Ok(WriterAcquisition {
-                            writer: acquired,
-                            claim,
-                            anchor,
-                        });
+                        return Ok(anchor);
                     }
                     clock.ensure_metadata_publication_budget(&self.namespace_id)?;
                 }
                 Err(CoreError::WalPublish(crate::wal::WalPublishError::NumberTaken)) => {
                     clock.ensure_metadata_publication_budget(&self.namespace_id)?;
                     anchor = self
-                        .load_writer_read_anchor(&acquired, clock.observe())
+                        .load_writer_read_anchor(acquired, clock.observe())
                         .await?;
                 }
                 Err(error) => return Err(error),
