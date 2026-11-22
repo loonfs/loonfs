@@ -41,7 +41,7 @@ To publish a batch, a writer:
 2. Checks the content-admission evidence, and puts the object with put-if-absent, however old its tip observation is.
 3. If the put succeeds, the batch is committed. The writer moves its position and acknowledges the requests, with no check of the elapsed time.
 4. If the put collides, runs discovery, as after any collision. A higher writer epoch means that the writer is fenced. A floor object means that the writer plans the batch again against the new floor, at the next number.
-5. If the put's outcome is unknown, drops its position, as in [Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes). The writer owes a fence from the moment it sends the put until it learns the outcome, so its next publication writes a fence with its own epoch (see [Writer ownership](../specs/format.md#61-writer-ownership)), and the fence's discovery reads the number back.
+5. If the put's outcome is unknown, drops its position, as in [Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes). The writer [owes a fence](../specs/glossary.md#owes-a-fence) from the moment it sends the put until it learns the outcome, so its next publication writes a fence with its own epoch (see [Writer ownership](../specs/format.md#61-writer-ownership)), and the fence's discovery reads the number back.
 
 The session's successor probe still runs every second by default, so the session learns of claims and folds between commits (see [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal)), but the put doesn't wait for the probe.
 

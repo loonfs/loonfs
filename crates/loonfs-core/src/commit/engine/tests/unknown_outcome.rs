@@ -232,7 +232,7 @@ async fn a_dropped_publish_future_leaves_the_session_owing_a_fence() {
 }
 
 /// Checks that a lone writer session whose fence put after an unknown
-/// outcome also loses its acknowledgment isn't fenced by itself: its next
+/// outcome also loses its acknowledgment isn't fenced by itself. Its next
 /// publication puts a fence again, and its commit is readable.
 #[tokio::test]
 async fn a_lost_fence_acknowledgment_never_fences_a_lone_writer() {
@@ -322,7 +322,7 @@ async fn an_unknown_floor_object_put_leaves_the_session_owing_a_fence() {
 }
 
 /// Checks that a session whose WAL put had an unknown outcome is fenced by a
-/// writer that took the namespace over in the meantime: the tail read of
+/// writer that took the namespace over in the meantime. The tail read of
 /// its fence finds the higher epoch, and its next publication returns
 /// `writer_fenced` and writes no manifest and no WAL object (format spec,
 /// "Writer ownership").

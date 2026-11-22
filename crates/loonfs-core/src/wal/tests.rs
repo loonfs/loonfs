@@ -352,8 +352,8 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
     });
     assert_eq!(winner.expect("winner").committed_seq, CommitSeq(2));
     assert_eq!(loser.expect_err("collision").code(), ErrorCode::StaleHead);
-    // The session's put of `left` was in flight when `second` published, so
-    // the session owed a fence: `second` put the fence at 3 and its commit at
+    // The session's put of `left` was in flight when `second` published, and
+    // the session owed a fence. `second` put the fence at 3 and its commit at
     // 4, and `left`'s put collided with the fence.
     assert_eq!(store.counts().create_if_absent_puts, 3);
     assert_eq!(

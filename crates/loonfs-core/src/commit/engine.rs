@@ -73,18 +73,19 @@ pub enum WriterSessionStatus {
     /// the session.
     Acquired(AcquiredWriter),
     /// The session holds this writer epoch and owes a fence. The session
-    /// records the debt before it sends a WAL put and clears it once it
-    /// learns the put's outcome, so the debt stays after an unknown outcome,
-    /// a dropped publish future, or a panic. The put may still be written at
+    /// records that it owes one before it sends a WAL put and clears the
+    /// record once it learns the put's outcome, so the session still owes a
+    /// fence after an unknown outcome, a dropped publish future, or a panic. The put may still be written at
     /// the number the session would put next, so the session's next
     /// publication writes a fence with this epoch before it plans a commit
     /// (format spec, "Failed and unknown outcomes").
     ///
-    /// The debt is one record for the session, which relies on the rule that
-    /// a session publishes one WAL object at a time. The runtime publishes
-    /// through one engine per session. If two engines that share a session
-    /// had puts in flight at the same time, a known outcome of one put would
-    /// clear the debt that the other put left, so this record doesn't
+    /// The record that the session owes a fence is one record for the
+    /// session, which relies on the rule that a session publishes one WAL
+    /// object at a time. The runtime publishes through one engine per
+    /// session. If two engines that share a session had puts in flight at
+    /// the same time, a known outcome of one put would clear the record that
+    /// the other put left, so this record doesn't
     /// protect a host that overlaps puts from two engines of one session.
     HoldsEpochOwesFence(AcquiredWriter),
     /// Permanent fencing record for this session. Later publishes return
