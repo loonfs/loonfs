@@ -18,10 +18,12 @@ FIRST_CONTAINER="loonfs-server-test-$$-1"
 SECOND_CONTAINER="loonfs-server-test-$$-2"
 WORK_DIR=""
 NAMESPACE="container-check"
-# The startup line the server logs once it holds the port. Step 5 asserts
-# the container's first log line is this one, which proves both that logging
-# is on by default and that the line exists.
-STARTUP_MESSAGE="loonfs-server is listening"
+# The line the server logs before it builds anything, and the line it logs
+# once it holds the port. Step 5 asserts the container's first log line is the
+# starting line, which proves that logging is on by default and that the line
+# exists, and checks that the log carries the listening line.
+STARTUP_MESSAGE="loonfs-server is starting"
+LISTENING_MESSAGE="loonfs-server is listening"
 
 # The server wrote the store as the image's own user, so under a runtime
 # that maps container ids onto host ids the files there belong to that user
@@ -163,7 +165,8 @@ READINESS="$(status_code "$BASE_URL/readiness")"
 pass "GET /readiness answered 200"
 
 # 5. The first log line. Logging is on with no environment variable set, and
-#    the line names the bind address and the store kind.
+#    the line names the bind address and the store kind. The listening line
+#    follows it once the server holds the port.
 FIRST_LOG_LINE="$(first_log_line "$FIRST_CONTAINER")"
 [[ "$FIRST_LOG_LINE" == *"$STARTUP_MESSAGE"* ]] \
   || fail "the first log line does not carry the startup message: $FIRST_LOG_LINE"
@@ -172,6 +175,9 @@ FIRST_LOG_LINE="$(first_log_line "$FIRST_CONTAINER")"
 [[ "$FIRST_LOG_LINE" == *"local_fs"* ]] \
   || fail "the startup line does not name the store kind: $FIRST_LOG_LINE"
 pass "the first log line is the startup line: $FIRST_LOG_LINE"
+[[ "$(docker logs "$FIRST_CONTAINER" 2>&1)" == *"$LISTENING_MESSAGE"* ]] \
+  || fail "the log does not carry the listening line"
+pass "the log carries the listening line"
 
 # 6. The process is not root.
 CONTAINER_UID="$(docker exec "$FIRST_CONTAINER" id -u)"

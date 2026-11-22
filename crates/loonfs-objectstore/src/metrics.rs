@@ -323,9 +323,14 @@ pub struct JsonlObjectStoreMetricsRecorder {
 }
 
 impl JsonlObjectStoreMetricsRecorder {
-    /// Creates or truncates a JSONL output file, creating missing parent directories.
+    /// Opens a JSONL output file for appending, creating the file and its
+    /// missing parent directories.
     ///
-    /// The operation fails when directories or the output file cannot be created.
+    /// Samples are appended, so a process that opens the file while another
+    /// process writes to it (for example a second server that fails to start)
+    /// doesn't erase the samples already written. Delete the file for a fresh
+    /// run. The operation fails when directories or the output file cannot be
+    /// created.
     pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -333,8 +338,12 @@ impl JsonlObjectStoreMetricsRecorder {
                 fs::create_dir_all(parent)?;
             }
         }
+        let file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)?;
         Ok(Self {
-            writer: Mutex::new(BufWriter::new(File::create(path)?)),
+            writer: Mutex::new(BufWriter::new(file)),
         })
     }
 
