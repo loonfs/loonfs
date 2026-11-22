@@ -341,9 +341,13 @@ async fn extent_cap_keeps_the_prefix_in_which_each_extent_covers_the_rest() {
 /// assembly, and that the new extent records the checksum that the store
 /// keeps. Validation and a direct download write only the pieces.
 #[tokio::test]
-async fn a_creators_fold_combines_whole_shared_base_extents_and_other_writes_keep_them() {
+async fn a_creators_fold_combines_whole_shared_span_extents_and_other_writes_keep_them() {
     for source in [Source::Shared, Source::SharedUpload] {
         for write in ["fold", "validation", "download"] {
+            // A fold merges a shared span that takes its whole object, and
+            // keeps a shared whole-object extent because the layout doesn't
+            // record the object's length.
+            let combines = write == "fold" && source == Source::Shared;
             let directory = tempfile::tempdir().expect("directory");
             let store = RecordingStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
@@ -381,7 +385,7 @@ async fn a_creators_fold_combines_whole_shared_base_extents_and_other_writes_kee
             };
             let operations = store.snapshot();
             let context = format!("{source:?} {write}");
-            if write == "fold" {
+            if combines {
                 assert_eq!(written.extents.len(), 1, "{context}");
                 let extent = &written.extents[0];
                 assert_eq!(extent.content_id, reference.content_id, "{context}");
@@ -505,13 +509,14 @@ fn located(content_id: &ContentId, length: u64) -> LocatedExtent {
 }
 
 /// Checks the cap through repeated fork, append, and merge cycles. A 1 MB
-/// uploaded base is followed in each cycle by a fork's 1,000-byte extent,
-/// which a merge writes without combining, and `main`'s fold of 10 appended
-/// bytes, which the doubling rule can't merge into the fork's extent. The
-/// cap fires at cycle 16 and keeps the base, so it copies the appended
-/// history once (16,160 bytes). At cycle 32 it keeps that span, which is as
-/// long as everything after it, and at cycle 47 the extents after it have
-/// reached its length, so it copies the span again with the rest.
+/// uploaded base, which the fold never merges, is followed in each cycle by
+/// a fork's 1,000-byte extent, which a merge writes without combining, and
+/// `main`'s fold of 10 appended bytes, which the doubling rule can't merge
+/// into the fork's extent. The cap counts only the extents after the base,
+/// so it fires at cycle 17 and copies the appended history once (17,170
+/// bytes). At cycle 33 it keeps that span, which is longer than everything
+/// after it, and at cycle 49 the extents after it have passed its length, so
+/// it copies the span again with the rest.
 #[test]
 fn the_cap_copies_each_span_again_only_after_the_extents_behind_it_reach_its_length() {
     let chain = ContentId::generate();
@@ -521,24 +526,63 @@ fn the_cap_copies_each_span_again_only_after_the_extents_behind_it_reach_its_len
     base.extent.object = ExtentObject::Whole;
     let mut layout = vec![base];
     let mut firings = Vec::new();
-    for cycle in 1..=47 {
+    for cycle in 1..=49 {
         layout.push(located(&fork, 1_000));
         let CombinePlan {
             retained,
             candidate_length,
         } = combine_plan(&layout, 10, own, |extent| {
-            own(extent) || takes_whole_object(extent)
+            own(extent) || takes_whole_span(extent)
         });
-        assert!(retained < MAX_LAYOUT_EXTENTS, "cycle {cycle}");
+        assert!(retained <= MAX_LAYOUT_EXTENTS, "cycle {cycle}");
         if retained < layout.len() - 1 {
             firings.push((cycle, retained, candidate_length));
         }
         layout.truncate(retained);
         layout.push(located(&chain, candidate_length));
     }
-    assert_eq!(firings, [(16, 1, 16_160), (32, 2, 16_160), (47, 1, 47_470)]);
+    assert_eq!(firings, [(17, 1, 17_170), (33, 2, 16_160), (49, 1, 49_490)]);
     let lengths: Vec<_> = layout.iter().map(|located| located.extent.length).collect();
-    assert_eq!(lengths, [1_000_000, 47_470]);
+    assert_eq!(lengths, [1_000_000, 49_490]);
+}
+
+/// Checks the cap's cost when 31 extents each cover everything after them.
+/// The prefix then fills every slot but one, so the extent after it absorbs
+/// each fold's pieces and is copied again on every fold: a hundred 1-byte
+/// folds behind a 256-byte extent copy that extent's span every time, and
+/// grow it to 356 bytes, while the 31 extents before it stay as they are.
+#[test]
+fn a_full_prefix_copies_the_span_after_it_on_every_fold() {
+    let chain = ContentId::generate();
+    let own = |extent: &ContentExtent| extent.content_id == chain;
+    let mut layout: Vec<_> = (0..31)
+        .rev()
+        .map(|exponent| located(&chain, 512 << exponent))
+        .collect();
+    let prefix: Vec<_> = layout
+        .iter()
+        .map(|located| located.object_key.clone())
+        .collect();
+    layout.push(located(&chain, 256));
+    for fold in 1..=100 {
+        let CombinePlan {
+            retained,
+            candidate_length,
+        } = combine_plan(&layout, 1, own, own);
+        assert_eq!(
+            (retained, candidate_length),
+            (31, 256 + fold),
+            "fold {fold}"
+        );
+        layout.truncate(retained);
+        layout.push(located(&chain, candidate_length));
+    }
+    let kept: Vec<_> = layout[..31]
+        .iter()
+        .map(|located| located.object_key.clone())
+        .collect();
+    assert_eq!(kept, prefix);
+    assert_eq!(layout[31].extent.length, 356);
 }
 
 #[tokio::test]

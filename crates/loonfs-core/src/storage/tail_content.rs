@@ -359,13 +359,14 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     }
     let extents = location.extents;
     // An assembly copies whole objects, so a shared base extent that takes
-    // part of its object can't be merged. The restoration above makes an
-    // own extent whole.
+    // part of its object can't be merged, and the plan can't tell how much
+    // of a whole-object extent's object it takes without a request. The
+    // restoration above makes an own extent whole.
     let combinable = |extent: &ContentExtent| {
         own(extent)
             || (created_here
                 && policy == CombinePolicy::OwnAndSharedBaseExtents
-                && takes_whole_object(extent))
+                && takes_whole_span(extent))
     };
     let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();
     let CombinePlan {
@@ -396,12 +397,12 @@ async fn tail_extent_plan<S: ?Sized, L: LayoutLookup>(
     })
 }
 
-/// Returns whether `extent` takes every byte of its object. A whole object
-/// exists only for an upload or a chain of zero bytes, and stores the chain's
-/// bytes from offset 0, so no layout takes part of one.
-fn takes_whole_object(extent: &ContentExtent) -> bool {
+/// Returns whether `extent` is a span that takes every byte of its object.
+/// A layout records a span object's bounds but not a whole object's length,
+/// so a whole-object extent never qualifies.
+fn takes_whole_span(extent: &ContentExtent) -> bool {
     match extent.object {
-        ExtentObject::Whole => true,
+        ExtentObject::Whole => false,
         ExtentObject::Span { start, end, .. } => extent.offset == 0 && extent.length == end - start,
     }
 }
@@ -438,9 +439,12 @@ struct CombinePlan {
 ///   longest prefix of those extents, of fewer than [`MAX_LAYOUT_EXTENTS`],
 ///   in which each extent is at least as long as every extent after it and
 ///   the candidate together, and merges the rest.
-///   Each merged span is then at most as long as the extent before it, so a
-///   later cap copies the span again only after the extents behind it have
-///   grown to its length.
+///   Each merged span is then at most as long as the extent before it. While
+///   fewer than 31 extents form the prefix, a later cap copies the span again
+///   only after the extents behind it have grown to its length. When 31 do,
+///   the span after them absorbs each write's pieces and is copied again on
+///   every write until it outgrows the last prefix extent, which is at most
+///   the chain's length divided by 2^29.
 fn combine_plan(
     extents: &[LocatedExtent],
     tail_length: u64,
