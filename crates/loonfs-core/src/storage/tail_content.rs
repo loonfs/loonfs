@@ -439,12 +439,6 @@ struct CombinePlan {
 ///   longest prefix of those extents, of fewer than [`MAX_LAYOUT_EXTENTS`],
 ///   in which each extent is at least as long as every extent after it and
 ///   the candidate together, and merges the rest.
-///   Each merged span is then at most as long as the extent before it. While
-///   fewer than 31 extents form the prefix, a later cap copies the span again
-///   only after the extents behind it have grown to its length. When 31 do,
-///   the span after them absorbs each write's pieces and is copied again on
-///   every write until it outgrows the last prefix extent, which is at most
-///   the chain's length divided by 2^29.
 fn combine_plan(
     extents: &[LocatedExtent],
     tail_length: u64,
