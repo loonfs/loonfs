@@ -836,6 +836,72 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     assert_eq!(CoreError::from(error).code(), ErrorCode::NamespaceCorrupt);
 }
 
+/// Checks that a create under a directory whose ancestry is disconnected, and
+/// a replace of a file below that directory, fail validation with
+/// `InodeMissing`. A base compaction of the bindings group leaves inodes
+/// disconnected below an expired deletion, and this test builds the same state
+/// by unbinding `/docs` without recording a tombstone.
+#[tokio::test]
+async fn create_and_replace_under_a_disconnected_ancestry_report_a_missing_inode() {
+    let mut unbind_docs = wal_delete_docs(DeltaPosition {
+        seq: CommitSeq(1),
+        delta_index: 1,
+    });
+    unbind_docs.truncate(1);
+    let metadata_state = metadata_state_after(&[
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
+        wal_create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt".to_owned(),
+            content_ref("content-1"),
+        ),
+        unbind_docs,
+    ]);
+    let context = validation_context(&metadata_state, CommitSeq(3));
+
+    let create_error = build_commit_plan(
+        &planned(vec![CommitOperation::Create {
+            child_inode_id: InodeId(4),
+            parent_inode_id: InodeId(2),
+            display_name: test_display_name("new.txt"),
+            child: NewChild::File(content_ref("content-2")),
+        }]),
+        4_200,
+        &context,
+    )
+    .await
+    .expect_err("create under a disconnected directory");
+    assert_matches!(
+        create_error,
+        CommitValidationError::InodeMissing {
+            operand: CommitOperand::CreateParent,
+            inode_id: InodeId(2),
+        }
+    );
+
+    let replace_error = build_commit_plan(
+        &planned(vec![CommitOperation::ReplaceFile {
+            inode_id: InodeId(3),
+            base_revision_no: RevisionNo(1),
+            content_ref: content_ref("content-2"),
+            append_offset: None,
+        }]),
+        4_200,
+        &context,
+    )
+    .await
+    .expect_err("replace below a disconnected directory");
+    assert_matches!(
+        replace_error,
+        CommitValidationError::InodeMissing {
+            operand: CommitOperand::ReplaceTarget,
+            inode_id: InodeId(3),
+        }
+    );
+}
+
 #[tokio::test]
 async fn restore_revision_overflow_is_rejected() {
     let mut deltas = wal_create_file(

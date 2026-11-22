@@ -133,7 +133,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             )
             .await?;
         self.ensure_child_unbound(child_inode_id, None).await?;
-        self.ensure_not_covered_by_tombstone(parent_inode_id, CommitOperand::CreateParent)
+        self.ensure_ancestry_reaches_root(parent_inode_id, CommitOperand::CreateParent)
             .await?;
         let (inode_kind, revision) = match &child {
             NewChild::Directory => (InodeKind::Directory, None),
@@ -199,7 +199,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         self.ensure_file_base_revision_is(inode_id, base_revision_no, CommitOperand::ReplaceTarget)
             .await?;
         let revision_no = next_revision_no(inode_id, base_revision_no)?;
-        self.ensure_not_covered_by_tombstone(inode_id, CommitOperand::ReplaceTarget)
+        self.ensure_ancestry_reaches_root(inode_id, CommitOperand::ReplaceTarget)
             .await?;
         let edge = self
             .resolve_current_binding(inode_id, CommitOperand::ReplaceTarget)
@@ -225,7 +225,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             .resolve_restore_source_revision(inode_id, source_revision_no)
             .await?;
         let revision_no = next_revision_no(inode_id, base_revision_no)?;
-        self.ensure_not_covered_by_tombstone(inode_id, CommitOperand::RestoreTarget)
+        self.ensure_ancestry_reaches_root(inode_id, CommitOperand::RestoreTarget)
             .await?;
         let edge = self
             .resolve_current_binding(inode_id, CommitOperand::RestoreTarget)
@@ -248,7 +248,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         let inode = self
             .resolve_inode_kind(inode_id, InodeKind::File, CommitOperand::DeleteTarget)
             .await?;
-        self.ensure_not_covered_by_tombstone(inode_id, CommitOperand::DeleteTarget)
+        self.ensure_ancestry_reaches_root(inode_id, CommitOperand::DeleteTarget)
             .await?;
         delete_deltas(&mut self.numbering, &inode, source_binding)
     }
@@ -279,13 +279,10 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             .await?;
         self.ensure_rename_does_not_cycle(&inode, new_parent_inode_id)
             .await?;
-        self.ensure_not_covered_by_tombstone(inode_id, CommitOperand::RenameSource)
+        self.ensure_ancestry_reaches_root(inode_id, CommitOperand::RenameSource)
             .await?;
-        self.ensure_not_covered_by_tombstone(
-            new_parent_inode_id,
-            CommitOperand::RenameTargetParent,
-        )
-        .await?;
+        self.ensure_ancestry_reaches_root(new_parent_inode_id, CommitOperand::RenameTargetParent)
+            .await?;
         let revision = self.resolve_revision_summary(&inode).await?;
         Ok(vec![
             unbind_delta(&mut self.numbering, source_binding, &inode)?,
@@ -324,7 +321,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             }
             .into());
         }
-        self.ensure_not_covered_by_tombstone(root_inode_id, CommitOperand::SubtreeRoot)
+        self.ensure_ancestry_reaches_root(root_inode_id, CommitOperand::SubtreeRoot)
             .await?;
         delete_deltas(&mut self.numbering, &inode, source_binding)
     }
@@ -354,7 +351,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             )
             .await?;
         self.ensure_child_unbound(inode_id, None).await?;
-        self.ensure_not_covered_by_tombstone(parent_inode_id, CommitOperand::RestoreDeletedTarget)
+        self.ensure_ancestry_reaches_root(parent_inode_id, CommitOperand::RestoreDeletedTarget)
             .await?;
         let revision = self.resolve_revision_summary(&inode).await?;
         Ok(vec![
