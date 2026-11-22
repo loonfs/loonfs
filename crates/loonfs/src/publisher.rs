@@ -319,9 +319,9 @@ impl NamespacePublisher {
         match *lock_state(&self.session) {
             WriterSessionStatus::Fenced(_) => NamespaceSessionStatus::Fenced,
             WriterSessionStatus::NamespaceGone => NamespaceSessionStatus::Closed,
-            WriterSessionStatus::Unacquired | WriterSessionStatus::Acquired(_) => {
-                NamespaceSessionStatus::Open
-            }
+            WriterSessionStatus::Unacquired
+            | WriterSessionStatus::Acquired(_)
+            | WriterSessionStatus::HoldsEpochOwesFence(_) => NamespaceSessionStatus::Open,
         }
     }
 

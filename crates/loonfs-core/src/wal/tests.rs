@@ -352,7 +352,10 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
     });
     assert_eq!(winner.expect("winner").committed_seq, CommitSeq(2));
     assert_eq!(loser.expect_err("collision").code(), ErrorCode::StaleHead);
-    assert_eq!(store.counts().create_if_absent_puts, 2);
+    // The session's put of `left` was in flight when `second` published, so
+    // the session owed a fence: `second` put the fence at 3 and its commit at
+    // 4, and `left`'s put collided with the fence.
+    assert_eq!(store.counts().create_if_absent_puts, 3);
     assert_eq!(
         publish(&mut first, "left")
             .await
@@ -360,7 +363,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
             .committed_seq,
         CommitSeq(3)
     );
-    assert_eq!(store.counts().create_if_absent_puts, 3);
+    assert_eq!(store.counts().create_if_absent_puts, 4);
     assert_eq!(store.counts().compare_and_swaps, 0);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace.load_current_metadata_view().await.expect("view");

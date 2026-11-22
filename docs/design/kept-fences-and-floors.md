@@ -41,7 +41,7 @@ To publish a batch, a writer:
 2. Checks the content-admission evidence, and puts the object with put-if-absent, however old its tip observation is.
 3. If the put succeeds, the batch is committed. The writer moves its position and acknowledges the requests, with no check of the elapsed time.
 4. If the put collides, runs discovery, as after any collision. A higher writer epoch means that the writer is fenced. A floor object means that the writer plans the batch again against the new floor, at the next number.
-5. If the put's outcome is unknown, drops its position, as in [Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes). The next publication runs discovery, which reads the number back.
+5. If the put's outcome is unknown, drops its position, as in [Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes). The writer owes a fence from the moment it sends the put until it learns the outcome, so its next publication writes a fence with its own epoch (see [Writer ownership](../specs/format.md#61-writer-ownership)), and the fence's discovery reads the number back.
 
 The session's successor probe still runs every second by default, so the session learns of claims and folds between commits (see [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal)), but the put doesn't wait for the probe.
 
@@ -55,7 +55,7 @@ This section shows that a put by an acquired writer session at `tip + 1` succeed
 
 A writer session `W` with writer epoch 5 has tip 30. When `W` observed tip 30 (by discovery, or by creating WAL object 30), nothing was at 31. A collection deletes only data objects, so if 31 is empty when the put is applied, either nothing was ever there, or a data object was created at 31 after the observation and later deleted. A writer learns that the tip passed a number in one of two ways: it created the object at that number itself, or it ran discovery, which replays every WAL object above the manifest's `folded_wal_no`. So the data object at 31 would come from one of these writers:
 
-- **`W` itself.** A session publishes one WAL object at a time, and the batch that's waiting is the one that would write 31. After a put whose outcome is unknown, `W` drops its position and runs discovery.
+- **`W` itself.** A session publishes one WAL object at a time, and the batch that's waiting is the one that would write 31. If a put by `W` succeeded, it moved `W`'s tip, and if it collided, it wrote nothing. A put whose outcome `W` doesn't know (its acknowledgment was lost, or a caller abandoned the publication while the put was in flight) may still be in flight, and if `W` ran discovery before that put was written, `W` would plan the put's own number again. So `W` owes a fence from the moment it sends a put until it learns the outcome, and it writes the fence, with epoch 5, before it plans a commit. The fence's discovery ran after the put in flight was sent, so the live fence is at the put's number or above it. At that number, the put collides with the fence, which stays. Above it, discovery found the number taken, so the put either was written there or is written later below the fence, where no reader replays it. If a collection emptied the number before the fence's put, the check after the fence's put finds the fence dead (see [The check after a fence or floor object put](#the-check-after-a-fence-or-floor-object-put)), and `W` writes another fence at the new tip.
 - **A writer with an older epoch.** `W` is acquired, so its own fence (say at 25) is at or below 30. To commit at 31, the older writer's tip would have to pass 25. It can't create WAL object 25 itself, because `W`'s fence is there, so it would have run a discovery that replays the fence or loads a manifest with epoch 5, and it would be fenced.
 - **A writer with a newer epoch.** That writer commits only above its own live fence (see [The check after a fence or floor object put](#the-check-after-a-fence-or-floor-object-put)). If its fence were at 30 or below, `W` would have passed it in the same way, by discovery (and been fenced) or by a put at that number (which would have collided). So the fence is at 31 or above, and that writer's first object at 31 or above is its fence, not a commit.
 
@@ -102,7 +102,7 @@ These parts of the format don't change:
 - `METADATA_PUBLICATION_BUDGET_MS` and `METADATA_COMPACTION_BUDGET_MS`, which keep a publication's unreferenced outputs younger than the age rules, and stop a publication that runs too long with an error.
 - `PUBLICATION_COMPLETION_BOUND_MS`, which becomes `METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS`. The value stays 25 minutes, because the metadata budget was already the larger term.
 - The rule that a writer drops a position whose manifest folds past the position's tip. That rule compares numbers, and the retention floor's invariant depends on it (see [Advancing the retention floor](../specs/format.md#101-advancing-the-retention-floor)).
-- The handling of an unknown outcome, the provider request bound, and the clock allowance.
+- The provider request bound and the clock allowance.
 
 ### Time rules
 
@@ -120,6 +120,7 @@ No rule depends on how long ago any process observed the WAL tip. These time rul
 - A commit object that would be at or below the bound is padded, by at most the bound.
 - A fence put, or a floor object put by a process without the writer epoch, costs one check after the put: a HEAD request and a conditional read of the boundary.
 - A collision with a floor object costs the writer one discovery and one new plan of the batch, as before.
+- A WAL put whose outcome is unknown costs the writer session one fence, a small WAL object that no process deletes and that counts toward the unfolded WAL thresholds until a fold covers it.
 
 A commit after a quiet period longer than five minutes no longer waits for a tip confirmation's two round trips.
 
@@ -129,7 +130,7 @@ The storage format changes in these sections:
 
 - [A summary of the log protocol](../specs/format.md#26-a-summary-of-the-log-protocol) says that garbage collection keeps fences and floor objects, and drops the time budget of every numbered put as the reason for the second guarantee.
 - [Replaying the visible WAL](../specs/format.md#42-replaying-the-visible-wal) removes the tip confirmation from how a position learns of a floor object and from a new position's previous probe.
-- [Writer ownership](../specs/format.md#61-writer-ownership) removes the budget from the fence put and adds the check after it.
+- [Writer ownership](../specs/format.md#61-writer-ownership) removes the budget from the fence put and adds the check after it, and sends a session back to the fence step after a WAL put whose outcome it doesn't know.
 - [Publication and group commit](../specs/format.md#63-publication-and-group-commit) removes the budget check, the observations table, the tip confirmation, and the "why" paragraphs about the confirmation, and adds the argument in [Why the put can't reuse an emptied number](#why-the-put-cant-reuse-an-emptied-number).
 - [Commit identity and retries](../specs/format.md#65-commit-identity-and-retries) refreshes the receipt projection after a collision or a manifest successor, not after a budget.
 - [Advancing the retention floor](../specs/format.md#101-advancing-the-retention-floor) removes the budget and the tip confirmation from the floor object's put and the writer rules, and adds the check after a put by a process without the writer epoch.
@@ -138,7 +139,7 @@ The storage format changes in these sections:
 - [Required operations](../specs/format.md#31-required-operations) says that a listing returns each object's size.
 - [WAL records](../specs/format.md#a5-wal-records) states the size bound and the padding of a commit object, and [Publication and collection timing](../specs/format.md#c1-publication-and-collection-timing) removes `WAL_PUBLISH_BUDGET_MS` and its term in the bound formulas.
 
-[Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes), [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy), and [Object keys](../specs/format.md#a8-object-keys) don't change. The API spec adds `fences_and_floor_objects` to the reasons that a namespace's GC response counts in `retained`.
+[Failed and unknown outcomes](../specs/format.md#64-failed-and-unknown-outcomes) says that a writer session owes a fence from sending a WAL put until it learns the put's outcome, and [WAL records](../specs/format.md#a5-wal-records) says that a fence's epoch may equal the epoch of the object before it. [Recovery material and maintenance policy](../specs/format.md#73-recovery-material-and-maintenance-policy) and [Object keys](../specs/format.md#a8-object-keys) don't change. The API spec adds `fences_and_floor_objects` to the reasons that a namespace's GC response counts in `retained`.
 
 The design notes [Retention advance in the WAL](retention-advance-in-the-wal.md), [Retention window](retention-window.md#who-advances-the-floor), [Read freshness](read-freshness.md#what-the-format-and-api-specs-say), [The WAL implementation](wal-boundary.md#responsibilities-outside-the-wal), and [The manifest boundary](manifest-boundary.md) (its retirement, [time rules](manifest-boundary.md#time-rules), and [costs](manifest-boundary.md#costs)) change. In the glossary, "Fence" and "Floor object" say that no process deletes them, "Publication budget" covers manifest publications alone, and "Collection" and "Garbage collection" exclude fences and floor objects.
 

@@ -86,7 +86,12 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .expect("recover the original receipt");
     assert_eq!(committed.committed_seq, CommitSeq(1));
     assert_eq!(committed.committed_at_ms, context.now_ms);
-    assert_no_writes(&store);
+    // The lost acknowledgment left the session owing a fence, so the retry
+    // puts a fence with the session's epoch before it finds the receipt, and
+    // it writes no commit.
+    assert!(crate::test_support::commit_wal_keys(&store, &namespace_id)
+        .await
+        .is_empty());
 
     drop(engine);
     let mut restarted = NamespaceCommitEngine::new(
