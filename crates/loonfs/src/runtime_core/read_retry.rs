@@ -5,7 +5,7 @@ use crate::pinned_read::PinnedRead;
 use crate::read_view::ReadSource;
 use crate::trace::phase_span;
 use crate::{CommitSeq, Consistency, CoreError, Error, NamespaceId, Result};
-use loonfs_core::limits::{MAX_CONTENTION_ATTEMPTS, READ_REVALIDATION_BOUND_MS};
+use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::Phase;
 use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
 use loonfs_types::ManifestNo;
@@ -95,8 +95,9 @@ impl RuntimeCore {
     /// the read's basis, up to `MAX_CONTENTION_ATTEMPTS` reads in all. A read
     /// whose basis was replaced on every attempt returns `store_contention`.
     ///
-    /// A maximum staleness longer than the revalidation bound returns
-    /// `invalid_request` before the read sends a request.
+    /// A read whose maximum staleness is longer than the revalidation bound
+    /// returns `invalid_request` before the read sends a request to the store
+    /// (see [`Self::current_read_context`]).
     pub(crate) async fn read<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
@@ -134,20 +135,6 @@ impl RuntimeCore {
         Fut: std::future::Future<Output = Result<T>>,
     {
         let mut confirmation = confirmation.into();
-        if let HeadConfirmation::Consistency(Some(Consistency::Eventual {
-            max_staleness_ms: Some(max_staleness_ms),
-        })) = confirmation
-        {
-            if max_staleness_ms > READ_REVALIDATION_BOUND_MS {
-                return Err(Error::InvalidRequest {
-                    message: format!(
-                        "an eventual read's maximum staleness may not exceed the revalidation \
-                         bound ({READ_REVALIDATION_BOUND_MS} ms)"
-                    ),
-                    param: "max_staleness_ms",
-                });
-            }
-        }
         let mut pinned = self
             .pinned_read(namespace_id, confirmation)
             .instrument(phase_span!(self, Phase::PinRead, namespace_id))
