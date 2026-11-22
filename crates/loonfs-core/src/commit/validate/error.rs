@@ -21,6 +21,7 @@ pub enum CommitOperand {
     AttributeTarget,
     AccessTarget,
     RestoreDeletedTarget,
+    RestoreDeletedParent,
     EmptyDirectoryTarget,
 }
 
@@ -37,6 +38,7 @@ impl fmt::Display for CommitOperand {
             Self::AttributeTarget => "attribute update target",
             Self::AccessTarget => "access update target",
             Self::RestoreDeletedTarget => "restore target",
+            Self::RestoreDeletedParent => "restore parent",
             Self::EmptyDirectoryTarget => "empty directory target",
         })
     }

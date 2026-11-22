@@ -1070,3 +1070,36 @@ async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_root
         ] if *target == deletion
     );
 }
+
+/// Checks that a restore into a missing parent fails with the restore parent
+/// operand, not the restore target operand, and returns no error details, so
+/// the details don't list the parent's inode ID as the restored inode's ID.
+#[tokio::test]
+async fn a_restore_into_a_missing_parent_reports_the_parent_operand() {
+    let metadata_state = metadata_state_after(&[
+        wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned()),
+        wal_delete_docs(DeltaPosition {
+            seq: CommitSeq(1),
+            delta_index: 1,
+        }),
+    ]);
+    let context = validation_context(&metadata_state, CommitSeq(2));
+    let request = planned(vec![CommitOperation::RestoreDeleted {
+        inode_id: InodeId(2),
+        deletion_seq: CommitSeq(2),
+        parent_inode_id: InodeId(9),
+        display_name: test_display_name("docs"),
+    }]);
+
+    let error = build_commit_plan(&request, 4_200, &context)
+        .await
+        .expect_err("restore into a missing parent");
+    assert_matches!(
+        error,
+        CommitValidationError::InodeMissing {
+            operand: CommitOperand::RestoreDeletedParent,
+            inode_id: InodeId(9),
+        }
+    );
+    assert_eq!(error.details(), None);
+}

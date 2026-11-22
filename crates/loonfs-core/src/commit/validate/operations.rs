@@ -347,11 +347,11 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 parent_inode_id,
                 display_name,
                 None,
-                CommitOperand::RestoreDeletedTarget,
+                CommitOperand::RestoreDeletedParent,
             )
             .await?;
         self.ensure_child_unbound(inode_id, None).await?;
-        self.ensure_ancestry_reaches_root(parent_inode_id, CommitOperand::RestoreDeletedTarget)
+        self.ensure_ancestry_reaches_root(parent_inode_id, CommitOperand::RestoreDeletedParent)
             .await?;
         let revision = self.resolve_revision_summary(&inode).await?;
         Ok(vec![
