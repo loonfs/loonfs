@@ -263,7 +263,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// reports a conflict, and records the
     /// conflicts for [`MergePlan::into_candidate`]. The subject of `fork` has to be able to
     /// read each inode whose change the merge applies. The proofs of the
-    /// merge's content expire one direct transfer lifetime after
+    /// merge's content expire `OPERATION_SNAPSHOT_TTL_MS` after
     /// `prepared_at_ms`.
     ///
     /// The plan reads the fork's current manifest and WAL tail at
