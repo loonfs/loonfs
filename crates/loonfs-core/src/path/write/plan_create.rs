@@ -118,33 +118,19 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         self.view
             .authorize(saved_parent, AccessRight::Remove.into(), Absence::Inode)
             .await?;
-        let (parent_inode_id, display_name) = match destination {
-            RestoreDeletedDestination::Path(absolute_path) => {
-                self.resolve_restore_deleted_destination(
-                    inode_id,
-                    saved_parent,
-                    Destination::Path(&absolute_path),
-                )
-                .await?
-            }
+        let destination = match &destination {
+            RestoreDeletedDestination::Path(absolute_path) => Destination::Path(absolute_path),
             RestoreDeletedDestination::Name {
                 parent_inode_id,
                 display_name,
-            } => {
-                let destination = Destination::Name {
-                    parent_inode_id,
-                    display_name: &display_name,
-                };
-                self.resolve_restore_deleted_destination(inode_id, saved_parent, destination)
-                    .await?
-            }
+            } => Destination::name(*parent_inode_id, display_name),
             RestoreDeletedDestination::Recorded => {
-                self.view
-                    .authorize(saved_parent, AccessRight::Create.into(), Absence::Inode)
-                    .await?;
-                (saved_parent, deleted_binding.display_name)
+                Destination::name(saved_parent, &deleted_binding.display_name)
             }
         };
+        let (parent_inode_id, display_name) = self
+            .resolve_restore_deleted_destination(inode_id, saved_parent, destination)
+            .await?;
         Ok(CompiledFilesystemOperation::new(vec![
             CommitOperation::RestoreDeleted {
                 inode_id,
@@ -155,8 +141,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         ]))
     }
 
-    /// Resolves the new destination of a restore, which has to be vacant,
-    /// and authorizes moving the deleted inode there from its saved parent.
+    /// Resolves the destination of a restore, which has to be vacant, and
+    /// authorizes moving the deleted inode there from its saved parent.
     async fn resolve_restore_deleted_destination(
         &self,
         inode_id: InodeId,

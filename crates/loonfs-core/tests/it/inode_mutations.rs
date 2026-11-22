@@ -1012,6 +1012,122 @@ async fn a_restore_of_a_deleted_file_binds_under_a_parent_inode() {
     );
 }
 
+/// Deletes `path` recursively and returns the deletion's sequence.
+async fn delete_recursively(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    context: &loonfs_core::test_support::WriterAt,
+    path: &str,
+) -> loonfs_types::CommitSeq {
+    submit_operation(
+        store,
+        namespace_id,
+        CommitId::generate(),
+        FilesystemOperation::DeletePath {
+            path: AbsolutePath::parse(path).expect("path"),
+            behavior: DeleteDirectoryBehavior::Recursive,
+            expected_inode_id: None,
+        },
+        context,
+    )
+    .await
+    .expect("delete")
+    .committed_seq
+}
+
+/// Restores the deletion of `inode_id` twice, in place and by name under
+/// `parent_inode_id` as `name` (its saved parent and original name),
+/// requires both restores to fail with the same code, details, and message,
+/// and returns that error.
+async fn restore_in_place_and_by_name_err(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    context: &loonfs_core::test_support::WriterAt,
+    (inode_id, deletion_seq): (InodeId, loonfs_types::CommitSeq),
+    (parent_inode_id, name): (InodeId, &str),
+) -> CoreError {
+    let restore = |destination| async move {
+        let operation = FilesystemOperation::RestoreDeleted {
+            inode_id,
+            deletion_seq,
+            destination,
+        };
+        submit_operation(
+            store,
+            namespace_id,
+            CommitId::generate(),
+            operation,
+            context,
+        )
+        .await
+        .expect_err("the restore must fail")
+    };
+    let in_place = restore(loonfs_types::options::RestoreDeletedDestination::Recorded).await;
+    let by_name = restore(loonfs_types::options::RestoreDeletedDestination::Name {
+        parent_inode_id,
+        display_name: display_name(name),
+    })
+    .await;
+    assert_eq!(
+        (in_place.code(), in_place.details(), in_place.to_string()),
+        (by_name.code(), by_name.details(), by_name.to_string())
+    );
+    in_place
+}
+
+#[tokio::test]
+async fn an_in_place_restore_checks_its_destination_as_a_restore_by_name_does() {
+    let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
+    let fixture = NamespaceFixture::new(&store, &namespace_id, &context);
+    create_directory_path(&store, &namespace_id, "/docs/a", &context, None)
+        .await
+        .expect("create /docs/a");
+    fixture
+        .write_file_bytes("/docs/a/f.txt", b"old", None)
+        .await
+        .expect("put file");
+    let (directory, _) = read_entry(&store, &namespace_id, "/docs/a").await;
+    let (file, _) = read_entry(&store, &namespace_id, "/docs/a/f.txt").await;
+    let file_deletion = delete_recursively(&store, &namespace_id, &context, "/docs/a/f.txt").await;
+    let restore_both_ways = || {
+        restore_in_place_and_by_name_err(
+            &store,
+            &namespace_id,
+            &context,
+            (file, file_deletion),
+            (directory, "f.txt"),
+        )
+    };
+
+    fixture
+        .write_file_bytes("/docs/a/F.TXT", b"new", None)
+        .await
+        .expect("take the name");
+    let taken = restore_both_ways().await;
+    assert_eq!(taken.code(), ErrorCode::PathConflict);
+
+    let directory_deletion = delete_recursively(&store, &namespace_id, &context, "/docs/a").await;
+    let parent_deleted = restore_both_ways().await;
+    assert_eq!(parent_deleted.code(), ErrorCode::InodeNotFound);
+
+    submit_operation(
+        &store,
+        &namespace_id,
+        CommitId::generate(),
+        FilesystemOperation::RestoreDeleted {
+            inode_id: directory,
+            deletion_seq: directory_deletion,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
+        },
+        &context,
+    )
+    .await
+    .expect("restore /docs/a");
+    delete_recursively(&store, &namespace_id, &context, "/docs").await;
+    let ancestor_deleted = restore_both_ways().await;
+    assert_eq!(ancestor_deleted.code(), ErrorCode::InodeNotFound);
+}
+
 #[tokio::test]
 async fn inode_binding_precondition_requires_the_current_binding() {
     let (_temp_dir, store, namespace_id, context) = namespace_with_docs().await;
