@@ -73,15 +73,12 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         Ok(())
     }
 
-    /// Deletes a file inode, after checking that `source_binding`, the
-    /// parent binding observed during planning, is still current.
-    pub(crate) async fn delete_file(
-        &mut self,
-        inode_id: InodeId,
-        source_binding: &ResolvedBinding,
-    ) -> Result<()> {
+    /// Deletes the file or directory subtree that `source_binding` binds,
+    /// after checking that `source_binding`, the parent binding observed
+    /// during planning, is still current.
+    pub(crate) async fn delete(&mut self, source_binding: &ResolvedBinding) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self.validate_delete_file(inode_id, source_binding).await?;
+        let deltas = self.validate_delete(source_binding).await?;
         self.record_step(op_index, deltas);
         Ok(())
     }
@@ -104,23 +101,6 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 new_parent_inode_id,
                 new_display_name,
             )
-            .await?;
-        self.record_step(op_index, deltas);
-        Ok(())
-    }
-
-    /// Deletes a directory subtree, after checking that `source_binding`,
-    /// the parent binding observed during planning, is still current, and
-    /// with `require_empty`, that the directory has no visible children.
-    pub(crate) async fn delete_subtree(
-        &mut self,
-        root_inode_id: InodeId,
-        source_binding: &ResolvedBinding,
-        require_empty: bool,
-    ) -> Result<()> {
-        let op_index = self.numbering.reserve_op_index()?;
-        let deltas = self
-            .validate_delete_subtree(root_inode_id, source_binding, require_empty)
             .await?;
         self.record_step(op_index, deltas);
         Ok(())
@@ -298,15 +278,15 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         )?])
     }
 
-    async fn validate_delete_file(
-        &mut self,
-        inode_id: InodeId,
-        source_binding: &ResolvedBinding,
-    ) -> Result<Vec<WalDelta>> {
+    async fn validate_delete(&mut self, source_binding: &ResolvedBinding) -> Result<Vec<WalDelta>> {
         self.ensure_source_binding(source_binding).await?;
-        let inode = self
-            .resolve_inode_kind(inode_id, InodeKind::File, CommitOperand::DeleteTarget)
-            .await?;
+        let inode_id = source_binding.child_inode_id;
+        let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
+            CommitValidationError::InodeMissing {
+                operand: CommitOperand::DeleteTarget,
+                inode_id,
+            },
+        )?;
         self.ensure_ancestry_reaches_root(inode_id, CommitOperand::DeleteTarget)
             .await?;
         delete_deltas(&mut self.numbering, &inode, source_binding)
@@ -357,32 +337,6 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
                 revision,
             },
         ])
-    }
-
-    async fn validate_delete_subtree(
-        &mut self,
-        root_inode_id: InodeId,
-        source_binding: &ResolvedBinding,
-        require_empty: bool,
-    ) -> Result<Vec<WalDelta>> {
-        self.ensure_source_binding(source_binding).await?;
-        let operand = if require_empty {
-            CommitOperand::EmptyDirectoryTarget
-        } else {
-            CommitOperand::SubtreeRoot
-        };
-        let inode = self
-            .resolve_inode_kind(root_inode_id, InodeKind::Directory, operand)
-            .await?;
-        if require_empty && self.view().has_visible_children(root_inode_id).await? {
-            return Err(CommitValidationError::DirectoryNotEmpty {
-                inode_id: root_inode_id,
-            }
-            .into());
-        }
-        self.ensure_ancestry_reaches_root(root_inode_id, CommitOperand::SubtreeRoot)
-            .await?;
-        delete_deltas(&mut self.numbering, &inode, source_binding)
     }
 
     async fn validate_restore_deleted(

@@ -130,9 +130,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 self.ensure_expected_destination_revision(existing, expected_destination)
                     .await?;
                 let existing_binding = self.view().source_binding(existing).await?;
-                self.validation
-                    .delete_file(existing.inode_id, &existing_binding)
-                    .await?;
+                self.validation.delete(&existing_binding).await?;
             }
             ReplaceDestination::Vacant => {
                 if expected_destination.is_some() {

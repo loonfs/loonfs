@@ -2,13 +2,15 @@
 
 use super::planner::OperationPlanningSession;
 use super::publish_path_planning::Target;
+use crate::commit::CommitValidationError;
 use crate::error::Result;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{AccessRight, AccessRights, BindingVersion, DeleteDirectoryBehavior, InodeKind};
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     /// Plans the delete of `target`, after checking its binding version when
-    /// the request names one.
+    /// the request names one. A delete that isn't recursive requires a
+    /// directory to have no visible children.
     pub(super) async fn plan_delete(
         &mut self,
         target: Target<'_>,
@@ -30,21 +32,19 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         }
         let resolved = &target.resolved;
         let source_binding = self.view().source_binding(resolved).await?;
-        match resolved.inode_kind {
-            InodeKind::File => {
-                self.validation
-                    .delete_file(resolved.inode_id, &source_binding)
-                    .await
+        if resolved.inode_kind == InodeKind::Directory
+            && behavior == DeleteDirectoryBehavior::NonRecursive
+            && self
+                .view()
+                .metadata
+                .has_visible_children(resolved.inode_id)
+                .await?
+        {
+            return Err(CommitValidationError::DirectoryNotEmpty {
+                inode_id: resolved.inode_id,
             }
-            InodeKind::Directory => {
-                self.validation
-                    .delete_subtree(
-                        resolved.inode_id,
-                        &source_binding,
-                        behavior != DeleteDirectoryBehavior::Recursive,
-                    )
-                    .await
-            }
+            .into());
         }
+        self.validation.delete(&source_binding).await
     }
 }
