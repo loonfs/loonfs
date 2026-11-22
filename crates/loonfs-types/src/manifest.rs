@@ -560,24 +560,13 @@ impl NamespaceManifestPayload {
         Ok(())
     }
 
-    /// Rejects changed identity, decreasing counters, and publication after
-    /// deletion in `successor`, and a `successor` without the next manifest
-    /// number.
+    /// Rejects a `successor` that breaks the rules a manifest keeps against
+    /// its predecessor (format spec, "Publishing a manifest"): the next
+    /// manifest number, the same identity fields, no decreasing counter, the
+    /// same activity at the same head, no manifest after a tombstone, and
+    /// after an initializing manifest, only a fork's manifest 2, its
+    /// activation, or its tombstone.
     pub fn ensure_successor(&self, successor: &Self) -> Result<(), ManifestChainError> {
-        self.ensure_followed_by(successor, true)
-    }
-
-    /// Rejects the changes that [`Self::ensure_successor`] rejects in `later`,
-    /// a manifest with any higher number.
-    ///
-    /// Each rule that a successor keeps is also true between any two manifests
-    /// of the chain, so a reader that skips the manifests between two numbers
-    /// checks the two manifests that it loaded with this.
-    pub fn ensure_later(&self, later: &Self) -> Result<(), ManifestChainError> {
-        self.ensure_followed_by(later, false)
-    }
-
-    fn ensure_followed_by(&self, successor: &Self, next: bool) -> Result<(), ManifestChainError> {
         let invalid = |field: &str| {
             Err(ManifestChainError {
                 field: field.to_owned(),
@@ -586,12 +575,7 @@ impl NamespaceManifestPayload {
         if successor.namespace_id != self.namespace_id {
             return invalid("namespace_id");
         }
-        let numbered = if next {
-            self.manifest_no.successor().ok() == Some(successor.manifest_no)
-        } else {
-            successor.manifest_no > self.manifest_no
-        };
-        if !numbered {
+        if self.manifest_no.successor().ok() != Some(successor.manifest_no) {
             return invalid("manifest_no");
         }
         if successor.folded_wal_no < self.folded_wal_no {
@@ -635,10 +619,10 @@ impl NamespaceManifestPayload {
             }
             (_, NamespaceStatus::Initializing {}) => return invalid("status"),
             // An active manifest or a tombstone after an initializing manifest
-            // changes only the status, and a fork's active manifest also
-            // raises the floor to the fork point, so it's the initializing
-            // manifest activated or its tombstone.
-            (NamespaceStatus::Initializing {}, status) if next => {
+            // is that manifest activated (for a fork, with the floor raised to
+            // the fork point) or its tombstone (with each extension's runs
+            // emptied), at the next number.
+            (NamespaceStatus::Initializing {}, status) => {
                 let expected = match status {
                     NamespaceStatus::Deleted { deleted_at_ms } => self.tombstone(deleted_at_ms),
                     _ => self.activated(),
@@ -1113,61 +1097,42 @@ mod tests {
     }
 
     #[test]
-    fn a_later_manifest_keeps_the_chain_rules_without_the_next_number() {
+    fn a_successor_has_the_next_number_and_keeps_every_counter() {
         let initial = NamespaceManifestPayload::initial(
-            NamespaceId::parse("later").expect("namespace"),
+            NamespaceId::parse("successor").expect("namespace"),
             pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
         )
         .activated();
-        let mut later = initial.clone();
-        later.manifest_no = ManifestNo(4);
-        later.head_seq = CommitSeq(3);
+        let mut successor = initial.clone();
+        successor.manifest_no = ManifestNo(2);
+        successor.head_seq = CommitSeq(3);
         initial
-            .ensure_later(&later)
-            .expect("a later manifest may skip numbers");
+            .ensure_successor(&successor)
+            .expect("the next number");
+        for manifest_no in [initial.manifest_no, ManifestNo(4)] {
+            assert_eq!(
+                initial
+                    .ensure_successor(&NamespaceManifestPayload {
+                        manifest_no,
+                        ..successor.clone()
+                    })
+                    .expect_err("a successor has the next number")
+                    .field,
+                "manifest_no"
+            );
+        }
         assert_eq!(
-            initial
-                .ensure_successor(&later)
-                .expect_err("a successor has the next number")
-                .field,
-            "manifest_no"
-        );
-        assert_eq!(
-            initial
-                .ensure_later(&initial)
-                .expect_err("a later manifest has a higher number")
-                .field,
-            "manifest_no"
-        );
-        let mut regressed = later.clone();
-        regressed.head_seq = CommitSeq(0);
-        assert_eq!(
-            later
-                .ensure_later(&NamespaceManifestPayload {
-                    manifest_no: ManifestNo(9),
-                    ..regressed
+            successor
+                .ensure_successor(&NamespaceManifestPayload {
+                    manifest_no: ManifestNo(3),
+                    head_seq: CommitSeq(0),
+                    ..successor.clone()
                 })
-                .expect_err("a later manifest keeps every counter")
+                .expect_err("a successor keeps every counter")
                 .field,
             "head_seq"
-        );
-        let deleted = NamespaceManifestPayload {
-            status: crate::control::NamespaceStatus::Deleted {
-                deleted_at_ms: 1_500,
-            },
-            ..later.clone()
-        };
-        assert_eq!(
-            deleted
-                .ensure_later(&NamespaceManifestPayload {
-                    manifest_no: ManifestNo(7),
-                    ..later
-                })
-                .expect_err("a tombstone ends its namespace")
-                .field,
-            "status"
         );
     }
 

@@ -195,8 +195,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         ))
     }
 
-    /// Returns the newest manifest above `previous`, checked against `previous`
-    /// (format spec, "Resolving the metadata basis"), or `None` when no manifest
+    /// Returns the newest manifest above `previous`, or `None` when no manifest
     /// above `previous` exists.
     ///
     /// The probe sends one HEAD request for the number after `previous`, and a
@@ -205,9 +204,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// switches to exponential galloping and parallel bracket narrowing
     /// ([`Self::probe_highest_manifest_from`]). The call then loads the
     /// manifest at the highest number found through the segment cache, with
-    /// one GET when the cache doesn't keep it, and checks it against
-    /// `previous` without the manifests in between. The call returns `None` too
-    /// if that manifest is gone by the GET.
+    /// one GET when the cache doesn't keep it. The call returns `None` too if
+    /// that manifest is gone by the GET.
     pub(crate) async fn find_newest_manifest_above(
         &self,
         previous: &LoadedManifest,
@@ -219,17 +217,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             return Ok(None);
         }
         let newest = self.probe_highest_manifest_from(next).await?;
-        let Some(manifest) = self.load_manifest_by_no(newest).await? else {
-            return Ok(None);
-        };
-        previous
-            .payload()
-            .ensure_later(manifest.payload())
-            .map_err(|error| ControlObjectLoadError::Codec {
-                object_key: manifest.object_key.clone(),
-                message: error.to_string(),
-            })?;
-        Ok(Some(manifest))
+        self.load_manifest_by_no(newest).await
     }
 
     /// Finds the highest existing manifest number at or above `confirmed`
