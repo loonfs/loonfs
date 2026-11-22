@@ -5,6 +5,8 @@ use crate::wal::WalPublishError;
 use bytes::Bytes;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::WalNo;
 
 pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
     store: &S,
@@ -35,6 +37,21 @@ pub(crate) async fn publish_wal_object<S: ObjectStore + ?Sized>(
             }
         })?;
     Ok(())
+}
+
+/// Returns whether a fence, or a floor object that a process without the
+/// writer epoch put, is live at `wal_no`, where `newest` is the newest
+/// manifest after the put (format spec, "Writer ownership").
+///
+/// A writer may commit at the number that such a put uses, and a fold and a
+/// collection may then empty that number before the put, so the put can
+/// succeed where no reader replays it. A collection deletes only WAL objects
+/// at or below a published manifest's `folded_wal_no`, so a number above
+/// `newest`'s `folded_wal_no` wasn't emptied. When the manifest that the put
+/// was planned from is still the newest, the object is live without another
+/// load, because the tail was read above that manifest's `folded_wal_no`.
+pub(crate) fn wal_object_is_live(wal_no: WalNo, newest: &NamespaceManifestPayload) -> bool {
+    wal_no > newest.folded_wal_no
 }
 
 /// The key of the WAL object at `wal_no`.

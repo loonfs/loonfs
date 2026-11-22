@@ -14,7 +14,7 @@ use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::MetadataSegmentCache;
 use crate::time::Observation;
-use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
+use crate::wal::{prepare_floor_object, publish_wal_object, wal_object_is_live, WalPublishError};
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
@@ -181,11 +181,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// discovery, and when the view's floor is below `target`, puts a floor
     /// object at the number after the tip with put-if-absent, with the
     /// writer epoch of the manifest that the attempt's discovery loaded.
-    /// After a put that succeeds, the attempt checks the discovery's manifest
-    /// for a newer one. The floor object is live when its number is above the
-    /// newest manifest's `folded_wal_no`. Otherwise the put may have used a
-    /// number that a collection emptied, so the floor object is dead (format
-    /// spec, "Advancing the retention floor"). A dead floor object, or a put
+    /// After a put that succeeds, the attempt checks whether the floor object
+    /// is live (see [`wal_object_is_live`]). A dead floor object, or a put
     /// that finds the number taken, starts the next attempt, for at most
     /// `MAX_CONTENTION_ATTEMPTS` attempts, and the last attempt's error is
     /// returned when every attempt failed. The call
@@ -249,11 +246,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Returns whether the floor object that `floored_head` ends with is
-    /// live: whether its WAL number is above the `folded_wal_no` of the
-    /// newest manifest after the put. The check first checks the manifest of
-    /// `anchor`, the discovery that the put was planned from. The tail was
-    /// read above that manifest's `folded_wal_no`, so when that manifest is
-    /// still the newest, the floor object is live.
+    /// live (see [`wal_object_is_live`]), loading the newest manifest only
+    /// when the manifest of `anchor`, the discovery that the put was planned
+    /// from, isn't the newest.
     async fn floor_object_is_live(
         &self,
         anchor: &mut crate::namespace::read_anchor::NamespaceReadAnchor,
@@ -263,7 +258,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             return Ok(true);
         }
         let newest = self.load_current_basis().await?;
-        Ok(floored_head.wal_no > newest.manifest.payload().folded_wal_no)
+        Ok(wal_object_is_live(
+            floored_head.wal_no,
+            newest.manifest.payload(),
+        ))
     }
 }
 
