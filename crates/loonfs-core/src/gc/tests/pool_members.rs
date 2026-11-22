@@ -422,6 +422,64 @@ async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_
     }
 }
 
+/// Checks that a member's user snapshot whose manifest is missing doesn't make
+/// the member unreadable, because it's a candidate that was never verified, and
+/// that pool collection leaves the snapshot's record for the member's own
+/// collection. A fork snapshot whose manifest is missing still makes the member
+/// unreadable.
+#[tokio::test]
+async fn only_a_fork_snapshot_whose_manifest_is_missing_makes_its_member_unreadable() {
+    let owners = [
+        (
+            SnapshotOwner::User {
+                name: Some("unverified".to_owned()),
+                expires_at_ms: None,
+                deleted_at_ms: None,
+            },
+            vec![],
+        ),
+        (
+            SnapshotOwner::Fork {
+                target_namespace_id: NamespaceId::parse("fork").expect("namespace"),
+            },
+            vec![GcSkippedWork::ContentDeletionUnreadableMember],
+        ),
+    ];
+    for (owner, skipped) in owners {
+        let directory = tempdir().expect("directory");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let (pool_id, members) = pool(&store, &["member"]).await;
+        let member = &members[0];
+        let namespace = crate::test_support::namespace_store(&store, member);
+        let snapshot = namespace
+            .create_snapshot_record(
+                owner,
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
+                &context(1_000).clock(),
+            )
+            .await
+            .map(|(record, _)| crate::snapshot::snapshot_record_summary(record))
+            .expect("snapshot");
+        let content_id = numbered_content_id(1);
+        let referenced = plant(&store, &pool_id, &content_id).await;
+        publish_layout(&store, member, &content_id).await;
+        store
+            .delete(&metadata_manifest_object(member, &snapshot.manifest_no))
+            .await
+            .expect("delete the snapshot's manifest");
+        let unreferenced = plant(&store, &pool_id, &numbered_content_id(2)).await;
+        let aged = aged_context(&store, &members).await;
+        let report = collect_pool(&store, &pool_id, &aged).await;
+        assert_eq!(report.skipped, skipped, "{snapshot:?}");
+        assert_eq!(exists(&store, &unreferenced).await, !skipped.is_empty());
+        assert!(exists(&store, &referenced).await);
+        let record = loonfs_objectstore::keys::snapshot_record(member, &snapshot.snapshot_id);
+        assert!(exists(&store, &record).await, "`{record}`");
+    }
+}
+
 #[tokio::test]
 async fn a_collection_past_the_pool_roots_budget_skips_the_content_sweep() {
     let directory = tempdir().expect("directory");

@@ -22,7 +22,7 @@ use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{metadata_segment_object_key, pool_member, pool_members_prefix};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::NamespaceStatus;
+use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner};
 use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::{ContentId, NamespaceId, PoolId, UploadId};
 use std::sync::{Arc, Mutex};
@@ -355,7 +355,10 @@ async fn load_member_roots<S: ObjectStore>(
 /// until the snapshots are deleted.
 ///
 /// A snapshot whose manifest is missing makes the member's roots unreadable,
-/// because only the member's own collection decides about its snapshots.
+/// unless the snapshot's record is gone or the snapshot is a user snapshot.
+/// (A user snapshot whose manifest is missing is a candidate that was never
+/// verified, so it protects nothing.) Pool collection doesn't delete a
+/// member's snapshots, because the member's own collection deletes them.
 async fn read_member_roots<S: ObjectStore>(
     member: &NamespaceStore<S>,
     current: PublicationBasis,
@@ -391,11 +394,21 @@ async fn read_member_roots<S: ObjectStore>(
             SnapshotManifest::Loaded(manifest) => protect_layout_segments(manifest, roots)?,
             SnapshotManifest::Rooted => {}
             SnapshotManifest::Missing(manifest_no) => {
-                return Err(missing_root_manifest(
-                    &member.namespace_id,
-                    *manifest_no,
-                    &snapshot.key,
-                ));
+                // A verified user snapshot protects its manifest from the
+                // moment it's acknowledged, so a user snapshot whose manifest
+                // is missing was never verified (format spec, "Snapshot
+                // cleanup"). The listing reads no record, so the collection
+                // reads this one record to find the snapshot's owner.
+                let record = member.load_listed_snapshot_record(&snapshot.key).await?;
+                let keeps_root = record
+                    .is_some_and(|record| !matches!(record.owner, SnapshotOwner::User { .. }));
+                if keeps_root {
+                    return Err(missing_root_manifest(
+                        &member.namespace_id,
+                        *manifest_no,
+                        &snapshot.key,
+                    ));
+                }
             }
         }
     }
