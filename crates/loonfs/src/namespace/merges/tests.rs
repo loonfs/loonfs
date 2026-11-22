@@ -1352,3 +1352,58 @@ async fn a_merge_folds_a_fork_whose_tail_has_a_commit_older_than_the_max_age() {
     assert!(after[1] > before[1], "the merge folds the fork: {after:?}");
     assert_eq!(family.fresh_read(&family.main, "/c.txt").await, b"c");
 }
+
+/// Checks that `main`'s fold keeps a file within the extent cap across fork,
+/// append, and merge cycles. `main` folds a 4 KiB file, and in each cycle a
+/// new fork appends 1 KiB, `main` merges it, appends 64 bytes, and folds. The
+/// merge writes the fork's bytes as one extent without combining, and the
+/// doubling rule can't merge it into the 64 bytes, so each cycle adds two
+/// extents. The cap fires at cycle 16, when no extent is as long as every
+/// extent after it, so the fold copies the file into one 21,504-byte extent.
+/// It fires again at cycle 32 and keeps that extent, which is longer than
+/// the 17,408 bytes after it.
+#[tokio::test]
+async fn fork_append_merge_cycles_keep_mains_layout_within_the_extent_cap() {
+    let family = family().await;
+    let main = &family.main;
+    let mut expected = vec![b'a'; 4096];
+    main.put_file("/log", &expected, &actor())
+        .await
+        .expect("the file");
+    let maintenance = main.maintenance();
+    let fold_main = || maintenance.fold_wal(main.id());
+    fold_main().await.expect("fold main");
+    let mut extents = 1;
+    for cycle in 1..=32 {
+        let fork_id = namespace_id(&format!("cycle-{cycle}"));
+        family
+            .runtime
+            .fork_namespace(main.id(), &fork_id, &actor())
+            .await
+            .expect("fork");
+        let fork = family.runtime.open_namespace(&fork_id).expect("open fork");
+        fork.append_file("/log", &[b'f'; 1024], &actor())
+            .await
+            .expect("append in the fork");
+        main.merge_fork(&fork_id, &actor()).await.expect("merge");
+        let (_, merged) = family.layout(main, "/log").await;
+        assert_eq!(merged.extents.len(), extents + 1, "cycle {cycle}");
+        assert!(merged.extents.len() <= 33, "cycle {cycle}");
+        main.append_file("/log", &[b'm'; 64], &actor())
+            .await
+            .expect("append in main");
+        fold_main().await.expect("fold main");
+        expected.extend([b'f'; 1024]);
+        expected.extend([b'm'; 64]);
+        let (_, folded) = family.layout(main, "/log").await;
+        extents = folded.extents.len();
+        let lengths: Vec<_> = folded.extents.iter().map(|extent| extent.length).collect();
+        match cycle {
+            16 => assert_eq!(lengths, [21_504]),
+            32 => assert_eq!(lengths, [21_504, 17_408]),
+            // The extent cap is 32.
+            _ => assert!(extents <= 32, "cycle {cycle}: {lengths:?}"),
+        }
+    }
+    assert_eq!(family.fresh_read(main, "/log").await, expected);
+}

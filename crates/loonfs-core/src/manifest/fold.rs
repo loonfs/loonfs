@@ -16,7 +16,9 @@ use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::runs::flatten_manifest_segments;
 use crate::segment::scan::VerifiedMetadataSegments;
-use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
+use crate::storage::tail_content::{
+    assemble_tail_content, write_tail_content, CombinePolicy, ContentWrites,
+};
 use crate::time::{Observation, OperationClock};
 use crate::wal::ProjectedWalTail;
 use crate::wal::WalPublishError;
@@ -117,6 +119,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         &view,
                         &content,
                         pieces,
+                        CombinePolicy::OwnAndSharedBaseExtents,
                     )
                     .await?;
                     {

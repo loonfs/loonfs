@@ -5,7 +5,7 @@ use super::*;
 use crate::error::ErrorCode;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::PutMode;
-use loonfs_types::{Checksum, ContentRefKind};
+use loonfs_types::{Checksum, ContentRefKind, ExtentObject};
 use std::assert_matches;
 
 fn append(path: &str, bytes: &[u8]) -> FilesystemOperation {
@@ -737,17 +737,28 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
                 .await
                 .expect("layout")
                 .expect("folded layout");
-            assert_eq!(
-                &row.layout.extents[..carried.extents.len()],
-                carried.extents
-            );
+            // The fold in the fresh chain's creator merges the carried extents
+            // into the suffix's extent when the newest carried extent takes
+            // its whole object, because the suffix is longer than each of
+            // them, and keeps every carried extent otherwise.
+            let newest = carried.extents.last().expect("a carried extent");
+            let whole = match newest.object {
+                ExtentObject::Span { start, end, .. } => {
+                    newest.offset == 0 && newest.length == end - start
+                }
+                ExtentObject::Whole => true,
+            };
+            let kept = if whole { 0 } else { carried.extents.len() };
+            assert_eq!(row.layout.extents.len(), kept + 1);
+            assert_eq!(&row.layout.extents[..kept], &carried.extents[..kept]);
             let extent = row.layout.extents.last().expect("new extent");
             assert_eq!(extent.content_id, fresh.content_id);
             let key =
                 crate::storage::content_location::extent_object_key(&pool_id(&store).await, extent);
+            let start = if whole { 0 } else { carried.size_bytes() };
             assert_eq!(
                 store.get(&key, None).await.expect("get").expect("object"),
-                suffix
+                original_bytes[loonfs_types::usize_from_u64(start)..]
             );
         }
     }

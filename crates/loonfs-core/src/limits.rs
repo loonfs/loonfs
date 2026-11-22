@@ -435,7 +435,8 @@ const _: () = assert!(
         >= COMPLETED_UPLOAD_ADMISSION_WINDOW_MS + PUBLICATION_COMPLETION_BOUND_MS
 );
 
-/// Bounds a chain's own extents while keeping shared base extents separate.
+/// Bounds the extents that a fold can combine after the last extent that it
+/// can't combine (format spec, "Extent assembly and the doubling rule").
 pub(crate) const MAX_LAYOUT_EXTENTS: usize = 32;
 
 /// The fewest binding rows that one directory scan reads per manifest round
