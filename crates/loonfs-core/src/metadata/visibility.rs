@@ -290,12 +290,14 @@ pub(crate) enum Ancestry {
 /// chain that breaks before either occurs only below an expired deletion.
 /// Base compactions remove an expired subtree's rows a family group at a
 /// time, so the bindings that lead to the deleted directory can be gone while
-/// the inode rows and revisions below it remain. Every read therefore treats
-/// an inode whose ancestry is [`Ancestry::Disconnected`] as hidden. The root
-/// inode can't be deleted, so the walk stops there without reading its
-/// tombstones. A
-/// parent-binding cycle is corrupt stored metadata, and the walk returns an
-/// error for it, because returning any variant could show a deleted subtree.
+/// the inode rows and revisions below it remain. Every visibility check
+/// therefore treats an inode whose ancestry is [`Ancestry::Disconnected`] as
+/// hidden.
+///
+/// The root inode can't be deleted, so the walk stops there without reading
+/// its tombstones. A parent-binding cycle is corrupt stored metadata, and the
+/// walk returns an error for it, because returning any variant could show a
+/// deleted subtree.
 pub(crate) async fn ancestry<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,

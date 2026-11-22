@@ -772,6 +772,7 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
 /// still store the file's rows. `/trash` was deleted after the floor, so it's
 /// in the trash, and `/keep/kept.txt` is visible.
 struct CompactedBindings {
+    gone_file: InodeId,
     trash: InodeId,
     trash_seq: CommitSeq,
     trash_file: InodeId,
@@ -817,6 +818,7 @@ async fn compact_the_bindings_of_an_expired_deletion<S: ObjectStore>(
         );
     }
     CompactedBindings {
+        gone_file: ids["/gone/file.txt"],
         trash: ids["/trash"],
         trash_seq,
         trash_file: ids["/trash/old.txt"],
@@ -856,7 +858,7 @@ async fn listed_files<S: ObjectStore>(
 /// edges under an expired deletion, a file listing, a snapshot's file
 /// listing, and a fork's file listing leave out a file below the deleted
 /// directory, whose inode row and revisions remain until their own groups
-/// compact.
+/// compact. A listing that includes deleted files still returns that file.
 #[tokio::test]
 async fn a_file_listing_leaves_out_a_file_whose_expired_ancestry_lost_its_bindings_first() {
     let temp = tempdir().expect("tempdir");
@@ -872,8 +874,12 @@ async fn a_file_listing_leaves_out_a_file_whose_expired_ancestry_lost_its_bindin
     );
     let with_deleted = listed_files(&store, &namespace_id, true).await;
     assert!(
-        with_deleted.is_superset(&BTreeSet::from([files.kept_file, files.trash_file])),
-        "a listing with deleted files includes the trash: {with_deleted:?}"
+        with_deleted.is_superset(&BTreeSet::from([
+            files.kept_file,
+            files.trash_file,
+            files.gone_file
+        ])),
+        "a listing with deleted files includes every stored file: {with_deleted:?}"
     );
 
     let snapshot = create_snapshot(&store, &namespace_id, &context)
