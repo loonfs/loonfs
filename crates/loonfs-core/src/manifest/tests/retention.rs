@@ -1277,7 +1277,7 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
 
 /// Reads the files one snapshot keeps at the test clock, or the error that
 /// says it no longer keeps anything.
-async fn read_snapshot_files<S: ObjectStore + ?Sized>(
+pub(super) async fn read_snapshot_files<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     snapshot_id: &SnapshotId,

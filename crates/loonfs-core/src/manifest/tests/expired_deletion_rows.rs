@@ -766,6 +766,211 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
     );
 }
 
+/// The inodes of a namespace in which the deletion of `/gone` has expired
+/// and a base compaction of the bindings group alone has removed the edge
+/// from `/gone` to `/gone/file.txt`, while the inodes and revisions groups
+/// still store the file's rows. `/trash` was deleted after the floor, so it's
+/// in the trash, and `/keep/kept.txt` is visible.
+struct CompactedBindings {
+    gone_file: InodeId,
+    trash: InodeId,
+    trash_seq: CommitSeq,
+    trash_file: InodeId,
+    kept_file: InodeId,
+}
+
+async fn compact_the_bindings_of_an_expired_deletion<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &WriterAt,
+) -> CompactedBindings {
+    bootstrap_restricted_namespace(store, namespace_id, context).await;
+    let paths = ["/gone/file.txt", "/trash/old.txt", "/keep/kept.txt"];
+    for path in paths {
+        put(store, namespace_id, path, b"text", context).await;
+    }
+    let mut ids = BTreeMap::new();
+    for path in paths.into_iter().chain(["/gone", "/trash"]) {
+        ids.insert(path, inode_id_of(store, namespace_id, path).await);
+    }
+    let gone_seq = delete_recursively(store, namespace_id, "/gone", context).await;
+    let trash_seq = delete_recursively(store, namespace_id, "/trash", context).await;
+    advance_floor_through(store, namespace_id, gone_seq, context).await;
+    assert_eq!(read_floor_seq(store, namespace_id).await, gone_seq);
+
+    let gone = [ids["/gone"], ids["/gone/file.txt"]];
+    compact_groups_without_false_positives(
+        store,
+        namespace_id,
+        &[MetadataFamilyGroup::Bindings],
+        &gone,
+    )
+    .await;
+    let rows = owned_rows(store, namespace_id, &gone[1..]).await;
+    assert_eq!(rows[&ApiMetadataRowFamily::DirentryChildBinds], Vec::new());
+    for family in [
+        ApiMetadataRowFamily::Inodes,
+        ApiMetadataRowFamily::Revisions,
+    ] {
+        assert!(
+            !rows[&family].is_empty(),
+            "{family:?} still stores the file"
+        );
+    }
+    CompactedBindings {
+        gone_file: ids["/gone/file.txt"],
+        trash: ids["/trash"],
+        trash_seq,
+        trash_file: ids["/trash/old.txt"],
+        kept_file: ids["/keep/kept.txt"],
+    }
+}
+
+/// The files that a file listing of the current view of `namespace_id`
+/// returns.
+async fn listed_files<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    include_deleted: bool,
+) -> BTreeSet<InodeId> {
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    crate::NamespaceStore::files_page(
+        view.metadata_view(),
+        loonfs_types::PageRequest {
+            cursor: None,
+            limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
+        },
+        crate::snapshot::ListSnapshotFilesOptions { include_deleted },
+    )
+    .await
+    .expect("list files")
+    .files
+    .into_iter()
+    .map(|file| file.inode_id)
+    .collect()
+}
+
+/// Checks that once a base compaction of the bindings group has removed the
+/// edges under an expired deletion, a file listing, a snapshot's file
+/// listing, and a fork's file listing leave out a file below the deleted
+/// directory, whose inode row and revisions remain until their own groups
+/// compact. A listing that includes deleted files still returns that file.
+#[tokio::test]
+async fn a_file_listing_leaves_out_a_file_whose_expired_ancestry_lost_its_bindings_first() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("compacted-bindings").expect("namespace id");
+    let context = writer_at("writer-1", 5_000);
+    let files = compact_the_bindings_of_an_expired_deletion(&store, &namespace_id, &context).await;
+
+    assert_eq!(
+        listed_files(&store, &namespace_id, false).await,
+        BTreeSet::from([files.kept_file]),
+        "the listing shows only the visible file"
+    );
+    let with_deleted = listed_files(&store, &namespace_id, true).await;
+    assert!(
+        with_deleted.is_superset(&BTreeSet::from([
+            files.kept_file,
+            files.trash_file,
+            files.gone_file
+        ])),
+        "a listing with deleted files includes every stored file: {with_deleted:?}"
+    );
+
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
+        .await
+        .expect("take a snapshot of the compacted manifest");
+    assert_eq!(
+        super::retention::read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
+            .await
+            .expect("list the snapshot's files"),
+        vec![files.kept_file],
+        "the snapshot's listing shows only the visible file"
+    );
+
+    let fork = NamespaceId::parse("compacted-bindings-fork").expect("namespace id");
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+    fixture
+        .engine()
+        .fork_namespace(
+            fixture
+                .engine()
+                .find_fork_target(&fork)
+                .await
+                .expect("find the fork target"),
+            &loonfs_test_support::test_actor(),
+            crate::test_support::fold_before_fork(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
+        .await
+        .expect("fork")
+        .created()
+        .expect("a new fork");
+    assert_eq!(
+        listed_files(&store, &fork, false).await,
+        BTreeSet::from([files.kept_file]),
+        "the fork inherits the rows and lists only the visible file"
+    );
+}
+
+/// Checks that beside an expired subtree whose bindings a base compaction
+/// removed first, the root stays visible, a file created and bound in one
+/// commit is listed, and a deletion in the trash stays out of the listing
+/// until a restore lists its file again.
+#[tokio::test]
+async fn a_file_listing_beside_compacted_expired_bindings_shows_new_and_restored_files() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("compacted-bindings").expect("namespace id");
+    let context = writer_at("writer-1", 5_000);
+    let files = compact_the_bindings_of_an_expired_deletion(&store, &namespace_id, &context).await;
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    assert!(view
+        .metadata_view()
+        .visible_inode(ROOT_INODE_ID)
+        .await
+        .expect("read the root")
+        .is_some());
+
+    put(&store, &namespace_id, "/keep/new.txt", b"new", &context).await;
+    let new_file = inode_id_of(&store, &namespace_id, "/keep/new.txt").await;
+    let listed = listed_files(&store, &namespace_id, false).await;
+    for (inode_id, shown) in [
+        (new_file, true),
+        (files.kept_file, true),
+        (files.trash_file, false),
+    ] {
+        assert_eq!(listed.contains(&inode_id), shown, "{inode_id}: {listed:?}");
+    }
+
+    commit(
+        &store,
+        &namespace_id,
+        FilesystemOperation::restore_deleted(
+            files.trash,
+            files.trash_seq,
+            &loonfs_types::options::RestoreDeletedDestination::Recorded,
+        ),
+        Vec::new(),
+        &context,
+    )
+    .await
+    .expect("restore the deletion in the trash");
+    assert!(listed_files(&store, &namespace_id, false)
+        .await
+        .contains(&files.trash_file));
+}
+
 /// The runs a delta-only window of `group` compacts: every run of the group
 /// after its oldest.
 fn delta_window(

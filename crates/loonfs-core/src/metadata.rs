@@ -50,5 +50,5 @@ pub(crate) use loonfs_types::format::manifest::TrashRecord;
 pub(crate) use self::rows::MetadataStateBuilder;
 
 pub(crate) use visibility::{
-    ancestry_allows_read, visible_child, AncestorWalk, MetadataVisibilityReads,
+    ancestry_allows_read, visible_child, AncestorWalk, Ancestry, MetadataVisibilityReads,
 };

@@ -144,7 +144,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Lists one page of the files that `view` reads at its sequence, as
     /// [`NamespaceEngine::list_snapshot_files_page`] and
     /// [`NamespaceEngine::list_files_page`] describe.
-    async fn files_page(
+    pub(crate) async fn files_page(
         view: MetadataView<'_, '_, S>,
         request: PageRequest<SnapshotFilesPageCursor>,
         options: ListSnapshotFilesOptions,

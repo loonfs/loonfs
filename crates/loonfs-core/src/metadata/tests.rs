@@ -422,12 +422,12 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             metadata_state.indexed_seq(),
         )
         .is_none());
-    assert_eq!(
-        metadata_state
-            .covering_subtree_tombstone(InodeId(3), metadata_state.indexed_seq())
-            .expect("descendant tombstone")
-            .root_inode_id,
-        InodeId(2)
+    assert_matches!(
+        super::visibility::resolve_in_memory_read(super::visibility::ancestry(
+            &mut metadata_state.reads_at_seq(metadata_state.indexed_seq()),
+            InodeId(3),
+        )),
+        Ok(Ancestry::Hidden(tombstone)) if tombstone.root_inode_id == InodeId(2)
     );
 }
 

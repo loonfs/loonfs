@@ -5,7 +5,9 @@ use super::super::{CommitValidationError, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::error::{CoreError, Result};
-use crate::metadata::{DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use crate::metadata::{
+    Ancestry, DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
+};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 
@@ -166,7 +168,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         inode_id: InodeId,
         operand: CommitOperand,
     ) -> Result<()> {
-        if let Some(tombstone) = self.view().covering_subtree_tombstone(inode_id).await? {
+        if let Ancestry::Hidden(tombstone) = self.view().ancestry(inode_id).await? {
             return Err(CommitValidationError::TargetUnderSubtreeTombstone {
                 operand,
                 inode_id,
