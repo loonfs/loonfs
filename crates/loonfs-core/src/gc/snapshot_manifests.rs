@@ -38,6 +38,8 @@ pub(super) struct ListedSnapshot {
     pub(super) key: String,
     /// The record's size, as the listing reported it.
     pub(super) size_bytes: u64,
+    /// The record's provider modification time, when the listing reported one.
+    pub(super) last_modified_at_ms: Option<u64>,
     pub(super) manifest: SnapshotManifest,
 }
 
@@ -100,14 +102,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .map_err(move |error| CoreError::store(&prefix, &error))
             .map_ok(move |entry| {
                 let ListedObject {
-                    key, size_bytes, ..
+                    key,
+                    size_bytes,
+                    last_modified_at_ms,
                 } = entry;
                 let manifest_no = snapshot_manifest_no(&key);
                 let first = matches!(manifest_no, Ok(Some(number)) if requested.insert(number));
                 let record = matches!(manifest_no, Ok(Some(_))).then(|| read_record(&key));
                 async move {
                     let (Some(manifest_no), Some(record)) = (manifest_no?, record) else {
-                        return Ok((size_bytes, None));
+                        return Ok((size_bytes, last_modified_at_ms, None));
                     };
                     let manifest = async {
                         if first {
@@ -117,13 +121,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         }
                     };
                     let (loaded, record) = futures::try_join!(manifest, record)?;
-                    Ok((size_bytes, Some((key, manifest_no, loaded, record))))
+                    Ok((
+                        size_bytes,
+                        last_modified_at_ms,
+                        Some((key, manifest_no, loaded, record)),
+                    ))
                 }
             })
             // `try_buffered` keeps listing order, so a snapshot that reuses an
             // earlier snapshot's load arrives after that load's result.
             .try_buffered(STORE_READS_IN_FLIGHT)
-            .map_ok(move |(size_bytes, listed)| {
+            .map_ok(move |(size_bytes, last_modified_at_ms, listed)| {
                 let Some((key, manifest_no, loaded, record)) = listed else {
                     return ListedSnapshotKey::Unrecognized { size_bytes };
                 };
@@ -139,6 +147,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     ListedSnapshot {
                         key,
                         size_bytes,
+                        last_modified_at_ms,
                         manifest,
                     },
                     record,
