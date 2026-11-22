@@ -254,10 +254,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .ok_or_else(|| CoreError::PathNotFound(path.clone()))?;
                 if let Some(expected) = expected_destination {
                     expected
-                        .ensure_revision(existing.inode_id, async {
-                            Ok(Some(existing_revision.revision_no))
-                        })
-                        .await?;
+                        .ensure_revision(existing.inode_id, Some(existing_revision.revision_no))?;
                 }
                 self.validation
                     .replace_file(existing.inode_id, &revision.content_ref, None)
@@ -307,15 +304,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         existing: &ResolvedVisiblePath,
         expected_destination: Option<ExpectedFileState>,
     ) -> Result<()> {
-        let Some(expected) = expected_destination else {
+        let Some(expected) = expected_destination.filter(ExpectedFileState::expects_revision)
+        else {
             return Ok(());
         };
-        let view = self.view();
-        expected
-            .ensure_revision(
-                existing.inode_id,
-                view.current_revision_no(existing.inode_id),
-            )
-            .await
+        let actual = self.view().current_revision_no(existing.inode_id).await?;
+        expected.ensure_revision(existing.inode_id, actual)
     }
 }

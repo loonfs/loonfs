@@ -173,10 +173,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .resolve_authorized_target(Target::Inode(inode_id), AccessRight::Write.into())
             .await?;
         target.ensure_file()?;
-        let view = self.view();
-        expected
-            .ensure_revision(inode_id, view.current_revision_no(inode_id))
-            .await?;
+        let actual = self.view().current_revision_no(inode_id).await?;
+        expected.ensure_revision(inode_id, actual)?;
         self.validation
             .replace_file(inode_id, &content_ref, None)
             .await
@@ -241,11 +239,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .await?
                     .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
                 if let Some(expected) = expected_file_state {
-                    expected
-                        .ensure_revision(existing.inode_id, async {
-                            Ok(Some(revision.revision_no))
-                        })
-                        .await?;
+                    expected.ensure_revision(existing.inode_id, Some(revision.revision_no))?;
                 }
                 self.validation
                     .replace_file(existing.inode_id, &content_ref, None)

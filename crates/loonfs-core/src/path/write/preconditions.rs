@@ -401,8 +401,8 @@ impl PreconditionFields {
 pub(super) struct ExpectedFileState {
     /// Destination inode required by the request.
     pub(super) inode_id: InodeId,
-    /// Destination content revision required by the request, which only
-    /// [`Self::ensure_revision`] reads.
+    /// Destination content revision required by the request, whose value
+    /// only [`Self::ensure_revision`] reads.
     revision_no: Option<RevisionNo>,
 }
 
@@ -414,16 +414,21 @@ impl ExpectedFileState {
         }
     }
 
-    /// Requires the current revision of the file `inode_id` to be the
-    /// revision that the request expects, if it expects one. `actual` reads
-    /// the current revision, and runs only when the request expects one.
-    pub(super) async fn ensure_revision(
+    /// Returns whether the request expects a revision of the file.
+    pub(super) fn expects_revision(&self) -> bool {
+        self.revision_no.is_some()
+    }
+
+    /// Requires `actual`, the current revision of the file `inode_id`
+    /// (`None` when the file isn't visible), to be the revision that the
+    /// request expects, if it expects one.
+    pub(super) fn ensure_revision(
         &self,
         inode_id: InodeId,
-        actual: impl Future<Output = Result<Option<RevisionNo>>>,
+        actual: Option<RevisionNo>,
     ) -> Result<()> {
         match self.revision_no {
-            Some(expected) => ensure_expected_revision(inode_id, expected, actual.await?),
+            Some(expected) => ensure_expected_revision(inode_id, expected, actual),
             None => Ok(()),
         }
     }
