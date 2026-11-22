@@ -205,10 +205,7 @@ async fn owned_staging_over_an_occupied_key_answers_the_same_for_bytes_and_for_a
                 .create()
                 .await
                 .expect("bootstrap");
-            let catalog = crate::test_support::namespace_store(&store, &namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog");
+            let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
             let engine =
                 crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
                     .engine();
@@ -515,10 +512,7 @@ async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::upload_records(),
     );
-    let catalog = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("catalog");
+    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
 
     let proxied = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
@@ -963,10 +957,7 @@ async fn an_open_session_takes_upload_work_only_before_its_expiry() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let setup = context(1_000);
     let (namespace_id, staged_id, _, _) = staged_session(&store, &setup).await;
-    let catalog = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("catalog");
+    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
     let proxied_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
         .begin_upload(&catalog, &loonfs_test_support::test_actor())

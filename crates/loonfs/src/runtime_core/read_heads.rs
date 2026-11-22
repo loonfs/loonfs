@@ -15,8 +15,8 @@ use crate::{Consistency, CoreError, NamespaceId, SnapshotId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    ensure_namespace_live, project_anchor_tail, NamespaceReadAnchor, PublicationBasis, ReadBasis,
-    VerifiedNamespaceCatalogEntry,
+    project_anchor_tail, ActiveNamespaceCatalogEntry, NamespaceReadAnchor, PublicationBasis,
+    ReadBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
@@ -454,16 +454,14 @@ impl RuntimeCore {
     /// The head is the one that [`HeadConfirmation::View`] confirms, so the
     /// refusal follows another process's tombstone within the revalidation
     /// bound.
-    pub(crate) async fn load_live_namespace_catalog_cached(
+    pub(crate) async fn load_active_namespace_catalog_cached(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<VerifiedNamespaceCatalogEntry> {
+    ) -> Result<ActiveNamespaceCatalogEntry> {
         let context = self
             .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
-        let head = &context.read_basis.head;
-        ensure_namespace_live(&head.namespace_id, head.status)?;
-        Ok(VerifiedNamespaceCatalogEntry::from_head(head))
+        ActiveNamespaceCatalogEntry::from_head(&context.read_basis.head).map_err(Error::from)
     }
 
     /// Drops the namespace's cached head, after this runtime learns of a

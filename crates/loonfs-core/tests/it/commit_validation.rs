@@ -140,10 +140,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         )
         .await
         .expect("stage content");
-    let catalog = namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("load namespace catalog");
+    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let completed = engine
         .complete_upload(
             &catalog,
@@ -1084,10 +1081,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         )
         .await
         .expect("stage content");
-    let catalog = namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("load namespace catalog");
+    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let completed = engine
         .complete_upload(
             &catalog,

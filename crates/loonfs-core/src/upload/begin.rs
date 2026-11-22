@@ -6,7 +6,7 @@ use super::session::{create_upload_session, NewUploadSession};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_MULTIPART_PART_BYTES, MIN_MULTIPART_PART_BYTES};
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ObjectStore, PROVIDER_MULTIPART_PART_BYTES};
 use loonfs_types::options::DirectMultipartUploadOptions;
@@ -38,11 +38,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// [`Self::begin_direct_put_upload_target`] or [`Self::begin_direct_multipart_upload_target`].
     pub async fn begin_upload(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let clock = self.namespace.start_clock();
-        let catalog = self.own_catalog(catalog);
+        self.assert_own_catalog(catalog);
         create_upload_session(
             &self.namespace.store,
             catalog,
@@ -56,11 +56,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Starts a direct PUT upload and assigns its content identity.
     pub async fn begin_direct_put_upload_target(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         actor_id: &ActorId,
     ) -> Result<DirectPutUploadTarget> {
         let clock = self.namespace.start_clock();
-        let catalog = self.own_catalog(catalog);
+        self.assert_own_catalog(catalog);
         let content_id = ContentId::generate();
         let object_key = content_blob(catalog.pool_id(), &content_id);
         let session = create_upload_session(
@@ -86,12 +86,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// record cannot be written, the provider upload is aborted.
     pub async fn begin_direct_multipart_upload_target(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         actor_id: &ActorId,
         options: DirectMultipartUploadOptions,
     ) -> Result<DirectMultipartUploadTarget> {
         let clock = self.namespace.start_clock();
-        let catalog = self.own_catalog(catalog);
+        self.assert_own_catalog(catalog);
         let part_size_bytes = multipart_part_size(options.part_size_bytes)?;
         let content_id = ContentId::generate();
         let object_key = content_blob(catalog.pool_id(), &content_id);

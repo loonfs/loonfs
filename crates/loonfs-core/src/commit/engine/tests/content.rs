@@ -103,10 +103,7 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
         .await
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
-    let catalog = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("catalog");
+    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
     let token = mint_content_token(
         "secret",
         completed.evidence.as_ref().expect("completed evidence"),
@@ -505,10 +502,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         .expect("bootstrap");
     let completed = completed_upload(&store, &namespace_id, &setup).await;
     let unused = completed_upload(&store, &namespace_id, &setup).await;
-    let catalog = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("catalog");
+    let catalog = crate::test_support::load_catalog(&store, &namespace_id).await;
     let mut proofs = vec![completed.prepared.clone()];
     for upload in [&completed, &unused] {
         let token = mint_content_token(

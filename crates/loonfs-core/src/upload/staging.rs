@@ -4,7 +4,7 @@
 use super::session::{create_upload_session_record, NewUploadSession};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::Result;
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::content_staging::{
@@ -26,12 +26,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// and the outcome record after it.
     pub async fn stage_owned_bytes(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         actor_id: &ActorId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
-        let catalog = self.own_catalog(catalog);
+        self.assert_own_catalog(catalog);
         let clock = self.namespace.start_clock();
         let session =
             open_owned_staging_session(&self.namespace.store, catalog, actor_id, &clock).await?;
@@ -55,18 +55,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// are identical.
     pub async fn stage_owned_stream(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         actor_id: &ActorId,
         body: ByteStream,
     ) -> Result<PreparedContent> {
         let _permit = self.namespace.content_writes.acquire().await;
+        self.assert_own_catalog(catalog);
         self.namespace
-            .stage_owned_stream(
-                self.own_catalog(catalog),
-                actor_id,
-                body,
-                &self.namespace.start_clock(),
-            )
+            .stage_owned_stream(catalog, actor_id, body, &self.namespace.start_clock())
             .await
     }
 }
@@ -79,7 +75,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// is identical.
     pub(crate) async fn stage_owned_stream(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         actor_id: &ActorId,
         body: ByteStream,
         clock: &OperationClock,
@@ -102,14 +98,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
 /// write.
 async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
+    catalog: &ActiveNamespaceCatalogEntry,
     actor_id: &ActorId,
     clock: &OperationClock,
 ) -> Result<UploadSessionPayload> {
-    // Do not recheck namespace availability here. The catalog came from the
-    // namespace head, and publication performs the final admission check. If
-    // the namespace is deleted first, garbage collection removes the
-    // unreferenced completed session and content.
     create_upload_session_record(
         store,
         catalog,
@@ -129,13 +121,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// and garbage collection removes its object.
     async fn complete_owned_staging(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         session: &UploadSessionPayload,
         written: ContentRef,
         clock: &OperationClock,
     ) -> Result<PreparedContent> {
         Ok(self
-            .record_completion(catalog.pool_id(), session, written, clock)
+            .record_completion(catalog, session, written, clock)
             .await?
             .prepared)
     }

@@ -278,7 +278,7 @@ pub mod ops;
 
 use crate::engine::NamespaceWriterEngine;
 use crate::namespace::basis::PublicationBasis;
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use loonfs_objectstore::ObjectStore;
@@ -531,16 +531,20 @@ pub async fn commit_wal_keys<S: ObjectStore + ?Sized>(
         .expect("list the WAL")
 }
 
-/// Loads the catalog of `namespace_id` from its current manifest, the
-/// catalog that a runtime hands the upload calls.
+/// Loads the catalog entry of `namespace_id` from its current manifest, and
+/// panics unless the namespace is active.
 pub async fn load_catalog<S: ObjectStore>(
     store: S,
     namespace_id: &NamespaceId,
-) -> VerifiedNamespaceCatalogEntry {
-    namespace_store(store, namespace_id)
-        .load_catalog_entry()
+) -> ActiveNamespaceCatalogEntry {
+    let manifest = namespace_store(store, namespace_id)
+        .load_current_manifest()
         .await
-        .expect("the namespace should have a catalog")
+        .expect("the namespace should have a current manifest");
+    ActiveNamespaceCatalogEntry::from_head(&crate::namespace::state::NamespaceReadState::from(
+        manifest.payload(),
+    ))
+    .expect("the namespace should be active")
 }
 
 /// Folds the WAL tail of `namespace`, a fork's source, and returns no writer

@@ -5,7 +5,7 @@ use super::records::UploadSessionState;
 use super::session::{ensure_session_actor, ensure_session_open, session_response, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::catalog::{ActiveNamespaceCatalogEntry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content_staging::{
     stage_bytes_under_content_id, stage_streamed_under_content_id, ContentKeyOwner,
@@ -24,15 +24,16 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// sessions always use separate object identities.
     pub async fn upload_content(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         upload_id: &UploadId,
         bytes: &[u8],
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let _permit = self.namespace.content_writes.acquire().await;
+        self.assert_own_catalog(catalog);
         self.namespace
             .upload_proxied_content(
-                self.own_catalog(catalog),
+                catalog,
                 upload_id,
                 actor_id,
                 ProxiedPayload::Bytes(bytes),
@@ -45,15 +46,16 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// hashing it on the way through instead of keeping it in memory.
     pub async fn upload_content_stream(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         upload_id: &UploadId,
         body: ByteStream,
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
         let _permit = self.namespace.content_writes.acquire().await;
+        self.assert_own_catalog(catalog);
         self.namespace
             .upload_proxied_content(
-                self.own_catalog(catalog),
+                catalog,
                 upload_id,
                 actor_id,
                 ProxiedPayload::Stream(body),
@@ -75,7 +77,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// checksums differ.
     pub(crate) async fn upload_proxied_content(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         upload_id: &UploadId,
         actor_id: &ActorId,
         payload: ProxiedPayload<'_>,

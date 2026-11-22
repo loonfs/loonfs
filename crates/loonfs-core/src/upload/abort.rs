@@ -27,7 +27,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         upload_id: &UploadId,
         actor_id: &ActorId,
     ) -> Result<UploadSession> {
-        let catalog = self.own_catalog(catalog);
+        self.assert_own_catalog(catalog);
         let clock = self.namespace.start_clock();
         let namespace_id = catalog.namespace_id();
         let loaded = self

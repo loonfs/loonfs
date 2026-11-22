@@ -2,8 +2,8 @@
 
 use crate::common::*;
 use bytes::Bytes;
+use loonfs_core::test_support::NamespaceFixture;
 use loonfs_core::test_support::WriterAt;
-use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::{CoreError, DirectPutUploadTarget, ErrorCode};
 use loonfs_objectstore::keys::{upload_outcome, upload_session};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -533,10 +533,7 @@ mod streamed_content {
             .create()
             .await
             .expect("bootstrap");
-        let catalog = namespace_store(&store, &namespace_id)
-            .load_catalog_entry()
-            .await
-            .expect("catalog");
+        let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
         let body = futures::stream::once(async move {
