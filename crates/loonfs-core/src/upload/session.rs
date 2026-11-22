@@ -7,7 +7,7 @@ use super::records::UploadSessionState;
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::limits::UPLOAD_SESSION_LEASE_MS;
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use crate::time::OperationClock;
 use bytes::Bytes;
 use loonfs_objectstore::keys::upload_session;
@@ -65,7 +65,7 @@ impl NewUploadSession {
 
 pub(crate) async fn create_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
+    catalog: &ActiveNamespaceCatalogEntry,
     actor_id: ActorId,
     session: NewUploadSession,
     clock: &OperationClock,
@@ -81,7 +81,7 @@ pub(crate) async fn create_upload_session<S: ObjectStore + ?Sized>(
 /// Writes the record that starts a new upload session, with put-if-absent.
 pub(crate) async fn create_upload_session_record<S: ObjectStore + ?Sized>(
     store: &S,
-    catalog: &VerifiedNamespaceCatalogEntry,
+    catalog: &ActiveNamespaceCatalogEntry,
     actor_id: ActorId,
     session: NewUploadSession,
     clock: &OperationClock,

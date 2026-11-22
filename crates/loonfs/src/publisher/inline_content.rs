@@ -144,7 +144,7 @@ impl NamespacePublisher {
         let catalog = self
             .context
             .runtime_core
-            .load_namespace_catalog_cached(namespace_id)
+            .load_active_namespace_catalog_cached(namespace_id)
             .await?;
         let engine = self
             .context

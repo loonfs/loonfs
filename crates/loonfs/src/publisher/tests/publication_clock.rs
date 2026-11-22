@@ -37,10 +37,7 @@ async fn publish_after_retry_delay(
     });
     let runtime = test_runtime(store.clone());
     create_namespace(&runtime, &namespace_id).await;
-    let catalog = loonfs_core::test_support::namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("catalog");
+    let catalog = loonfs_core::test_support::load_catalog(&store, &namespace_id).await;
     let engine = runtime
         .core
         .writer_engine(&runtime.writer.writer_id, &namespace_id);

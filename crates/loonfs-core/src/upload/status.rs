@@ -5,7 +5,7 @@ use super::proxied::find_proxied_content_ref;
 use super::session::{ensure_session_actor, session_response};
 use crate::engine::NamespaceEngine;
 use crate::error::Result;
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
 use crate::storage::content_admission::CompletedUploadEvidence;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
@@ -17,12 +17,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// the caller can retry publication without uploading the content again.
     pub async fn get_upload(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
+        catalog: &ActiveNamespaceCatalogEntry,
         upload_id: &UploadId,
         actor_id: &ActorId,
     ) -> Result<UploadSessionView> {
         let now_ms = self.now_ms();
-        let catalog = self.own_catalog(catalog);
+        self.assert_own_catalog(catalog);
         let loaded = self
             .namespace
             .load_upload_session_state(catalog, upload_id)

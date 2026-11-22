@@ -48,7 +48,7 @@ impl Namespace<Writable> {
         }
         let catalog = self
             .core
-            .load_namespace_catalog_cached(&self.namespace_id)
+            .load_active_namespace_catalog_cached(&self.namespace_id)
             .await?;
         Ok(self
             .engine()
@@ -111,7 +111,7 @@ impl Namespace<Writable> {
         }
         let catalog = self
             .core
-            .load_namespace_catalog_cached(&self.namespace_id)
+            .load_active_namespace_catalog_cached(&self.namespace_id)
             .await?;
         Ok(self
             .engine()

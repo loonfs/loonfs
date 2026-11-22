@@ -642,18 +642,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::diff::diff_page(&view, from_seq, options).await
     }
 
-    /// Verifies that a runtime-supplied catalog belongs to this engine's
-    /// namespace. A mismatch indicates an internal integration error.
-    pub(crate) fn own_catalog<'c>(
-        &self,
-        catalog: &'c VerifiedNamespaceCatalogEntry,
-    ) -> &'c VerifiedNamespaceCatalogEntry {
+    /// Asserts that a runtime-supplied catalog belongs to this engine's
+    /// namespace. A mismatch is a bug in the runtime.
+    pub(crate) fn assert_own_catalog(&self, catalog: &VerifiedNamespaceCatalogEntry) {
         assert_eq!(
             catalog.namespace_id(),
             &self.namespace.namespace_id,
             "a runtime should give an engine its own namespace's catalog"
         );
-        catalog
     }
 }
 
