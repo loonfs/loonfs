@@ -3,7 +3,7 @@
 use super::commit_session::CommitSession;
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
-use crate::metadata::RevisionRecord;
+use crate::metadata::{InodeRecord, RevisionRecord};
 use crate::path::write::DeletionInTrash;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
@@ -70,6 +70,17 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Returns the inode record of `inode_id`, whose kind, creator and
+    /// creation time a restore of a deleted item copies into its binding.
+    ///
+    /// The planner found the inode's deletion in the trash, so an inode
+    /// without a record means that the namespace is corrupt.
+    pub(super) async fn resolve_inode(&self, inode_id: InodeId) -> Result<InodeRecord> {
+        self.view().inode_at_seq(inode_id).await?.ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!("inode `{inode_id}` has no inode record"))
+        })
     }
 
     /// Returns the current revision of the file `inode_id`, which a write

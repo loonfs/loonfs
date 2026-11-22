@@ -5,7 +5,7 @@
 
 use super::commit_session::CommitSession;
 use super::numbering::CommitNumbering;
-use crate::commit::{CommitOperand, CommitValidationError};
+use crate::commit::CommitValidationError;
 use crate::error::Result;
 use crate::metadata::access_revision_no;
 use crate::path::write::{
@@ -214,12 +214,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let inode_id = deletion.root_inode_id();
-        let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
-            CommitValidationError::InodeMissing {
-                operand: CommitOperand::RestoreDeletedTarget,
-                inode_id,
-            },
-        )?;
+        let inode = self.resolve_inode(inode_id).await?;
         self.ensure_restorable_deletion(&deletion, deletion_seq)?;
         self.ensure_child_unbound(inode_id, None).await?;
         let revision = self
