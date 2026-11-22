@@ -1,6 +1,6 @@
 //! The retirement of a namespace whose tombstone is eligible.
 
-use super::live_set::{LiveSet, RetirementStatus};
+use super::live_set::LiveSet;
 use crate::error::Result;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
@@ -24,7 +24,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         live: &LiveSet,
         report: &mut GcResponse,
     ) -> Result<()> {
-        if live.retirement_status() != RetirementStatus::Eligible {
+        if !live.tombstone_is_eligible() {
             return Ok(());
         }
         let tombstone = live

@@ -193,7 +193,10 @@ pub enum GcSkippedWork {
     /// The collection deleted no content objects, because it couldn't read every pool member's
     /// roots within its budget.
     ContentDeletionPoolBudget,
-    /// The collection deleted no content objects, because it couldn't read one pool member's roots.
+    /// The collection deleted no content objects, because it couldn't read one pool member's roots
+    /// in this pass. If a member compacted and collected a segment during the pass, a later pass
+    /// normally succeeds. If the collection skips content deletion for this reason on consecutive
+    /// passes, a member needs repair or deletion.
     ContentDeletionUnreadableMember,
     /// A reason from a newer server.
     #[serde(other)]

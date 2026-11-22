@@ -4,76 +4,28 @@
 use super::charged_set::{ChargedQueue, ChargedSet, CollectionMemory};
 use super::deletes::Decision;
 use super::families::CandidateFamily;
-use super::snapshot_manifests::{
-    missing_root_manifest, ListedSnapshot, ListedSnapshotKey, SnapshotManifest,
+use super::roots::{
+    ListedSnapshotKey, MissingManifest, NamespaceRoots, RetirementStatus, SnapshotManifest,
 };
 use super::snapshots::sweep_snapshot_record;
 use crate::error::Result;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use crate::wal::wal_no_is_unfolded;
-use futures::TryStreamExt;
+use futures::{future, TryStreamExt};
 use loonfs_objectstore::keys::{extension_segment_object_key, metadata_segment_object_key};
 use loonfs_objectstore::layout::{manifest_no_of, wal_no_of};
 use loonfs_objectstore::{ListedObject, ObjectStore};
-use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{GcResponse, ManifestNo, NamespaceId, RetainedReason, WalNo};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetirementStatus {
-    Active,
-    Retained { retires_at_ms: Option<u64> },
-    Eligible,
-}
-
-impl RetirementStatus {
-    /// Returns the [retirement](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#95-retirement)
-    /// status at `now_ms` of a namespace whose current manifest is `tombstone`
-    /// when the namespace is deleted, and whose complete snapshot listing returned
-    /// a key when `has_snapshots`.
-    pub(super) fn of(
-        tombstone: Option<&NamespaceManifestPayload>,
-        has_snapshots: bool,
-        now_ms: u64,
-    ) -> Self {
-        let Some(tombstone) = tombstone else {
-            return Self::Active;
-        };
-        let deadline_ms = retirement_deadline_ms(tombstone);
-        if now_ms < deadline_ms {
-            Self::Retained {
-                retires_at_ms: Some(deadline_ms),
-            }
-        } else if has_snapshots {
-            Self::Retained {
-                retires_at_ms: None,
-            }
-        } else {
-            Self::Eligible
-        }
-    }
-
-    /// Returns whether the layout view of the namespace's current manifest is
-    /// a [content root](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#119-content-roots):
-    /// while the namespace is active, and while a deleted namespace's
-    /// retirement deadline is in the future.
-    pub(super) fn current_view_is_root(self) -> bool {
-        matches!(
-            self,
-            Self::Active
-                | Self::Retained {
-                    retires_at_ms: Some(_)
-                }
-        )
-    }
-}
-
 pub(super) struct LiveSet {
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
+    pub(super) status: RetirementStatus,
     /// The number of the newest manifest that the collection found. The
     /// collection keeps that manifest and every manifest above it.
     pub(super) newest_manifest_no: ManifestNo,
@@ -91,10 +43,6 @@ pub(super) struct LiveSet {
     has_snapshots: bool,
     pub(super) now_ms: u64,
     live_folded_wal_no: Option<WalNo>,
-    /// When a collection publishes the tombstone of the namespace, whose
-    /// newest manifest is initializing: the grace window after its manifest
-    /// 1's `created_at_ms`.
-    pub(super) tombstone_at_ms: Option<u64>,
 }
 
 impl LiveSet {
@@ -121,50 +69,47 @@ impl LiveSet {
         memory: CollectionMemory,
     ) -> Result<Option<Self>> {
         let namespace_id = &namespace.namespace_id;
+        let now_ms = clock.request_at_ms();
         let current = match namespace.find_newest_manifest().await? {
             NewestManifest::Absent => return Err(namespace.namespace_not_found()),
             NewestManifest::Retired => return Ok(None),
             NewestManifest::Manifest(current) => current,
         };
-        let created_at_ms = current.manifest.payload().created_at_ms;
-        let current = if matches!(
-            current.manifest.payload().status,
-            NamespaceStatus::Initializing {}
-        ) && clock.request_at_ms().saturating_sub(created_at_ms)
-            >= GC_GRACE_WINDOW_MS
-        {
-            let update = namespace
-                .tombstone_initializing_namespace(current, clock)
-                .await?;
-            if let TombstoneOutcome::Published(_) = update.response {
-                tracing::info!(
-                    namespace_id = %namespace_id,
-                    created_at_ms,
-                    "published the tombstone of an abandoned namespace creation"
-                );
+        let found = NamespaceRoots::new(namespace, current.manifest.payload(), now_ms).status;
+        let current = match found {
+            RetirementStatus::Initializing { tombstone_at_ms } if now_ms >= tombstone_at_ms => {
+                let created_at_ms = current.manifest.payload().created_at_ms;
+                let update = namespace
+                    .tombstone_initializing_namespace(current, clock)
+                    .await?;
+                if let TombstoneOutcome::Published(_) = update.response {
+                    tracing::info!(
+                        namespace_id = %namespace_id,
+                        created_at_ms,
+                        "published the tombstone of an abandoned namespace creation"
+                    );
+                }
+                update.current
             }
-            update.current
-        } else {
-            current
+            _ => current,
         };
         let head = current.manifest.payload();
+        let roots = NamespaceRoots::new(namespace, head, now_ms);
         let mut live = Self {
-            current_tombstone: head.status.is_deleted().then(|| head.clone()),
+            current_tombstone: roots.status.is_deleted().then(|| head.clone()),
+            status: roots.status,
             newest_manifest_no: head.manifest_no,
             objects: ChargedSet::new(&memory),
             snapshot_decisions: ChargedQueue::new(&memory),
             snapshot_listed_bytes: 0,
             memory,
             has_snapshots: false,
-            now_ms: clock.request_at_ms(),
-            live_folded_wal_no: (!head.status.is_deleted()).then_some(head.folded_wal_no),
-            tombstone_at_ms: matches!(head.status, NamespaceStatus::Initializing {})
-                .then(|| head.created_at_ms.saturating_add(GC_GRACE_WINDOW_MS)),
+            now_ms,
+            live_folded_wal_no: (!roots.status.is_deleted()).then_some(head.folded_wal_no),
         };
         let outcome = async {
-            live.protect_manifest(&current.manifest)?;
-            live.load_snapshots(namespace, head.manifest_no, clock)
-                .await
+            protect_manifest(&mut live.objects, &current.manifest)?;
+            live.load_snapshots(&roots).await
         }
         .await;
         tracing::info!(namespace_id = %namespace_id,
@@ -181,21 +126,62 @@ impl LiveSet {
     /// Protects the manifest of each listed snapshot, and keeps the collection's
     /// decision about each listed key.
     ///
-    /// A user snapshot whose manifest is missing is an unverified candidate,
-    /// which the collection deletes once the record's provider age reaches the
-    /// grace window. A fork snapshot whose manifest is missing fails the
-    /// collection unless snapshot cleanup would delete the snapshot, or the
-    /// snapshot is a deleted namespace's own fork point snapshot, which
-    /// retirement deletes.
+    /// The collection reads the record of each snapshot whose manifest is
+    /// present, and applies the snapshot cleanup rules to it. For a snapshot
+    /// whose manifest is missing, the listing has already read the record.
+    /// The collection applies the cleanup rules to an unverified user
+    /// snapshot, and deletes it anyway once the record's provider age reaches
+    /// the grace window. It keeps a deleted namespace's own fork point
+    /// snapshot, which retirement deletes. Any other snapshot whose manifest
+    /// is missing ends the collection with a corruption error.
+    ///
+    /// The collection protects each loaded manifest as the listing returns
+    /// it, and drops the loaded manifest before the record read, so the
+    /// listing's window of `STORE_READS_IN_FLIGHT` reads bounds the number of
+    /// loaded manifests in memory.
     async fn load_snapshots<S: ObjectStore>(
         &mut self,
-        namespace: &NamespaceStore<S>,
-        current_manifest_no: ManifestNo,
-        clock: &OperationClock,
+        roots: &NamespaceRoots<'_, S>,
     ) -> Result<()> {
-        let mut snapshots = namespace.list_snapshot_records(current_manifest_no);
-        while let Some(listed) = snapshots.try_next().await? {
-            let (snapshot, record) = match listed {
+        let namespace = roots.namespace;
+        let objects = &mut self.objects;
+        let mut snapshots = roots
+            .snapshots()
+            .and_then(|mut listed| {
+                // A protected manifest is rooted, so `Rooted` replaces the
+                // loaded manifest, which drops at the end of this closure.
+                let protected = match &mut listed {
+                    ListedSnapshotKey::Snapshot(snapshot) => {
+                        match std::mem::replace(&mut snapshot.manifest, SnapshotManifest::Rooted) {
+                            SnapshotManifest::Loaded(manifest) => {
+                                protect_manifest(objects, &manifest)
+                            }
+                            manifest => {
+                                snapshot.manifest = manifest;
+                                Ok(())
+                            }
+                        }
+                    }
+                    ListedSnapshotKey::Unrecognized { .. } => Ok(()),
+                };
+                future::ready(protected.map(|()| listed))
+            })
+            .map_ok(|listed| async move {
+                let record = match &listed {
+                    ListedSnapshotKey::Snapshot(snapshot)
+                        if !matches!(snapshot.manifest, SnapshotManifest::Missing(_)) =>
+                    {
+                        namespace
+                            .load_listed_snapshot_record(&snapshot.entry.key)
+                            .await?
+                    }
+                    ListedSnapshotKey::Snapshot(_) | ListedSnapshotKey::Unrecognized { .. } => None,
+                };
+                Ok((listed, record))
+            })
+            .try_buffered(STORE_READS_IN_FLIGHT);
+        while let Some((listed, record)) = snapshots.try_next().await? {
+            let snapshot = match listed {
                 ListedSnapshotKey::Unrecognized { size_bytes } => {
                     self.has_snapshots = true;
                     self.snapshot_listed_bytes += size_bytes;
@@ -206,113 +192,35 @@ impl LiveSet {
                     ))?;
                     continue;
                 }
-                ListedSnapshotKey::Snapshot(snapshot, record) => (snapshot, record),
+                ListedSnapshotKey::Snapshot(snapshot) => snapshot,
             };
-            let own_fork_point = record.as_ref().is_some_and(|record| {
-                matches!(
-                    &record.owner,
-                    SnapshotOwner::Fork { target_namespace_id }
-                        if *target_namespace_id == namespace.namespace_id
-                )
-            });
             // The namespace's own fork point snapshot doesn't keep it from
             // retirement, which deletes that snapshot (format spec,
             // "Retirement").
-            self.has_snapshots |= !own_fork_point;
-            self.snapshot_listed_bytes += snapshot.size_bytes;
-            if let SnapshotManifest::Loaded(manifest) = &snapshot.manifest {
-                self.protect_manifest(manifest)?;
-            }
-            let decision = match (&snapshot.manifest, &record) {
-                // Another collector can remove a released snapshot's basis after
-                // this collection listed it. Every snapshot for a missing manifest
-                // is checked on its own, because another snapshot for the number
-                // can still require retention when an earlier snapshot was
-                // deletable. The snapshot's record is read again, because the
-                // snapshot can have been released after the listing read it.
-                (SnapshotManifest::Missing(manifest_no), _) => {
-                    let decision = namespace.sweep_snapshot(&snapshot.key, self, clock).await?;
-                    let user = record
-                        .as_ref()
-                        .is_some_and(|record| matches!(record.owner, SnapshotOwner::User { .. }));
-                    if user && matches!(decision, Decision::Retain { .. }) {
-                        // A verified user snapshot protects its manifest from the
-                        // moment it's acknowledged, so this record is a candidate
-                        // that failed verification and outlived its creator's
-                        // delete, or whose put succeeded after the creator gave
-                        // up. The collection skips the record when it gathers
-                        // roots. Waiting for the grace window keeps the collection
-                        // from deleting a candidate that its creator is still
-                        // verifying or deleting (format spec, "Snapshot cleanup").
-                        self.unverified_candidate(&namespace.namespace_id, &snapshot)
-                    } else {
-                        // A call that finishes a fork can find an initializing
-                        // manifest that's already older than the grace window,
-                        // and a delete and a collection can remove that manifest
-                        // during the call, which then writes the fork point
-                        // snapshot on the deleted manifest. Nothing reads through a
-                        // deleted namespace's fork point snapshot, and the
-                        // tombstone lists the same runs, so the collection loses no
-                        // root by keeping the snapshot for retirement, which
-                        // deletes it by ID (format spec, "Snapshot cleanup").
-                        let left_to_retirement = own_fork_point && self.current_tombstone.is_some();
-                        if matches!(decision, Decision::Retain { .. }) && !left_to_retirement {
-                            return Err(missing_root_manifest(
-                                &namespace.namespace_id,
-                                *manifest_no,
-                                &snapshot.key,
-                            ));
+            self.has_snapshots |= !roots.is_own_fork_point(&snapshot.snapshot_id);
+            self.snapshot_listed_bytes += snapshot.entry.size_bytes;
+            let (status, now_ms) = (self.status, self.now_ms);
+            let decision = match snapshot.manifest {
+                SnapshotManifest::Loaded(_) | SnapshotManifest::Rooted => match record {
+                    Some(record) => {
+                        sweep_snapshot_record(&snapshot.entry.key, &record, status, now_ms)
+                    }
+                    None => Decision::Gone,
+                },
+                SnapshotManifest::Missing(MissingManifest::RecordGone) => Decision::Gone,
+                SnapshotManifest::Missing(MissingManifest::UnverifiedUser(record)) => {
+                    match sweep_snapshot_record(&snapshot.entry.key, &record, status, now_ms) {
+                        Decision::Retain { .. } => {
+                            unverified_candidate(&namespace.namespace_id, snapshot.entry, now_ms)
                         }
-                        decision
+                        decision => decision,
                     }
                 }
-                (_, Some(record)) => sweep_snapshot_record(&snapshot.key, record, self, clock),
-                (_, None) => Decision::Gone,
+                SnapshotManifest::Missing(MissingManifest::DeletedOwnForkPoint) => {
+                    Decision::retain(RetainedReason::SnapshotNotDeletable, None, now_ms)
+                }
             };
             self.snapshot_decisions.push_back(decision)?;
-        }
-        Ok(())
-    }
-
-    /// Deletes `snapshot`, an unverified user snapshot whose manifest is
-    /// missing, once the record's provider age is at least the grace window,
-    /// and keeps it otherwise.
-    fn unverified_candidate(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot: &ListedSnapshot,
-    ) -> Decision<GcResponse> {
-        let decision = Decision::aged(
-            ListedObject {
-                key: snapshot.key.clone(),
-                last_modified_at_ms: snapshot.last_modified_at_ms,
-                size_bytes: snapshot.size_bytes,
-            },
-            GC_GRACE_WINDOW_MS,
-            self.now_ms,
-            |report: &mut GcResponse| &mut report.deleted_snapshots_by_owner.user,
-        );
-        if let Decision::Delete { .. } = decision {
-            tracing::warn!(
-                namespace_id = %namespace_id,
-                object_key = %snapshot.key,
-                "deleting an unverified user snapshot whose manifest is missing"
-            );
-        }
-        decision
-    }
-
-    /// Keeps `manifest` and its metadata and extension segments.
-    fn protect_manifest(&mut self, manifest: &LoadedManifest) -> Result<()> {
-        self.objects.insert(manifest.object_key.clone())?;
-        for segment in manifest.payload().runs.iter().flat_map(|run| &run.segments) {
-            self.objects.insert(metadata_segment_object_key(segment))?;
-        }
-        for (name, entry) in &manifest.payload().extensions {
-            for segment in entry.segments() {
-                self.objects
-                    .insert(extension_segment_object_key(name, segment))?;
-            }
         }
         Ok(())
     }
@@ -337,26 +245,52 @@ impl LiveSet {
             }
     }
 
-    pub(super) fn deadline(&self, tombstone: &NamespaceManifestPayload) -> u64 {
-        retirement_deadline_ms(tombstone)
-    }
-
-    /// Returns the retirement status of the collected namespace.
-    pub(super) fn retirement_status(&self) -> RetirementStatus {
-        RetirementStatus::of(
-            self.current_tombstone.as_ref(),
-            self.has_snapshots,
-            self.now_ms,
-        )
+    /// Returns whether the namespace's tombstone is eligible for retirement,
+    /// which it is once the retirement deadline has passed and the complete
+    /// snapshot listing returned no key other than the namespace's own fork
+    /// point snapshot.
+    pub(super) fn tombstone_is_eligible(&self) -> bool {
+        self.status == RetirementStatus::PastDeadline && !self.has_snapshots
     }
 }
 
-/// Returns the earliest time at which the namespace of `tombstone` can be
-/// retired: the grace window after its deletion.
-pub(super) fn retirement_deadline_ms(tombstone: &NamespaceManifestPayload) -> u64 {
-    tombstone
-        .status
-        .deleted_at_ms()
-        .expect("a tombstone should carry its deletion stamp")
-        .saturating_add(GC_GRACE_WINDOW_MS)
+/// Keeps `manifest` and its metadata and extension segments in `objects`.
+fn protect_manifest(objects: &mut ChargedSet<String>, manifest: &LoadedManifest) -> Result<()> {
+    objects.insert(manifest.object_key.clone())?;
+    for segment in manifest.payload().runs.iter().flat_map(|run| &run.segments) {
+        objects.insert(metadata_segment_object_key(segment))?;
+    }
+    for (name, entry) in &manifest.payload().extensions {
+        for segment in entry.segments() {
+            objects.insert(extension_segment_object_key(name, segment))?;
+        }
+    }
+    Ok(())
+}
+
+/// Deletes `snapshot`, an unverified user snapshot of `namespace_id` whose
+/// manifest is missing, once the record's provider age is at least the grace
+/// window at `now_ms`, and keeps it otherwise. Waiting for the grace window
+/// keeps the collection from deleting a candidate that its creator is still
+/// verifying or deleting (format spec, "Snapshot cleanup").
+fn unverified_candidate(
+    namespace_id: &NamespaceId,
+    snapshot: ListedObject,
+    now_ms: u64,
+) -> Decision<GcResponse> {
+    let key = snapshot.key.clone();
+    let decision = Decision::aged(
+        snapshot,
+        GC_GRACE_WINDOW_MS,
+        now_ms,
+        |report: &mut GcResponse| &mut report.deleted_snapshots_by_owner.user,
+    );
+    if let Decision::Delete { .. } = decision {
+        tracing::warn!(
+            namespace_id = %namespace_id,
+            object_key = %key,
+            "deleting an unverified user snapshot whose manifest is missing"
+        );
+    }
+    decision
 }

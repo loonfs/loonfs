@@ -1,7 +1,7 @@
-//! The decisions that a collection's sweeps make about listed objects, and
-//! the bounded concurrent deletes that carry them out.
+//! The decisions that a collection's sweeps make about listed objects, the
+//! age rule that those decisions use, and the bounded concurrent deletes that
+//! carry them out.
 
-use super::snapshots::GraceAge;
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
@@ -95,17 +95,44 @@ impl<R: CollectionReport> Decision<R> {
         now_ms: u64,
         counter: Counter<R>,
     ) -> Self {
-        let reason = match GraceAge::of(entry.last_modified_at_ms, grace_window_ms, now_ms) {
-            GraceAge::Aged => {
+        let reason = match entry.last_modified_at_ms {
+            Some(modified_at_ms)
+                if AgeWindow::after(modified_at_ms, grace_window_ms).has_passed(now_ms) =>
+            {
                 return Self::Delete {
                     keys: vec![entry.key],
                     counter,
                 };
             }
-            GraceAge::Young => R::WITHIN_GRACE_WINDOW,
-            GraceAge::Unknown => R::NO_PROVIDER_TIMESTAMP,
+            Some(_) => R::WITHIN_GRACE_WINDOW,
+            // The provider reported no modification time, so the object's age
+            // is unknown and the collection treats the object as young.
+            None => R::NO_PROVIDER_TIMESTAMP,
         };
         Self::retain(reason, None, now_ms)
+    }
+}
+
+/// The window that a collection waits after a time, such as a time that a
+/// record stores or an object's provider modification time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AgeWindow {
+    /// The time plus the window, saturating at the largest time.
+    pub(super) ends_at_ms: u64,
+}
+
+impl AgeWindow {
+    /// Returns the window of `window_ms` after `at_ms`.
+    pub(super) fn after(at_ms: u64, window_ms: u64) -> Self {
+        Self {
+            ends_at_ms: at_ms.saturating_add(window_ms),
+        }
+    }
+
+    /// Returns whether the window has passed at `now_ms`. A time after
+    /// `now_ms` is inside its window.
+    pub(super) fn has_passed(self, now_ms: u64) -> bool {
+        now_ms >= self.ends_at_ms
     }
 }
 

@@ -4,7 +4,8 @@
 use super::charged_set::{ChargedQueue, CollectionMemory};
 use super::deletes::{apply_decisions, CollectionReport, Decision};
 use super::families::CandidateFamily;
-use super::live_set::{LiveSet, RetirementStatus};
+use super::live_set::LiveSet;
+use super::roots::{retirement_deadline, RetirementStatus};
 use super::sweep::{retired_candidate, Sweep};
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_COLLECTION_BYTES;
@@ -66,10 +67,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         report.retires_at_ms = live
             .current_tombstone
             .as_ref()
-            .map(|tombstone| live.deadline(tombstone));
-        report.next_reclamation_at_ms = match live.retirement_status() {
-            RetirementStatus::Retained { retires_at_ms } => retires_at_ms,
-            _ => live.tombstone_at_ms,
+            .map(|tombstone| retirement_deadline(tombstone).ends_at_ms);
+        report.next_reclamation_at_ms = match live.status {
+            RetirementStatus::Initializing { tombstone_at_ms } => Some(tombstone_at_ms),
+            RetirementStatus::BeforeDeadline { retires_at_ms } => Some(retires_at_ms),
+            RetirementStatus::Active | RetirementStatus::PastDeadline => None,
         };
         let sweep = Sweep {
             clock,

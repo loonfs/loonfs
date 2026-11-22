@@ -864,7 +864,7 @@ Pool GC responses include `skipped` (omitted when empty, each reason listed once
 | Reason | What the collection skipped | What the operator can do |
 | --- | --- | --- |
 | `content_deletion_pool_budget` | Skipped content-object deletion because reading all pool members' roots exceeded the [Content roots](format.md#119-content-roots) time budget. | Run pool GC again later. If it persists, delete unused forks to reduce member count. |
-| `content_deletion_unreadable_member` | Skipped content-object deletion because one pool member's roots couldn't be read. | Check the server warning log for the collection and repair or delete the reported member namespace. |
+| `content_deletion_unreadable_member` | Skipped content-object deletion because one pool member's roots couldn't be read in this pass, for example because a layout segment's extent filter couldn't be loaded after the member compacted and collected the segment during the pass. | Run pool GC again later, because a later pass normally succeeds when a member compacted during the pass. If pool GC reports this reason on consecutive passes, check the server warning log for the collection, and repair or delete the member namespace it identifies. The warning identifies a member whose roots couldn't be read by its `namespace_id`, and an extent filter that couldn't be loaded by its segment's key. The namespace in that key is the segment's owner, which for a segment that a fork inherited is the fork's source. |
 
 [Candidate and age rules](format.md#113-candidate-and-age-rules) defines exact deletion eligibility for every object family.
 

@@ -6,7 +6,7 @@
 //! tree node, and reference count the value owns. Allocator rounding and
 //! bookkeeping stay outside every budget.
 
-use crate::gc::{CompletedUploadSession, MemberState};
+use crate::gc::{CompletedUploadSession, RetirementStatus};
 use crate::namespace::state::NamespaceReadState;
 use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::storage::content_admission::ContentTokenError;
@@ -211,7 +211,7 @@ impl HeapBytes for CompletedUploadSession {
     }
 }
 
-impl HeapBytes for MemberState {
+impl HeapBytes for RetirementStatus {
     fn heap_bytes(&self) -> usize {
         0
     }

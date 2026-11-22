@@ -174,10 +174,6 @@ impl<K: Eq + std::hash::Hash + HeapBytes, V: HeapBytes> ChargedMap<K, V> {
         self.entries.get(key)
     }
 
-    pub(super) fn values(&self) -> impl Iterator<Item = &V> {
-        self.entries.values()
-    }
-
     pub(super) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.entries.iter()
     }

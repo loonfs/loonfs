@@ -6,9 +6,10 @@
 use super::uploads::{ListedUpload, ListedUploadSession};
 use crate::error::{CoreError, Result};
 use crate::gc::charged_set::{ChargedMap, ChargedQueue, ChargedSet, CollectionMemory};
-use crate::gc::live_set::{retirement_deadline_ms, RetirementStatus};
+use crate::gc::roots::{
+    ListedSnapshot, ListedSnapshotKey, NamespaceRoots, RetirementStatus, SnapshotManifest,
+};
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
-use crate::gc::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
 use crate::in_flight::POOL_MEMBER_READS_IN_FLIGHT;
 use crate::limits::POOL_ROOTS_READ_BUDGET_MS;
 use crate::namespace::basis::PublicationBasis;
@@ -19,26 +20,45 @@ use crate::pool_store::PoolStore;
 use crate::time::{Observation, OperationClock};
 use futures::stream::FuturesOrdered;
 use futures::{StreamExt, TryStreamExt};
-use loonfs_objectstore::keys::{metadata_segment_object_key, pool_member, pool_members_prefix};
+use loonfs_objectstore::keys::{metadata_segment_object_key, pool_members_prefix};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{NamespaceStatus, SnapshotOwner, SnapshotPayload};
-use loonfs_types::format::manifest::{
-    MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload,
-};
+use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::{ContentId, NamespaceId, PoolId, UploadId};
 use std::sync::{Arc, Mutex};
 
-/// What the collection read of one member of the pool.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MemberState {
-    /// The collection has read the member's roots, and its retirement status by the
-    /// collection's clock.
-    Read { status: RetirementStatus },
-    /// The listed member is initializing, so it has no roots: LoonFS refuses
-    /// commits to it, so no commit can be published in it that refers to the
-    /// pool's content.
-    NoRoots,
+/// What a pool's collection knows of the namespace that created an upload
+/// session, in the terms of the format spec's upload-session cleanup rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SessionNamespace {
+    /// The collection keeps the namespace's sessions whatever their records
+    /// say, until `reclaimable_at_ms`, or with no date when it's `None`. The
+    /// collection keeps a session with no date when it stopped before it read
+    /// every listed member, so it can't decide the namespace's status. It
+    /// keeps a session of a deleted namespace whose retirement deadline
+    /// hasn't passed until that deadline.
+    KeepsSessions { reclaimable_at_ms: Option<u64> },
+    /// A member that is being created or is active.
+    Live,
+    /// A namespace that the collection treats as retired, even while a fork's
+    /// snapshot keeps it from retirement: a deleted member at or past its
+    /// retirement deadline, or a namespace with no member entry in the
+    /// collection's listing, or whose entry the collection deleted, after the
+    /// collection read every listed member. A namespace without an entry was
+    /// retired, isn't in the pool, or had its entry written after the
+    /// listing.
+    Retired,
+}
+
+/// A root that a pool's collection couldn't read.
+#[derive(Clone, Copy)]
+pub(super) enum UnreadRoot<'a> {
+    /// The roots of the member with this namespace ID.
+    Member(&'a NamespaceId),
+    /// The extent filter of the layout segment at this key. The key's
+    /// namespace is the segment's owner, which for a segment that a fork
+    /// inherited is the fork's source.
+    ExtentFilter(&'a str),
 }
 
 /// How the collection's read of the pool's members ended.
@@ -52,6 +72,45 @@ pub(super) enum MemberReadOutcome {
     BudgetExceeded,
     /// The roots of one member couldn't be read.
     UnreadableMember,
+}
+
+impl MemberReadReport {
+    /// Records that the collection couldn't read `unread`, one of a member's
+    /// roots, because of `error`, and logs which root it couldn't read, so
+    /// that the collection skips the content sweep and finishes the rest.
+    /// Returns `error` instead when it is a failed charge to the collection's
+    /// memory budget, which ends the collection.
+    ///
+    /// A member's read and the load of an extent filter that a member's
+    /// rooted manifest lists both end here. Another process can collect a
+    /// member while the pool's collection reads it, so a manifest, a WAL
+    /// object, or a segment that the read needs can be gone.
+    pub(super) fn stop_at_unreadable_member(
+        &mut self,
+        pool_id: &PoolId,
+        unread: UnreadRoot<'_>,
+        error: CoreError,
+    ) -> Result<()> {
+        if let CoreError::LiveSetExceedsCollectionMemory { .. } = error {
+            return Err(error);
+        }
+        match unread {
+            UnreadRoot::Member(namespace_id) => tracing::warn!(
+                pool_id = %pool_id,
+                namespace_id = %namespace_id,
+                error = %error,
+                "a pool member's roots couldn't be read; skipping the pool's content sweep"
+            ),
+            UnreadRoot::ExtentFilter(segment_key) => tracing::warn!(
+                pool_id = %pool_id,
+                object_key = %segment_key,
+                error = %error,
+                "a layout segment's extent filter couldn't be loaded; skipping the pool's content sweep"
+            ),
+        }
+        self.outcome = MemberReadOutcome::UnreadableMember;
+        Ok(())
+    }
 }
 
 /// What the collection read of the pool's members.
@@ -93,8 +152,9 @@ pub(super) struct PoolRoots {
     /// The bytes of the upload records that the listing of the uploads
     /// prefix returned, as the listing reported them.
     pub(super) upload_record_bytes: u64,
-    /// Every listed member that the collection has read.
-    members: ChargedMap<NamespaceId, MemberState>,
+    /// The retirement status of every listed member that the collection has
+    /// read.
+    members: ChargedMap<NamespaceId, RetirementStatus>,
     now_ms: u64,
 }
 
@@ -231,17 +291,14 @@ impl PoolRoots {
                 break;
             };
             match result {
-                Ok(Some(state)) => self.members.insert(member_id, state)?,
+                Ok(Some(status)) => self.members.insert(member_id, status)?,
                 Ok(None) => {}
-                Err(error @ CoreError::LiveSetExceedsCollectionMemory { .. }) => return Err(error),
                 Err(error) => {
-                    tracing::warn!(
-                        pool_id = %pool.pool_id,
-                        error = %error,
-                        "a pool member's roots couldn't be read; skipping the pool's content sweep"
-                    );
-                    self.member_read.outcome = MemberReadOutcome::UnreadableMember;
-                    return Ok(());
+                    return self.member_read.stop_at_unreadable_member(
+                        &pool.pool_id,
+                        UnreadRoot::Member(&member_id),
+                        error,
+                    )
                 }
             }
             self.member_read.members_read += 1;
@@ -255,34 +312,38 @@ impl PoolRoots {
         Ok(())
     }
 
-    /// Returns the retirement status of `namespace_id`, the namespace of an
-    /// upload session that the collection sweeps, or `None` when the collection can't
-    /// decide it.
+    /// Returns what the collection knows of `namespace_id`, the namespace of
+    /// an upload session that the collection sweeps.
     ///
     /// The collection can't decide the status of a listed member whose roots
     /// it hasn't read, so a namespace that it hasn't read has no status when
-    /// the collection stopped before reading every listed member. A listed
-    /// namespace without roots is eligible, because no commit that refers to
-    /// the pool's content can be published in it. A namespace that isn't in
-    /// the map has no member entry, because the listing didn't include it or
-    /// the collection deleted its entry: it was retired, it isn't in the pool,
-    /// or its entry was written after the listing, and it's eligible too. A session
-    /// that the collection listed before the member listing can't belong to a
+    /// the collection stopped before reading every listed member. A namespace
+    /// that isn't in the map has no member entry, because the listing didn't
+    /// include it or the collection deleted its entry. A session that the
+    /// collection listed before the member listing can't belong to a
     /// namespace whose entry was written after, because a namespace has its
     /// entry before it's active. A session that the collection didn't list as
     /// completed before the member listing can't rely on this status to skip
     /// the completed-content grace.
-    pub(super) fn find_retirement_status(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Option<RetirementStatus> {
-        match self.members.get(namespace_id) {
-            Some(MemberState::Read { status }) => Some(*status),
-            Some(MemberState::NoRoots) => Some(RetirementStatus::Eligible),
-            None => match self.member_read.outcome {
-                MemberReadOutcome::Complete => Some(RetirementStatus::Eligible),
-                MemberReadOutcome::BudgetExceeded | MemberReadOutcome::UnreadableMember => None,
+    pub(super) fn find_session_namespace(&self, namespace_id: &NamespaceId) -> SessionNamespace {
+        let Some(status) = self.members.get(namespace_id) else {
+            return match self.member_read.outcome {
+                MemberReadOutcome::Complete => SessionNamespace::Retired,
+                MemberReadOutcome::BudgetExceeded | MemberReadOutcome::UnreadableMember => {
+                    SessionNamespace::KeepsSessions {
+                        reclaimable_at_ms: None,
+                    }
+                }
+            };
+        };
+        match *status {
+            RetirementStatus::Initializing { .. } | RetirementStatus::Active => {
+                SessionNamespace::Live
+            }
+            RetirementStatus::BeforeDeadline { retires_at_ms } => SessionNamespace::KeepsSessions {
+                reclaimable_at_ms: Some(retires_at_ms),
             },
+            RetirementStatus::PastDeadline => SessionNamespace::Retired,
         }
     }
 }
@@ -305,11 +366,12 @@ fn lock<'guard, 'roots>(
 }
 
 /// Reads the roots of `member`, a namespace that the pool's member list lists,
-/// into `roots`, and returns the member's state, or `None` for a namespace
-/// that isn't a member.
+/// into `roots`, and returns the member's retirement status, or `None` for a
+/// namespace that isn't a member.
 ///
 /// An initializing namespace has no roots, and the collection reads nothing of
-/// it beyond its newest manifest: LoonFS refuses commits to it, and a fork's
+/// it beyond its newest manifest: LoonFS refuses commits to it, so no commit
+/// that refers to the pool's content can be published in it, and a fork's
 /// manifest lists the source's segments, which the source's snapshot keeps. A
 /// retired namespace, an ID without a manifest, and a namespace whose manifest
 /// records another pool aren't members. The collection deletes their entries
@@ -320,26 +382,23 @@ async fn load_member_roots<S: ObjectStore>(
     pool_id: &PoolId,
     now_ms: u64,
     roots: &Mutex<SharedRoots<'_>>,
-) -> Result<Option<MemberState>> {
+) -> Result<Option<RetirementStatus>> {
     let observed = Observation::now(Arc::clone(&member.timer));
     let reason = match member.find_newest_manifest().await? {
         NewestManifest::Manifest(current) if current.manifest.payload().pool_id == *pool_id => {
-            if let NamespaceStatus::Initializing {} = current.manifest.payload().status {
-                return Ok(Some(MemberState::NoRoots));
-            }
-            let status = read_member_roots(member, current, observed, now_ms, roots).await?;
-            return Ok(Some(MemberState::Read { status }));
+            let found = NamespaceRoots::new(member, current.manifest.payload(), now_ms).status;
+            let status = if matches!(found, RetirementStatus::Initializing { .. }) {
+                found
+            } else {
+                read_member_roots(member, current, observed, now_ms, roots).await?
+            };
+            return Ok(Some(status));
         }
         NewestManifest::Manifest(_) => "other_pool",
         NewestManifest::Retired => "retired",
         NewestManifest::Absent => "absent",
     };
-    let key = pool_member(pool_id, &member.namespace_id);
-    member
-        .store
-        .delete(&key)
-        .await
-        .map_err(|error| CoreError::store(&key, &error))?;
+    member.delete_member_entry(pool_id).await?;
     tracing::info!(pool_id = %pool_id, namespace_id = %member.namespace_id, reason,
         "deleted the member entry of a namespace that isn't a member");
     Ok(None)
@@ -350,17 +409,15 @@ async fn load_member_roots<S: ObjectStore>(
 /// layout segments of the manifests that the member's snapshots keep, and
 /// returns the member's retirement status.
 ///
-/// A deleted member stays a member until its boundary is retired, so its
-/// status is retained, with its retirement deadline while the deadline is
-/// in the future. The tombstone's own view stops being a root at the
-/// deadline, and the manifests that the member's snapshots keep stay roots
-/// until the snapshots are deleted.
+/// A deleted member stays a member until its boundary is retired. The
+/// tombstone's own view stops being a root at the retirement deadline, and
+/// the manifests that the member's snapshots keep stay roots until the
+/// snapshots are deleted.
 ///
-/// A snapshot whose manifest is missing makes the member's roots unreadable,
-/// unless the snapshot protects nothing (see [`protects_nothing`]): its
-/// record is gone, it's a user snapshot, or it's a deleted member's own fork
-/// point snapshot. Pool collection doesn't delete a member's snapshots,
-/// because the member's own collection deletes them.
+/// A snapshot whose manifest is missing protects nothing, or makes the
+/// member's roots unreadable (see [`NamespaceRoots::snapshots`]). Pool
+/// collection doesn't delete a member's snapshots, because the member's own
+/// collection deletes them.
 async fn read_member_roots<S: ObjectStore>(
     member: &NamespaceStore<S>,
     current: PublicationBasis,
@@ -371,9 +428,9 @@ async fn read_member_roots<S: ObjectStore>(
     let anchor = member
         .load_read_anchor_from_manifest(current.manifest, current.boundary, observed, None)
         .await?;
-    let head = anchor.manifest.payload();
+    let member_roots = NamespaceRoots::new(member, anchor.manifest.payload(), now_ms);
     // A tombstone's runs cover its whole WAL, so it has no tail.
-    if head.status.is_active() {
+    if member_roots.status == RetirementStatus::Active {
         let tail = project_anchor_tail(&member.store, &member.segment_cache, &anchor)?;
         let mut roots = lock(roots);
         for revision in tail.revisions() {
@@ -387,66 +444,21 @@ async fn read_member_roots<S: ObjectStore>(
             }
         }
     }
-    let mut snapshots = member.list_snapshot_manifests(head.manifest_no);
+    let mut snapshots = member_roots.snapshots();
     while let Some(listed) = snapshots.try_next().await? {
-        let ListedSnapshotKey::Snapshot(snapshot, ()) = listed else {
-            continue;
-        };
-        match &snapshot.manifest {
-            SnapshotManifest::Loaded(manifest) => protect_layout_segments(manifest, roots)?,
-            SnapshotManifest::Rooted => {}
-            SnapshotManifest::Missing(manifest_no) => {
-                // The listing reads no record, so the collection reads this
-                // one record to find the snapshot's owner.
-                let record = member.load_listed_snapshot_record(&snapshot.key).await?;
-                if !protects_nothing(record.as_ref(), &member.namespace_id, head) {
-                    return Err(missing_root_manifest(
-                        &member.namespace_id,
-                        *manifest_no,
-                        &snapshot.key,
-                    ));
-                }
-            }
+        if let ListedSnapshotKey::Snapshot(ListedSnapshot {
+            manifest: SnapshotManifest::Loaded(manifest),
+            ..
+        }) = &listed
+        {
+            protect_layout_segments(manifest, roots)?;
         }
     }
     drop(snapshots);
-    let status = if head.status.is_deleted() {
-        RetirementStatus::Retained {
-            retires_at_ms: Some(retirement_deadline_ms(head))
-                .filter(|deadline_ms| now_ms < *deadline_ms),
-        }
-    } else {
-        RetirementStatus::Active
-    };
-    if status.current_view_is_root() {
+    if member_roots.status.current_view_is_root() {
         protect_layout_segments(&anchor.manifest, roots)?;
     }
-    Ok(status)
-}
-
-/// Returns whether a snapshot whose manifest is missing protects nothing.
-/// `record` is the snapshot's record (`None` when the record is gone),
-/// `namespace_id` is the member that lists the snapshot, and `head` is the
-/// member's current manifest.
-fn protects_nothing(
-    record: Option<&SnapshotPayload>,
-    namespace_id: &NamespaceId,
-    head: &NamespaceManifestPayload,
-) -> bool {
-    match record.map(|record| &record.owner) {
-        None => true,
-        // A verified user snapshot protects its manifest from the moment it's
-        // acknowledged, so a user snapshot whose manifest is missing was never
-        // verified (format spec, "Snapshot cleanup").
-        Some(SnapshotOwner::User { .. }) => true,
-        // A call that finishes a fork can write the fork point snapshot on a
-        // manifest that a concurrent delete and collection removed. Nothing
-        // reads a deleted namespace's fork point snapshot, and its tombstone
-        // lists the same runs (format spec, "Snapshot cleanup").
-        Some(SnapshotOwner::Fork {
-            target_namespace_id,
-        }) => target_namespace_id == namespace_id && head.status.is_deleted(),
-    }
+    Ok(member_roots.status)
 }
 
 /// Keeps the layout segments that `manifest` lists, whose extent filters
