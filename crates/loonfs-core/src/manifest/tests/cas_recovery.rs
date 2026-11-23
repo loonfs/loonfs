@@ -459,8 +459,11 @@ async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
         .await
         .expect("bootstrap");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let basis = namespace.load_current_basis().await.expect("current");
-    let mut payload = basis.manifest.payload().clone();
+    let basis = namespace
+        .load_current_basis(crate::test_support::observed_now())
+        .await
+        .expect("current");
+    let mut payload = basis.manifest().payload().clone();
     payload.manifest_no = ManifestNo(3);
     store.fail_next(1);
     let outcome = namespace
@@ -755,7 +758,7 @@ async fn an_ambiguous_compactor_claim_confirms_its_own_claim() {
     .await
     .expect("claim")
     .response
-    .manifest
+    .manifest()
     .compactor_epoch();
     assert_eq!(epoch, loonfs_types::CompactorEpoch(1));
     let current = crate::test_support::namespace_store(&store, &namespace_id)
@@ -781,8 +784,11 @@ async fn two_puts_of_one_payload_store_different_bytes() {
         .await
         .expect("create");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let basis = namespace.load_current_basis().await.expect("current");
-    let mut payload = basis.manifest.payload().clone();
+    let basis = namespace
+        .load_current_basis(crate::test_support::observed_now())
+        .await
+        .expect("current");
+    let mut payload = basis.manifest().payload().clone();
     payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
     let mut published = Vec::new();
     for _ in 0..2 {
@@ -797,7 +803,7 @@ async fn two_puts_of_one_payload_store_different_bytes() {
         let ManifestPublicationOutcome::Published(outcome) = outcome else {
             panic!("the put is published, got {outcome:?}");
         };
-        published.push(outcome.manifest);
+        published.push(outcome.into_manifest());
         // The number is free again for the second put.
         store
             .delete(&metadata_manifest_object(
@@ -850,7 +856,7 @@ async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
         .expect("publish a copy");
     assert!(update.published);
     let successor = namespace.load_current_manifest().await.expect("current");
-    assert_eq!(successor.manifest(), update.current.manifest.manifest());
+    assert_eq!(successor.manifest(), update.current.manifest().manifest());
     assert_eq!(
         successor.payload().manifest_no,
         predecessor.payload().manifest_no.successor().expect("next")

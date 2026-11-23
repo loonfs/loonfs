@@ -257,10 +257,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         if self.check_anchor_manifest(anchor).await? {
             return Ok(true);
         }
-        let newest = self.load_current_basis().await?;
+        let newest = self.load_current_manifest().await?;
         Ok(wal_no_is_unfolded(
             floored_head.wal_no,
-            newest.manifest.folded_wal_no(),
+            newest.folded_wal_no(),
         ))
     }
 }

@@ -311,13 +311,10 @@ async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tomb
             .find_newest_manifest()
             .await
             .expect("newest manifest");
-        let crate::namespace::control::NewestManifest::Manifest(current) = current else {
+        let crate::namespace::control::NewestManifest::Manifest(current, _) = current else {
             panic!("the tombstone is the newest manifest");
         };
-        assert_eq!(
-            current.manifest.payload().manifest_no,
-            loonfs_types::ManifestNo(5)
-        );
-        assert!(current.manifest.payload().status.is_deleted());
+        assert_eq!(current.payload().manifest_no, loonfs_types::ManifestNo(5));
+        assert!(current.payload().status.is_deleted());
     }
 }

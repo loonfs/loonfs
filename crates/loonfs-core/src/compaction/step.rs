@@ -22,7 +22,7 @@ use crate::manifest::load::metadata_basis_from_manifest;
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::published::{PublicationReport, PublishedManifest};
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
-use crate::namespace::PublicationBasis;
+use crate::namespace::held::Held;
 use crate::phase::Phase;
 use crate::segment::runs::{runs_newest_first, MetadataFamilyGroup};
 use loonfs_objectstore::ObjectStore;
@@ -105,16 +105,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     )]
     pub async fn compact_metadata_unit(
         &self,
-        basis: Option<PublicationBasis>,
+        basis: Option<Held<LoadedManifest>>,
         compactor_epoch: CompactorEpoch,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<CompactionUnitOutcome> {
         let compaction = self.namespace.start_clock();
         let basis = match basis {
             Some(basis) => basis,
-            None => self.namespace.load_current_basis().await?,
+            None => {
+                self.namespace
+                    .load_current_basis(compaction.origin())
+                    .await?
+            }
         };
-        let current = &basis.manifest;
+        let current = basis.manifest();
         let payload = current.payload();
         if payload.compactor_epoch != compactor_epoch {
             return Ok(CompactionUnitOutcome::Fenced);
@@ -291,8 +295,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// manifest that won (format spec, "Publishing a manifest").
     pub async fn claim_compactor(
         &self,
-        basis: Option<PublicationBasis>,
-    ) -> Result<PublicationReport<PublicationBasis>> {
+        basis: Option<Held<LoadedManifest>>,
+    ) -> Result<PublicationReport<Held<LoadedManifest>>> {
         let clock = self.namespace.start_clock();
         let update = self
             .namespace

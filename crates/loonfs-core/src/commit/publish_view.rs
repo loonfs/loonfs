@@ -243,7 +243,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 let loaded_basis = metadata_basis_from_manifest(
                     &self.store,
                     Some(&self.segment_cache),
-                    &anchor.manifest,
+                    anchor.current_manifest(),
                 );
                 let position = load_writer_position(&anchor, anchor.basis(), &loaded_basis)?;
                 (position, loaded_basis.segments)
@@ -275,8 +275,8 @@ fn load_writer_position<S: ObjectStore + ?Sized>(
             basis,
         },
         tail,
-        basis_checked: anchor.checked.clone(),
-        boundary: anchor.boundary.clone(),
+        basis_checked: anchor.held.checked().clone(),
+        boundary: anchor.held.boundary().clone(),
     })
 }
 

@@ -1,7 +1,7 @@
 //! Snapshot publication races and verification request counts.
 
 use super::*;
-use crate::namespace::basis::PublicationBasis;
+use crate::namespace::held::Held;
 use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::MetadataMapStore;
@@ -99,13 +99,25 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
         .expect("write");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = context.clock();
-    let basis = namespace.load_current_basis().await.expect("discovery");
+    let basis = namespace
+        .load_current_basis(crate::test_support::observed_now())
+        .await
+        .expect("discovery");
     let (created, verified) = namespace
-        .create_verified_snapshot_record(None, None, basis.clone(), &clock)
+        .create_verified_snapshot_record(
+            None,
+            None,
+            basis.manifest(),
+            basis.boundary().clone(),
+            &clock,
+        )
         .await
         .expect("snapshot of the current manifest");
-    assert_eq!(verified.manifest.manifest(), basis.manifest.manifest());
-    assert_eq!(created.record.head_seq, basis.manifest.manifest().head_seq);
+    assert_eq!(verified.manifest().manifest(), basis.manifest().manifest());
+    assert_eq!(
+        created.record.head_seq,
+        basis.manifest().manifest().head_seq
+    );
     let head = namespace.load_read_state().await.expect("head");
     assert!(
         head.seq > created.record.head_seq,
@@ -113,17 +125,23 @@ async fn a_snapshot_without_a_fold_is_verified_on_a_current_manifest_and_replace
     );
     assert_eq!(
         namespace
-            .load_current_basis()
+            .load_current_basis(crate::test_support::observed_now())
             .await
             .expect("current manifest")
-            .manifest
+            .manifest()
             .manifest(),
-        basis.manifest.manifest()
+        basis.manifest().manifest()
     );
 
     store.block_next();
     let (outcome, ()) = tokio::join!(
-        namespace.create_verified_snapshot_record(None, None, basis, &clock),
+        namespace.create_verified_snapshot_record(
+            None,
+            None,
+            basis.manifest(),
+            basis.boundary().clone(),
+            &clock,
+        ),
         async {
             store.wait_until_blocked().await;
             crate::test_support::namespace_store(&store, &namespace_id)
@@ -246,10 +264,11 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
                 expires_at_ms: None,
                 deleted_at_ms: None,
             },
-            PublicationBasis {
-                manifest: current,
-                boundary: Default::default(),
-            },
+            Held::new(
+                current,
+                crate::test_support::observed_now(),
+                Default::default(),
+            ),
             &clock
         ),
         async {
@@ -320,22 +339,26 @@ async fn snapshot_verification_sends_a_successor_head_and_a_boundary_read_and_re
     };
     let basis = write_and_fold("/one").await;
     assert!(
-        basis.boundary.object().is_some(),
+        basis.boundary().object().is_some(),
         "the fold read the boundary object"
     );
-    let manifest_no = basis.manifest.payload().manifest_no;
+    let manifest_no = basis.manifest().payload().manifest_no;
     let successor = manifest_no.successor().expect("next number");
     let successor_key = metadata_manifest_object(&namespace_id, &successor);
 
     store.reset();
     let verification = namespace
-        .verify_snapshot_basis(basis.clone())
+        .verify_snapshot_basis(
+            basis.manifest(),
+            basis.boundary().clone(),
+            crate::test_support::observed_now(),
+        )
         .await
         .expect("verification");
     let record::SnapshotBasisVerification::Verified(verified) = verification else {
         panic!("the fold's manifest is current: {verification:?}");
     };
-    assert_eq!(verified.manifest.payload().manifest_no, manifest_no);
+    assert_eq!(verified.manifest().payload().manifest_no, manifest_no);
     let requests = store.take();
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert_eq!(
@@ -350,7 +373,11 @@ async fn snapshot_verification_sends_a_successor_head_and_a_boundary_read_and_re
     write_and_fold("/two").await;
     store.reset();
     let verification = namespace
-        .verify_snapshot_basis(basis.clone())
+        .verify_snapshot_basis(
+            basis.manifest(),
+            basis.boundary().clone(),
+            crate::test_support::observed_now(),
+        )
         .await
         .expect("verification");
     assert_matches!(verification, record::SnapshotBasisVerification::Invalid);
@@ -373,7 +400,11 @@ async fn snapshot_verification_sends_a_successor_head_and_a_boundary_read_and_re
         .expect("delete the successor");
     store.reset();
     let verification = namespace
-        .verify_snapshot_basis(basis)
+        .verify_snapshot_basis(
+            basis.manifest(),
+            basis.boundary().clone(),
+            crate::test_support::observed_now(),
+        )
         .await
         .expect("verification");
     assert_matches!(verification, record::SnapshotBasisVerification::Invalid);

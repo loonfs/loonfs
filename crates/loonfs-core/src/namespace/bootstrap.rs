@@ -4,7 +4,8 @@ use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::ExistingNamespace;
 use crate::metadata::{InodeRecord, MetadataState};
-use crate::namespace::basis::PublicationBasis;
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -69,7 +70,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
         };
         let manifest_1 = match existing {
-            ExistingNamespace::Initializing(manifest_1) => manifest_1,
+            ExistingNamespace::Initializing(manifest_1, boundary) => {
+                Held::new(manifest_1, clock.origin(), boundary)
+            }
             ExistingNamespace::Active if options.allow_existing => {
                 return self.namespace.load_metadata().await
             }
@@ -79,7 +82,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 })
             }
         };
-        ensure_create_request_matches(manifest_1.manifest.payload(), options)?;
+        ensure_create_request_matches(manifest_1.manifest().payload(), options)?;
         self.finish_create(manifest_1, &clock).await
     }
 
@@ -87,17 +90,19 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// publishes manifest 2 (steps 3 and 4 of [`Self::bootstrap_namespace`]).
     async fn finish_create(
         &self,
-        manifest_1: PublicationBasis,
+        manifest_1: Held<LoadedManifest>,
         clock: &OperationClock,
     ) -> Result<NamespaceMetadata> {
         self.namespace
-            .write_member_entry(&manifest_1.manifest.payload().pool_id, clock)
+            .write_member_entry(&manifest_1.manifest().payload().pool_id, clock)
             .await?;
         let active = self
             .namespace
             .publish_active_manifest(manifest_1, clock)
             .await?;
-        Ok(super::status::created_namespace(active.manifest.payload()))
+        Ok(super::status::created_namespace(
+            active.manifest().payload(),
+        ))
     }
 }
 

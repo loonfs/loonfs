@@ -3,10 +3,11 @@
 use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
 use crate::limits::{MANIFEST_PROBE_WINDOW, MAX_CONTENTION_ATTEMPTS};
-use crate::namespace::basis::PublicationBasis;
 use crate::namespace::boundary::KeptBoundary;
+use crate::namespace::held::Held;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
+use crate::time::Observation;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_objectstore::layout::manifest_no_of;
@@ -64,7 +65,7 @@ pub(crate) enum NewestManifest {
     /// The namespace's boundary is retired.
     Retired,
     /// The namespace's newest manifest, with the boundary of the last read.
-    Manifest(PublicationBasis),
+    Manifest(LoadedManifest, KeptBoundary),
 }
 
 pub(crate) fn ensure_head_identity(
@@ -97,19 +98,31 @@ pub fn ensure_namespace_live(
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads the namespace's current manifest from the manifest boundary.
     pub async fn load_current_manifest(&self) -> crate::error::Result<LoadedManifest> {
-        Ok(self.load_current_basis().await?.manifest)
-    }
-
-    /// Loads the namespace's current manifest from the manifest boundary,
-    /// with the boundary of the last read.
-    ///
-    /// The call returns `namespace_not_found` when no namespace has the ID,
-    /// and `namespace_deleted` when the namespace is retired.
-    pub async fn load_current_basis(&self) -> crate::error::Result<PublicationBasis> {
         match self.find_newest_manifest().await? {
             NewestManifest::Absent => Err(self.namespace_not_found()),
             NewestManifest::Retired => Err(self.namespace_deleted()),
-            NewestManifest::Manifest(current) => Ok(current),
+            NewestManifest::Manifest(manifest, _) => Ok(manifest),
+        }
+    }
+
+    /// Loads the namespace's current manifest from the manifest boundary,
+    /// with the boundary of the last read, as a manifest checked at
+    /// `observed`, an observation that the caller read before the call.
+    ///
+    /// The find lists the manifests above the boundary after `observed`, so
+    /// every manifest published before `observed` is at or below the one it
+    /// returns. The call returns `namespace_not_found` when no namespace has
+    /// the ID, and `namespace_deleted` when the namespace is retired.
+    pub async fn load_current_basis(
+        &self,
+        observed: Observation,
+    ) -> crate::error::Result<Held<LoadedManifest>> {
+        match self.find_newest_manifest().await? {
+            NewestManifest::Absent => Err(self.namespace_not_found()),
+            NewestManifest::Retired => Err(self.namespace_deleted()),
+            NewestManifest::Manifest(manifest, boundary) => {
+                Ok(Held::new(manifest, observed, boundary))
+            }
         }
     }
 
@@ -185,10 +198,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             };
             let reloaded = self.reload_boundary(kept).await?;
             if !reloaded.covers(manifest_no) {
-                return Ok(NewestManifest::Manifest(PublicationBasis {
-                    manifest,
-                    boundary: reloaded,
-                }));
+                return Ok(NewestManifest::Manifest(manifest, reloaded));
             }
         }
         Err(CoreError::contention_exhausted(

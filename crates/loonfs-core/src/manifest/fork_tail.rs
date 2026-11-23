@@ -6,9 +6,10 @@ use super::fold::ManifestProjection;
 use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
 use super::publish::ManifestChange;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::basis::{MetadataBasis, PublicationBasis};
+use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::fork::ForkDeadline;
+use crate::namespace::held::Held;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
@@ -108,12 +109,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// either.
     pub(crate) async fn publish_fork_point_manifest(
         &self,
-        manifest_1: PublicationBasis,
+        manifest_1: Held<LoadedManifest>,
         tail: &ForkPointTail,
         deadline: &ForkDeadline,
         clock: &OperationClock,
-    ) -> Result<PublicationBasis> {
-        let payload = manifest_1.manifest.payload();
+    ) -> Result<Held<LoadedManifest>> {
+        let payload = manifest_1.manifest().payload();
         assert!(
             tail.seq > payload.head_seq,
             "a fork publishes manifest 2 only for a tail with commits"
@@ -123,12 +124,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 seq: tail.seq,
                 ..NamespaceReadState::from(payload)
             },
-            basis: MetadataBasis::new(manifest_1.manifest.manifest()),
-            boundary: manifest_1.boundary.clone(),
+            held: manifest_1.clone(),
             manifest_segments: metadata_basis_from_manifest(
                 &self.store,
                 Some(&self.segment_cache),
-                &manifest_1.manifest,
+                manifest_1.manifest(),
             )
             .segments,
             tail_state: Arc::clone(&tail.tail),

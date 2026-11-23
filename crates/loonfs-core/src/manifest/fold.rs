@@ -9,9 +9,10 @@ use crate::error::CoreError;
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataView;
-use crate::namespace::basis::{MetadataBasis, PublicationBasis};
+use crate::namespace::basis::MetadataBasis;
 use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::held::Held;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::runs::flatten_manifest_segments;
@@ -164,19 +165,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
         let projection = self.load_head_projection(held, clock).await?;
-        let publication_basis = projection.publication_basis();
-        if publication_basis.manifest.folded_wal_no() == projection.head.wal_no {
+        let basis = projection.held.clone();
+        if basis.manifest().folded_wal_no() == projection.head.wal_no {
             // No store observation confirms the basis here, so the manifest has
             // no start observation.
             return Ok(FoldedWalTail::new(
                 &self.namespace_id,
                 projection.head.seq,
-                PublishedManifest::new(
-                    &publication_basis.manifest.envelope,
-                    None,
-                    projection.boundary.clone(),
-                ),
-                publication_basis,
+                PublishedManifest::new(&basis.manifest().envelope, None, basis.boundary().clone()),
+                basis,
                 FoldWalOutcome::AlreadyCurrent,
             ));
         }
@@ -189,7 +186,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             layouts: None,
         });
         let folded = self
-            .update_manifest(Some(publication_basis), clock, |current: LoadedManifest| {
+            .update_manifest(Some(basis), clock, |current: LoadedManifest| {
                 let fold = &fold;
                 async move { fold.lock().await.attempt(current).await }
             })
@@ -231,10 +228,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
         match held {
             Some((held, manifest_segments)) => Ok(ManifestProjection {
+                held: Held::new(
+                    manifest_segments.loaded_manifest(),
+                    held.basis_checked,
+                    held.boundary,
+                ),
                 manifest_segments,
                 head: held.read_basis.head,
-                basis: held.read_basis.basis,
-                boundary: held.boundary,
                 tail_state: held.tail,
             }),
             None => self.load_fold_projection(clock.observe()).await,
@@ -249,12 +249,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let loaded_basis = super::load::metadata_basis_from_manifest(
             &self.store,
             Some(&self.segment_cache),
-            &anchor.manifest,
+            anchor.held.manifest(),
         );
         let tail_state = loaded_basis.project_tail(&anchor)?;
         Ok(ManifestProjection {
-            basis: anchor.basis(),
-            boundary: anchor.boundary,
+            held: anchor.held,
             head: anchor.read_state,
             manifest_segments: loaded_basis.segments,
             tail_state,
@@ -363,7 +362,7 @@ pub struct FoldedWalTail {
     pub manifest: PublishedManifest,
     /// The same manifest as loaded, with the manifest boundary that the call
     /// read. A snapshot of the manifest is verified from this basis.
-    pub basis: PublicationBasis,
+    pub basis: Held<LoadedManifest>,
 }
 
 impl FoldedWalTail {
@@ -371,7 +370,7 @@ impl FoldedWalTail {
         namespace_id: &NamespaceId,
         target_head_seq: CommitSeq,
         manifest: PublishedManifest,
-        basis: PublicationBasis,
+        basis: Held<LoadedManifest>,
         outcome: FoldWalOutcome,
     ) -> Self {
         Self {
@@ -427,13 +426,20 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
         //   winner.
         // - Content: the first attempt's extents and layouts still describe
         //   this tail.
-        if payload.manifest_no != self.projection.basis.manifest_no() {
+        if payload.manifest_no != self.projection.basis().manifest_no() {
             if same_head(
-                &self.projection.basis,
+                &self.projection.basis(),
                 &self.projection.head,
                 &PublishedManifest::new(&current.envelope, None, KeptBoundary::default()),
             ) {
-                self.projection.basis = MetadataBasis::new(current.manifest());
+                // A check that found no manifest after the projection's
+                // manifest also found none after `current`, a later manifest,
+                // so `current` keeps that check.
+                self.projection.held = Held::new(
+                    current.clone(),
+                    self.projection.held.checked().clone(),
+                    self.projection.held.boundary().clone(),
+                );
                 self.projection.manifest_segments = metadata_basis_from_manifest(
                     &self.namespace.store,
                     Some(&self.namespace.segment_cache),
@@ -447,7 +453,7 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
                     .await?;
                 self.layouts = None;
                 // The tail was read above a manifest newer than `current`.
-                if self.projection.basis.manifest_no() != payload.manifest_no {
+                if self.projection.basis().manifest_no() != payload.manifest_no {
                     return Ok(ManifestChange::Again);
                 }
                 if covers_tail(payload, &self.projection.head) {
@@ -481,9 +487,11 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
 /// the tail reached.
 pub(crate) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(crate) head: NamespaceReadState,
-    pub(crate) basis: MetadataBasis,
-    /// The manifest boundary as the check that confirmed `basis` read it.
-    pub(crate) boundary: KeptBoundary,
+    /// The manifest that the tail was read above, with the check that
+    /// confirmed it. A publication builds on it.
+    pub(crate) held: Held<LoadedManifest>,
+    /// The segments of the same manifest, which the projection's reads go
+    /// through.
     pub(crate) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.
@@ -495,13 +503,9 @@ impl<S: ObjectStore + ?Sized> ManifestProjection<'_, S> {
         MetadataView::from_loaded_head(&self.head, &self.manifest_segments, &self.tail_state)
     }
 
-    /// Returns the manifest that the tail was read above, with the manifest
-    /// boundary that the check that confirmed it read.
-    pub(crate) fn publication_basis(&self) -> PublicationBasis {
-        PublicationBasis {
-            manifest: self.manifest_segments.loaded_manifest(),
-            boundary: self.boundary.clone(),
-        }
+    /// Returns the manifest that the tail was read above, as a read's basis.
+    pub(crate) fn basis(&self) -> MetadataBasis {
+        MetadataBasis::new(self.held.manifest().manifest())
     }
 }
 

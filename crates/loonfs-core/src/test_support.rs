@@ -299,8 +299,9 @@ pub mod kept_inodes;
 pub mod ops;
 
 use crate::engine::NamespaceWriterEngine;
-use crate::namespace::basis::PublicationBasis;
 use crate::namespace::catalog::ActiveNamespaceCatalogEntry;
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use loonfs_objectstore::ObjectStore;
@@ -447,7 +448,7 @@ pub(crate) async fn half_done_fork<S: ObjectStore + Clone>(
         .publish_first_manifest(manifest_1, &clock)
         .await
         .expect("publish manifest 1");
-    (temporary, published.manifest.payload().clone())
+    (temporary, published.manifest().payload().clone())
 }
 
 /// Writes the fork snapshot that `manifest_1`, a fork's manifest 1, records,
@@ -620,7 +621,7 @@ pub async fn fold_before_fork<S: ObjectStore>(
 /// of the current head keeps.
 pub async fn folded_manifest<S: ObjectStore>(
     namespace: &NamespaceStore<S>,
-) -> crate::Result<PublicationBasis> {
+) -> crate::Result<Held<LoadedManifest>> {
     let folded = namespace
         .fold_wal_tail(None, &namespace.start_clock())
         .await?;

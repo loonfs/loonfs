@@ -4,8 +4,8 @@ use crate::commit::publish_view::WriterPosition;
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::{ManifestChange, ManifestUpdate};
 use crate::manifest::PublicationReport;
-use crate::namespace::basis::PublicationBasis;
 use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
 use crate::namespace::writer_epoch::AcquiredWriter;
@@ -92,7 +92,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// namespace becomes deleted or active, never both.
     pub(crate) async fn tombstone_initializing_namespace(
         &self,
-        current: PublicationBasis,
+        current: Held<LoadedManifest>,
         clock: &OperationClock,
     ) -> Result<ManifestUpdate<TombstoneOutcome>> {
         self.update_manifest(Some(current), clock, |current: LoadedManifest| {

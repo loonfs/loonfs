@@ -5,8 +5,9 @@ use super::record::{write_snapshot_record, SnapshotBasisVerification};
 use crate::engine::{Administrator, NamespaceEngine, RuntimeReadContext, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::namespace::basis::PublicationBasis;
 use crate::namespace::boundary::KeptBoundary;
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
@@ -35,7 +36,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         administrator: &Administrator,
         name: Option<String>,
         expires_at_ms: Option<u64>,
-        basis: PublicationBasis,
+        basis: Held<LoadedManifest>,
     ) -> Result<Snapshot> {
         administrator.assert_for(&self.namespace.namespace_id);
         self.create_verified_snapshot(name, expires_at_ms, basis)
@@ -59,13 +60,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         name: Option<String>,
         expires_at_ms: Option<u64>,
-        basis: PublicationBasis,
-    ) -> Result<(CreatedSnapshot, PublicationBasis)> {
+        basis: Held<LoadedManifest>,
+    ) -> Result<(CreatedSnapshot, Held<LoadedManifest>)> {
         self.namespace
             .create_verified_snapshot_record(
                 name,
                 expires_at_ms,
-                basis,
+                basis.manifest(),
+                basis.boundary().clone(),
                 &self.namespace.start_clock(),
             )
             .await
@@ -98,15 +100,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             )
             .await?
             .ok_or_else(manifest_replaced)?;
-        let basis = PublicationBasis {
-            manifest: segments.loaded_manifest(),
-            boundary: KeptBoundary::default(),
-        };
         self.namespace
             .create_verified_snapshot_record(
                 None,
                 expires_at_ms,
-                basis,
+                &segments.loaded_manifest(),
+                KeptBoundary::default(),
                 &self.namespace.start_clock(),
             )
             .await
@@ -135,47 +134,53 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn create_snapshot_record(
         &self,
         owner: SnapshotOwner,
-        basis: PublicationBasis,
+        basis: Held<LoadedManifest>,
         clock: &OperationClock,
-    ) -> Result<(SnapshotPayload, PublicationBasis)> {
+    ) -> Result<(SnapshotPayload, Held<LoadedManifest>)> {
         let SnapshotOwner::User {
             name,
             expires_at_ms,
             deleted_at_ms,
         } = owner
         else {
-            let record = self.new_snapshot_record(owner, &basis, clock);
+            let record = self.new_snapshot_record(owner, basis.manifest(), clock);
             write_snapshot_record(&self.store, &record, clock).await?;
             return Ok((record, basis));
         };
         assert_eq!(deleted_at_ms, None, "a created snapshot isn't deleted");
-        self.create_verified_snapshot_record(name, expires_at_ms, basis, clock)
-            .await
-            .map(|(created, basis)| (created.record, basis))
+        self.create_verified_snapshot_record(
+            name,
+            expires_at_ms,
+            basis.manifest(),
+            basis.boundary().clone(),
+            clock,
+        )
+        .await
+        .map(|(created, basis)| (created.record, basis))
     }
 
-    /// Creates a verified user snapshot of `basis`'s manifest, with the label
-    /// `name` and the expiry `expires_at_ms`.
+    /// Creates a verified user snapshot of `manifest`, with the label `name`
+    /// and the expiry `expires_at_ms`.
     ///
-    /// `basis` contains a manifest and the manifest boundary that the caller
-    /// read: the manifest that the caller's fold published or found current,
-    /// or the current manifest that a discovery of the namespace's head
-    /// found, for a snapshot without a fold (format spec, "Creating and
-    /// verifying a snapshot"). The call returns `stale_head` when
-    /// the manifest stopped being current before the snapshot's
-    /// verification, so the caller can read a fresh basis and take a snapshot
-    /// again. Returns the snapshot record with the version that its write
-    /// stored, and the newest manifest with the manifest boundary that the
-    /// verification read. A call that fails after it starts writing the
-    /// record leaves the record deleted at its key (see
-    /// `delete_failed_snapshot`).
+    /// `manifest` is the manifest that the caller's fold published or found
+    /// current, or, for a snapshot without a fold, the manifest of the
+    /// namespace's head. `kept` is the manifest boundary as the caller last
+    /// read it (format spec, "Creating and verifying a snapshot"). The call
+    /// returns `stale_head` when the manifest stopped being current before
+    /// the snapshot's verification, so the caller can read a fresh basis and
+    /// take a snapshot again. Returns the snapshot record with the version
+    /// that its write stored, and the newest manifest with the manifest
+    /// boundary that the verification read, checked at the start of `clock`.
+    /// A call that fails after it starts writing the record leaves the record
+    /// deleted at its key (see `delete_failed_snapshot`).
     pub(crate) async fn create_verified_snapshot_record(
         &self,
         name: Option<String>,
         expires_at_ms: Option<u64>,
-        basis: PublicationBasis,
+        manifest: &LoadedManifest,
+        kept: KeptBoundary,
         clock: &OperationClock,
-    ) -> Result<(CreatedSnapshot, PublicationBasis)> {
+    ) -> Result<(CreatedSnapshot, Held<LoadedManifest>)> {
         validate_snapshot_request(name.as_deref(), expires_at_ms)?;
         let record = self.new_snapshot_record(
             SnapshotOwner::User {
@@ -183,12 +188,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 expires_at_ms,
                 deleted_at_ms: None,
             },
-            &basis,
+            manifest,
             clock,
         );
         let verification = async {
             let written = write_snapshot_record(&self.store, &record, clock).await?;
-            Ok::<_, CoreError>((written.etag, self.verify_snapshot_basis(basis).await?))
+            let verified = self
+                .verify_snapshot_basis(manifest, kept, clock.origin())
+                .await?;
+            Ok::<_, CoreError>((written.etag, verified))
         }
         .await;
         let error = match verification {
@@ -208,15 +216,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Err(error)
     }
 
-    /// Returns a record for `owner` of `basis`'s manifest, under a freshly
-    /// generated [`SnapshotId`].
+    /// Returns a record for `owner` of `manifest`, under a freshly generated
+    /// [`SnapshotId`].
     fn new_snapshot_record(
         &self,
         owner: SnapshotOwner,
-        basis: &PublicationBasis,
+        manifest: &LoadedManifest,
         clock: &OperationClock,
     ) -> SnapshotPayload {
-        let manifest = basis.manifest.manifest();
+        let manifest = manifest.manifest();
         SnapshotPayload {
             snapshot_id: SnapshotId::generate(manifest.manifest_no),
             namespace_id: self.namespace_id.clone(),

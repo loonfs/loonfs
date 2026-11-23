@@ -9,10 +9,11 @@ use super::validate::{validate_manifest, validate_namespace_manifest};
 use crate::commit::publish_view::WriterPosition;
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
-use crate::namespace::basis::{MetadataBasis, PublicationBasis};
+use crate::namespace::basis::MetadataBasis;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -194,22 +195,25 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Returns the manifest of a writer session's position as a basis that a
-    /// publication can build on, with the manifest boundary that the position
-    /// keeps, or `None` when the manifest is at or below the boundary (see
-    /// [`Self::load_held_manifest`]).
+    /// publication can build on, with the position's check time and the
+    /// manifest boundary that the position keeps, or `None` when the manifest
+    /// is at or below the boundary (see [`Self::load_held_manifest`]).
     pub async fn load_position_basis(
         &self,
         position: &WriterPosition,
-    ) -> crate::error::Result<Option<PublicationBasis>> {
+    ) -> crate::error::Result<Option<Held<LoadedManifest>>> {
         let segments = self
             .load_held_manifest(
                 position.read_basis.basis.manifest(),
                 position.boundary.clone(),
             )
             .await?;
-        Ok(segments.map(|segments| PublicationBasis {
-            manifest: segments.loaded_manifest(),
-            boundary: position.boundary.clone(),
+        Ok(segments.map(|segments| {
+            Held::new(
+                segments.loaded_manifest(),
+                position.basis_checked.clone(),
+                position.boundary.clone(),
+            )
         }))
     }
 }

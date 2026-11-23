@@ -13,6 +13,7 @@ pub(crate) mod control;
 pub(crate) mod delete;
 pub(crate) mod fork;
 pub(crate) mod head_cache;
+pub(crate) mod held;
 pub(crate) mod member_entry;
 pub(crate) mod read_anchor;
 pub(crate) mod state;
@@ -20,7 +21,8 @@ pub(crate) mod status;
 pub(crate) mod store;
 pub(crate) mod writer_epoch;
 
-pub use basis::{MetadataBasis, PublicationBasis, ReadBasis, SnapshotReadBasis};
+pub use basis::{MetadataBasis, ReadBasis, SnapshotReadBasis};
+pub use held::Held;
 
 #[cfg(test)]
 mod tests;

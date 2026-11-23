@@ -8,7 +8,7 @@ use crate::engine::{NamespaceEngine, RuntimeReadContext, Writable};
 use crate::error::Result;
 use crate::manifest::load_basis_metadata_segments;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
-use crate::namespace::PublicationBasis;
+use crate::namespace::held::Held;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionEntry, NamespaceManifestPayload};
@@ -22,14 +22,14 @@ use loonfs_types::ExtensionName;
 /// (format spec, "Publishing a manifest").
 #[derive(Debug, Clone)]
 pub struct ExtensionBasis {
-    basis: PublicationBasis,
+    basis: Held<LoadedManifest>,
     clock: OperationClock,
 }
 
 impl ExtensionBasis {
     /// Returns the manifest that the change builds on.
     pub fn manifest(&self) -> &NamespaceManifestPayload {
-        self.basis.manifest.payload()
+        self.basis.manifest().payload()
     }
 
     /// Returns the entry of extension `name` in the manifest, or `None` when
@@ -63,8 +63,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// change, and starts the clock of the change's publication.
     pub async fn load_extension_basis(&self) -> Result<ExtensionBasis> {
         let clock = self.namespace.start_clock();
-        let basis = self.namespace.load_current_basis().await?;
-        let payload = basis.manifest.payload();
+        let basis = self.namespace.load_current_basis(clock.origin()).await?;
+        let payload = basis.manifest().payload();
         ensure_namespace_live(&payload.namespace_id, payload.status)?;
         Ok(ExtensionBasis { basis, clock })
     }

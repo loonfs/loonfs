@@ -5,8 +5,8 @@ use crate::limits::{
     MAX_TAIL_COMMIT_AGE_MS, METADATA_PUBLICATION_BUDGET_MS, OPERATION_SNAPSHOT_TTL_MS,
 };
 use crate::manifest::tests::control_requests;
-use crate::namespace::basis::PublicationBasis;
 use crate::namespace::fork::ForkOutcome;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::test_support::{NamespaceFixture, WriterAt};
 use crate::wal::tests::publish;
@@ -1164,10 +1164,11 @@ async fn an_initializing_namespace_is_not_found_except_by_create_fork_and_delete
             &crate::test_support::administrator(&fixture.engine()),
             None,
             None,
-            PublicationBasis {
-                manifest: namespace.load_current_manifest().await.expect("current"),
-                boundary: Default::default(),
-            },
+            Held::new(
+                namespace.load_current_manifest().await.expect("current"),
+                crate::test_support::observed_now(),
+                Default::default(),
+            ),
         )
         .await;
     assert_matches!(snapshot, Err(CoreError::HeadMoved(_)));
@@ -1459,13 +1460,14 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
     let other_finisher = async {
         store.wait_until_blocked().await;
         let namespace = crate::test_support::namespace_store(store.inner(), &target);
-        let crate::namespace::control::NewestManifest::Manifest(current) = namespace
+        let crate::namespace::control::NewestManifest::Manifest(current, boundary) = namespace
             .find_newest_manifest()
             .await
             .expect("find manifest 1")
         else {
             panic!("manifest 1 is the newest manifest");
         };
+        let current = Held::new(current, crate::test_support::observed_now(), boundary);
         namespace
             .update_manifest(Some(current), &context().clock(), |current| async move {
                 Ok(crate::manifest::publish::ManifestChange::Next(

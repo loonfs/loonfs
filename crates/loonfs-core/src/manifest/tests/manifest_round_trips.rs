@@ -759,7 +759,7 @@ async fn create_snapshot_keeps_a_current_basis_without_building_a_new_manifest()
     else {
         panic!("the manifest is published");
     };
-    let manifest_checksum = published.manifest.envelope.payload_checksum().to_owned();
+    let manifest_checksum = published.manifest().envelope.payload_checksum().to_owned();
 
     let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await

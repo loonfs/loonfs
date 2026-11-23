@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::limits::{GC_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
-use crate::namespace::basis::PublicationBasis;
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use loonfs_objectstore::keys::{self, snapshot_prefix};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::page_limit;
@@ -16,7 +17,7 @@ use std::assert_matches;
 /// `error`, the store error that the creation's put returned.
 pub(super) fn record_of_failed_creation(
     error: &CoreError,
-    basis: &PublicationBasis,
+    basis: &Held<LoadedManifest>,
     owner: SnapshotOwner,
     created_at_ms: u64,
 ) -> SnapshotPayload {
@@ -25,7 +26,7 @@ pub(super) fn record_of_failed_creation(
     };
     let (namespace_id, snapshot_id) =
         record::snapshot_record_key_ids(object_key).expect("a snapshot record key");
-    let manifest = basis.manifest.manifest();
+    let manifest = basis.manifest().manifest();
     SnapshotPayload {
         snapshot_id,
         namespace_id,
@@ -206,10 +207,11 @@ async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grac
     let (creation, ()) = tokio::join!(
         namespace.create_snapshot_record(
             owner,
-            crate::namespace::basis::PublicationBasis {
-                manifest: selected.clone(),
-                boundary: Default::default(),
-            },
+            Held::new(
+                selected.clone(),
+                crate::test_support::observed_now(),
+                Default::default(),
+            ),
             &clock
         ),
         async {
