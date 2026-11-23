@@ -9,7 +9,7 @@ use futures::StreamExt as _;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
 use loonfs_types::{
-    headers, Context, ErrorCode, ErrorResponse, NamespaceId, OperationDeadline, PageRequest,
+    headers, Context, ErrorResponse, NamespaceId, OperationDeadline, PageRequest,
     TransportRetryOutcome,
 };
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
@@ -182,7 +182,6 @@ impl Client {
         let built = self
             .build(request, Body::empty())
             .map_err(|error| FailedAttempt {
-                source: FailureSource::Network,
                 error,
                 retry_after_ms: None,
             })?;
@@ -196,7 +195,6 @@ impl Client {
                 .map_err(|error| failed_attempt(&request.url, error))?
                 .to_bytes();
             return Err(FailedAttempt {
-                source: FailureSource::Response,
                 error: map_status_error(response.status.as_u16(), &bytes),
                 retry_after_ms,
             });
@@ -268,8 +266,7 @@ impl Client {
                 Ok(response) => return Ok(response),
                 Err(failed) => failed,
             };
-            let retryable = retryable_transport_failure(failed.source, &failed.error);
-            if !self.transport_retry_enabled || !retryable {
+            if !self.transport_retry_enabled || !failed.error.retryable_without_operator_action() {
                 return Err(failed.error);
             }
             // The policy waits the whole `Retry-After`, or stops when the deadline can't fit it.
@@ -302,7 +299,6 @@ impl Client {
             .map(Body::from)
             .unwrap_or_else(Body::empty);
         let built = self.build(request, body).map_err(|error| FailedAttempt {
-            source: FailureSource::Network,
             error,
             retry_after_ms: None,
         })?;
@@ -403,7 +399,6 @@ impl WireResponse {
         } else {
             let retry_after_ms = parse_retry_after_ms(&self.headers);
             Err(FailedAttempt {
-                source: FailureSource::Response,
                 error: map_status_error(self.status.as_u16(), &bytes),
                 retry_after_ms,
             })
@@ -436,7 +431,6 @@ impl BufferedResponse {
 
 fn failed_attempt(url: &str, error: TransportError) -> FailedAttempt {
     FailedAttempt {
-        source: FailureSource::Network,
         error: ClientError::Http(render_send_error(
             url,
             &error,
@@ -447,26 +441,12 @@ fn failed_attempt(url: &str, error: TransportError) -> FailedAttempt {
     }
 }
 
-/// One failed attempt, with whether the network layer itself reported it.
+/// One failed attempt.
 pub(crate) struct FailedAttempt {
-    /// Whether a complete response was served. Classified here, before the
-    /// error is flattened, because the retry policy keys on it: a served
-    /// status with a non-envelope body (a load balancer's HTML 502) is not a
-    /// transport failure.
-    pub(crate) source: FailureSource,
     pub(crate) error: ClientError,
     /// The wait that the failed response's `Retry-After` header asks for, in
     /// milliseconds, when the header is in delta seconds.
     pub(crate) retry_after_ms: Option<u64>,
-}
-
-/// Where a failed request attempt's error came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FailureSource {
-    /// No complete response was served.
-    Network,
-    /// The server served a complete response with an error status.
-    Response,
 }
 
 pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
@@ -525,28 +505,6 @@ fn render_send_error(
     } else {
         format!("request to `{url}` failed: {detail}")
     }
-}
-
-/// Returns whether a failed request is eligible for an automatic retry.
-///
-/// Network failures are retryable. Server responses are retryable only when
-/// their error code identifies a temporary condition that requires no
-/// operator action. A response without the error envelope is retryable when
-/// its status says the responder is busy or failing for the moment, which a
-/// storage provider's SlowDown or InternalError and an intermediary's 502
-/// are; the policy of the request already says it is safe to send again.
-pub(crate) fn retryable_transport_failure(source: FailureSource, error: &ClientError) -> bool {
-    source == FailureSource::Network
-        || error
-            .code()
-            .is_some_and(ErrorCode::retryable_without_operator_action)
-        || matches!(
-            error,
-            ClientError::HttpStatus {
-                status: 429 | 500 | 502 | 503 | 504,
-                ..
-            }
-        )
 }
 
 #[allow(

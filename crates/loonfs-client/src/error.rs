@@ -94,6 +94,40 @@ impl ClientError {
         }
     }
 
+    /// Returns whether sending the same request again can succeed without a
+    /// change by the caller or an operator. The client retries an error like
+    /// that when the request is safe to send more than once.
+    ///
+    /// That is the case for a failure to send the request or to read its
+    /// response, for an error code that
+    /// [`ErrorCode::retryable_without_operator_action`] accepts, and for a
+    /// response without the error envelope whose status says that the
+    /// responder stopped waiting for the rest of the request (408) or that
+    /// the responder is busy or failing for the moment (429, 500, 502, 503,
+    /// or 504), such as a storage provider's SlowDown or a load balancer's
+    /// 502. A response with any other status needs a change before the
+    /// request can succeed, such as a 501 or a 505 from a proxy that doesn't
+    /// support the request.
+    pub fn retryable_without_operator_action(&self) -> bool {
+        match self {
+            ClientError::Http(_) => true,
+            ClientError::Api { .. } => self
+                .code()
+                .is_some_and(ErrorCode::retryable_without_operator_action),
+            ClientError::HttpStatus { status, .. } => {
+                matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+            }
+            ClientError::ConfigIo(_)
+            | ClientError::ConfigDecode(_)
+            | ClientError::ConfigField(_)
+            | ClientError::InvalidNamespacePath(_)
+            | ClientError::UploadTooLarge { .. }
+            | ClientError::Io(_)
+            | ClientError::Json(_)
+            | ClientError::Protocol(_) => false,
+        }
+    }
+
     /// Returns the cause in the details of [`ClientError::Api`], for a code
     /// that two causes share because the remedy is the same for both. Branch
     /// on [`Self::code`], and use the cause to report or count what happened.

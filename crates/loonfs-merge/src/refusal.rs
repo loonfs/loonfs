@@ -15,29 +15,16 @@ pub(crate) enum Refusal {
     Fail,
 }
 
-/// Returns whether sending the request again can get past `error`: the
-/// request's outcome isn't known (a transport failure or an outcome-unknown
-/// error), or the server refused the request with a transient error.
-///
-/// A transient error is `commit_queue_full`, `server_busy`, or
-/// `shutting_down` (see [`ErrorCode::retryable_without_operator_action`]),
-/// which the client has already retried with a backoff.
+/// Returns whether sending the request again can get past `error`. That's
+/// the case when the request's outcome isn't known (an `outcome_unknown`
+/// error), or when the client would retry the error for a request that's
+/// safe to send twice (see
+/// [`ClientError::retryable_without_operator_action`]).
 pub(crate) fn sends_again(error: &ClientError) -> bool {
-    match error {
-        ClientError::Api { .. } => error.code().is_some_and(|code| {
-            code.kind() == ErrorKind::OutcomeUnknown || code.retryable_without_operator_action()
-        }),
-        ClientError::Http(_) | ClientError::Io(_) => true,
-        ClientError::HttpStatus { status, .. } => matches!(*status, 408 | 429) || *status >= 500,
-        ClientError::ConfigIo(_)
-        | ClientError::ConfigDecode(_)
-        | ClientError::ConfigField(_)
-        | ClientError::InvalidNamespacePath(_)
-        | ClientError::UploadTooLarge { .. }
-        | ClientError::Json(_)
-        | ClientError::Protocol(_) => false,
-        _ => false,
-    }
+    error
+        .code()
+        .is_some_and(|code| code.kind() == ErrorKind::OutcomeUnknown)
+        || error.retryable_without_operator_action()
 }
 
 /// Returns the server's error response for a merge or a rebase that it
@@ -82,28 +69,35 @@ pub(crate) fn is_gone(error: &ClientError) -> bool {
 mod tests {
     use super::sends_again;
     use loonfs_client::ClientError;
+    use loonfs_types::ErrorResponse;
 
     #[test]
-    fn sends_again_retries_only_transient_and_transport_failures() {
+    fn sends_again_on_an_unknown_outcome_and_on_what_the_client_retries() {
+        let api = |code: &str| ClientError::Api {
+            status: 503,
+            response: Box::new(ErrorResponse {
+                code: code.to_owned(),
+                feature: None,
+                message: String::new(),
+                param: None,
+                request_id: None,
+                details: None,
+            }),
+        };
+        let status = |status: u16| ClientError::HttpStatus {
+            status,
+            provider_code: None,
+            detail: "not the error envelope".to_owned(),
+        };
+        assert!(sends_again(&api("outcome_unknown")));
+        assert!(sends_again(&api("server_busy")));
         assert!(sends_again(&ClientError::Http("reset".to_owned())));
-        assert!(sends_again(&ClientError::Io("eof".to_owned())));
-        assert!(sends_again(&ClientError::HttpStatus {
-            status: 502,
-            provider_code: None,
-            detail: "bad gateway".to_owned(),
-        }));
-        assert!(sends_again(&ClientError::HttpStatus {
-            status: 408,
-            provider_code: None,
-            detail: "request timeout".to_owned(),
-        }));
-        assert!(sends_again(&ClientError::HttpStatus {
-            status: 429,
-            provider_code: None,
-            detail: "rate limited".to_owned(),
-        }));
+        for retried in [408, 429, 502] {
+            assert!(sends_again(&status(retried)), "{retried}");
+        }
 
         for non_retryable in [
+            api("store_contention"),
             ClientError::ConfigIo("missing".to_owned()),
             ClientError::ConfigDecode("bad toml".to_owned()),
             ClientError::InvalidNamespacePath("/bad".to_owned()),
@@ -111,13 +105,12 @@ mod tests {
                 size_bytes: 100,
                 reason: "too big".to_owned(),
             },
+            ClientError::Io("eof".to_owned()),
             ClientError::Json("invalid json".to_owned()),
             ClientError::Protocol("contract violation".to_owned()),
-            ClientError::HttpStatus {
-                status: 400,
-                provider_code: None,
-                detail: "bad request".to_owned(),
-            },
+            status(400),
+            status(501),
+            status(505),
         ] {
             assert!(
                 !sends_again(&non_retryable),
