@@ -527,7 +527,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
                     });
                 }
                 let occupant = self
-                    .resolve_visible_child(parent_inode_id, display_name)
+                    .resolve_child_by_name(parent_inode_id, display_name)
                     .await?;
                 Ok(ResolvedDestination {
                     parent_inode_id,
@@ -586,7 +586,13 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         resolution
     }
 
-    pub(super) async fn resolve_visible_child(
+    /// Returns the visible child named `display_name` under the directory
+    /// `parent_inode_id`, if any.
+    ///
+    /// The lookup reads the child's binding, and then resolves the child by
+    /// its inode ID, which reads the child's inode record and walks up its
+    /// parents for its path.
+    pub(super) async fn resolve_child_by_name(
         &self,
         parent_inode_id: InodeId,
         display_name: &DisplayName,

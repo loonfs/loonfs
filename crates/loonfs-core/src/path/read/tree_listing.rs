@@ -1,7 +1,7 @@
 //! Recursive directory listing: a depth-first walk of one directory's
 //! subtree, paged with a cursor that records the walk's stack.
 
-use super::listing::{resolve_visible_child, ListedChild, ScannedChild};
+use super::listing::{ListedChild, ScannedChild};
 use super::loaded_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::Result;
@@ -183,7 +183,7 @@ async fn resume_stack<S: ObjectStore + ?Sized>(
         {
             break;
         }
-        let directory = resolve_visible_child(&parent.directory, &binding);
+        let directory = ResolvedVisiblePath::child_of(&parent.directory, &binding);
         stack.push(TreeFrame::new(directory, frame.last_name_key));
     }
     Ok(stack)

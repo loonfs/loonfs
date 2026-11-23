@@ -26,6 +26,30 @@ pub struct ResolvedVisiblePath {
     pub binding_version: Option<DeltaPosition>,
 }
 
+impl ResolvedVisiblePath {
+    /// Returns the child that `binding` binds under `directory`, built from
+    /// the binding without a read. The caller already found the child
+    /// visible.
+    pub(crate) fn child_of(
+        directory: &ResolvedVisiblePath,
+        binding: &DirentryBindingRecord,
+    ) -> Self {
+        let display_name = binding
+            .display_name()
+            .expect("visible binding should be bound");
+        Self {
+            absolute_path: directory.absolute_path.join(display_name),
+            inode_id: binding.child_inode_id,
+            inode_kind: binding.child_kind,
+            created_by: binding.child_created_by.clone(),
+            created_at_ms: binding.child_created_at_ms,
+            parent_inode_id: Some(binding.parent_inode_id),
+            display_name: display_name.to_string(),
+            binding_version: Some(binding.bind_position),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum VisiblePathError {
