@@ -2216,7 +2216,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
 /// Checks that `loonfs.publisher.queue_depth` reports the candidates queued
 /// at every namespace's publisher together, and falls to zero once both
 /// queues are taken.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn the_queue_depth_gauge_sums_the_queues_of_every_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(BlockingStore::matching(
@@ -2282,6 +2282,9 @@ async fn the_queue_depth_gauge_sums_the_queues_of_every_namespace() {
         .await
         .expect("the second commit stays queued");
     }
+    // A publisher reports the depth after it releases the queue's lock, with
+    // no await in between. The test runs on one thread, so the reports of the
+    // queue changes that the waits above found have run.
     assert_eq!(queue_depth(), 2);
 
     store.release();

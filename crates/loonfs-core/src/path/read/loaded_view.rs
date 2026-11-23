@@ -436,8 +436,19 @@ mod tests {
         store.reset();
         store.inner().arm();
         let (first_namespace, second_namespace) = (namespace(&shared), namespace(&shared));
-        let mut first = pin!(first_namespace.load_metadata_view(&context));
-        let mut second = pin!(second_namespace.load_metadata_view(&context));
+        // Tokio limits the operations that a task completes between two
+        // yields (its cooperative budget). Past the limit, a free lock returns
+        // pending until the task yields, and the store reads above reach the
+        // limit when their blocking reads finish before the test polls them.
+        // Outside the budget, one poll takes each load as far as it can go:
+        // the first load to the parked WAL GET, and the second load to the
+        // wait for the first.
+        let mut first = pin!(tokio::task::unconstrained(
+            first_namespace.load_metadata_view(&context)
+        ));
+        let mut second = pin!(tokio::task::unconstrained(
+            second_namespace.load_metadata_view(&context)
+        ));
         assert!(poll!(first.as_mut()).is_pending());
         assert!(poll!(pin!(store.inner().wait_until_blocked())).is_ready());
         assert!(poll!(second.as_mut()).is_pending());

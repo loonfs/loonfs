@@ -828,9 +828,16 @@ mod tests {
             let mut loads = Vec::new();
             for key in &keys {
                 store.inner().arm();
-                let mut load = Box::pin(cache.get_or_load(key, || async {
-                    store.get(key.as_str(), None).await.map(|_| Block(1))
-                }));
+                // These polls and the store calls between the two passes spend
+                // the test task's tokio budget (the operations it completes
+                // between yields), and past it a poll returns pending at the
+                // cache's free lock before the GET. Outside the budget, one
+                // poll takes each load to the parked GET.
+                let mut load = Box::pin(tokio::task::unconstrained(
+                    cache.get_or_load(key, || async {
+                        store.get(key.as_str(), None).await.map(|_| Block(1))
+                    }),
+                ));
                 assert!(poll!(load.as_mut()).is_pending());
                 assert!(poll!(pin!(store.inner().wait_until_blocked())).is_ready());
                 loads.push(load);
