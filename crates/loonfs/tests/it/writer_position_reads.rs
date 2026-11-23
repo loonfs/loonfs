@@ -1306,8 +1306,8 @@ enum History {
 /// above the manifest, so the advance drops the position and plans from the
 /// newest manifest. With the manifest in the cache, the plan reads a segment
 /// that the collection deleted, the advance finds a newer current manifest,
-/// drops the position and the cached head, loads the head again, and plans
-/// from the newest manifest.
+/// drops the position and the cached head, and plans from the newest
+/// manifest.
 #[tokio::test]
 async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() {
     for cached in [false, true] {
@@ -1347,13 +1347,6 @@ async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() 
                 vec![line("get {ns} MetadataSegment")],
                 // The check that a newer manifest replaced the planned one.
                 discovery(true),
-                // The load of the head after the drop.
-                discovery(false),
-                vec![
-                    line("get {ns} WalObject 00000000000000000011"),
-                    line("head {ns} MetadataManifest 00000000000000000019"),
-                    line("get {ns} Boundary"),
-                ],
                 // The second plan, from the newest manifest.
                 discovery(false),
                 segments,
@@ -1612,8 +1605,8 @@ async fn a_rebase_from_a_position_on_a_collected_manifest_succeeds() {
 /// manifest back by hand. The advance reads the manifest from the store and
 /// plans from it as it would from the segment cache, the plan reads a
 /// segment that the collection deleted, and the advance finds a newer
-/// current manifest, drops the position and the cached head, loads the head
-/// again, and plans from the newest manifest.
+/// current manifest, drops the position and the cached head, and plans from
+/// the newest manifest.
 #[tokio::test]
 async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_succeeds() {
     use loonfs_objectstore::ObjectStore;
@@ -1655,18 +1648,77 @@ async fn a_retention_advance_from_a_stored_position_manifest_below_the_boundary_
         ],
         // The check that a newer manifest replaced the planned one.
         discovery.clone(),
-        // The load of the head after the drop.
-        discovery.clone(),
-        vec![
-            line("get {ns} WalObject 00000000000000000011"),
-            line("head {ns} MetadataManifest 00000000000000000019"),
-            line("get {ns} Boundary"),
-        ],
         // The second plan, from the newest manifest.
         discovery,
         vec![line("get {ns} MetadataSegment"); 4],
     ]
     .concat();
+    assert_eq!(
+        loonfs_test_support::stores::request_lines(&fixture.recording.take()),
+        expected
+    );
+}
+
+/// Checks that a strong read whose cached head is on a manifest that a
+/// collection deleted reads again from the newest manifest, and checks the
+/// read's requests.
+///
+/// The writer's session closes, so its position, on the deleted manifest,
+/// becomes the cached head. The strong read's WAL probe finds nothing new,
+/// and the manifest check isn't due. The read then finds a segment of the
+/// deleted manifest missing, finds the newer current manifest, and drops the
+/// runtime's view of the namespace. The second run loads the head by
+/// discovery and reads from the newest manifest.
+#[tokio::test]
+async fn a_strong_read_from_a_collected_manifest_reads_the_newest_manifest() {
+    let name = "collected-strong-read";
+    let (fixture, _, _) = position_on_a_collected_manifest(name, true, History::Files).await;
+    fixture
+        .writer
+        .open_namespace(&fixture.namespace_id)
+        .expect("a handle on the session")
+        .close()
+        .await
+        .expect("close the session");
+    fixture.recording.reset();
+    let file = fixture
+        .reader
+        .read_file_with_options(
+            "/small.txt",
+            &ReadFileOptions {
+                at: ReadAt::Live(Some(Consistency::Strong)),
+            },
+        )
+        .await
+        .expect("the read runs again from the newest manifest");
+    assert_eq!(file.bytes, [b's'; 1024]);
+    let namespace = fixture.namespace_id.to_string();
+    let line = |request: &str| request.replace("{ns}", &namespace);
+    let expected = [
+        // The first run: the WAL probe of the cached head, and the read of a
+        // segment that the collection deleted.
+        line("get {ns} WalObject 00000000000000000011"),
+        line("get {ns} MetadataSegment"),
+        // The check that a newer manifest replaced the read's manifest.
+        line("get {ns} Boundary"),
+        line("list namespaces/{ns}/manifests/"),
+        line("get {ns} MetadataManifest 00000000000000000018"),
+        line("get {ns} Boundary"),
+        // The second run's load of the head by discovery, with the WAL read
+        // above the newest manifest and the check of its successor.
+        line("get {ns} Boundary"),
+        line("list namespaces/{ns}/manifests/"),
+        line("get {ns} Boundary"),
+        line("get {ns} WalObject 00000000000000000011"),
+        line("head {ns} MetadataManifest 00000000000000000019"),
+        line("get {ns} Boundary"),
+        // The second run's read from the newest manifest.
+        line("get {ns} MetadataSegment"),
+        line("get {ns} MetadataSegment"),
+        line("get {ns} MetadataSegment"),
+        line("get {ns} MetadataSegment"),
+        "get pool ContentBlob".to_owned(),
+    ];
     assert_eq!(
         loonfs_test_support::stores::request_lines(&fixture.recording.take()),
         expected

@@ -77,8 +77,9 @@ pub(crate) fn reject_snapshot_cursor<C: SnapshotBoundCursor>(cursor: Option<&C>)
 impl<M: crate::Mode> Namespace<M> {
     /// Runs `read` at the state that `at` selects, with the state's source.
     ///
-    /// A live read reads the live head, confirmed as `at` asks, and runs once
-    /// more at a reloaded head if a newer manifest replaced the read's basis.
+    /// A live read reads the live head, confirmed as `at` asks, and runs
+    /// again from the newest manifest each time a newer manifest replaced the
+    /// read's basis, up to `MAX_CONTENTION_ATTEMPTS` runs in all.
     /// A snapshot read reads the snapshot that `at` selects.
     pub(crate) async fn read_at<T, Read, ReadFuture>(&self, at: &ReadAt, read: Read) -> Result<T>
     where
@@ -161,9 +162,10 @@ impl<M: crate::Mode> Namespace<M> {
     /// reads through them. A read through a view returns `ManifestReplaced`
     /// when a newer manifest replaced the view's manifest and a collection
     /// removed that manifest's segments. Each time `read` returns that error,
-    /// this method reloads the namespace's head and runs `read` again, as an
-    /// ordinary read of the namespace runs, up to `MAX_CONTENTION_ATTEMPTS`
-    /// runs in all. If every run returns `ManifestReplaced`, this method
+    /// this method drops the runtime's view of the namespace and runs `read`
+    /// again, so the next run's views load the namespace's head from the
+    /// store, up to `MAX_CONTENTION_ATTEMPTS` runs in all. An ordinary read of
+    /// the namespace runs again the same way. If every run returns `ManifestReplaced`, this method
     /// returns `store_contention`.
     pub async fn read_through_views<T, F, Fut>(&self, read: F) -> Result<T>
     where
@@ -172,7 +174,8 @@ impl<M: crate::Mode> Namespace<M> {
     {
         trace::in_operation(
             operation_span!(self.core, "read_through_views", self.namespace_id),
-            self.core.read_at_reloaded_head(&self.namespace_id, read),
+            self.core
+                .run_again_after_replaced_manifest(&self.namespace_id, read),
         )
         .await
     }

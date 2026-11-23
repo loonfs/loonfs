@@ -98,30 +98,6 @@ impl RuntimeCore {
             .await
     }
 
-    /// Loads the namespace's head from the store, without starting from the
-    /// cached head, and installs it through
-    /// [`HeadAndWalTailCache::replace_head`](loonfs_core::cache::HeadAndWalTailCache::replace_head).
-    ///
-    /// A read that finds a segment of its basis missing reloads this way,
-    /// after it drops the cached head, because the newer manifest that
-    /// replaced its basis is what it needs, and a refresh from the cached
-    /// head would read the same basis again. The reload shares the refresh
-    /// of the head in flight the way a strong read does, because a refresh
-    /// that starts after the drop finds that newer manifest too.
-    pub(crate) async fn reload_namespace_head(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> std::result::Result<Arc<CachedHead>, CoreError> {
-        self.inner
-            .head_and_wal_tail_cache
-            .check_or_join_head(
-                namespace_id,
-                || None,
-                || self.refresh_namespace_head(namespace_id, None),
-            )
-            .await
-    }
-
     async fn refresh_namespace_head(
         &self,
         namespace_id: &NamespaceId,

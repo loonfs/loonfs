@@ -396,8 +396,9 @@ impl Namespace<Writable> {
     /// snapshots' manifests refer to. The snapshot expires with the plan's
     /// content proofs, so a merge that can't release it leaves it to the fork's
     /// collector. When a newer manifest replaced the one that the read found,
-    /// the call reads the fork's head from the store and takes the snapshot
-    /// again, up to `MAX_CONTENTION_ATTEMPTS` snapshots in all.
+    /// the call drops this runtime's view of the fork, so the next read loads
+    /// the fork's head from the store, and takes the snapshot again, up to
+    /// `MAX_CONTENTION_ATTEMPTS` snapshots in all.
     ///
     /// When the fork's tail has a commit older than
     /// [`MAX_TAIL_COMMIT_AGE_MS`](loonfs_core::limits::MAX_TAIL_COMMIT_AGE_MS),
@@ -433,7 +434,7 @@ impl Namespace<Writable> {
             {
                 Err(CoreError::HeadMoved(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
                     attempts += 1;
-                    self.core.reload_replaced_head(fork_id).await?;
+                    self.core.forget_namespace_view(fork_id).await;
                 }
                 created => return Ok((fork, created?)),
             }

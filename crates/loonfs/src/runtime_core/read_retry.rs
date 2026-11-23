@@ -94,9 +94,10 @@ fn replaced_on_every_run(namespace_id: &NamespaceId, current_manifest_no: Manife
 
 impl RuntimeCore {
     /// Runs `read` at the namespace's live head, confirmed as `confirmation`
-    /// asks, and again at a reloaded head each time a newer manifest replaced
-    /// the read's basis, up to `MAX_CONTENTION_ATTEMPTS` reads in all. A read
-    /// whose basis was replaced on every attempt returns `store_contention`.
+    /// asks, and again from the newest manifest each time a newer manifest
+    /// replaced the read's basis, up to `MAX_CONTENTION_ATTEMPTS` reads in
+    /// all (see [`Self::run_again_after_replaced_manifest`]). A read whose
+    /// basis was replaced on every attempt returns `store_contention`.
     ///
     /// A read whose maximum staleness is longer than the revalidation bound
     /// returns `invalid_request` before the read sends a request to the store
@@ -158,7 +159,7 @@ impl RuntimeCore {
         // Boxed, because without the box, a crate that awaits a read fails to
         // compile with "queries overflow the depth limit!" while the compiler
         // computes the layout of the caller's future.
-        Box::pin(self.read_at_reloaded_head(namespace_id, || {
+        Box::pin(self.run_again_after_replaced_manifest(namespace_id, || {
             let first = first.take();
             async move {
                 let pinned = match first {
@@ -176,16 +177,18 @@ impl RuntimeCore {
         .await
     }
 
-    /// Runs `attempt`, and runs it again from a reloaded head each time it
-    /// returns `ManifestReplaced`, up to `MAX_CONTENTION_ATTEMPTS` runs in
-    /// all. If every run returns `ManifestReplaced`, this method returns
+    /// Runs `attempt`, and runs it again each time it returns
+    /// `ManifestReplaced`, up to `MAX_CONTENTION_ATTEMPTS` runs in all. If
+    /// every run returns `ManifestReplaced`, this method returns
     /// `store_contention`.
     ///
-    /// `attempt` reads at the namespace's head as the head is when the run
-    /// starts, so a run after a reload reads a newer manifest than the run
-    /// before it read. [`Self::read_at_least`] runs an ordinary read through
-    /// this method, with a head that it pins for each run.
-    pub(crate) async fn read_at_reloaded_head<T, F, Fut>(
+    /// Before each run after the first, the method drops this runtime's view
+    /// of the namespace (see [`Self::forget_namespace_view`]). `attempt` reads
+    /// at the namespace's head as the head is when the run starts, so a run
+    /// after a drop loads the head by discovery, and reads a newer manifest
+    /// than the run before it read. [`Self::read_at_least`] runs an ordinary
+    /// read through this method, with a head that it pins for each run.
+    pub(crate) async fn run_again_after_replaced_manifest<T, F, Fut>(
         &self,
         namespace_id: &NamespaceId,
         mut attempt: F,
@@ -197,7 +200,7 @@ impl RuntimeCore {
         for _ in 1..MAX_CONTENTION_ATTEMPTS {
             match attempt().await {
                 Err(Error::Core(CoreError::ManifestReplaced { .. })) => {
-                    self.reload_replaced_head(namespace_id).await?;
+                    self.forget_namespace_view(namespace_id).await;
                 }
                 result => return result,
             }
@@ -209,19 +212,6 @@ impl RuntimeCore {
             })) => Err(replaced_on_every_run(namespace_id, current_manifest_no)),
             result => result,
         }
-    }
-
-    /// Loads the namespace's head from the store after a newer manifest
-    /// replaced the manifest that this runtime's head of the namespace
-    /// reads, so the next read starts from the newer manifest.
-    ///
-    /// The call drops this runtime's view of the namespace (see
-    /// [`Self::forget_namespace_view`]), and then loads the head from the
-    /// store, which finds the manifest that replaced the read's basis.
-    pub(crate) async fn reload_replaced_head(&self, namespace_id: &NamespaceId) -> Result<()> {
-        self.forget_namespace_view(namespace_id).await;
-        self.reload_namespace_head(namespace_id).await?;
-        Ok(())
     }
 
     /// Returns whether a read confirmed as `confirmation` reads an `eventual`
