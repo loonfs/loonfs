@@ -5,7 +5,6 @@ use crate::pinned_read::PinnedRead;
 use crate::read_view::ReadSource;
 use crate::trace::phase_span;
 use crate::{CommitSeq, Consistency, CoreError, Error, NamespaceId, Result};
-use loonfs_core::control::KeptBoundary;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::Phase;
 use loonfs_core::{ManifestLoadError, MetadataProjectionLoadError, RuntimeReadContext};
@@ -40,7 +39,7 @@ pub(crate) async fn classify_read_result<T>(
             .namespace_store(&context.read_basis().head().namespace_id)
             .above_boundary(
                 context.read_basis().basis().manifest_no(),
-                KeptBoundary::default(),
+                context.boundary().clone(),
             )
             .await?
             .0
