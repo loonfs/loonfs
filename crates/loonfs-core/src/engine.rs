@@ -40,7 +40,7 @@ use tracing::Instrument;
 /// [`Self::at_seq`] refuses a sequence above the head.
 ///
 /// A read of an earlier sequence or of a snapshot checks the subject's
-/// rights at the namespace's current head
+/// rights at the namespace's head when the read started
 /// ([API spec, Snapshots](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#snapshots)),
 /// so each context also records the head at which its reads are authorized.
 /// A context from [`Self::new`] is authorized at its own head, a context
@@ -101,7 +101,7 @@ impl RuntimeReadContext {
 
     /// Returns a context that reads the state that a snapshot kept, from
     /// `basis`, with its reads authorized at the same head as the reads of
-    /// `live`, the context of the namespace's current head.
+    /// `live`, the context of the namespace's head when the read started.
     pub fn at_snapshot(basis: SnapshotReadBasis, live: RuntimeReadContext) -> Self {
         let authorization = match live.authorization {
             Some(authorization) => authorization,
@@ -149,6 +149,10 @@ impl RuntimeReadContext {
 
 /// Proof that an engine's subject is the administrator of one namespace, or
 /// that the engine has no subject, as in the service context.
+///
+/// The proof records the namespace it was checked for and not the subject,
+/// because a function that receives it, such as the commit engine's
+/// deletion, may have no subject to compare with.
 ///
 /// Only [`NamespaceEngine::verify_administrator`] and
 /// [`NamespaceEngine::find_administrator_without_read`] return one. A
@@ -203,18 +207,15 @@ pub type NamespaceWriterEngine<S> = NamespaceEngine<S, Writable>;
 /// they are granted to.
 #[derive(Debug)]
 enum Reader {
-    /// No subject, as in the service context. Reads check no rights, but a
-    /// read of an earlier sequence or of a snapshot still loads the view of
-    /// the head at which the read is authorized.
+    /// No subject, as in the service context. Reads check no rights.
     Service,
     /// A subject whose rights each read checks, at the head at which the
     /// read's context is authorized.
     Subject(Subject),
-    /// A reader that a check showed administers the namespace, or that has
-    /// no subject. Reads check no rights and load no other head's view. The
-    /// subject, when there is one, stays the identity of the engine's
+    /// A subject that a check showed administers the namespace. Reads check
+    /// no rights, and the subject stays the identity of the engine's
     /// commits.
-    Administrator(Option<Subject>),
+    Administrator(Subject),
 }
 
 /// A namespace-scoped core API.
@@ -265,33 +266,28 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub(crate) fn subject(&self) -> Option<&Subject> {
         match &self.reader {
             Reader::Service => None,
-            Reader::Subject(subject) => Some(subject),
-            Reader::Administrator(subject) => subject.as_ref(),
+            Reader::Subject(subject) | Reader::Administrator(subject) => Some(subject),
         }
     }
 
     /// Loads the views and the authorization of one per-subject read at
-    /// `context`: the view at `context` and, when `context` reads an earlier
-    /// sequence or a snapshot and this engine doesn't have administrator
-    /// reads, the view of the head at which its reads are authorized.
+    /// `context`: the view at `context` and, when this engine checks a
+    /// subject's rights and `context` reads an earlier sequence or a
+    /// snapshot, the view of the head at which its reads are authorized.
     async fn authorized_read<'a>(
         &'a self,
         context: &'a RuntimeReadContext,
     ) -> Result<AuthorizedRead<'a, S>> {
-        let subject = match &self.reader {
-            Reader::Administrator(_) => {
-                return Ok(AuthorizedRead {
-                    view: self
-                        .namespace
-                        .load_metadata_view(context)
-                        .instrument(crate::phase_span!(crate::Phase::LoadView))
-                        .await?,
-                    head_view: None,
-                    authorizer: Authorizer::Service,
-                });
-            }
-            Reader::Service => None,
-            Reader::Subject(subject) => Some(subject),
+        let Some(subject) = self.subject_to_check() else {
+            return Ok(AuthorizedRead {
+                view: self
+                    .namespace
+                    .load_metadata_view(context)
+                    .instrument(crate::phase_span!(crate::Phase::LoadView))
+                    .await?,
+                head_view: None,
+                authorizer: Authorizer::Service,
+            });
         };
         let head_view = match context.separate_authorization() {
             Some(head) => Some(
@@ -302,7 +298,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             ),
             None => None,
         };
-        let authorizer = Authorizer::for_request(subject);
+        let authorizer = Authorizer::for_request(Some(subject));
         let view = self
             .namespace
             .load_metadata_view(context)
@@ -322,10 +318,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self.namespace.load_metadata_view(context).await.map(drop)
     }
 
-    /// Returns the subject whose administrator rights a check has to read,
-    /// or `None` when the reader passes without a read: an engine with no
-    /// subject, as in the service context, or one whose reads were granted
-    /// administrator rights with a proof.
+    /// Returns the subject whose rights this engine checks, or `None` when
+    /// it checks no rights: an engine with no subject, as in the service
+    /// context, or one whose reads a check granted administrator rights.
+    /// The administrator check and every per-subject read check rights
+    /// exactly when this returns a subject.
     fn subject_to_check(&self) -> Option<&Subject> {
         match &self.reader {
             Reader::Subject(subject) => Some(subject),
@@ -824,8 +821,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 struct AuthorizedRead<'a, S: ObjectStore> {
     view: LoadedMetadataView<'a, S>,
     /// The view of the head at which the read is authorized, when the read's
-    /// context reads an earlier sequence or a snapshot and the engine doesn't
-    /// have administrator reads.
+    /// context reads an earlier sequence or a snapshot and the engine checks
+    /// a subject's rights.
     head_view: Option<LoadedMetadataView<'a, S>>,
     authorizer: Authorizer<'a>,
 }
@@ -862,7 +859,12 @@ impl<S: ObjectStore + Clone> NamespaceEngine<S, ReadOnly> {
         Ok(Self {
             namespace: self.namespace.clone(),
             mode: ReadOnly,
-            reader: Reader::Administrator(self.subject().cloned()),
+            reader: match &self.reader {
+                Reader::Service => Reader::Service,
+                Reader::Subject(subject) | Reader::Administrator(subject) => {
+                    Reader::Administrator(subject.clone())
+                }
+            },
         })
     }
 }
