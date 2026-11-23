@@ -215,7 +215,8 @@ impl ReadView {
     /// it applies a subject's rights, such as `loonfs-grep`.
     ///
     /// Requires what the change feed requires: a handle with no subject, or
-    /// a subject that administers the namespace at its current head.
+    /// a subject that administers the namespace at the head that this view's
+    /// reads are authorized at.
     /// Otherwise it returns `forbidden`.
     pub async fn as_administrator(&self) -> Result<ReadView> {
         let _permit = self.core.read_permit().await;
