@@ -14,6 +14,7 @@ mod memory_store;
 mod metadata_map_store;
 mod namespace_overlap_store;
 mod operation;
+mod panic_store;
 mod recording_store;
 mod replace;
 
@@ -38,6 +39,7 @@ pub use operation::{
     request_lines, sort_head_runs, write_keys, OperationContext, OperationKind, OperationSelector,
     RecordedOperation,
 };
+pub use panic_store::{PanicInterceptor, PanicStore};
 pub use recording_store::{RecordedGet, RecordingInterceptor, RecordingStore, StoreCounts};
 pub use replace::replace_object;
 

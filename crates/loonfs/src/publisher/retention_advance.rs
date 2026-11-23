@@ -9,6 +9,7 @@ use futures::FutureExt;
 use loonfs_core::control::LoadedManifest;
 use loonfs_core::time::OperationClock;
 use loonfs_core::FloorObjectReport;
+use loonfs_types::panic_message;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ impl NamespacePublisher {
                 // A panic can follow the floor object's put, so the position
                 // may omit the floor object. The callers get the error, and
                 // the next sweep tries the advance again.
-                self.record_panic("retention_advance", payload);
+                self.record_panic("retention_advance", panic_message(payload.as_ref()));
                 if let Some(engine) = self.lock_engine().await.engine.as_mut() {
                     engine.invalidate_projection();
                 }

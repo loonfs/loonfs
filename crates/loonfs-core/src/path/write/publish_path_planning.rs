@@ -758,7 +758,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             let name =
                 ResolvedDestination::at_path(absolute_path, parent_inode_id, display_name, None)
                     .available_name(None)?;
-            let new_inode = self.next_inode_id()?;
+            let new_inode = self.next_inode_id();
             parent_inode_id = new_inode.inode_id();
             self.commit
                 .create(new_inode, name, NewChild::Directory)

@@ -347,7 +347,7 @@ impl<S> HeldNamespace<S> {
                         Ok(result) => result,
                         Err(payload) => Err(loonfs::Error::RuntimeTask(format!(
                             "closing the session panicked: {}",
-                            crate::panic_message(payload.as_ref())
+                            loonfs_types::panic_message(payload.as_ref())
                         ))),
                     })
                     .boxed()

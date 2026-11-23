@@ -61,14 +61,7 @@ pub fn retry_result_on_macos_teardown_einval<T, E: std::fmt::Debug>(
 }
 
 fn panic_is_teardown_einval(payload: &(dyn std::any::Any + Send)) -> bool {
-    let message = if let Some(owned) = payload.downcast_ref::<String>() {
-        owned.as_str()
-    } else if let Some(literal) = payload.downcast_ref::<&'static str>() {
-        literal
-    } else {
-        return false;
-    };
-    message_is_teardown_einval(message)
+    message_is_teardown_einval(loonfs_types::panic_message(payload))
 }
 
 fn message_is_teardown_einval(message: &str) -> bool {

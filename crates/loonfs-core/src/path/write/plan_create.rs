@@ -48,7 +48,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         destination.ensure_mutation()?;
         let destination = self.view().resolve_destination(destination).await?;
         let name = self.view().authorize_vacant_name(&destination).await?;
-        let new_inode = self.next_inode_id()?;
+        let new_inode = self.next_inode_id();
         self.commit.create(new_inode, name, child).await
     }
 
@@ -92,7 +92,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .await?
             }
         };
-        let new_inode = self.next_inode_id()?;
+        let new_inode = self.next_inode_id();
         self.commit
             .create(new_inode, name, NewChild::Directory)
             .await
@@ -270,7 +270,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     .await?
             }
         };
-        let new_inode = self.next_inode_id()?;
+        let new_inode = self.next_inode_id();
         self.commit
             .create(new_inode, name, NewChild::File(content_ref))
             .await

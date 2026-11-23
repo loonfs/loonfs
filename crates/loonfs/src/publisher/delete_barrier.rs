@@ -7,6 +7,7 @@ use crate::trace::phase_event;
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result};
 use futures::FutureExt;
 use loonfs_core::{Administrator, Phase};
+use loonfs_types::panic_message;
 use std::panic::AssertUnwindSafe;
 
 impl NamespacePublisher {
@@ -26,7 +27,7 @@ impl NamespacePublisher {
             Err(payload) => {
                 // Contain deletion panics so the worker can continue. Deletion has no commit
                 // receipt for reconciliation, so report the task failure to its callers.
-                self.record_panic("delete", payload);
+                self.record_panic("delete", panic_message(payload.as_ref()));
                 Err(Error::RuntimeTask(
                     "delete task aborted mid-delete".to_owned(),
                 ))

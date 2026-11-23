@@ -454,6 +454,16 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+/// Returns the message that a panic included, or a fixed description when
+/// the payload isn't a string.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("a panic payload that isn't a string")
+}
+
 #[cfg(test)]
 mod tests {
     use super::ErrorCode;

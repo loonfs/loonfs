@@ -229,6 +229,30 @@ mod tests {
         }
     }
 
+    /// Checks that a commit whose preparation panicked returns the
+    /// `server_error` envelope with a fixed message, and none of the panic's
+    /// message.
+    #[tokio::test]
+    async fn a_panic_in_a_commits_preparation_returns_a_fixed_message() {
+        let response = ApiResponseError::runtime(
+            loonfs::CoreError::CommitPreparationPanicked(
+                "injected panic at `internal-key`".to_owned(),
+            )
+            .into(),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body");
+        let error: ErrorResponse = serde_json::from_slice(&bytes).expect("error");
+        assert_eq!(error.code, ErrorCode::ServerError.as_str());
+        assert_eq!(
+            error.message,
+            "the server hit a bug while it prepared the commit"
+        );
+    }
+
     #[tokio::test]
     async fn composed_errors_reuse_status_retry_and_preserve_caller_envelope() {
         for code in ErrorCode::ALL {

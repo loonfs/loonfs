@@ -866,9 +866,11 @@ async fn a_merge_refuses_an_inode_id_that_already_exists() {
     assert_eq!(feed(&store, &namespace_id).await, [ordinary, merged]);
 }
 
-/// Checks that a merge whose inode IDs don't match its creates fails instead
-/// of panicking the publisher: a create without an ID, and an ID for an
-/// operation that creates no inode.
+/// Checks that a merge whose inode IDs don't match its creates fails with
+/// `server_error` when its preparation panics, for a create without an ID
+/// and for an ID assigned to an operation that creates no inode. The error
+/// isn't one after which a merge plans again, the same merge fails the
+/// same way when it's sent again, and the namespace keeps committing.
 #[tokio::test]
 async fn a_merge_whose_inode_ids_dont_match_its_creates_is_refused() {
     let (_directory, store, namespace_id, writer) = setup().await;
@@ -889,32 +891,40 @@ async fn a_merge_whose_inode_ids_dont_match_its_creates_is_refused() {
         remove: Vec::new(),
         expected_attributes_revision_no: None,
     };
-    let assigned = fork_inode_id();
-    let cases = [
-        (
-            CommitCandidate::new(create_directory_request("unassigned", "unassigned")).with_merge(
-                merge(3, 7),
-                FORK_POINT,
-                BTreeMap::new(),
+    let cases =
+        [
+            (
+                CommitCandidate::new(create_directory_request("unassigned", "unassigned"))
+                    .with_merge(merge(3, 7), FORK_POINT, BTreeMap::new()),
+                "a merge operation that creates an inode should have an assigned inode ID",
             ),
-            "a merge operation creates an inode but has no assigned inode ID".to_owned(),
-        ),
-        (
-            CommitCandidate::new(intent("misassigned", vec![update])).with_merge(
-                merge(3, 7),
-                FORK_POINT,
-                BTreeMap::from([(0, assigned)]),
+            (
+                CommitCandidate::new(intent("misassigned", vec![update])).with_merge(
+                    merge(3, 7),
+                    FORK_POINT,
+                    BTreeMap::from([(0, fork_inode_id())]),
+                ),
+                "a merge's operation 0 should create the inode that the merge assigned it",
             ),
-            format!("a merge assigned inode `{assigned}` to an operation that creates no inode"),
-        ),
-    ];
+        ];
     for (candidate, message) in cases {
-        let error = publish(&store, &namespace_id, &writer, candidate)
-            .await
-            .expect_err("a merge whose IDs don't match its creates");
-        assert_refused_merge(error, 0, &message);
+        for attempt in ["first", "again"] {
+            let error = publish(&store, &namespace_id, &writer, candidate.clone())
+                .await
+                .expect_err(attempt);
+            assert_eq!(error.code(), ErrorCode::ServerError, "{attempt}");
+            assert!(!error.code().is_stale_plan(), "{attempt}");
+            assert_matches!(
+                &error,
+                CoreError::CommitPreparationPanicked(panic) if panic.contains(message),
+                "{attempt}"
+            );
+        }
     }
-    assert_eq!(feed(&store, &namespace_id).await, [directory]);
+    let after = publish(&store, &namespace_id, &writer, create_dir("after", "after"))
+        .await
+        .expect("a commit after the merges");
+    assert_eq!(feed(&store, &namespace_id).await, [directory, after]);
 }
 
 /// A subject with `principals`.

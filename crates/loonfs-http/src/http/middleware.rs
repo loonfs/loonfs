@@ -14,8 +14,9 @@ use axum::Router;
 use futures::FutureExt as _;
 use loonfs::ErrorCode;
 use loonfs_types::{ErrorCause, ErrorKind};
-use std::any::Any;
 use std::sync::Arc;
+
+pub use loonfs_types::panic_message;
 
 /// Response header that includes the request's correlation id.
 pub(super) const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -139,16 +140,6 @@ async fn catch_handler_panic(mut request: Request, next: Next) -> Response {
             .into_response()
         }
     }
-}
-
-/// Returns the message that a panic included, or a fixed description when
-/// the payload isn't a string.
-pub fn panic_message(payload: &(dyn Any + Send)) -> &str {
-    payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("a panic payload that isn't a string")
 }
 
 /// Counts, times, and logs every request once it reaches its HTTP outcome.

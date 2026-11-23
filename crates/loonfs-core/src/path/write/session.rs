@@ -222,16 +222,12 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 .plan(operation)
                 .await
                 .map_err(|error| error.at_operation(index))?;
-            if let CreatedInodeIds::Merge(Some(assigned)) = operation_session.created_inode_ids {
-                // Only a bug in the merge's planner assigns an ID to an
-                // operation that creates no inode. A panic would return
-                // `outcome_unknown` and panic again on every retry, so
-                // the merge fails with an error that the caller doesn't retry.
-                return Err(CoreError::InvalidCommitRequest(format!(
-                    "a merge assigned inode `{}` to an operation that creates no inode",
-                    assigned.inode_id()
-                ))
-                .at_operation(index));
+            if let CreatedInodeIds::Merge(unused) = &operation_session.created_inode_ids {
+                assert_eq!(
+                    unused.as_ref().map(NewInodeId::inode_id),
+                    None,
+                    "a merge's operation {index} should create the inode that the merge assigned it"
+                );
             }
             operation_indexes.resize(commit.deltas().len(), index);
         }

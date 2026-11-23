@@ -143,7 +143,7 @@ pub use digest::{
     sha256_digest, sha256_hex, PayloadChecksum, PayloadChecksumValidationError, SHA256_DIGEST_BYTES,
 };
 pub use entropy::{install_entropy, installed_entropy, Entropy, OsEntropy, SeededEntropy};
-pub use error::{ErrorCode, ErrorKind};
+pub use error::{panic_message, ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, generated_id_body_prefixes, next_public_ordinal, BindingVersion,
     BindingVersionValidationError, CommitId, CommitIdValidationError, CommitSeq, CompactorEpoch,
