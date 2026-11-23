@@ -1346,6 +1346,55 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
     }
 }
 
+/// Checks that a floor object that a process without a writer session puts
+/// after the namespace's deletion returns `namespace_deleted`. The process
+/// reads the tip, and while its put waits, the writer session folds the tail
+/// and publishes the tombstone. The put is then written at the number after
+/// the folded tip, which the tombstone doesn't fold, so only the tombstone
+/// itself shows that the floor object is in a deleted namespace.
+#[tokio::test]
+async fn a_floor_object_put_after_the_namespace_is_deleted_returns_namespace_deleted() {
+    use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    bootstrap_namespace(&store, &namespace_id, &test_context())
+        .await
+        .expect("bootstrap");
+    let mut writer = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        test_context().writer_id,
+    );
+    publish_directories(&mut writer, "dir", 2).await;
+    let planned = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load the planned manifest");
+    let parked = std::sync::Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(wal_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    parked.block_next();
+    let advancing = crate::test_support::namespace_store(parked.clone(), &namespace_id);
+    let (advanced, ()) = tokio::join!(
+        advancing.publish_floor_object(&planned, CommitSeq(1)),
+        async {
+            parked.wait_until_blocked().await;
+            writer
+                .delete_namespace(
+                    &crate::test_support::administrator_of(&store, &namespace_id),
+                    Default::default(),
+                )
+                .await
+                .expect("the writer session deletes the namespace");
+            parked.release();
+        }
+    );
+    assert_matches!(advanced, Err(CoreError::NamespaceDeleted { .. }));
+}
+
 /// Reads the files one snapshot keeps at the test clock, or the error that
 /// says it no longer keeps anything.
 pub(super) async fn read_snapshot_files<S: ObjectStore + ?Sized>(

@@ -6,8 +6,8 @@ use crate::trace::phase_span;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
-use loonfs_core::control::{Checked, Held, HeldManifestForm, LoadedManifest};
-use loonfs_core::publish::WriterPosition;
+use loonfs_core::control::{Held, HeldManifestForm, LoadedManifest};
+use loonfs_core::publish::{PositionCheck, WriterPosition};
 use loonfs_core::CoreError;
 use loonfs_core::Phase;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -247,24 +247,13 @@ impl RuntimeCore {
             .filter(|position| position.basis().is_confirmed_by(check))
     }
 
-    /// Checks the position's manifest with
-    /// [`NamespaceStore::check_newest`](loonfs_core::NamespaceStore::check_newest).
-    ///
-    /// A check that finds the manifest the newest records the check. A check
-    /// that finds a successor starts the walk of
-    /// [`same_epoch_manifests_above`](loonfs_core::NamespaceStore::same_epoch_manifests_above),
-    /// which loads each manifest after the position's while each has the
-    /// position's writer epoch (a fold, a compaction, or a snapshot, by this
-    /// runtime or by another process), and then reads the manifest boundary.
-    /// The position moves onto the newest of them, as it moves onto the
-    /// manifests this runtime publishes (see [`HeadPositions::move_position`]),
-    /// with the walk as that manifest's check. A fold that folds past the
-    /// position's tip covered a WAL object that the session hasn't read, such
-    /// as another process's floor object, so the move drops the position
-    /// instead. A manifest at or below the boundary drops the position,
-    /// because a collection may have deleted the manifests above it, and so
-    /// does anything else that the walk finds. A move or a drop waits for a
-    /// publish that has the engine locked.
+    /// Checks the position (see [`WriterPosition::check`]), and applies
+    /// what the check found: it records a check that found the position's
+    /// manifest the newest, moves the position onto the newest manifest of
+    /// its writer epoch, as it moves onto the manifests this runtime
+    /// publishes (see [`HeadPositions::move_position`]), or drops the
+    /// position. A move or a drop waits for a publish that has the engine
+    /// locked.
     async fn check_writer_position(
         &self,
         namespace_id: &NamespaceId,
@@ -276,30 +265,20 @@ impl RuntimeCore {
         };
         let observed = self.observation();
         let namespace = self.namespace_store(namespace_id);
-        let mut held = position.basis().clone();
-        let newest = match namespace.check_newest(&mut held, observed.clone()).await? {
-            Checked::Newest => {
-                slot.record_check(&held);
-                return Ok(());
+        match position.check(&namespace, observed).await? {
+            PositionCheck::Newest(checked) => slot.record_check(&checked),
+            PositionCheck::MoveTo(newest) => {
+                positions.move_position(namespace_id, newest.clone()).await;
+                slot.record_check(&newest);
             }
-            Checked::Successor => {
-                namespace
-                    .same_epoch_manifests_above(&held, observed)
-                    .await?
+            PositionCheck::Drop => {
+                // The position becomes the cached head, which the check found
+                // out of date, so the head is dropped after it, and the next
+                // read loads the namespace by discovery.
+                positions.drop_position(namespace_id).await;
+                self.invalidate_namespace_read_cache(namespace_id);
             }
-            Checked::AtOrBelowBoundary => None,
-        };
-        let Some(newest) = newest else {
-            // The position becomes the cached head, which a successor or a
-            // manifest at or below the boundary makes out of date, so the head
-            // is dropped after it, and the next read loads the namespace by
-            // discovery.
-            positions.drop_position(namespace_id).await;
-            self.invalidate_namespace_read_cache(namespace_id);
-            return Ok(());
-        };
-        positions.move_position(namespace_id, newest.clone()).await;
-        slot.record_check(&newest);
+        }
         Ok(())
     }
 }

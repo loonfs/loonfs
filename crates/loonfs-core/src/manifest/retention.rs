@@ -11,7 +11,7 @@ use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::{GC_GRACE_WINDOW_MS, MAX_CONTENTION_ATTEMPTS};
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
-use crate::namespace::held::Checked;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::cache::MetadataSegmentCache;
 use crate::time::Observation;
@@ -210,7 +210,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let mut last_error = None;
         for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
             let observed = Observation::now(Arc::clone(&self.timer));
-            let mut anchor = self.load_live_read_anchor(observed.clone()).await?;
+            let anchor = self.load_live_read_anchor(observed.clone()).await?;
             let head = &anchor.read_state;
             let manifest_retention_floor_seq = anchor.current_manifest().retention_floor_seq();
             if head.retention_floor_seq >= target {
@@ -224,7 +224,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Ok(()) => {
                     let floored_head = head.after_wal_object(floor_object.envelope().payload());
                     if self
-                        .floor_object_is_live(&mut anchor, &floored_head, observed)
+                        .floor_object_is_live(anchor.held, &floored_head, observed)
                         .await?
                     {
                         return Ok(FloorObjectReport {
@@ -246,23 +246,20 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Returns whether the floor object that `floored_head` ends with is
-    /// live (see [`wal_no_is_unfolded`]), loading the newest manifest only
-    /// when the manifest of `anchor`, the discovery that the put was planned
-    /// from, isn't the newest.
+    /// live against the newest manifest (see [`wal_no_is_unfolded`]).
+    ///
+    /// The newest manifest is `planned`, the manifest that the put was
+    /// planned from, when a check finds `planned` the newest, and otherwise
+    /// the manifest loaded from the manifest boundary (see
+    /// [`Self::refresh_live`]). When the namespace is deleted by then, the
+    /// call returns `namespace_deleted`, as a fence's check does.
     async fn floor_object_is_live(
         &self,
-        anchor: &mut crate::namespace::read_anchor::NamespaceReadAnchor,
+        planned: Held<LoadedManifest>,
         floored_head: &crate::namespace::state::NamespaceReadState,
         observed: Observation,
     ) -> Result<bool> {
-        if self
-            .check_newest(&mut anchor.held, observed.clone())
-            .await?
-            == Checked::Newest
-        {
-            return Ok(true);
-        }
-        let newest = self.load_current_basis(observed).await?;
+        let newest = self.refresh_live(planned, observed).await?;
         Ok(wal_no_is_unfolded(
             floored_head.wal_no,
             newest.manifest().folded_wal_no(),

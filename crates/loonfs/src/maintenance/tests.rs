@@ -1040,6 +1040,108 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
     }
 }
 
+/// Checks that a retention advance whose floor object is put after another
+/// runtime's writer session deleted the namespace returns
+/// `namespace_deleted` from the floor object's check, and sends nothing after
+/// that check, because the check finds the tombstone, so no fold follows.
+#[tokio::test]
+async fn an_advance_whose_floor_object_follows_a_deletion_returns_namespace_deleted() {
+    use crate::{AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, RetentionTarget};
+    use loonfs_test_support::stores::{
+        request_lines, BlockingStore, KeyPredicate, OperationSelector, RecordingStore,
+    };
+
+    let directory = tempdir().expect("tempdir");
+    let actor = loonfs_test_support::test_actor();
+    let namespace = namespace_id("deleted-during-advance");
+    let writer_store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let writer = writer(Arc::clone(&writer_store), "writer").await;
+    writer
+        .create_namespace(&namespace, &actor)
+        .await
+        .expect("create the namespace");
+    for path in ["/a", "/b"] {
+        writer
+            .open_namespace(&namespace)
+            .expect("open the namespace")
+            .put_file(path, b"body", &actor)
+            .await
+            .expect("put a file");
+    }
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("writer"))
+        .fold_wal(&namespace)
+        .await
+        .expect("fold commits 1 and 2");
+    writer.drain().await.expect("the fold's compaction settles");
+    // The session commits a WAL tail above the planned manifest, and the
+    // deletion folds that tail before its tombstone. The handle keeps the
+    // session open until the deletion, so the deletion puts no fence.
+    let session = writer
+        .open_namespace(&namespace)
+        .expect("open the namespace");
+    session
+        .put_file("/c", b"body", &actor)
+        .await
+        .expect("put a file");
+    let planned = current_manifest_payload(writer_store.as_ref(), &namespace).await;
+
+    // The advancing runtime's floor object put waits while the writer
+    // session publishes the namespace's tombstone.
+    let store = Arc::new(RecordingStore::new(
+        BlockingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::prefix(loonfs_objectstore::keys::wal_prefix(&namespace)),
+            OperationSelector::PutCreateIfAbsent,
+        ),
+        KeyPredicate::any(),
+    ));
+    let advancing = maintenance_past_the_grace_window(store.clone()).await;
+    store.inner().block_next();
+    store.reset();
+    let (advanced, ()) = tokio::join!(
+        advancing.advance_retention_floor_with_options(
+            &namespace,
+            &AdvanceRetentionFloorOptions {
+                target: RetentionTarget::Seq(CommitSeq(1)),
+            },
+        ),
+        async {
+            store.inner().wait_until_blocked().await;
+            session
+                .delete()
+                .await
+                .expect("the writer session deletes the namespace");
+            store.inner().release();
+        }
+    );
+    let error = advanced.expect_err("the advance finds the tombstone");
+    assert_eq!(error.code(), ErrorCode::NamespaceDeleted, "{error:?}");
+
+    let tombstone = current_manifest_payload(writer_store.as_ref(), &namespace).await;
+    assert!(tombstone.status.is_deleted());
+    let manifest = |number: u64| format!("MetadataManifest {number:020}");
+    let lines = request_lines(&store.take());
+    let floor_object = format!("put {namespace} WalObject ");
+    let put = lines
+        .iter()
+        .position(|line| line.starts_with(&floor_object))
+        .unwrap_or_else(|| panic!("the floor object's put: {lines:?}"));
+    assert_eq!(
+        lines[put + 1..],
+        [
+            // The check after the put finds a manifest after the planned
+            // one, and loads the newest manifest, which is the tombstone.
+            format!("head {namespace} {}", manifest(planned.manifest_no.0 + 1)),
+            format!("get {namespace} Boundary"),
+            format!("list namespaces/{namespace}/manifests/"),
+            format!("get {namespace} {}", manifest(tombstone.manifest_no.0)),
+            format!("get {namespace} Boundary"),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn an_advance_past_the_manifests_floor_finds_a_floor_object_in_the_tail_when_it_publishes() {
     use crate::{AdvanceRetentionFloorOptions, CommitSeq, RetentionTarget};

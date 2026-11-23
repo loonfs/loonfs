@@ -15,8 +15,8 @@ use crate::{Consistency, CoreError, NamespaceId, SnapshotId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    project_anchor_tail, ActiveNamespaceCatalogEntry, Checked, Held, LoadedManifest,
-    NamespaceReadAnchor, ReadBasis, SnapshotReadBasis, VerifiedNamespaceCatalogEntry,
+    project_anchor_tail, ActiveNamespaceCatalogEntry, Held, LoadedManifest, NamespaceReadAnchor,
+    ReadBasis, SnapshotReadBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
@@ -155,8 +155,7 @@ impl RuntimeCore {
                             Phase::ValidationManifestProbe,
                             namespace_id
                         ))
-                        .await?
-                        == Checked::Newest);
+                        .await?);
             if current {
                 return Ok(head);
             }

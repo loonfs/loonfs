@@ -9,7 +9,7 @@ use crate::{Error, Result};
 use crate::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, NamespaceId, SharedObjectStore,
 };
-use loonfs_core::control::{ensure_namespace_live, Checked, Held, LoadedManifest};
+use loonfs_core::control::{Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::{MetadataCompactionCancellation, Phase};
 use loonfs_types::CompactorEpoch;
@@ -73,22 +73,6 @@ impl Maintenance {
             None => engine,
         };
         engine
-    }
-
-    /// Loads the current manifest of a namespace that's active, without
-    /// the WAL tail above it, as a basis that a compaction unit can plan and
-    /// publish from.
-    pub(super) async fn load_live_basis(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<Held<LoadedManifest>> {
-        let basis = self
-            .core
-            .namespace_store(namespace_id)
-            .load_current_basis(self.core.observation())
-            .await?;
-        ensure_namespace_live(namespace_id, basis.manifest().payload().status)?;
-        Ok(basis)
     }
 
     /// Returns the manifest of this runtime's writer position as a basis,
@@ -284,6 +268,7 @@ impl Maintenance {
         claimed: Option<CompactorEpoch>,
         observed: Option<Held<LoadedManifest>>,
     ) -> Result<ControlFlow<MetadataCompactionOutcome, Option<Held<LoadedManifest>>>> {
+        let namespace = self.core.namespace_store(namespace_id);
         let (basis, from_position) = match observed {
             Some(basis) => (basis, false),
             None => match self.load_position_basis(namespace_id).await? {
@@ -293,7 +278,7 @@ impl Maintenance {
                 // here first would load the manifest twice.
                 None if claimed.is_some() => return Ok(ControlFlow::Continue(None)),
                 None => {
-                    let current = self.load_live_basis(namespace_id).await?;
+                    let current = namespace.load_live_basis(self.core.observation()).await?;
                     return Ok(self.screen(namespace_id, claimed, current));
                 }
             },
@@ -308,19 +293,12 @@ impl Maintenance {
                 .await?;
             match self.load_position_basis(namespace_id).await? {
                 Some(basis) => basis,
-                None => self.load_live_basis(namespace_id).await?,
+                None => namespace.load_live_basis(self.core.observation()).await?,
             }
         } else {
-            let mut basis = basis;
-            let checked = self
-                .core
-                .namespace_store(namespace_id)
-                .check_newest(&mut basis, self.core.observation())
-                .await?;
-            if checked == Checked::Newest {
-                return Ok(ControlFlow::Continue(Some(basis)));
-            }
-            self.load_live_basis(namespace_id).await?
+            namespace
+                .refresh_live(basis, self.core.observation())
+                .await?
         };
         Ok(self.screen(namespace_id, claimed, basis))
     }

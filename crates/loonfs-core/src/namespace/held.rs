@@ -5,7 +5,7 @@
 use crate::error::Result;
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::boundary::KeptBoundary;
-use crate::namespace::control::LoadedManifest;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::time::Observation;
@@ -75,7 +75,7 @@ impl HeldManifestForm for ReadBasis {
 /// What a check of a held manifest found (see
 /// [`NamespaceStore::check_newest`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Checked {
+pub(crate) enum Checked {
     /// No manifest follows the held one, and the held one is above the
     /// manifest boundary.
     Newest,
@@ -215,7 +215,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// view's WAL probe. `held` keeps the boundary that the check read, and
     /// when the manifest is the newest, it takes `observed` as its check time
     /// if `observed` is younger than its own.
-    pub async fn check_newest<M: HeldManifestForm>(
+    pub(crate) async fn check_newest<M: HeldManifestForm>(
         &self,
         held: &mut Held<M>,
         observed: Observation,
@@ -235,6 +235,30 @@ impl<S: ObjectStore> NamespaceStore<S> {
             held.checked = observed;
         }
         Ok(Checked::Newest)
+    }
+
+    /// Returns `basis` when a check finds its manifest the newest (format
+    /// spec, "Checking an in-memory manifest"), and otherwise the namespace's
+    /// current manifest from the manifest boundary (see
+    /// [`Self::load_live_basis`]).
+    ///
+    /// Either way, the call returns `namespace_deleted` when the manifest
+    /// that it would return is a tombstone, and `namespace_not_found` when
+    /// that manifest is initializing, so every manifest it returns is active.
+    /// `observed` is an observation that the caller read before the call.
+    /// When the check finds `basis` the newest, `observed` becomes the check
+    /// time of `basis`, and a manifest loaded from the boundary is checked at
+    /// `observed` too.
+    pub async fn refresh_live(
+        &self,
+        mut basis: Held<LoadedManifest>,
+        observed: Observation,
+    ) -> Result<Held<LoadedManifest>> {
+        if self.check_newest(&mut basis, observed.clone()).await? != Checked::Newest {
+            return self.load_live_basis(observed).await;
+        }
+        ensure_namespace_live(&self.namespace_id, basis.manifest().payload().status)?;
+        Ok(basis)
     }
 }
 

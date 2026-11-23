@@ -252,7 +252,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// move, when it finds more than [`MAX_POSITION_MOVES`] manifests, and
     /// when the newest manifest is at or below the boundary, because a
     /// collection may have deleted the manifests after it.
-    pub async fn same_epoch_manifests_above(
+    pub(crate) async fn same_epoch_manifests_above(
         &self,
         held: &Held<ReadBasis>,
         observed: Observation,
