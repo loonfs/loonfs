@@ -34,6 +34,7 @@ use loonfs_types::{
     NamespaceId,
 };
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub use net_change::MERGE_COMMITS_PAGE_BYTES;
@@ -72,8 +73,9 @@ pub struct MergeRequest {
 /// merge's reservation to the estimate. Admission checks the merge's commit.
 #[derive(Clone)]
 pub struct MergeAllowance {
-    /// The allowance, in bytes.
-    pub max_bytes: usize,
+    /// The allowance, in bytes. A host whose allowance is zero has merges
+    /// turned off and doesn't plan a merge, so the allowance can't be zero.
+    pub max_bytes: NonZeroUsize,
     /// The multiple of a merge's planned WAL bytes that estimates the peak.
     pub peak_per_planned_byte: usize,
     /// The merge's reservation of the allowance.
@@ -112,7 +114,7 @@ impl fmt::Debug for MergeAllowance {
 impl MergeAllowance {
     /// Returns an allowance of `max_bytes` that one merge shares with no
     /// other merge, for a caller without a publisher.
-    pub fn unshared(max_bytes: usize, peak_per_planned_byte: usize) -> Self {
+    pub fn unshared(max_bytes: NonZeroUsize, peak_per_planned_byte: usize) -> Self {
         Self {
             max_bytes,
             peak_per_planned_byte,
@@ -130,8 +132,7 @@ impl MergeAllowance {
     /// bytes and the working bytes, and an estimate above the allowance
     /// returns `merge_too_large`. Otherwise the check grows the reservation to
     /// the estimate, and returns `server_busy` when other merges'
-    /// reservations leave no room for the growth. An allowance of zero turns
-    /// merges off, so it refuses every merge.
+    /// reservations leave no room for the growth.
     pub fn check(&self, planned_bytes: usize, working_bytes: usize) -> Result<()> {
         let document_bytes = planned_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
         if document_bytes > MAX_WAL_OBJECT_BYTES {
@@ -145,11 +146,11 @@ impl MergeAllowance {
         let estimated_bytes = planned_bytes
             .saturating_mul(self.peak_per_planned_byte)
             .max(working_bytes);
-        if self.max_bytes == 0 || estimated_bytes > self.max_bytes {
+        if estimated_bytes > self.max_bytes.get() {
             return Err(CoreError::MergeTooLarge {
                 bound: MergeBound::MergeAllowance,
                 estimated_bytes,
-                max_bytes: self.max_bytes,
+                max_bytes: self.max_bytes.get(),
                 split_at_seq: None,
             });
         }

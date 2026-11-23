@@ -24,7 +24,7 @@ use loonfs_types::{
     LIMIT_NAMESPACE_DEFAULT_RETENTION_WINDOW_MS, MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::{Arc, OnceLock, Weak};
 
 mod read_heads;
@@ -34,6 +34,26 @@ mod read_retry;
 pub(crate) use read_heads::HeadConfirmation;
 pub(crate) use read_position::{HeadPositions, ReadPositionSlot};
 pub(crate) use read_retry::{classify_read_result, ensure_source_current};
+
+/// Proof that the runtime's merge allowance isn't zero, so merges are on,
+/// with the allowance in bytes.
+///
+/// Only [`RuntimeCore::merges_enabled`] returns one. Reserving a
+/// merge's share of the allowance takes the proof, so no merge is planned,
+/// reserved, or published while merges are off. The merge planner and the
+/// admission check read the allowance from the proof, and the execution
+/// budget's totals read the same number from the budget.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MergesEnabled {
+    max_merge_bytes: NonZeroUsize,
+}
+
+impl MergesEnabled {
+    /// Returns the merge allowance, in bytes.
+    pub(crate) fn max_merge_bytes(self) -> NonZeroUsize {
+        self.max_merge_bytes
+    }
+}
 
 /// The object-store client, settings, budget, clocks, caches, and metrics
 /// that read-only and writable runtimes share.
@@ -153,18 +173,19 @@ impl RuntimeCore {
         &self.inner.execution_budget
     }
 
-    /// Returns `not_supported` for `filesystem.merges` when the execution
-    /// budget's merge allowance is zero, which turns merges off. A merge, a
-    /// rebase, and the next-range query check this before they read a
-    /// namespace.
-    pub(crate) fn ensure_merges_enabled(&self) -> crate::Result<()> {
-        if self.inner.execution_budget.max_merge_bytes() == 0 {
-            return Err(crate::Error::NotSupported {
+    /// Returns the proof that merges are on, with the merge allowance, or
+    /// `not_supported` for `filesystem.merges` when the execution budget's
+    /// merge allowance is zero, which turns merges off. A merge, a replay,
+    /// the next-range query, the fork that starts a rebase, and the commit of
+    /// a merge candidate call this before they read a namespace.
+    pub(crate) fn merges_enabled(&self) -> crate::Result<MergesEnabled> {
+        match NonZeroUsize::new(self.inner.execution_budget.max_merge_bytes()) {
+            Some(max_merge_bytes) => Ok(MergesEnabled { max_merge_bytes }),
+            None => Err(crate::Error::NotSupported {
                 feature: FEATURE_MERGES,
                 message: "merges are disabled".to_owned(),
-            });
+            }),
         }
-        Ok(())
     }
 
     /// Waits for a read permit from the execution budget. Every public read

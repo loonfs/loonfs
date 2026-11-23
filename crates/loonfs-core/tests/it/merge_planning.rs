@@ -47,7 +47,7 @@ impl Family {
             fork: namespace_id("main-fork"),
             writer: default_writer(),
             subject,
-            allowance: MergeAllowance::unshared(usize::MAX, 3),
+            allowance: MergeAllowance::unshared(std::num::NonZeroUsize::MAX, 3),
         }
     }
 
@@ -1394,7 +1394,8 @@ async fn a_merge_over_the_allowance_is_too_large_before_its_conflicts() {
     let mut family = Family::new().await;
     // A file create plans about 4,850 bytes, which the allowance is charged
     // three times, so 64 KiB admits only a few creates.
-    family.allowance = MergeAllowance::unshared(64 * 1024, 3);
+    family.allowance =
+        MergeAllowance::unshared(std::num::NonZeroUsize::new(64 * 1024).expect("nonzero"), 3);
     for index in 0..16 {
         family
             .fork()
@@ -1440,7 +1441,8 @@ async fn a_first_commit_over_the_allowance_has_no_split_hint() {
     let mut family = Family::new().await;
     // A directory's attribute update bounds about 66 KB, and the allowance is
     // charged three times that.
-    family.allowance = MergeAllowance::unshared(64 * 1024, 3);
+    family.allowance =
+        MergeAllowance::unshared(std::num::NonZeroUsize::new(64 * 1024).expect("nonzero"), 3);
     family
         .commit_all(
             &family.fork,
@@ -1499,7 +1501,8 @@ async fn a_merge_over_the_allowance_by_its_temporary_move_has_a_split_hint() {
         .and_then(MergePlan::into_candidate)
         .expect("the merge")
         .wal_record_bytes_upper_bound();
-    family.allowance.max_bytes = planned_bytes - 1;
+    family.allowance.max_bytes =
+        std::num::NonZeroUsize::new(planned_bytes - 1).expect("a nonzero allowance");
     let error = family.plan(None).await.expect_err("too large");
     assert_matches!(
         error,
@@ -1581,7 +1584,8 @@ async fn the_split_hint_measures_a_range_as_the_planner_plans_it() {
     // The first of the hint's probes ends at the third commit, and a range
     // that ends later creates another file.
     for (max_bytes, fits) in [(planned_bytes, true), (planned_bytes - 1, false)] {
-        family.allowance.max_bytes = max_bytes;
+        family.allowance.max_bytes =
+            std::num::NonZeroUsize::new(max_bytes).expect("a nonzero allowance");
         let error = family.plan(None).await.expect_err("too large");
         let split_at_seq = error.details().and_then(|details| details.split_at_seq);
         assert_matches!(

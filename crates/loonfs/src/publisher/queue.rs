@@ -3,8 +3,10 @@
 //! it.
 
 use super::admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
+use super::registry::MergeReservation;
 use super::{NamespacePublisher, NamespacePublisherState};
 use crate::publish::CommitCandidate;
+use crate::runtime_core::MergesEnabled;
 use crate::trace::phase_event;
 use crate::{CommitSeq, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Result};
 use loonfs_core::commit::CommitFingerprint;
@@ -180,32 +182,39 @@ impl NamespacePublisher {
             .acquire_candidate(&self.namespace_id, candidate)
     }
 
-    /// Reserves a merge's share of the merge allowance, before the merge is
-    /// planned, so that the allowance covers the merge's planning and its
-    /// publication.
-    pub(crate) fn reserve_merge(&self) -> std::result::Result<Arc<AdmissionPermit>, CoreError> {
+    /// Reserves a merge's share of the merge allowance in `merges`, before
+    /// the merge is planned, so that the allowance covers the merge's
+    /// planning and its publication.
+    pub(crate) fn reserve_merge(
+        &self,
+        merges: MergesEnabled,
+    ) -> std::result::Result<MergeReservation, CoreError> {
         drop(self.admitted_session(&self.lock_state())?);
-        self.context.admission.reserve_merge(&self.namespace_id)
+        let permit = self
+            .context
+            .admission
+            .reserve_merge(&self.namespace_id, merges.max_merge_bytes())?;
+        Ok(MergeReservation { permit, merges })
     }
 
-    /// Submits a merge under the reservation that `permit` keeps, and checks
-    /// the merge against one WAL object and the merge allowance first.
+    /// Submits a merge under `reservation`, and checks the merge against one
+    /// WAL object and the merge allowance first.
     ///
     /// Once the merge enters the queue, cancelling the caller only drops
     /// result delivery; the worker still owns and publishes the merge.
     pub(crate) async fn submit_merge(
         &self,
         candidate: CommitCandidate,
-        permit: &Arc<AdmissionPermit>,
+        reservation: &MergeReservation,
     ) -> Result<Commit> {
         drop(self.admitted_session(&self.lock_state())?);
         let candidate = PreparedCandidate::new(candidate);
         PublicationAdmission::validate_merge(
             &candidate.candidate,
             candidate.wal_record_bytes_upper_bound,
-            permit,
+            &reservation.allowance(),
         )?;
-        self.submit_admitted(candidate, permit).await
+        self.submit_admitted(candidate, &reservation.permit).await
     }
 
     async fn submit_admitted(

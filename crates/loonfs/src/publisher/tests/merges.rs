@@ -34,6 +34,17 @@ fn merge_through(commit_id: &str, name: &str, after_seq: u64, through_seq: u64) 
     )
 }
 
+/// Submits a merge under a reservation of the merge allowance, as a merge
+/// route does.
+async fn submit_merge(
+    publisher: &NamespacePublisher,
+    candidate: CommitCandidate,
+) -> crate::Result<Commit> {
+    let merges = publisher.context.runtime_core.merges_enabled()?;
+    let reservation = publisher.reserve_merge(merges)?;
+    publisher.submit_merge(candidate, &reservation).await
+}
+
 /// Checks that a merge opens a batch of its own, that nothing joins it, and
 /// that its WAL object contains the merge alone.
 #[tokio::test]
@@ -66,7 +77,12 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
         CommitCandidate::new(create_directory_request("after-1", "after-1")),
         CommitCandidate::new(create_directory_request("after-2", "after-2")),
     ] {
-        responses.push(try_admit_candidate(&publisher, &namespace_id, candidate).expect("admit"));
+        let admitted = if candidate.is_merge() {
+            try_admit_merge(&publisher, &namespace_id, candidate)
+        } else {
+            try_admit_candidate(&publisher, &namespace_id, candidate)
+        };
+        responses.push(admitted.expect("admit"));
     }
     let batches = publisher_state(&publisher)
         .queue
@@ -164,9 +180,9 @@ async fn merges_that_fit_the_allowance_are_admitted_together() {
         ),
         Err(CoreError::CommitQueueFull)
     );
-    let first = try_admit_candidate(&publisher, &namespace_id, merge("merge", "merged"))
+    let first = try_admit_merge(&publisher, &namespace_id, merge("merge", "merged"))
         .expect("admit a merge above the namespace allowance and the byte total");
-    let second = try_admit_candidate(
+    let second = try_admit_merge(
         &publisher,
         &namespace_id,
         merge_through("later", "second", 7, 9),
@@ -181,7 +197,7 @@ async fn merges_that_fit_the_allowance_are_admitted_together() {
 
     let (smaller, _) = publisher_with_allowance(merge_peak - 1);
     assert_matches!(
-        try_admit_candidate(&smaller, &namespace_id, merge("merge", "merged")),
+        try_admit_merge(&smaller, &namespace_id, merge("merge", "merged")),
         Err(CoreError::MergeTooLarge {
             bound: loonfs_core::MergeBound::MergeAllowance,
             estimated_bytes,
@@ -204,19 +220,17 @@ async fn a_retry_of_a_merge_in_flight_returns_the_merge() {
     create_namespace(&runtime, &namespace_id).await;
     let publisher = standalone_publisher_with(&namespace_id, &runtime, TestCore::unpaced());
 
-    let mut first = Box::pin(publisher.submit(merge("merge", "merged")));
+    let mut first = Box::pin(submit_merge(&publisher, merge("merge", "merged")));
     assert!(
         futures::poll!(first.as_mut()).is_pending(),
         "the merge is admitted"
     );
-    let retry = publisher
-        .submit(merge("merge", "merged"))
+    let retry = submit_merge(&publisher, merge("merge", "merged"))
         .await
         .expect("the retry");
     let first = first.await.expect("the merge");
     assert_eq!(retry, first);
-    let error = publisher
-        .submit(merge("other", "merged"))
+    let error = submit_merge(&publisher, merge("other", "merged"))
         .await
         .expect_err("the range was applied");
     assert_eq!(error.code(), crate::ErrorCode::MergeRangeConflict);

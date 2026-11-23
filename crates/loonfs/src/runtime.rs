@@ -225,7 +225,7 @@ impl LoonFs<Writable> {
     /// prepares it, and with merges when its merge allowance isn't zero.
     pub fn capabilities(&self) -> CapabilityDocument {
         let mut capabilities = self.core.capabilities();
-        if self.execution_budget().max_merge_bytes() != 0 {
+        if self.core.merges_enabled().is_ok() {
             capabilities
                 .features
                 .insert(FEATURE_MERGES.to_owned(), true);

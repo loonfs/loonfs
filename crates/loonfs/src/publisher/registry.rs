@@ -4,7 +4,7 @@
 use super::admission::{AdmissionPermit, PublicationAdmission};
 use super::{lock_state, NamespacePublisher, NamespaceTurns, PublisherContext};
 use crate::publish::CommitCandidate;
-use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
+use crate::runtime_core::{HeadPositions, MergesEnabled, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result,
@@ -113,14 +113,18 @@ pub(crate) struct NamespaceSession {
 /// A merge's reservation of the merge allowance, which the merge keeps from
 /// before its plan until its commit settles, so the allowance covers the
 /// merge's planning and its publication. The reservation grows while the
-/// merge plans and doesn't shrink.
-pub(crate) struct MergeReservation(Arc<AdmissionPermit>);
+/// merge plans and doesn't shrink. The reservation keeps the proof that
+/// merges are on, which includes the allowance.
+pub(crate) struct MergeReservation {
+    pub(super) permit: Arc<AdmissionPermit>,
+    pub(super) merges: MergesEnabled,
+}
 
 impl MergeReservation {
     /// Returns the merge allowance with this reservation, which the merge
     /// planner checks and grows.
     pub(crate) fn allowance(&self) -> loonfs_core::MergeAllowance {
-        self.0.merge_allowance()
+        self.permit.merge_allowance(self.merges.max_merge_bytes())
     }
 }
 
@@ -141,12 +145,12 @@ impl NamespaceSession {
         self.publisher.submit_candidate(candidate).await
     }
 
-    /// Reserves a merge's share of the merge allowance, before the merge is
-    /// planned. When the reservations of other merges, into any namespace
-    /// that shares the execution budget, leave no room, the merge gets
-    /// `server_busy`.
-    pub(crate) fn reserve_merge(&self) -> Result<MergeReservation> {
-        Ok(MergeReservation(self.publisher.reserve_merge()?))
+    /// Reserves a merge's share of the merge allowance in `merges`, before
+    /// the merge is planned. When the reservations of other merges, into
+    /// any namespace that shares the execution budget, leave no room, the
+    /// merge gets `server_busy`.
+    pub(crate) fn reserve_merge(&self, merges: MergesEnabled) -> Result<MergeReservation> {
+        Ok(self.publisher.reserve_merge(merges)?)
     }
 
     /// Submits a merge under `reservation`. Admitted work continues if the
@@ -156,7 +160,7 @@ impl NamespaceSession {
         candidate: CommitCandidate,
         reservation: &MergeReservation,
     ) -> Result<Commit> {
-        self.publisher.submit_merge(candidate, &reservation.0).await
+        self.publisher.submit_merge(candidate, reservation).await
     }
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations

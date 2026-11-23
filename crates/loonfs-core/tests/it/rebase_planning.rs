@@ -181,7 +181,7 @@ impl Family {
                 &self.snapshot_context().await,
                 &request,
                 self.writer.now_ms,
-                MergeAllowance::unshared(usize::MAX, 3),
+                MergeAllowance::unshared(std::num::NonZeroUsize::MAX, 3),
             )
             .await?;
         let conflicts = plan.conflicts().to_vec();
@@ -227,7 +227,7 @@ impl Family {
                 &read_context(&self.store, source).await,
                 &request,
                 self.writer.now_ms,
-                MergeAllowance::unshared(usize::MAX, 3),
+                MergeAllowance::unshared(std::num::NonZeroUsize::MAX, 3),
             )
             .await
             .expect("plan the merge")
