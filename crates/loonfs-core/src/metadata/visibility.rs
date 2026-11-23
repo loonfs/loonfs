@@ -525,18 +525,18 @@ where
         }));
     }
 
-    let mut last: Option<DirentryBindingRecord> = None;
-    let mut current_absolute_path = AbsolutePath::root();
+    let root_path = AbsolutePath::root();
+    let mut last: Option<ResolvedVisiblePath> = None;
 
     let components = absolute_path.components();
     for (depth, component) in components.iter().enumerate() {
-        let (parent_inode_id, parent_kind) = match &last {
-            None => (root_inode_id, InodeKind::Directory),
-            Some(binding) => (binding.child_inode_id, binding.child_kind),
+        let (parent_path, parent_inode_id, parent_kind) = match &last {
+            None => (&root_path, root_inode_id, InodeKind::Directory),
+            Some(parent) => (&parent.absolute_path, parent.inode_id, parent.inode_kind),
         };
         if parent_kind != InodeKind::Directory {
             return Err(VisiblePathError::PathComponentNotDirectory {
-                absolute_path: current_absolute_path.to_string(),
+                absolute_path: parent_path.to_string(),
                 inode_id: parent_inode_id,
                 inode_kind: parent_kind,
             }
@@ -554,7 +554,7 @@ where
         let Some(direntry) = direntry else {
             return Ok(VisiblePathWalk::Missing(MissingPath {
                 deepest_existing: parent_inode_id,
-                deepest_path: current_absolute_path,
+                deepest_path: parent_path.clone(),
                 missing: components[depth..]
                     .iter()
                     .map(|component| component.to_display_name())
@@ -562,30 +562,12 @@ where
             }));
         };
 
-        current_absolute_path = current_absolute_path.join(
-            direntry
-                .display_name()
-                .expect("visible binding should be bound"),
-        );
-        last = Some(direntry);
+        last = Some(ResolvedVisiblePath::child_of(parent_path, &direntry));
     }
 
-    let last = last.expect("a non-root path should have a component");
-    let display_name = last
-        .display_name()
-        .expect("visible binding should be bound")
-        .to_string();
-    let binding_version = Some(last.bind_position);
-    Ok(VisiblePathWalk::Found(ResolvedVisiblePath {
-        absolute_path: current_absolute_path,
-        inode_id: last.child_inode_id,
-        inode_kind: last.child_kind,
-        created_by: last.child_created_by,
-        created_at_ms: last.child_created_at_ms,
-        parent_inode_id: Some(last.parent_inode_id),
-        display_name,
-        binding_version,
-    }))
+    Ok(VisiblePathWalk::Found(
+        last.expect("a non-root path should have a component"),
+    ))
 }
 
 /// Drives a visibility future built over in-memory reads to completion

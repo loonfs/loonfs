@@ -27,19 +27,16 @@ pub struct ResolvedVisiblePath {
 }
 
 impl ResolvedVisiblePath {
-    /// Returns the child that `binding` binds under `directory`, built from
-    /// the binding without a read.
+    /// Returns the child that `binding` binds under the directory at
+    /// `directory_path`, built from the binding without a read.
     ///
     /// The caller already found the child visible.
-    pub(crate) fn child_of(
-        directory: &ResolvedVisiblePath,
-        binding: &DirentryBindingRecord,
-    ) -> Self {
+    pub(crate) fn child_of(directory_path: &AbsolutePath, binding: &DirentryBindingRecord) -> Self {
         let display_name = binding
             .display_name()
             .expect("visible binding should be bound");
         Self {
-            absolute_path: directory.absolute_path.join(display_name),
+            absolute_path: directory_path.join(display_name),
             inode_id: binding.child_inode_id,
             inode_kind: binding.child_kind,
             created_by: binding.child_created_by.clone(),

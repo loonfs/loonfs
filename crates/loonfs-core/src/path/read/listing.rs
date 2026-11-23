@@ -584,7 +584,10 @@ impl ListedChild {
     /// Resolves a scanned child of `directory` to its path.
     pub(super) fn new(directory: &ResolvedVisiblePath, scanned: ScannedChild) -> Self {
         Self {
-            resolved: ResolvedVisiblePath::child_of(directory, &scanned.child.binding),
+            resolved: ResolvedVisiblePath::child_of(
+                &directory.absolute_path,
+                &scanned.child.binding,
+            ),
             binding: scanned.child.binding,
             readable: scanned.readable,
         }
