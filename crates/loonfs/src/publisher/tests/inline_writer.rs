@@ -1736,23 +1736,44 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    for options in [
-        InlineContentPolicy {
-            inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES + 1),
-            ..policy()
-        },
-        InlineContentPolicy {
-            inline_content_wal_object_budget_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES + 1,
-            ..policy()
-        },
-        InlineContentPolicy {
-            inline_content_wal_object_budget_bytes: 0,
-            ..policy()
-        },
-        InlineContentPolicy {
-            inline_content_tail_limit_bytes: 0,
-            ..policy()
-        },
+    for (options, message) in [
+        (
+            InlineContentPolicy {
+                inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES + 1),
+                ..policy()
+            },
+            format!(
+                "`inline_content.inline_content_threshold_bytes` must not exceed \
+                 {MAX_WAL_INLINE_CONTENT_BYTES}"
+            ),
+        ),
+        (
+            InlineContentPolicy {
+                inline_content_wal_object_budget_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES + 1,
+                ..policy()
+            },
+            format!(
+                "`inline_content.inline_content_wal_object_budget_bytes` must be between 1 and \
+                 {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"
+            ),
+        ),
+        (
+            InlineContentPolicy {
+                inline_content_wal_object_budget_bytes: 0,
+                ..policy()
+            },
+            format!(
+                "`inline_content.inline_content_wal_object_budget_bytes` must be between 1 and \
+                 {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"
+            ),
+        ),
+        (
+            InlineContentPolicy {
+                inline_content_tail_limit_bytes: 0,
+                ..policy()
+            },
+            "`inline_content.inline_content_tail_limit_bytes` must be greater than zero".to_owned(),
+        ),
     ] {
         let error = crate::LoonFs::builder_with_store(store.clone(), crate::Context::Service)
             .writer_id(loonfs_test_support::ids::writer_id("writer"))
@@ -1764,7 +1785,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             .await
             .err()
             .expect("invalid policy");
-        assert_matches!(error, Error::Config(_));
+        assert_matches!(&error, Error::Config(actual) if *actual == message);
         assert!(store.snapshot().is_empty());
     }
     crate::LoonFs::builder_with_store(store, crate::Context::Service)

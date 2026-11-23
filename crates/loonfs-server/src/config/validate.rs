@@ -5,8 +5,6 @@
 use super::memory::read_cgroup_memory_limit;
 use super::{AuthConfig, MemorySizing, ServerConfig, TransportConfig};
 use crate::{Result, ServerError};
-use loonfs::GC_GRACE_WINDOW_MS;
-use loonfs::READ_REVALIDATION_BOUND_MS;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_http::AuthPolicy;
 use loonfs_types::config::{non_blank, validate_non_empty, ConfigFieldError};
@@ -101,31 +99,10 @@ impl ServerConfig {
                 }));
             }
         }
-        for (field, interval_ms) in [
-            (
-                "manifest_revalidation_interval_ms",
-                self.manifest_revalidation_interval_ms,
-            ),
-            ("max_staleness_ms", self.max_staleness_ms),
-        ] {
-            if interval_ms.is_some_and(|interval_ms| interval_ms > READ_REVALIDATION_BOUND_MS) {
-                return Err(ServerError::Config(ConfigFieldError::Invalid {
-                    field,
-                    reason: format!(
-                        "must not exceed {READ_REVALIDATION_BOUND_MS}, the revalidation bound"
-                    ),
-                }));
-            }
-        }
-        if self
-            .retention_window_ms
-            .is_some_and(|window_ms| window_ms.get() < GC_GRACE_WINDOW_MS)
-        {
-            return Err(ServerError::Config(ConfigFieldError::Invalid {
-                field: "retention_window_ms",
-                reason: format!("must be at least {GC_GRACE_WINDOW_MS}, the grace window"),
-            }));
-        }
+        // Each setting that the runtime checks has the same path in the
+        // server's config as in the runtime's, so the runtime's field is the
+        // field that the server reports.
+        self.runtime_config().validate()?;
         let invalid_grep = |reason: String| {
             ServerError::Config(ConfigFieldError::Invalid {
                 field: "grep",
@@ -146,12 +123,6 @@ impl ServerConfig {
             validate_non_empty("metadata_cache.ssd.directory", &ssd.directory)?;
         }
         self.store.validate()?;
-        self.runtime_config().validate().map_err(|error| {
-            ServerError::Config(ConfigFieldError::Invalid {
-                field: "runtime",
-                reason: error.to_string(),
-            })
-        })?;
         let maintenance_writer_id = WriterId::parse(format!("{}-maintenance", self.writer_id))
             .map_err(|error| {
                 ServerError::Config(ConfigFieldError::Invalid {

@@ -4,12 +4,11 @@
 use crate::common::{data_wal_put_for, expect_code, writer_epoch};
 use loonfs::test_support::writer;
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, NamespaceSessionStatus, RuntimeConfig,
-    SharedObjectStore, Writable,
+    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, NamespaceSessionStatus,
+    RetentionWindow, RuntimeConfig, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, RecordingStore};
-use std::num::NonZeroU64;
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
@@ -25,9 +24,9 @@ async fn a_namespace_created_without_a_window_has_the_runtimes_default_window() 
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
-    let default_window_ms = NonZeroU64::new(30 * 86_400_000);
-    let own_window_ms = NonZeroU64::new(86_400_000);
-    let writer = LoonFs::builder_with_store(store.clone(), loonfs::Context::Service)
+    let default_window_ms = RetentionWindow::new(30 * 86_400_000).ok();
+    let own_window_ms = RetentionWindow::new(86_400_000).ok();
+    let writer = LoonFs::builder_with_store(store, loonfs::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("default-window"))
         .config(RuntimeConfig {
             default_retention_window_ms: default_window_ms,
@@ -60,7 +59,7 @@ async fn a_namespace_created_without_a_window_has_the_runtimes_default_window() 
             .expect("namespace metadata");
         assert_eq!(
             metadata.retention_window_ms,
-            expected.map(NonZeroU64::get),
+            expected.map(RetentionWindow::get),
             "{name}"
         );
     }
@@ -70,23 +69,17 @@ async fn a_namespace_created_without_a_window_has_the_runtimes_default_window() 
             .limits
             .get(loonfs_types::LIMIT_NAMESPACE_DEFAULT_RETENTION_WINDOW_MS)
             .copied(),
-        default_window_ms.map(NonZeroU64::get),
+        default_window_ms.map(RetentionWindow::get),
         "the runtime advertises the window that a namespace created without one receives"
     );
 
-    let short = LoonFs::builder_with_store(store, loonfs::Context::Service)
-        .writer_id(loonfs_test_support::ids::writer_id("short-window"))
-        .config(RuntimeConfig {
-            default_retention_window_ms: NonZeroU64::new(loonfs::GC_GRACE_WINDOW_MS - 1),
-            ..RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .err()
-        .expect("a default window shorter than the grace window fails the build");
+    let short = serde_json::from_value::<RuntimeConfig>(serde_json::json!({
+        "default_retention_window_ms": loonfs::GC_GRACE_WINDOW_MS - 1
+    }))
+    .expect_err("a default window shorter than the grace window doesn't decode");
     assert!(
-        matches!(&short, loonfs::Error::Config(message) if message.contains("default_retention_window_ms")),
-        "{short:?}"
+        short.to_string().contains("shorter than the grace window"),
+        "{short}"
     );
 }
 

@@ -7,13 +7,12 @@ use crate::{Client, ClientError, Result};
 use loonfs_types::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, GcRequest, GcResponse,
     ListSnapshotRecordsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PoolGcResponse, PoolId,
+    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PoolGcResponse, PoolId, RetentionWindow,
     RunMaintenanceJobRequest, RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest,
     RunPoolMaintenanceJobResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
     SnapshotId, SnapshotRecord,
 };
 use loonfs_types::{GrepIndex, ProbeStoreRequest, ProbeStoreResponse};
-use std::num::NonZeroU64;
 
 /// A pager over existing snapshots.
 pub type SnapshotRecordsPager = Pager<ListSnapshotRecordsResponse, ClientError>;
@@ -227,7 +226,7 @@ impl Client {
     pub async fn set_retention_window(
         &self,
         namespace_id: &NamespaceId,
-        retention_window_ms: Option<NonZeroU64>,
+        retention_window_ms: Option<RetentionWindow>,
     ) -> Result<SetRetentionWindowResponse> {
         let response = self
             .run_maintenance_job(

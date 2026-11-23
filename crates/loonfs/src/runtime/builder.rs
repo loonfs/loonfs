@@ -13,6 +13,7 @@ use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::MetadataRunPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
+use loonfs_types::config::ConfigFieldError;
 use loonfs_types::{Context, WriterId};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -299,7 +300,12 @@ impl CoreConfig {
                     .to_owned(),
             ));
         }
-        self.config.validate()?;
+        self.config.validate().map_err(|error| {
+            Error::Config(match error {
+                ConfigFieldError::Invalid { field, reason } => format!("`{field}` {reason}"),
+                other => other.to_string(),
+            })
+        })?;
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = config.kind();

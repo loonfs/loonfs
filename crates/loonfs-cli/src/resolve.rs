@@ -14,7 +14,10 @@ use loonfs_client::Client;
 use loonfs_grep::{
     GrepBlockCache, GrepService, GrepStepBudget, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
-use loonfs_types::{ActorId, Context, NamespaceId, PrincipalId, PrincipalSet, SecretString};
+use loonfs_types::{
+    ActorId, Context, NamespaceId, PrincipalId, PrincipalSet, RetentionWindow, SecretString,
+};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 pub(crate) fn resolve_namespace(
@@ -100,6 +103,21 @@ fn named_cli_input_error(name: &str, message: String) -> CliError {
 /// `invalid_request` code in both embedded and remote modes.
 pub(crate) fn parse_namespace_id(namespace: &str) -> Result<NamespaceId> {
     NamespaceId::parse(namespace).map_err(|error| CliError::invalid_request(error.to_string()))
+}
+
+/// Builds the retention window of `--retention-window-ms` after argument
+/// parsing. A window shorter than the grace window uses the shared
+/// `invalid_request` code in both embedded and remote modes.
+pub(crate) fn parse_retention_window(
+    window_ms: Option<NonZeroU64>,
+) -> Result<Option<RetentionWindow>> {
+    window_ms
+        .map(|window_ms| {
+            RetentionWindow::new(window_ms.get()).map_err(|error| {
+                CliError::invalid_request(error.to_string()).with_param("--retention-window-ms")
+            })
+        })
+        .transpose()
 }
 
 fn default_writer_id() -> String {

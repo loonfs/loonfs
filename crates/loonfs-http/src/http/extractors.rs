@@ -11,7 +11,9 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
 use loonfs_types::crypto::constant_time_eq;
-use loonfs_types::{headers, AbsolutePath, ActorId, Context, NamespaceId, PrincipalSet};
+use loonfs_types::{
+    headers, AbsolutePath, ActorId, Context, NamespaceId, PrincipalSet, RetentionWindow,
+};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -324,7 +326,10 @@ fn refine_internally_tagged_path(body: &[u8], pointer: String) -> Option<String>
             "path" | "source_path" | "destination_path" => {
                 serde_json::from_value::<AbsolutePath>((*value).clone()).is_err()
             }
-            "retention_window_ms" | "max_wal_tail_objects" => {
+            "retention_window_ms" => {
+                serde_json::from_value::<RetentionWindow>((*value).clone()).is_err()
+            }
+            "max_wal_tail_objects" => {
                 serde_json::from_value::<std::num::NonZeroU64>((*value).clone()).is_err()
             }
             _ => false,

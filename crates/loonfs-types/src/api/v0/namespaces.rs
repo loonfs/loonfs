@@ -1,8 +1,7 @@
 //! Namespace requests and responses for the v0 HTTP API.
 
-use crate::{ActorId, CommitSeq, ManifestNo, NamespaceId, PoolId, SnapshotId};
+use crate::{ActorId, CommitSeq, ManifestNo, NamespaceId, PoolId, RetentionWindow, SnapshotId};
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU64;
 
 /// A request to create a namespace.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +24,7 @@ pub struct CreateNamespaceRequest {
         feature = "openapi",
         schema(value_type = Option<u64>, nullable = false, minimum = 86400000)
     )]
-    pub retention_window_ms: Option<NonZeroU64>,
+    pub retention_window_ms: Option<RetentionWindow>,
 }
 
 // The schema declares the smallest retention window as a literal, because the
@@ -275,8 +274,13 @@ mod tests {
             }))
             .expect("a create body with a retention window decodes")
             .retention_window_ms,
-            NonZeroU64::new(86_400_000)
+            RetentionWindow::new(86_400_000).ok()
         );
+        serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+            "namespace_id": "demo",
+            "retention_window_ms": 86_399_999
+        }))
+        .expect_err("a window shorter than the grace window should be rejected");
         serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
             "namespace_id": "demo",
             "fork_of": "other"

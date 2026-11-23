@@ -207,7 +207,7 @@ pub struct ServerConfig {
     /// floor of a namespace without a window where it is. Absent, a
     /// namespace created without a window has no window. The window must be
     /// at least 86400000, the grace window.
-    pub retention_window_ms: Option<NonZeroU64>,
+    pub retention_window_ms: Option<loonfs::RetentionWindow>,
     /// Idle milliseconds before a caught-up session with no request handle
     /// closes. A later write opens a new session. Defaults to 30 minutes.
     #[serde(default = "default_idle_session_close_after_ms")]

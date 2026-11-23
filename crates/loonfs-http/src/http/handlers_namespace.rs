@@ -255,9 +255,7 @@ pub(super) async fn create_namespace(
             },
         )
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime(error).with_body_field_params(&["/retention_window_ms"])
-        })?;
+        .map_err(ApiResponseError::runtime)?;
     Ok(Json(namespace))
 }
 

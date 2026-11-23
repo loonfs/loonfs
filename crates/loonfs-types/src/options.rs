@@ -4,8 +4,8 @@
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
     AttributesRevisionNo, CommitId, CommitPrecondition, CommitSeq, DeleteDirectoryBehavior,
-    DestinationBehavior, DestinationPrecondition, DisplayName, EffectiveLimit, InodeId, RevisionNo,
-    SnapshotId,
+    DestinationBehavior, DestinationPrecondition, DisplayName, EffectiveLimit, InodeId,
+    RetentionWindow, RevisionNo, SnapshotId,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -599,10 +599,8 @@ pub struct MergeForkOptions {
 pub struct CreateNamespaceOptions {
     /// The namespace's retention window, which a host's scheduled retention
     /// advance uses, or `None` for the runtime's default window, if the
-    /// runtime has a default. A window shorter than the grace window
-    /// ([`GC_GRACE_WINDOW_MS`](crate::limits::GC_GRACE_WINDOW_MS)) is
-    /// refused.
-    pub retention_window_ms: Option<NonZeroU64>,
+    /// runtime has a default.
+    pub retention_window_ms: Option<RetentionWindow>,
     /// Whether creating a namespace that already exists succeeds and returns
     /// the existing namespace's state.
     pub allow_existing: bool,

@@ -903,9 +903,12 @@ fn builders_reject_a_read_interval_above_the_revalidation_bound() {
             .writer_id(loonfs_test_support::ids::writer_id("interval-test"))
     };
     let assert_rejected = |result: loonfs::Result<()>, setting: &str| match result {
-        Err(Error::Config(message)) => assert!(
-            message.contains(setting),
-            "the error should identify `{setting}`: {message}"
+        Err(error @ Error::Config(_)) => assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid runtime config: `{setting}` must not exceed {bound}, the revalidation \
+                 bound"
+            )
         ),
         Err(other) => panic!("expected a config error for `{setting}`, got {other:?}"),
         Ok(()) => panic!("`{setting}` above the revalidation bound must fail the build"),

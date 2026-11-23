@@ -2,8 +2,9 @@
 //! policy, and inline content policy.
 
 use crate::trace::TraceMode;
-use crate::{Error, ReadConsistency, Result};
-use loonfs_core::limits::{GC_GRACE_WINDOW_MS, READ_REVALIDATION_BOUND_MS};
+use crate::{ReadConsistency, RetentionWindow};
+use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
+use loonfs_types::config::ConfigFieldError;
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -147,7 +148,7 @@ mod inline_content_threshold {
 }
 
 impl InlineContentPolicy {
-    fn validate(&self) -> Result<()> {
+    fn validate(&self) -> std::result::Result<(), ConfigFieldError> {
         use loonfs_types::format::wal::{
             MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
         };
@@ -155,21 +156,24 @@ impl InlineContentPolicy {
             .inline_content_threshold_bytes
             .is_some_and(|value| value > MAX_WAL_INLINE_CONTENT_BYTES)
         {
-            return Err(Error::Config(format!(
-                "`inline_content_threshold_bytes` must not exceed {MAX_WAL_INLINE_CONTENT_BYTES}"
-            )));
+            return Err(ConfigFieldError::Invalid {
+                field: "inline_content.inline_content_threshold_bytes",
+                reason: format!("must not exceed {MAX_WAL_INLINE_CONTENT_BYTES}"),
+            });
         }
         if self.inline_content_wal_object_budget_bytes == 0
             || self.inline_content_wal_object_budget_bytes > MAX_WAL_OBJECT_INLINE_CONTENT_BYTES
         {
-            return Err(Error::Config(format!(
-                "`inline_content_wal_object_budget_bytes` must be between 1 and {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"
-            )));
+            return Err(ConfigFieldError::Invalid {
+                field: "inline_content.inline_content_wal_object_budget_bytes",
+                reason: format!("must be between 1 and {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"),
+            });
         }
         if self.inline_content_tail_limit_bytes == 0 {
-            return Err(Error::Config(
-                "`inline_content_tail_limit_bytes` must be greater than zero".to_owned(),
-            ));
+            return Err(ConfigFieldError::Invalid {
+                field: "inline_content.inline_content_tail_limit_bytes",
+                reason: "must be greater than zero".to_owned(),
+            });
         }
         Ok(())
     }
@@ -196,7 +200,7 @@ pub struct RuntimeConfig {
     /// the manifest of a cached head. Defaults to 1000, and zero checks on
     /// every read. A value above
     /// [`READ_REVALIDATION_BOUND_MS`](crate::READ_REVALIDATION_BOUND_MS)
-    /// fails the build with [`Error::Config`].
+    /// fails the build with [`Error::Config`](crate::Error::Config).
     pub manifest_revalidation_interval_ms: u64,
     /// Maximum staleness, in milliseconds, of an eventual read that doesn't
     /// set its own (see [`Consistency::Eventual`](crate::Consistency::Eventual)).
@@ -207,7 +211,7 @@ pub struct RuntimeConfig {
     /// maximum staleness. Defaults to 1000, and zero confirms the head on
     /// every read. A value above
     /// [`READ_REVALIDATION_BOUND_MS`](crate::READ_REVALIDATION_BOUND_MS)
-    /// fails the build with [`Error::Config`].
+    /// fails the build with [`Error::Config`](crate::Error::Config).
     pub max_staleness_ms: u64,
     /// Consistency of a read that doesn't set its own, including every read
     /// that takes no options. Defaults to [`ReadConsistency::Eventual`],
@@ -251,10 +255,9 @@ pub struct RuntimeConfig {
     /// Retention window, in milliseconds, that the runtime records in the
     /// first manifest of each namespace that it creates without a window in
     /// the request. Defaults to `None`, so such a namespace has no window. A
-    /// fork copies its source's window instead. A window shorter than the
-    /// grace window ([`GC_GRACE_WINDOW_MS`]) fails the build. The capability
-    /// document advertises the window as `namespace.default_retention_window_ms`.
-    pub default_retention_window_ms: Option<NonZeroU64>,
+    /// fork copies its source's window instead. The capability document
+    /// advertises the window as `namespace.default_retention_window_ms`.
+    pub default_retention_window_ms: Option<RetentionWindow>,
 }
 
 impl Default for RuntimeConfig {
@@ -275,14 +278,17 @@ impl Default for RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// Checks the settings against the limits of the runtime, and returns
-    /// [`Error::Config`] for the first setting outside them.
-    pub fn validate(&self) -> Result<()> {
+    /// Checks the settings against the limits of the runtime, and returns an
+    /// error that identifies the first setting outside them by its path in
+    /// this struct (such as `inline_content.inline_content_tail_limit_bytes`).
+    /// The error's reason completes a sentence whose subject is the setting,
+    /// such as "must be greater than zero".
+    pub fn validate(&self) -> std::result::Result<(), ConfigFieldError> {
         // An eventual read checks a view whose manifest check is as old as
         // the revalidation bound, whatever the setting, so a longer interval or
         // maximum staleness would promise something that the runtime doesn't
         // do.
-        for (setting, interval_ms) in [
+        for (field, interval_ms) in [
             (
                 "manifest_revalidation_interval_ms",
                 self.manifest_revalidation_interval_ms,
@@ -290,46 +296,14 @@ impl RuntimeConfig {
             ("max_staleness_ms", self.max_staleness_ms),
         ] {
             if interval_ms > READ_REVALIDATION_BOUND_MS {
-                return Err(Error::Config(format!(
-                    "`{setting}` is {interval_ms} ms, which exceeds the revalidation bound of \
-                     {READ_REVALIDATION_BOUND_MS} ms"
-                )));
+                return Err(ConfigFieldError::Invalid {
+                    field,
+                    reason: format!(
+                        "must not exceed {READ_REVALIDATION_BOUND_MS}, the revalidation bound"
+                    ),
+                });
             }
-        }
-        if let Some(message) = short_retention_window(
-            "default_retention_window_ms",
-            self.default_retention_window_ms,
-        ) {
-            return Err(Error::Config(message));
         }
         self.inline_content.validate()
     }
-}
-
-/// Returns [`Error::InvalidRequest`] for a retention window shorter than the
-/// grace window.
-pub(crate) fn check_retention_window(retention_window_ms: Option<NonZeroU64>) -> Result<()> {
-    match short_retention_window("retention_window_ms", retention_window_ms) {
-        Some(message) => Err(Error::InvalidRequest {
-            message,
-            param: "retention_window_ms",
-        }),
-        None => Ok(()),
-    }
-}
-
-/// Returns why the retention window in `setting` is refused, when the window
-/// is shorter than the grace window ([`GC_GRACE_WINDOW_MS`]). An advance
-/// never moves the floor past a commit younger than the grace window, so a
-/// shorter window couldn't be kept (format spec, "Advancing the retention
-/// floor").
-fn short_retention_window(setting: &str, window_ms: Option<NonZeroU64>) -> Option<String> {
-    window_ms
-        .filter(|window_ms| window_ms.get() < GC_GRACE_WINDOW_MS)
-        .map(|window_ms| {
-            format!(
-                "`{setting}` is {window_ms} ms, which is shorter than the grace window of \
-                 {GC_GRACE_WINDOW_MS} ms"
-            )
-        })
 }

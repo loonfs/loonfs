@@ -658,7 +658,7 @@ root = "/tmp/loonfs-server"
         ("", None),
         (
             "retention_window_ms = 2592000000",
-            std::num::NonZeroU64::new(2_592_000_000),
+            loonfs::RetentionWindow::new(2_592_000_000).ok(),
         ),
     ] {
         let loaded = load_server_config(config(setting))
@@ -677,10 +677,14 @@ root = "/tmp/loonfs-server"
         other => panic!("expected a decode error, got {other:?}"),
     }
     let short = format!("retention_window_ms = {}", GC_GRACE_WINDOW_MS - 1);
-    assert_invalid_field(
-        load_server_config(config(&short)).expect_err("a window shorter than the grace window"),
-        "retention_window_ms",
-    );
+    match load_server_config(config(&short)).expect_err("a window shorter than the grace window") {
+        ServerError::ConfigDecode(message) => assert!(
+            message.contains("retention_window_ms")
+                && message.contains("shorter than the grace window"),
+            "the decode error should identify `retention_window_ms` and say why: {message}"
+        ),
+        other => panic!("expected a decode error, got {other:?}"),
+    }
 }
 
 #[test]

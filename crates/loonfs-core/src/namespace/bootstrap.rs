@@ -10,6 +10,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::options::CreateNamespaceOptions;
 use loonfs_types::{CommitSeq, InodeKind, NamespaceMetadata, PoolId, ROOT_INODE_ID};
+use std::num::NonZeroU64;
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates the namespace if it does not already exist, or finishes a
@@ -41,7 +42,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             Some(existing) => existing,
             None => {
                 let manifest_1 = NamespaceManifestPayload {
-                    retention_window_ms: options.retention_window_ms,
+                    retention_window_ms: options.retention_window_ms.map(NonZeroU64::from),
                     ..NamespaceManifestPayload::initial(
                         self.namespace.namespace_id.clone(),
                         PoolId::generate(),
@@ -112,7 +113,7 @@ fn ensure_create_request_matches(
     options: &CreateNamespaceOptions,
 ) -> Result<()> {
     let matches = manifest_1.fork_basis.is_none()
-        && manifest_1.retention_window_ms == options.retention_window_ms;
+        && manifest_1.retention_window_ms == options.retention_window_ms.map(NonZeroU64::from);
     if !matches {
         return Err(CoreError::NamespaceExists {
             namespace_id: manifest_1.namespace_id.clone(),

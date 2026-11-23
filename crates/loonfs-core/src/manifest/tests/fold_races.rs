@@ -52,7 +52,9 @@ impl Rival {
                     &crate::test_support::writer_at("test-writer", 0),
                 )
                 .engine()
-                .set_retention_window(std::num::NonZeroU64::new(60_000))
+                .set_retention_window(
+                    loonfs_types::RetentionWindow::new(2 * crate::limits::GC_GRACE_WINDOW_MS).ok(),
+                )
                 .await
                 .expect("set the retention window");
                 assert!(published.published.is_some(), "the window changes");
