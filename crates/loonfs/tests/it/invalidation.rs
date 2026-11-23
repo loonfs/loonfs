@@ -172,6 +172,147 @@ async fn a_fenced_delete_names_the_active_writer_and_epoch() {
     assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
 }
 
+/// Creates the namespace as writer A on `store_a`, puts `/a1.txt` and folds
+/// it, so A's session keeps a position with no WAL tail. Writer B, on
+/// `store_b` over the same objects, then puts `/b1.txt`, which claims the
+/// next writer epoch, and deletes the namespace when `delete` is set.
+/// Returns A's runtime and A's handle, whose session isn't fenced yet.
+async fn a_session_behind_another_writer(
+    store_a: &SharedObjectStore,
+    store_b: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    delete: bool,
+) -> (LoonFs<Writable>, Namespace<Writable>) {
+    let actor = loonfs_test_support::test_actor();
+    let writer_a = writer_with_cache(store_a, "writer-a", |builder| builder).await;
+    writer_a
+        .create_namespace(namespace_id, &actor)
+        .await
+        .expect("create namespace");
+    let namespace_writer_a = writer_a
+        .open_namespace(namespace_id)
+        .expect("open namespace");
+    namespace_writer_a
+        .put_file("/a1.txt", b"a", &actor)
+        .await
+        .expect("writer a puts a file");
+    writer_a
+        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
+        .fold_wal(namespace_id)
+        .await
+        .expect("writer a folds its tail");
+    writer_a
+        .drain()
+        .await
+        .expect("the fold's compaction settles");
+    let namespace_writer_b = writer(store_b.clone(), "writer-b")
+        .await
+        .open_namespace(namespace_id)
+        .expect("open namespace");
+    namespace_writer_b
+        .put_file("/b1.txt", b"b", &actor)
+        .await
+        .expect("writer b takes over the epoch");
+    if delete {
+        namespace_writer_b
+            .delete()
+            .await
+            .expect("writer b deletes the namespace");
+    }
+    (writer_a, namespace_writer_a)
+}
+
+/// Checks that a session's delete of a namespace that another writer claimed
+/// and then deleted returns `writer_fenced`, because a writer session checks
+/// the writer epoch of the manifest it loads before the namespace's status,
+/// and that the delete marks the session fenced. A delete through a new
+/// handle of the same runtime opens a new session, which finds the
+/// tombstone when it claims the namespace and returns `namespace_deleted`.
+#[tokio::test]
+async fn a_delete_after_another_writers_delete_is_fenced_and_a_new_session_finds_the_tombstone() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let namespace_id = NamespaceId::parse("deleted").expect("valid namespace id");
+    let (writer_a, namespace_writer_a) =
+        a_session_behind_another_writer(&store, &store, &namespace_id, true).await;
+
+    let fence = expect_writer_fenced(
+        namespace_writer_a.delete().await,
+        "the session finds another writer's tombstone",
+    );
+    assert_eq!(
+        fence
+            .active_writer
+            .as_ref()
+            .map(|writer| writer.writer_id.as_str()),
+        Some("writer-b")
+    );
+    assert_eq!(
+        namespace_writer_a.session_status(),
+        loonfs::NamespaceSessionStatus::Fenced
+    );
+    let retried = writer_a
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .delete()
+        .await
+        .expect_err("the namespace is deleted");
+    assert_eq!(
+        retried.code(),
+        loonfs::ErrorCode::NamespaceDeleted,
+        "{retried:?}"
+    );
+}
+
+/// Checks that a session's delete after another writer's claim returns
+/// `writer_fenced` from the load of the newest manifest, before it reads
+/// the WAL tail above that manifest or checks the manifest. The delete's
+/// first attempt puts its tombstone on the session's position, loses the
+/// put to the claim, and finds the claim above the position.
+#[tokio::test]
+async fn a_fenced_delete_reads_no_wal_tail() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create store"),
+        KeyPredicate::any(),
+    ));
+    let store_a: SharedObjectStore = recording.clone();
+    let store_b: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let namespace_id = NamespaceId::parse("fenced-delete").expect("valid namespace id");
+    let (_writer_a, namespace_writer_a) =
+        a_session_behind_another_writer(&store_a, &store_b, &namespace_id, false).await;
+
+    recording.reset();
+    expect_writer_fenced(
+        namespace_writer_a.delete().await,
+        "the session finds another writer's claim",
+    );
+    let mut operations = recording.take();
+    loonfs_test_support::stores::sort_head_runs(&mut operations);
+    let manifest = |number: u64| format!("fenced-delete MetadataManifest {number:020}");
+    let mut expected = vec![format!("put {}", manifest(5))];
+    // After the lost put, the deletion probes above the position's
+    // manifest 4, and loads the claim, manifest 5, which is the newest above
+    // the boundary.
+    expected.extend((5..=13).map(|number| format!("head {}", manifest(number))));
+    expected.extend([
+        format!("get {}", manifest(5)),
+        "get fenced-delete Boundary".to_owned(),
+        // The next attempt loads the writer anchor. Discovery finds the claim
+        // in the segment cache, and its writer epoch returns `writer_fenced`
+        // before a WAL read or a check of the claim.
+        "get fenced-delete Boundary".to_owned(),
+        "list namespaces/fenced-delete/manifests/".to_owned(),
+        "get fenced-delete Boundary".to_owned(),
+    ]);
+    assert_eq!(
+        loonfs_test_support::stores::request_lines(&operations),
+        expected
+    );
+}
+
 #[tokio::test]
 async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
     let temp_dir = tempdir().expect("tempdir");

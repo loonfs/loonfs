@@ -11,7 +11,7 @@ use crate::manifest::{FloorObjectReport, ManifestLoadError};
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::held::Held;
-use crate::namespace::read_anchor::NamespaceReadAnchor;
+use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::time::{Observation, OperationClock};
@@ -124,7 +124,7 @@ pub struct NamespaceCommitEngine<S> {
 #[derive(Debug)]
 struct PositionState {
     current: Option<WriterPosition>,
-    acquired_anchor: Option<NamespaceReadAnchor>,
+    acquired_anchor: Option<WriterAnchor>,
     /// This session's epoch and fencing for the namespace; see
     /// [`WriterSessionStatus`].
     session: SharedWriterSessionStatus,

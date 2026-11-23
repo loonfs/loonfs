@@ -7,7 +7,7 @@ use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Checked;
 use crate::namespace::held::Held;
-use crate::namespace::read_anchor::NamespaceReadAnchor;
+use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use crate::wal::{prepare_fence, publish_wal_object, wal_no_is_unfolded};
@@ -31,7 +31,7 @@ pub struct AcquiredWriter {
 pub(crate) struct WriterAcquisition {
     pub(crate) writer: AcquiredWriter,
     pub(crate) claim: Held<LoadedManifest>,
-    pub(crate) anchor: NamespaceReadAnchor,
+    pub(crate) anchor: WriterAnchor,
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
@@ -96,11 +96,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await?;
         let claim = update.current.clone();
         let acquired = update.response;
-        // The tail read before the fence put doesn't check the manifest: the
-        // check after the put does, and it also tells whether the fence is
-        // live.
+        // The tail read before the fence put doesn't check the manifest,
+        // because the check after the put does, and that check also tells
+        // whether the fence is live.
         let anchor = self
-            .load_unchecked_read_anchor(update.current, Some(&acquired))
+            .load_unchecked_writer_anchor(update.current, &acquired)
             .await?;
         let anchor = self.put_fence(&acquired, anchor, &clock).await?;
         Ok(WriterAcquisition {
@@ -115,9 +115,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// acquisition does, and returns the read anchor whose tip is the fence
     /// (format spec, "Failed and unknown outcomes"). A session owes such a
     /// fence after a WAL put of its own whose outcome it doesn't know. The
-    /// tail read before the put returns `writer_fenced` when the manifest
-    /// has a higher epoch, as every tail read of a session does.
-    pub(crate) async fn fence_writer(&self, held: &AcquiredWriter) -> Result<NamespaceReadAnchor> {
+    /// load before the put checks the writer epoch and the namespace's
+    /// status, as every load of a writer anchor does (see [`WriterAnchor`]).
+    pub(crate) async fn fence_writer(&self, held: &AcquiredWriter) -> Result<WriterAnchor> {
         let clock = self.start_clock();
         let anchor = self.load_writer_read_anchor(held, clock.observe()).await?;
         self.put_fence(held, anchor, &clock).await
@@ -127,12 +127,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// it after the put, and puts it again at the new tip while it's dead or
     /// its number is taken (format spec, "Writer ownership"). Returns the
     /// read anchor whose tip is the live fence.
+    ///
+    /// Every anchor that the call puts a fence above is a writer anchor, so
+    /// its namespace is active, and the loads after a newer manifest or a
+    /// taken number return `writer_fenced` or `namespace_deleted` before
+    /// another put.
     async fn put_fence(
         &self,
         acquired: &AcquiredWriter,
-        mut anchor: NamespaceReadAnchor,
+        mut anchor: WriterAnchor,
         clock: &OperationClock,
-    ) -> Result<NamespaceReadAnchor> {
+    ) -> Result<WriterAnchor> {
         // Bounded by both the publication time budget and
         // `MAX_UNFOLDED_WAL_OBJECTS`: an old writer can never race more than
         // the write-stop ceiling of WAL objects without folding, while the
@@ -140,22 +145,26 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // broken store.
         for _attempt in 0..crate::limits::MAX_UNFOLDED_WAL_OBJECTS {
             let head = &anchor.read_state;
-            super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
             let fence = prepare_fence(head, acquired.writer_epoch)?;
             match publish_wal_object(&self.store, &fence).await {
                 Ok(()) => {
                     let fenced_head = head.after_wal_object(fence.envelope().payload());
-                    if self.check_newest(&mut anchor.held, clock.origin()).await? == Checked::Newest
+                    if self
+                        .check_newest(&mut anchor.0.held, clock.origin())
+                        .await?
+                        == Checked::Newest
                     {
-                        anchor.read_state = fenced_head;
+                        anchor.0.read_state = fenced_head;
                         anchor
+                            .0
                             .tail
                             .push_published(fence.envelope().clone(), fence.as_bytes().len());
                         return Ok(anchor);
                     }
-                    // A newer manifest. The writer read anchor at that
-                    // manifest returns `writer_fenced` for a higher epoch,
-                    // and replays a live fence.
+                    // A newer manifest. The writer anchor at that manifest
+                    // returns `writer_fenced` for a higher epoch and
+                    // `namespace_deleted` for a tombstone, and replays a
+                    // live fence.
                     anchor = self
                         .load_writer_read_anchor(acquired, clock.observe())
                         .await?;
@@ -163,10 +172,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         fenced_head.wal_no,
                         anchor.current_manifest().folded_wal_no(),
                     ) {
-                        super::control::ensure_namespace_live(
-                            &anchor.read_state.namespace_id,
-                            anchor.read_state.status,
-                        )?;
                         return Ok(anchor);
                     }
                     clock.ensure_metadata_publication_budget(&self.namespace_id)?;
@@ -214,9 +219,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-/// Fails with `writer_fenced` when `active_epoch`, the writer epoch of a
-/// manifest or a head, isn't the epoch of `acquired_writer`. `active_writer`
-/// is the writer block that the manifest or head records.
+/// Fails with `writer_fenced` when `active_epoch` isn't the epoch of
+/// `acquired_writer`. `active_writer` is the writer block that records
+/// `active_epoch`.
+///
+/// The publish view, and a deletion that starts from the session's
+/// position, call this function to compare the session's own position with
+/// the session. A position is kept in this process's memory, and the
+/// position can be older than the session without the store being corrupt,
+/// so any other epoch there means that the position isn't the session's.
+/// The check of a manifest that a writer anchor's load read from the store
+/// is a different rule, in which a lower epoch is a corrupt store (see
+/// `ensure_stored_writer_epoch` in `read_anchor.rs`).
+/// `ensure_stored_writer_epoch` calls this function for a higher epoch.
 pub(crate) fn ensure_writer_not_fenced(
     active_epoch: WriterEpoch,
     active_writer: Option<&WriterBlock>,

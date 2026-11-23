@@ -234,6 +234,101 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
     assert_eq!(code, Some(ErrorCode::WriterFenced));
 }
 
+/// Checks that a writer session that loads a stored manifest with a writer
+/// epoch below its own returns `namespace_corrupt`, at each entry that loads
+/// the session's writer anchor: a commit, a retention advance through the
+/// session, a deletion, and the fence that a session owes after a WAL put
+/// with an unknown outcome. A lower epoch can't follow the session's own
+/// claim in a correct store, so the error doesn't mark the session fenced.
+#[tokio::test]
+async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
+    for entry in ["commit", "retention advance", "deletion", "fence"] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = context("writer-a");
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &writer)
+            .create()
+            .await
+            .expect("bootstrap");
+        let session = SharedWriterSessionStatus::default();
+        let mut engine = NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &namespace_id),
+            writer.writer_id.clone(),
+        )
+        .writer_session(Arc::clone(&session));
+        engine
+            .publish_batch(vec![create_dir("first", "alpha")], &writer.clock())
+            .await
+            .results
+            .remove(0)
+            .expect("the session's first commit acquires its epoch");
+        let acquired = match &*session.lock().expect("session lock") {
+            WriterSessionStatus::Acquired(acquired) => acquired.clone(),
+            other => panic!("{entry}: the session holds its epoch: {other:?}"),
+        };
+        let current = crate::test_support::namespace_store(&store, &namespace_id)
+            .load_current_manifest()
+            .await
+            .expect("the session's manifest");
+        let mut lower = current.payload().clone();
+        lower.manifest_no = lower.manifest_no.successor().expect("next manifest number");
+        lower.writer_epoch = WriterEpoch(acquired.writer_epoch.0 - 1);
+        lower.writer = None;
+        store
+            .put(
+                &loonfs_objectstore::keys::metadata_manifest_object(
+                    &namespace_id,
+                    &lower.manifest_no,
+                ),
+                crate::manifest::publish::encode_manifest(lower)
+                    .into_bytes()
+                    .into(),
+                loonfs_objectstore::PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("put a manifest with a lower writer epoch");
+        // Without a position, the session's next unit loads its writer
+        // anchor from the store.
+        engine.invalidate_projection();
+        if entry == "fence" {
+            *session.lock().expect("session lock") =
+                WriterSessionStatus::HoldsEpochOwesFence(acquired.clone());
+        }
+        let error = match entry {
+            "retention advance" => engine
+                .publish_floor_object(&current, CommitSeq(1), &writer.clock())
+                .await
+                .expect_err("the advance finds the lower epoch"),
+            "deletion" => engine
+                .delete_namespace(
+                    &crate::test_support::administrator_of(&store, &namespace_id),
+                    Default::default(),
+                )
+                .await
+                .expect_err("the deletion finds the lower epoch"),
+            _ => engine
+                .publish_batch(vec![create_dir("second", "beta")], &writer.clock())
+                .await
+                .results
+                .remove(0)
+                .expect_err("the commit finds the lower epoch"),
+        };
+        assert_eq!(
+            error.code(),
+            ErrorCode::NamespaceCorrupt,
+            "{entry}: {error:?}"
+        );
+        assert!(
+            !matches!(
+                *session.lock().expect("session lock"),
+                WriterSessionStatus::Fenced(_)
+            ),
+            "{entry}: a corrupt store doesn't fence the session"
+        );
+    }
+}
+
 #[tokio::test]
 async fn shared_session_keeps_fencing_across_engine_rebuilds() {
     let temp_dir = tempdir().expect("tempdir");
