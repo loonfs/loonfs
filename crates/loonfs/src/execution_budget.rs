@@ -37,10 +37,11 @@ const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1
 /// plan and publish at once.
 ///
 /// Admission estimates a merge's peak as three times its planned WAL bytes.
-/// A file create plans about 4,850 bytes, so the default admits a merge of
-/// about 36,000 file creates while no other merge is admitted. One WAL object fits about 110,000 creates, and
-/// an allowance of 1.5 GiB, three times the WAL object's 512 MiB, admits
-/// every merge that fits one WAL object.
+/// A file create whose content has a layout of one extent plans 5,432
+/// bytes, so the default admits a merge of about 32,900 file creates while
+/// no other merge is admitted. One WAL object fits about 98,800 creates,
+/// and an allowance of 1.5 GiB, three times the WAL object's 512 MiB,
+/// admits every merge that fits one WAL object.
 pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
 
 /// Work in flight that one or more runtimes share.

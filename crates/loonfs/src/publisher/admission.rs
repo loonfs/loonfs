@@ -17,8 +17,11 @@ use tokio::sync::oneshot;
 /// The estimated peak memory of publishing a merge, as a multiple of the
 /// merge's planned WAL bytes. Publication builds the commit's deltas and
 /// encodes its WAL object while the merge's operations are still in memory.
-/// In measurements of merges of file creates, the peak was 1.8 times the
-/// planned bytes with 13-byte names, and 3.1 times with 255-byte names.
+/// In measurements of merges of file creates, taken when a file create
+/// planned about 4,850 bytes, the peak was about 8,600 bytes for each
+/// create with 13-byte names and about 15,100 with 255-byte names. A file
+/// create whose content has a layout of one extent now plans 5,432 bytes,
+/// so the estimate is 16,296 bytes for each create, which covers both.
 const MERGE_PEAK_PER_PLANNED_BYTE: usize = 3;
 
 /// The bytes of the merge allowance that a merge reserves before it plans,

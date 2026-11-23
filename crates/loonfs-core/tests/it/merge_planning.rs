@@ -1387,7 +1387,7 @@ async fn a_range_that_touched_too_many_inodes_is_too_large() {
 #[tokio::test]
 async fn a_merge_over_the_allowance_is_too_large_before_its_conflicts() {
     let mut family = Family::new().await;
-    // A file create plans about 4,850 bytes, which the allowance is charged
+    // A file create plans about 5,400 bytes, which the allowance is charged
     // three times, so 64 KiB admits only a few creates.
     family.allowance = MergeAllowance::unshared(64 * 1024, 3);
     for index in 0..16 {
