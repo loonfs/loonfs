@@ -1038,3 +1038,71 @@ async fn the_split_hint_of_a_new_forks_merge_counts_its_covered_range() {
         assert_eq!(split_at_seq == Some(through_seq), fits, "{max_bytes}");
     }
 }
+
+/// Checks that the split hint never names a range that the planner then
+/// refuses, at allowances around the smallest allowance that admits a merge
+/// through a replay piece whose every change conflicted. That piece touches
+/// no inode and still records the fork's covered range, so the commit's
+/// fixed fields and its covered range are all that it plans. Below that
+/// allowance no piece fits, and the refusal has no `split_at_seq`, as a
+/// merge whose first commit alone is too large has none.
+#[tokio::test]
+async fn a_split_hint_through_a_piece_with_no_operation_is_admitted() {
+    let family = Family::new().await;
+    family.write(&family.main, "/docs/a.txt", b"theirs").await;
+    family.write(&family.fork, "/docs/a.txt", b"ours").await;
+    family.create_rebase().await;
+    let replay = family.replay("replay-1", None).await.expect("replay");
+    assert_eq!(replay.conflicts.len(), 1);
+    assert!(replay.commit.events.is_empty());
+    for path in ["/m1.txt", "/m2.txt"] {
+        family.write(&family.rebase, path, b"m").await;
+    }
+    let plan = |name: &'static str, through_seq: Option<CommitSeq>, max_bytes: usize| {
+        let family = &family;
+        async move {
+            let max_bytes = std::num::NonZeroUsize::new(max_bytes).expect("a nonzero allowance");
+            family
+                .plan_into_main(
+                    &family.rebase,
+                    name,
+                    through_seq,
+                    MergeAllowance::unshared(max_bytes, 3),
+                )
+                .await
+                .and_then(MergePlan::into_candidate)
+        }
+    };
+    // The smallest allowance that admits the piece, which the planner's
+    // estimate makes monotonic in the allowance. The search halves a range
+    // of at most 2^20 bytes, so it ends within 21 plans.
+    let piece_seq = Some(replay.commit.committed_seq);
+    let (mut refused, mut admitted) = (1, 1 << 20);
+    plan("piece", piece_seq, admitted)
+        .await
+        .expect("the piece fits 1 MiB");
+    while admitted - refused > 1 {
+        let middle = refused + (admitted - refused) / 2;
+        match plan("piece", piece_seq, middle).await {
+            Ok(_) => admitted = middle,
+            Err(_) => refused = middle,
+        }
+    }
+
+    for max_bytes in admitted - 32..admitted + 32 {
+        let error = plan("whole", None, max_bytes)
+            .await
+            .expect_err("the whole range is too large");
+        let split_at_seq = error.details().and_then(|details| details.split_at_seq);
+        if let Some(split_at_seq) = split_at_seq {
+            plan("split", Some(split_at_seq), max_bytes)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{max_bytes}: the hint {split_at_seq} is refused: {error:?}")
+                });
+        }
+        if max_bytes < admitted {
+            assert_eq!(split_at_seq, None, "{max_bytes}: {error:?}");
+        }
+    }
+}

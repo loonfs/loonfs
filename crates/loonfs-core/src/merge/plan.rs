@@ -139,6 +139,17 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         )
         .await?;
         let planned_bytes = fields_bytes.saturating_add(covered_ranges_bytes(&covered_ranges));
+        // A merge whose net change is empty plans no operation, so its fixed
+        // bytes are checked before the classification, as the split hint's
+        // measure checks them, and not only by the final check.
+        with_split_hint(
+            memory.check_planned(planned_bytes),
+            fork_view,
+            range,
+            fields_bytes,
+            allowance,
+        )
+        .await?;
         record.covered_ranges = covered_ranges;
         let mut classifier = Classifier {
             main,

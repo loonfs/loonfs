@@ -191,6 +191,9 @@ async fn measure_net_change<S: ObjectStore + ?Sized>(
     let commits = range_commits(end, fork_view.head(), after_seq, &memory).await?;
     let mut planned_bytes =
         fields_bytes.saturating_add(covered_ranges_bytes(&commits.covered_ranges));
+    // A range whose net change is empty plans no operation, so the fixed
+    // bytes are checked before the loop as well as with each inode.
+    memory.check_planned(planned_bytes)?;
     for inode_id in commits.touched {
         let plan = match inode_change(&mut ours, &mut before, fork, inode_id).await? {
             Some(change) => net_change_plan(start, fork, inode_id, &change).await?,
