@@ -9,6 +9,7 @@ use crate::diff::DiffPage;
 use crate::error::{CoreError, Result};
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::{ReadBasis, SnapshotReadBasis};
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
@@ -71,6 +72,14 @@ pub struct RuntimeReadContext {
     /// Clones of a context, and the contexts made from it, share one copy
     /// through the `Arc`.
     authorization: Option<Arc<RuntimeReadContext>>,
+    /// The manifest boundary that a live context's holder (a cached head, a
+    /// writer position, or a read anchor) kept when the context was built
+    /// from it. A read that checks its manifest against the boundary reads
+    /// the boundary object conditionally on this one. A context from
+    /// [`Self::at_seq`] or [`Self::at_snapshot`] keeps the boundary of the
+    /// live context it was made from, because the boundary belongs to the
+    /// namespace and not to one manifest.
+    boundary: KeptBoundary,
 }
 
 impl RuntimeReadContext {
@@ -96,6 +105,7 @@ impl RuntimeReadContext {
             tail,
             visible_seq: None,
             authorization: None,
+            boundary: basis.boundary().clone(),
         }
     }
 
@@ -114,6 +124,7 @@ impl RuntimeReadContext {
     /// `basis`, with its reads authorized at the same head as the reads of
     /// `live`, the context of the namespace's head when the read started.
     pub fn at_snapshot(basis: SnapshotReadBasis, live: RuntimeReadContext) -> Self {
+        let boundary = live.boundary.clone();
         let authorization = match live.authorization {
             Some(authorization) => authorization,
             None => Arc::new(live),
@@ -123,6 +134,7 @@ impl RuntimeReadContext {
             tail: None,
             visible_seq: None,
             authorization: Some(authorization),
+            boundary,
         }
     }
 
@@ -144,6 +156,13 @@ impl RuntimeReadContext {
     /// Returns the head and metadata basis that this context reads.
     pub fn read_basis(&self) -> &ReadBasis {
         &self.read_basis
+    }
+
+    /// Returns the manifest boundary that the holder of this context's live
+    /// head (a cached head, a writer position, or a read anchor) kept when
+    /// the live context was built from it.
+    pub fn boundary(&self) -> &KeptBoundary {
+        &self.boundary
     }
 
     /// Returns the head and metadata basis that this context reads, and

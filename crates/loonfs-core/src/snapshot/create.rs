@@ -96,7 +96,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .namespace
             .load_held_manifest(
                 context.read_basis().basis.manifest(),
-                KeptBoundary::default(),
+                context.boundary().clone(),
             )
             .await?
             .ok_or_else(manifest_replaced)?;
@@ -105,7 +105,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 None,
                 expires_at_ms,
                 &segments.loaded_manifest(),
-                KeptBoundary::default(),
+                context.boundary().clone(),
                 &self.namespace.start_clock(),
             )
             .await
