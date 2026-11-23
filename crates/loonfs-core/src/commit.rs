@@ -1,4 +1,4 @@
-//! Commit admission, planning, validation, and publication.
+//! Commit admission, planning, and publication.
 //!
 //! A batch of commits is published as one WAL object.
 //! [`NamespaceCommitEngine`](crate::publish::NamespaceCommitEngine) is the

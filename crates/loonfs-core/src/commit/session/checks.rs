@@ -1,4 +1,5 @@
-//! The rules that the writes of a commit check against the commit's state.
+//! The rules that the writes of a commit check against the commit's state,
+//! and the reads of the rows that the writes copy into their deltas.
 
 use super::commit_session::CommitSession;
 use crate::commit::CommitValidationError;
@@ -20,9 +21,9 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// or that a later deletion replaced, fails here, so it can't cancel a
     /// different deletion.
     ///
-    /// A base compaction relies on the floor check: the writer validates
-    /// against a floor that only its own epoch raises, so no restore of a
-    /// deletion at or below the floor is accepted after the floor moves.
+    /// A base compaction relies on the floor check. Only the writer's own
+    /// epoch raises the floor that the writer checks against, so no restore
+    /// of a deletion at or below the floor is accepted after the floor moves.
     pub(super) fn ensure_restorable_deletion(
         &self,
         deletion: &DeletionInTrash,
@@ -123,7 +124,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// the retention floor is found only while it's the file's newest at or
     /// below the floor. A base compaction removes the older ones once the
     /// floor has moved, and this refusal is what lets it: every commit
-    /// validated against the floor leaves them alone, so none copies a
+    /// checked against the floor leaves them alone, so none copies a
     /// revision whose content the collector reclaims
     /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
     pub(super) async fn resolve_restore_source_revision(

@@ -55,11 +55,6 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 source.absence(),
             )?;
         }
-        // Replace is an atomic delete-plus-rename: the destination file's
-        // delete and the source's rebind are written in one commit, and the
-        // destination is checked for vacancy again after the delete. Mirrors
-        // put: only a file destination can be replaced, and a path never
-        // replaces itself.
         let destination = self.view().resolve_destination(destination).await?;
         // The first leg of a merge's move through a temporary name enters
         // the temporary directory, which needs no create right for the same
@@ -116,6 +111,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 .authorize_relocation(source.inode_id, from_parent, parent_inode_id, mover)
                 .await?;
         }
+        // A move with `Replace` deletes the destination file and rebinds the
+        // source in one commit, and checks that the destination is vacant
+        // again after the delete. As with a put, only a file can be replaced,
+        // and a path never replaces itself.
         let available = match replaced {
             ReplaceDestination::Replaced(existing) => {
                 ensure_expected_inode(
@@ -278,9 +277,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 if source_attributes.is_empty() {
                     return Ok(());
                 }
-                // The attribute update resolves the inode that the create
-                // wrote, after the create, so both write to the same new
-                // inode.
+                // The attribute update takes a `ResolvedTarget`, which only a
+                // resolution makes, and the new inode becomes visible only
+                // after its create, so the planner resolves it here.
                 let child = self
                     .view()
                     .resolve_target(Target::Inode(child_inode_id), AccessRight::Write.into())

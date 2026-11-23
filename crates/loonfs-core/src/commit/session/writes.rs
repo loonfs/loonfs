@@ -200,12 +200,12 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         Ok(())
     }
 
-    /// Recovers a deleted file or subtree: revokes `deletion`, the root's
-    /// deletion in the trash, which the request identified by `deletion_seq`
-    /// (the delete's committed sequence, which the delete and the change feed
-    /// report), and binds the inode at `destination`. Scoping recovery to
-    /// the observed position keeps a stale request from cancelling a later
-    /// deletion of the same inode.
+    /// Recovers a deleted file or subtree. The write revokes `deletion`, the
+    /// root's deletion in the trash, and binds the inode at `destination`.
+    /// The request identifies the deletion by `deletion_seq`, the sequence of
+    /// the commit that deleted it, which the delete and the change feed both
+    /// report. Checking that sequence keeps a stale request from cancelling a
+    /// later deletion of the same inode.
     pub(crate) async fn restore_deleted(
         &mut self,
         deletion: DeletionInTrash,

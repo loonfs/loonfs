@@ -398,13 +398,12 @@ impl PreconditionFields {
     }
 }
 
-/// Validated file state required before replacement.
+/// The file that a request expects to replace or append to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ExpectedFileState {
-    /// Destination inode required by the request.
+    /// The inode that the request expects.
     pub(super) inode_id: InodeId,
-    /// Destination content revision required by the request, whose value
-    /// only [`Self::ensure_revision`] reads.
+    /// The revision that the request expects the file to have, if any.
     revision_no: Option<RevisionNo>,
 }
 

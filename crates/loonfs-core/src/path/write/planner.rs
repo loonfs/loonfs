@@ -1201,7 +1201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondition() {
+    async fn a_stale_expected_attributes_revision_is_rejected() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
         let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
         fixture
@@ -1270,6 +1270,7 @@ mod tests {
         let error = try_plan_against_current_state(&store, &namespace_id, &update(1))
             .await
             .expect_err("nothing has written revision 1 yet");
+        assert_eq!(error.code(), ErrorCode::StaleAttributes);
         assert_matches!(
             failed_operation_error(error),
             CoreError::CommitValidation(
@@ -1349,9 +1350,10 @@ mod tests {
         }
     }
 
-    /// A bind names an inode with no current binding. A restore of a deleted
-    /// directory that a corrupt namespace binds elsewhere too is refused as
-    /// corruption, after the planner's checks pass.
+    /// A bind requires an inode with no current binding. If a corrupt
+    /// namespace still binds a deleted directory somewhere, a restore of that
+    /// directory passes the planner's checks and then fails with
+    /// `namespace_corrupt`.
     #[tokio::test]
     async fn a_restore_of_an_inode_that_is_still_bound_reports_corruption() {
         let deleted = deleted_docs(0, false).await;
@@ -1401,9 +1403,9 @@ mod tests {
         );
     }
 
-    /// A restore of a deleted item applies only while the deletion it names
-    /// is its root's latest tombstone event, so a stale request can't cancel
-    /// a later deletion.
+    /// A restore of a deleted item succeeds only while the deletion that the
+    /// request identifies is the latest tombstone event of the item's root,
+    /// so a stale request can't cancel a later deletion.
     #[tokio::test]
     async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_roots_latest_event()
     {

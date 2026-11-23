@@ -59,8 +59,8 @@ impl<'a, S: ObjectStore + ?Sized> CommitSession<'a, S> {
 
     /// The metadata the next read resolves against: the loaded publish view
     /// plus every row that this commit's earlier writes would persist. The
-    /// planner reads through this, so an operation resolves paths against
-    /// what the writes before it built.
+    /// planner reads through this view, so an operation resolves paths
+    /// against the rows that earlier writes built.
     pub(crate) fn view(&self) -> MetadataView<'_, 'a, S> {
         self.base_view
             .with_overlay(Some(&self.overlay), self.batch_accepted, self.committed_seq)

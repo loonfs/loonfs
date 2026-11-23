@@ -71,7 +71,8 @@ impl<'a> Target<'a> {
 }
 
 /// A target resolved to its visible inode. Only the resolutions in this
-/// module make one, so a write that takes one changes a visible inode.
+/// module make one, so the inode was visible in the commit's state when the
+/// value was made.
 pub(crate) struct ResolvedTarget<'a> {
     resolved: ResolvedVisiblePath,
     target: Target<'a>,
@@ -153,8 +154,8 @@ pub(super) struct AccessUpdateTarget<'a> {
 
 /// The current binding of a visible inode other than the root, as
 /// [`PlanningView::source_binding`] read it. Only that function makes one,
-/// so a write that takes one unbinds a current binding or writes a revision
-/// under it.
+/// so the binding was current in the commit's state when the value was
+/// made.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedBinding {
     parent_inode_id: InodeId,
@@ -311,11 +312,16 @@ impl<'a> ResolvedDestination<'a> {
     }
 
     /// Returns the destination as a name that a bind can take, which is a
-    /// name that nothing visible occupies, or that `rebinding`, the inode
-    /// that the bind moves, occupies already.
-    pub(super) fn available_name(&self, rebinding: Option<InodeId>) -> Result<AvailableName> {
+    /// name that no visible inode occupies, or that `allowed_occupant`
+    /// occupies already. A move or a copy passes its source, so a move can
+    /// bind a new spelling of the source's own name, and the copy's planner
+    /// refuses a copy onto its own source.
+    pub(super) fn available_name(
+        &self,
+        allowed_occupant: Option<InodeId>,
+    ) -> Result<AvailableName> {
         match &self.occupant {
-            Some(existing) if Some(existing.inode_id) != rebinding => {
+            Some(existing) if Some(existing.inode_id) != allowed_occupant => {
                 Err(CoreError::DestinationExists {
                     path: self.path.clone(),
                     existing_display_name: Some(existing.display_name.clone()),
@@ -330,9 +336,9 @@ impl<'a> ResolvedDestination<'a> {
 }
 
 /// A name under a visible directory that a bind can take. Only
-/// [`ResolvedDestination::available_name`] makes one, so a write that takes
-/// one binds under a visible directory, at a name that no other visible
-/// inode occupies.
+/// [`ResolvedDestination::available_name`] makes one, so the directory was
+/// visible, and no other visible inode occupied the name, in the commit's
+/// state when the value was made.
 pub(crate) struct AvailableName {
     parent_inode_id: InodeId,
     display_name: DisplayName,
@@ -536,7 +542,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
 
     /// Authorizes `create` on the destination's parent and then returns the
     /// destination as a vacant name.
-    pub(super) async fn ensure_vacant_destination(
+    pub(super) async fn authorize_vacant_name(
         &self,
         destination: &ResolvedDestination<'_>,
     ) -> Result<AvailableName> {

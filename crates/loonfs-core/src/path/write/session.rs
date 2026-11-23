@@ -77,9 +77,9 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         &self.durable_cache
     }
 
-    /// Checks a candidate's preconditions and plans its operations, which
-    /// check their rules and write their rows in one pass, against the
-    /// batch's state before the candidate.
+    /// Checks a candidate's preconditions against the batch's state before
+    /// the candidate, and then plans each of its operations, which writes the
+    /// operation's rows into the commit.
     pub(crate) async fn prepare_commit(
         &self,
         candidate: &CommitCandidate,
@@ -139,10 +139,10 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         }
     }
 
-    /// Plans each operation against the commit's state, whose writes apply
-    /// the operation's rows at once, so later operations observe earlier
-    /// ones. The first failure aborts the request and attaches the failing
-    /// operation's index.
+    /// Plans each operation in order. Each write applies its rows to the
+    /// commit's state at once, so a later operation reads the rows that
+    /// earlier operations wrote. The first failure aborts the request and
+    /// attaches the failing operation's index.
     ///
     /// The head is the validated source of the namespace and writer epoch:
     /// `load_publish_metadata_view` fences on epoch equality, and the batch

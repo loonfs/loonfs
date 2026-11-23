@@ -19,8 +19,8 @@ use loonfs_types::{
 
 /// A deleted item's deletion in the trash: the latest tombstone event of the
 /// item's root, which is a `set` above the retention floor. Only
-/// [`OperationPlanningSession::resolve_deletion_in_trash`] makes one, so a
-/// restore that takes one revokes a deletion that is in the trash.
+/// [`OperationPlanningSession::resolve_deletion_in_trash`] makes one, so the
+/// deletion was in the trash in the commit's state when the value was made.
 pub(crate) struct DeletionInTrash {
     root_inode_id: InodeId,
     position: DeltaPosition,
@@ -47,7 +47,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     ) -> Result<()> {
         destination.ensure_mutation()?;
         let destination = self.view().resolve_destination(destination).await?;
-        let name = self.view().ensure_vacant_destination(&destination).await?;
+        let name = self.view().authorize_vacant_name(&destination).await?;
         let new_inode = self.next_inode_id()?;
         self.commit.create(new_inode, name, child).await
     }
@@ -76,7 +76,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         let name = match walk {
             VisiblePathWalk::Found(existing) => {
                 let destination = ResolvedDestination::found(absolute_path, existing)?;
-                self.view().ensure_vacant_destination(&destination).await?
+                self.view().authorize_vacant_name(&destination).await?
             }
             VisiblePathWalk::Missing(missing) => {
                 self.view()
@@ -178,7 +178,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         if destination.parent_inode_id() != saved_parent {
             check_rights(mover, AccessRight::Read.into(), inode_id, Absence::Inode)?;
         }
-        let name = view.ensure_vacant_destination(&destination).await?;
+        let name = view.authorize_vacant_name(&destination).await?;
         view.authorize_relocation(inode_id, saved_parent, destination.parent_inode_id(), mover)
             .await?;
         Ok(name)
@@ -249,7 +249,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             }
             VisiblePathWalk::Found(existing) => {
                 let destination = ResolvedDestination::found(absolute_path, existing)?;
-                self.view().ensure_vacant_destination(&destination).await?
+                self.view().authorize_vacant_name(&destination).await?
             }
             VisiblePathWalk::Missing(missing) => {
                 self.view()
