@@ -186,6 +186,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Moves the expiry of an unexpired snapshot that isn't deleted to
     /// `requested_expires_at_ms`, never earlier. A snapshot without an expiry is returned unchanged.
     /// `administrator` proves the caller administers the namespace.
+    ///
+    /// Each compare-and-swap checks the call's publication budget first, as a
+    /// snapshot record's creation does, so a call that stalled past its
+    /// budget doesn't extend the snapshot (format spec, "Extending a
+    /// snapshot").
     pub async fn extend_snapshot(
         &self,
         administrator: &Administrator,
@@ -213,6 +218,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
             *expires_at_ms = requested_expires_at_ms;
             let encoded = encode_snapshot_record(&next);
+            clock.ensure_metadata_publication_budget(&self.namespace.namespace_id)?;
             match self
                 .namespace
                 .store

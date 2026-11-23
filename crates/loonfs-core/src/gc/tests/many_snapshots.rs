@@ -44,7 +44,7 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             },
             ..basis.clone()
         };
-        crate::snapshot::record::write_snapshot_record(&store, &record)
+        crate::snapshot::record::write_snapshot_record(&store, &record, &setup.clock())
             .await
             .expect("expired snapshot");
     }

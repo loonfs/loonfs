@@ -369,6 +369,7 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
                     }
                 },
             },
+            &setup.clock(),
         )
         .await
         .expect("write snapshot");

@@ -688,7 +688,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .as_ref()
             .expect("a fork's manifest records its fork basis");
         deadline.ensure_before(clock)?;
-        clock.ensure_metadata_publication_budget(&self.namespace.namespace_id)?;
         write_snapshot_record(
             &self.namespace.store,
             &SnapshotPayload {
@@ -701,6 +700,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     target_namespace_id: fork.namespace_id.clone(),
                 },
             },
+            clock,
         )
         .await?;
         let source = self.namespace.find_current_above(&source).await?;
@@ -793,7 +793,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             "the fork point snapshot is on the fork's manifest at the fork point"
         );
         let manifest = newest.manifest.manifest();
-        clock.ensure_metadata_publication_budget(&self.namespace_id)?;
         write_snapshot_record(
             &self.store,
             &SnapshotPayload {
@@ -806,6 +805,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     target_namespace_id: self.namespace_id.clone(),
                 },
             },
+            clock,
         )
         .await?;
         Ok(())

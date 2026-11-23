@@ -8,6 +8,7 @@ use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::PublicationBasis;
 use crate::namespace::store::NamespaceStore;
+use crate::time::OperationClock;
 use bytes::Bytes;
 use loonfs_objectstore::keys::snapshot_record;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
@@ -25,10 +26,17 @@ pub(crate) fn encode_snapshot_record(record: &SnapshotPayload) -> Bytes {
 
 /// Writes a record under its freshly generated [`SnapshotId`], and returns
 /// the version of the record that the write stored.
+///
+/// The write checks `clock`'s publication budget once, before its first put,
+/// so a call that stalled past its budget writes nothing (format spec,
+/// "Clock and operation assumptions"). The retries of the put don't check
+/// the budget again.
 pub(crate) async fn write_snapshot_record<S: ObjectStore + ?Sized>(
     store: &S,
     record: &SnapshotPayload,
+    clock: &OperationClock,
 ) -> Result<ObjectMetadata> {
+    clock.ensure_metadata_publication_budget(&record.namespace_id)?;
     let encoded = encode_snapshot_record(record);
     let object_key = snapshot_record(&record.namespace_id, &record.snapshot_id);
     create_control_object_under_generated_id(store, &object_key, encoded)

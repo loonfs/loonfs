@@ -470,6 +470,7 @@ pub(crate) async fn write_fork_snapshot<S: ObjectStore>(
                 target_namespace_id: manifest_1.namespace_id.clone(),
             },
         },
+        &crate::time::OperationClock::start(manifest_1.created_at_ms, std_timer()),
     )
     .await
     .expect("write the fork snapshot");

@@ -141,7 +141,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         } = owner
         else {
             let record = self.new_snapshot_record(owner, &basis, clock);
-            write_snapshot_record(&self.store, &record).await?;
+            write_snapshot_record(&self.store, &record, clock).await?;
             return Ok((record, basis));
         };
         assert_eq!(deleted_at_ms, None, "a created snapshot isn't deleted");
@@ -183,7 +183,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             clock,
         );
         let verification = async {
-            let written = write_snapshot_record(&self.store, &record).await?;
+            let written = write_snapshot_record(&self.store, &record, clock).await?;
             Ok::<_, CoreError>((written.etag, self.verify_snapshot_basis(basis).await?))
         }
         .await;
@@ -192,6 +192,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 return Ok((CreatedSnapshot { record, etag }, basis))
             }
             Ok((_, SnapshotBasisVerification::Invalid)) => manifest_replaced(),
+            // Only the record's write returns this error, and only from its
+            // check before the first put, so a call that returns it sent no
+            // put and has no record to delete.
+            Err(error @ CoreError::MetadataPublicationBudgetExceeded { .. }) => return Err(error),
             Err(error) => error,
         };
         self.delete_failed_snapshot(&record, clock, &error).await;
