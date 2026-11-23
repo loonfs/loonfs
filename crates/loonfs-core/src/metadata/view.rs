@@ -382,6 +382,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         visibility::visible_child(&mut self.reads(), parent_inode_id, name_key).await
     }
 
+    /// Returns the visible child under `(parent_inode_id, name_key)` of a
+    /// directory that the caller already found visible, without reading the
+    /// directory's inode record.
+    pub(crate) async fn visible_child_of_visible_directory(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &NameKey,
+    ) -> Result<Option<DirentryBindingRecord>> {
+        visibility::visible_child_of_visible_directory(&mut self.reads(), parent_inode_id, name_key)
+            .await
+    }
+
     pub(crate) async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>> {
         visibility::visible_inode(&mut self.reads(), inode_id).await
     }

@@ -441,6 +441,24 @@ pub(crate) async fn visible_page_child<R: MetadataVisibilityReads>(
     Ok(Some(direntry))
 }
 
+/// The visible child under `(parent, name_key)` of a parent that the caller
+/// already found to be a visible directory. It's the same child as
+/// [`visible_child`] returns, without a read of the parent's inode record,
+/// as [`visible_page_child`] explains.
+pub(crate) async fn visible_child_of_visible_directory<R: MetadataVisibilityReads>(
+    reads: &mut R,
+    parent_inode_id: InodeId,
+    name_key: &NameKey,
+) -> Result<Option<DirentryBindingRecord>, R::Error> {
+    let Some(direntry) = reads
+        .active_child_binding(parent_inode_id, name_key)
+        .await?
+    else {
+        return Ok(None);
+    };
+    visible_page_child(reads, direntry).await
+}
+
 /// Resolves `absolute_path` component by component through visible
 /// directories and visible child bindings, starting at the canonical root
 /// inode. Each component folds into its name key.
@@ -492,11 +510,7 @@ where
             absolute_path: current_absolute_path.join(&display_name).to_string(),
         };
         let name_key = NameKey::for_display_name(&display_name);
-        let direntry = reads
-            .active_child_binding(parent_inode_id, &name_key)
-            .await?
-            .ok_or_else(not_found)?;
-        let direntry = visible_page_child(reads, direntry)
+        let direntry = visible_child_of_visible_directory(reads, parent_inode_id, &name_key)
             .await?
             .ok_or_else(not_found)?;
 

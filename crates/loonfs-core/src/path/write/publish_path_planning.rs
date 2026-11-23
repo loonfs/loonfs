@@ -209,6 +209,8 @@ pub(super) enum Destination<'a> {
         parent_inode_id: InodeId,
         display_name: &'a DisplayName,
     },
+    /// A path whose parent directory a walk from the root found.
+    ExistingParent(&'a ExistingParent<'a>),
 }
 
 impl<'a> Destination<'a> {
@@ -224,8 +226,48 @@ impl<'a> Destination<'a> {
         match self {
             Self::Path(path) => ensure_mutation_path(path),
             Self::Name { .. } => Ok(()),
+            Self::ExistingParent(parent) => ensure_mutation_path(parent.path),
         }
     }
+}
+
+/// The directories above a path, as
+/// [`PlanningView::resolve_parent_directories`] walked them from the root.
+pub(super) enum ParentDirectories<'a> {
+    /// Every directory above the path exists.
+    Existing(ExistingParent<'a>),
+    /// Some directories above the path are missing.
+    Missing {
+        /// The deepest directory above the path that exists.
+        deepest_existing: InodeId,
+        /// The names of the missing directories below it, from the top.
+        missing: Vec<DisplayName>,
+    },
+}
+
+impl ParentDirectories<'_> {
+    /// Returns the deepest directory above the path that exists, whose
+    /// `create` right covers the path and every directory created above it.
+    pub(super) fn deepest_existing(&self) -> InodeId {
+        match self {
+            Self::Existing(parent) => parent.inode_id,
+            Self::Missing {
+                deepest_existing, ..
+            } => *deepest_existing,
+        }
+    }
+}
+
+/// The parent directory of a path, which a walk from the root found as a
+/// visible directory. Only [`PlanningView::resolve_parent_directories`] makes
+/// one, so the directory was visible in the commit's state when the value
+/// was made.
+pub(super) struct ExistingParent<'a> {
+    /// The path whose parent the directory is, as the request spells it.
+    path: &'a AbsolutePath,
+    inode_id: InodeId,
+    /// The directory's path, as the namespace stores it.
+    stored_path: AbsolutePath,
 }
 
 /// A destination resolved to its parent directory and its current occupant.
@@ -478,7 +520,83 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
                     absence: Absence::Inode,
                 })
             }
+            Destination::ExistingParent(parent) => {
+                // The walk that made `parent` found it as a visible
+                // directory, so only the final name is looked up.
+                let name = final_component(parent.path)?;
+                let occupant = self
+                    .metadata
+                    .visible_child_of_visible_directory(
+                        parent.inode_id,
+                        &NameKey::for_display_name(&name),
+                    )
+                    .await?
+                    .map(|binding| read::resolve_visible_child(&parent.stored_path, &binding));
+                Ok(ResolvedDestination {
+                    parent_inode_id: parent.inode_id,
+                    name,
+                    path: parent.path.as_str().to_owned(),
+                    occupant,
+                    absence: Absence::Path(parent.path.as_str()),
+                })
+            }
         }
+    }
+
+    /// Walks the directories above `absolute_path` from the root, down to the
+    /// deepest one that exists.
+    ///
+    /// A component that exists and isn't a directory is reported only after
+    /// `create` is authorized on it.
+    pub(super) async fn resolve_parent_directories<'p>(
+        &self,
+        absolute_path: &'p AbsolutePath,
+    ) -> Result<ParentDirectories<'p>> {
+        let components = absolute_path.components();
+        let above = components.split_last().map_or(&[][..], |(_, above)| above);
+        let mut current_inode = ROOT_INODE_ID;
+        let mut current_path = AbsolutePath::root();
+        for (depth, component) in above.iter().enumerate() {
+            let name_key = NameKey::for_display_name(&component.to_display_name());
+            let Some(child) = self
+                .metadata
+                .visible_child(current_inode, &name_key)
+                .await?
+            else {
+                return Ok(ParentDirectories::Missing {
+                    deepest_existing: current_inode,
+                    missing: above[depth..]
+                        .iter()
+                        .map(|component| component.to_display_name())
+                        .collect(),
+                });
+            };
+            current_path = current_path.join(
+                child
+                    .display_name()
+                    .expect("visible binding should be bound"),
+            );
+            if child.child_kind != InodeKind::Directory {
+                self.authorize(
+                    child.child_inode_id,
+                    AccessRight::Create.into(),
+                    Absence::Path(absolute_path.as_str()),
+                )
+                .await?;
+                return Err(VisiblePathError::PathComponentNotDirectory {
+                    absolute_path: current_path.to_string(),
+                    inode_id: child.child_inode_id,
+                    inode_kind: child.child_kind,
+                }
+                .into());
+            }
+            current_inode = child.child_inode_id;
+        }
+        Ok(ParentDirectories::Existing(ExistingParent {
+            path: absolute_path,
+            inode_id: current_inode,
+            stored_path: current_path,
+        }))
     }
 
     /// Authorizes `create` on the destination's parent and then returns the

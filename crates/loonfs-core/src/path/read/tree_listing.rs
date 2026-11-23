@@ -183,7 +183,7 @@ async fn resume_stack<S: ObjectStore + ?Sized>(
         {
             break;
         }
-        let directory = resolve_visible_child(&parent.directory, &binding);
+        let directory = resolve_visible_child(&parent.directory.absolute_path, &binding);
         stack.push(TreeFrame::new(directory, frame.last_name_key));
     }
     Ok(stack)

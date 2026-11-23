@@ -15,8 +15,9 @@ use crate::phase::Phase;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::options::{AttributeInclusion, ListOptions};
 use loonfs_types::{
-    AccessRight, CommitSeq, DirectoryPageCursor, DirectoryTreePageCursor, DisplayName, InodeId,
-    InodeKind, ListPageCursor, NameKey, Page, PageRequest, PathEntry, PathEntryKind,
+    AbsolutePath, AccessRight, CommitSeq, DirectoryPageCursor, DirectoryTreePageCursor,
+    DisplayName, InodeId, InodeKind, ListPageCursor, NameKey, Page, PageRequest, PathEntry,
+    PathEntryKind,
 };
 use std::collections::HashMap;
 use tracing::Instrument;
@@ -584,23 +585,24 @@ impl ListedChild {
     /// Resolves a scanned child of `directory` to its path.
     pub(super) fn new(directory: &ResolvedVisiblePath, scanned: ScannedChild) -> Self {
         Self {
-            resolved: resolve_visible_child(directory, &scanned.child.binding),
+            resolved: resolve_visible_child(&directory.absolute_path, &scanned.child.binding),
             binding: scanned.child.binding,
             readable: scanned.readable,
         }
     }
 }
 
-/// Resolves the path of `binding`'s child, a visible child of `directory`.
-pub(super) fn resolve_visible_child(
-    directory: &ResolvedVisiblePath,
+/// Resolves the path of `binding`'s child, a visible child of the directory
+/// at `directory_path`.
+pub(crate) fn resolve_visible_child(
+    directory_path: &AbsolutePath,
     binding: &DirentryBindingRecord,
 ) -> ResolvedVisiblePath {
     let display_name = binding
         .display_name()
         .expect("visible binding should be bound");
     ResolvedVisiblePath {
-        absolute_path: directory.absolute_path.join(display_name),
+        absolute_path: directory_path.join(display_name),
         inode_id: binding.child_inode_id,
         inode_kind: binding.child_kind,
         created_by: binding.child_created_by.clone(),
