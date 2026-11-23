@@ -2,7 +2,7 @@
 //! order, each seeing the rows earlier candidates would persist.
 
 use super::planned_pieces::{CommitPieces, PlannedPieces};
-use super::planner::{CreatedInodeIds, OperationPlanningSession};
+use super::planner::{CreatedInodeIds, NewInodeId, OperationPlanningSession};
 use super::publish_path_planning::PlanningView;
 use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, MergeIntent};
@@ -15,7 +15,7 @@ use crate::storage::tail_content::{cut_layout, materialize_content_layout, Conte
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{next_public_ordinal, CommitSeq, ContentRef, InodeId, NamespaceId};
+use loonfs_types::{next_public_ordinal, CommitSeq, ContentRef, NamespaceId};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
@@ -223,12 +223,14 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 .and_then(|merge| merge.temporary_moves.get(&index).copied());
             let created_inode_ids = match candidate.merge() {
                 Some(merge) => {
-                    let assigned = merge.created_inode_ids.get(&index).copied();
-                    if let Some(inode_id) = assigned {
-                        ensure_merged_inode_is_new(&commit.view(), inode_id)
-                            .await
-                            .map_err(|error| error.at_operation(index))?;
-                    }
+                    let assigned = match merge.created_inode_ids.get(&index) {
+                        Some(&inode_id) => Some(
+                            NewInodeId::merged(&commit.view(), inode_id)
+                                .await
+                                .map_err(|error| error.at_operation(index))?,
+                        ),
+                        None => None,
+                    };
                     CreatedInodeIds::Merge(assigned)
                 }
                 None => CreatedInodeIds::Generated {
@@ -249,13 +251,14 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
                 .plan(operation)
                 .await
                 .map_err(|error| error.at_operation(index))?;
-            if let CreatedInodeIds::Merge(Some(inode_id)) = operation_session.created_inode_ids {
+            if let CreatedInodeIds::Merge(Some(assigned)) = operation_session.created_inode_ids {
                 // Only a bug in the merge's planner assigns an ID to an
                 // operation that creates no inode. A panic would return
                 // `outcome_unknown` and panic again on every retry, so
                 // the merge fails with an error that the caller doesn't retry.
                 return Err(CoreError::InvalidCommitRequest(format!(
-                    "a merge assigned inode `{inode_id}` to an operation that creates no inode"
+                    "a merge assigned inode `{}` to an operation that creates no inode",
+                    assigned.inode_id()
                 ))
                 .at_operation(index));
             }
@@ -389,27 +392,6 @@ async fn ensure_merge_is_admissible<S: ObjectStore + ?Sized>(
             expected_after_seq,
             actual_after_seq: merge.record.source_after_seq,
         });
-    }
-    Ok(())
-}
-
-/// Requires an inode that a merge creates under the fork's ID to be absent
-/// from `view`, which includes the merge's earlier operations, so an ID
-/// assigned to two creates fails at the second.
-///
-/// An inode row is immutable and unique, so a second row for the same ID
-/// would corrupt the namespace. The ID is present only if the merge's planner
-/// has a bug: it mistook an inode that this namespace already has (for
-/// example, one that an earlier merge created) for a new one, or it assigned
-/// one ID to two creates.
-async fn ensure_merged_inode_is_new<S: ObjectStore + ?Sized>(
-    view: &MetadataView<'_, '_, S>,
-    inode_id: InodeId,
-) -> Result<()> {
-    if view.inode_at_seq(inode_id).await?.is_some() {
-        return Err(CoreError::InvalidCommitRequest(format!(
-            "a merge creates inode `{inode_id}`, which already exists"
-        )));
     }
     Ok(())
 }

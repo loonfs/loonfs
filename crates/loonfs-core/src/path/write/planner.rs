@@ -12,6 +12,7 @@ use crate::authorize::Authorizer;
 use crate::commit::engine::TemporaryMove;
 use crate::commit::{CommitFingerprint, CommitSession, NewChild};
 use crate::error::{CoreError, Result};
+use crate::metadata::MetadataView;
 use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
@@ -76,14 +77,37 @@ pub(super) struct OperationPlanningSession<'p, 'c, S: ObjectStore + ?Sized> {
     pub(super) temporary_move: Option<TemporaryMove>,
 }
 
-/// The ID of an inode that a create writes. Only
-/// [`OperationPlanningSession::next_inode_id`] makes one, so the ID is new to
-/// the namespace: a generated ID includes the commit's sequence, and the
-/// planning session checks that a merge's assigned ID is absent before it
-/// plans the operation.
+/// The ID of an inode that a create writes.
+///
+/// Only [`OperationPlanningSession::next_inode_id`] and [`NewInodeId::merged`]
+/// make one, so the ID is new to the namespace. A generated ID includes the
+/// commit's own sequence, which no earlier commit used, and
+/// [`NewInodeId::merged`] checks that no inode has a merge's assigned ID.
 pub(crate) struct NewInodeId(InodeId);
 
 impl NewInodeId {
+    /// Returns `inode_id`, the ID that a merge assigns to an inode that it
+    /// creates, after checking that no inode in `view` has it. `view`
+    /// includes the merge's earlier operations, so an ID assigned to two
+    /// creates fails at the second.
+    ///
+    /// An inode row is immutable and unique, so a second row for the same ID
+    /// would corrupt the namespace. The ID is present only if the merge's
+    /// planner has a bug: it mistook an inode that this namespace already has
+    /// (for example, one that an earlier merge created) for a new one, or it
+    /// assigned one ID to two creates.
+    pub(super) async fn merged<S: ObjectStore + ?Sized>(
+        view: &MetadataView<'_, '_, S>,
+        inode_id: InodeId,
+    ) -> Result<Self> {
+        if view.inode_at_seq(inode_id).await?.is_some() {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "a merge creates inode `{inode_id}`, which already exists"
+            )));
+        }
+        Ok(Self(inode_id))
+    }
+
     pub(crate) fn inode_id(&self) -> InodeId {
         self.0
     }
@@ -97,7 +121,7 @@ pub(super) enum CreatedInodeIds<'p> {
     /// The ID that the inode has in the fork, for a merge's operation, which
     /// creates at most one inode. The operation takes the ID when it creates
     /// the inode.
-    Merge(Option<InodeId>),
+    Merge(Option<NewInodeId>),
 }
 
 impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
@@ -127,7 +151,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 );
                 Ok(NewInodeId(InodeId::generate(self.committed_seq, create_no)))
             }
-            CreatedInodeIds::Merge(assigned) => assigned.take().map(NewInodeId).ok_or_else(|| {
+            CreatedInodeIds::Merge(assigned) => assigned.take().ok_or_else(|| {
                 CoreError::InvalidCommitRequest(
                     "a merge operation creates an inode but has no assigned inode ID".to_owned(),
                 )
