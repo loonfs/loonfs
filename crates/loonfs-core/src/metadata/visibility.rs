@@ -449,16 +449,36 @@ pub(crate) enum VisiblePathWalk {
     Found(ResolvedVisiblePath),
     /// A component of the path has no visible child under the directory above
     /// it.
-    Missing {
-        /// The deepest directory on the path that is visible, which is the
-        /// directory above the first missing component.
-        deepest_existing: InodeId,
-        /// The path of that directory, as the namespace stores it.
-        deepest_path: AbsolutePath,
-        /// The path's components from the first missing one to the last one,
-        /// as the path spells them.
-        missing: Vec<DisplayName>,
-    },
+    Missing(MissingPath),
+}
+
+/// The components of a path that [`walk_visible_path`] found missing, below
+/// the deepest directory on the path that is visible.
+///
+/// Only the walk makes one, so the first missing component had no visible
+/// child under that directory in the state that the walk read.
+pub(crate) struct MissingPath {
+    /// The deepest directory on the path that is visible, which is the
+    /// directory above the first missing component.
+    deepest_existing: InodeId,
+    /// The path of that directory, as the namespace stores it.
+    deepest_path: AbsolutePath,
+    /// The path's components from the first missing one to the last one, as
+    /// the path spells them.
+    missing: Vec<DisplayName>,
+}
+
+impl MissingPath {
+    /// Returns the deepest directory on the path that is visible.
+    pub(crate) fn deepest_existing(&self) -> InodeId {
+        self.deepest_existing
+    }
+
+    /// Returns the path's components from the first missing one to the last
+    /// one, as the path spells them.
+    pub(crate) fn into_missing(self) -> Vec<DisplayName> {
+        self.missing
+    }
 }
 
 impl VisiblePathWalk {
@@ -467,12 +487,8 @@ impl VisiblePathWalk {
     pub(crate) fn into_resolved(self) -> Result<ResolvedVisiblePath, VisiblePathError> {
         match self {
             Self::Found(resolved) => Ok(resolved),
-            Self::Missing {
-                deepest_path,
-                missing,
-                ..
-            } => Err(VisiblePathError::PathNotFound {
-                absolute_path: deepest_path.join(&missing[0]).to_string(),
+            Self::Missing(missing) => Err(VisiblePathError::PathNotFound {
+                absolute_path: missing.deepest_path.join(&missing.missing[0]).to_string(),
             }),
         }
     }
@@ -535,14 +551,14 @@ where
             None => None,
         };
         let Some(direntry) = direntry else {
-            return Ok(VisiblePathWalk::Missing {
+            return Ok(VisiblePathWalk::Missing(MissingPath {
                 deepest_existing: parent_inode_id,
                 deepest_path: current_absolute_path,
                 missing: components[depth..]
                     .iter()
                     .map(|component| component.to_display_name())
                     .collect(),
-            });
+            }));
         };
 
         current_absolute_path = current_absolute_path.join(

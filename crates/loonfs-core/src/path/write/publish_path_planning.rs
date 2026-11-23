@@ -1,15 +1,20 @@
 //! [`PlanningView`]: the read-only part of planning one operation, with
 //! the target and destination resolution that the planners share. The
+//! directories that a put or `mkdir -p` creates above its path are created
+//! here too, because only this module makes a [`ResolvedDestination`]. The
 //! authorization checks are in [`super::planning_authorization`].
 
+use super::planner::OperationPlanningSession;
 use super::planning_authorization::AccessStateRef;
 use super::preconditions::ensure_expected_inode;
 use crate::authorize::{Absence, Authorizer};
 use crate::binding_version;
+use crate::commit::NewChild;
 use crate::error::{CoreError, Result};
 
 use crate::metadata::{
-    AccessRevisionRecord, MetadataView, ResolvedVisiblePath, RevisionRecord, VisiblePathError,
+    AccessRevisionRecord, MetadataView, MissingPath, ResolvedVisiblePath, RevisionRecord,
+    VisiblePathError,
 };
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use crate::path::read;
@@ -236,8 +241,9 @@ impl<'a> Destination<'a> {
 
 /// A destination resolved to its parent directory and its current occupant.
 /// [`PlanningView::resolve_destination`] makes one from a [`Destination`],
-/// and the planners of a put and of `mkdir -p` make one with
-/// [`ResolvedDestination::at_path`] from a walk of the request's path.
+/// and [`ResolvedDestination::found`] and
+/// [`OperationPlanningSession::create_missing_directories`] make one from
+/// what a walk of the request's path returned.
 pub(super) struct ResolvedDestination<'a> {
     parent_inode_id: InodeId,
     name: DisplayName,
@@ -252,7 +258,7 @@ impl<'a> ResolvedDestination<'a> {
     /// Returns the destination `name` under the directory `parent_inode_id`,
     /// with `occupant`, the inode that occupies it now, for an operation at
     /// the request's path `absolute_path`, which its errors report.
-    pub(super) fn at_path(
+    fn at_path(
         absolute_path: &'a AbsolutePath,
         parent_inode_id: InodeId,
         name: DisplayName,
@@ -265,6 +271,20 @@ impl<'a> ResolvedDestination<'a> {
             occupant,
             absence: Absence::Path(absolute_path.as_str()),
         }
+    }
+
+    /// Returns the destination at `absolute_path`, which a walk of the path
+    /// found occupied by `existing`.
+    pub(super) fn found(
+        absolute_path: &'a AbsolutePath,
+        existing: ResolvedVisiblePath,
+    ) -> Result<Self> {
+        Ok(Self::at_path(
+            absolute_path,
+            existing.parent_inode_id.unwrap_or(ROOT_INODE_ID),
+            final_component(absolute_path)?,
+            Some(existing),
+        ))
     }
 
     pub(super) fn parent_inode_id(&self) -> InodeId {
@@ -675,6 +695,43 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
             });
         }
         Ok(resolved.inode_id)
+    }
+}
+
+impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
+    /// Creates a directory at each missing component of `absolute_path`
+    /// except the last, each under the one before it and the first under
+    /// the deepest visible directory, and returns the last component, which
+    /// is the final name of `absolute_path`, as a vacant name under the last
+    /// directory.
+    ///
+    /// A walk of `absolute_path` returned `missing`, so the first component
+    /// is vacant under the deepest visible directory, and each later
+    /// component is under a directory that this operation created. The
+    /// caller must authorize `create` on the deepest visible directory, which
+    /// covers every name below it.
+    pub(super) async fn create_missing_directories(
+        &mut self,
+        absolute_path: &AbsolutePath,
+        missing: MissingPath,
+    ) -> Result<AvailableName> {
+        let mut parent_inode_id = missing.deepest_existing();
+        let mut missing = missing.into_missing();
+        let final_name = missing
+            .pop()
+            .expect("a walk that stops at a missing component should report it");
+        for display_name in missing {
+            let name =
+                ResolvedDestination::at_path(absolute_path, parent_inode_id, display_name, None)
+                    .available_name(None)?;
+            let new_inode = self.next_inode_id()?;
+            parent_inode_id = new_inode.inode_id();
+            self.commit
+                .create(new_inode, name, NewChild::Directory)
+                .await?;
+        }
+        ResolvedDestination::at_path(absolute_path, parent_inode_id, final_name, None)
+            .available_name(None)
     }
 }
 
