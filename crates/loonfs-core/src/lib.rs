@@ -169,7 +169,7 @@ pub mod cache {
 pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::manifest::NamespaceStatistics;
-    pub use crate::namespace::boundary::{higher_boundary, LoadedBoundary};
+    pub use crate::namespace::boundary::{KeptBoundary, LoadedBoundary};
     pub use crate::namespace::catalog::{
         ActiveNamespaceCatalogEntry, VerifiedNamespaceCatalogEntry,
     };

@@ -4,7 +4,7 @@ use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
 use crate::limits::{MANIFEST_PROBE_WINDOW, MAX_CONTENTION_ATTEMPTS};
 use crate::namespace::basis::PublicationBasis;
-use crate::namespace::boundary::at_or_below_boundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use futures::{stream, StreamExt, TryStreamExt};
@@ -166,24 +166,25 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     Ok::<_, CoreError>(manifest_no_of(&entry.key).max(highest))
                 })
                 .await?;
+            let kept = KeptBoundary::from(boundary);
             let Some(manifest_no) = highest else {
-                if self.reload_boundary(boundary.clone()).await? != boundary {
+                if self.reload_boundary(kept.clone()).await? != kept {
                     continue;
                 }
-                let (Some(boundary), Some(boundary_no)) = (boundary, boundary_no) else {
+                let (Some(boundary), Some(boundary_no)) = (kept.object(), boundary_no) else {
                     return Ok(NewestManifest::Absent);
                 };
                 return Err(ControlObjectLoadError::Codec {
                     message: format!("no manifest is above the manifest boundary `{boundary_no}`"),
-                    object_key: boundary.object_key,
+                    object_key: boundary.object_key.clone(),
                 }
                 .into());
             };
             let Some(manifest) = self.load_manifest_by_no(manifest_no).await? else {
                 continue;
             };
-            let reloaded = self.reload_boundary(boundary).await?;
-            if !at_or_below_boundary(manifest_no, reloaded.as_ref()) {
+            let reloaded = self.reload_boundary(kept).await?;
+            if !reloaded.covers(manifest_no) {
                 return Ok(NewestManifest::Manifest(PublicationBasis {
                     manifest,
                     boundary: reloaded,

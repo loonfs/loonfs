@@ -8,7 +8,6 @@ use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
 use crate::manifest::retention::verify_manifest_segments_exist;
 use crate::manifest::{FloorObjectReport, ManifestLoadError, PublishedManifest};
-use crate::namespace::boundary::higher_boundary;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
@@ -229,7 +228,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             state.invalidate_projection();
             return;
         }
-        position.boundary = higher_boundary(position.boundary.take(), manifest.boundary);
+        position.boundary = std::mem::take(&mut position.boundary).higher(manifest.boundary);
         let Some(started) = manifest.started else {
             return;
         };

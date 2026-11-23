@@ -6,6 +6,7 @@ use crate::engine::{Administrator, NamespaceEngine, RuntimeReadContext, Writable
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::namespace::basis::PublicationBasis;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
@@ -91,12 +92,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<CreatedSnapshot> {
         let segments = self
             .namespace
-            .load_held_manifest(context.read_basis().basis.manifest(), None)
+            .load_held_manifest(
+                context.read_basis().basis.manifest(),
+                KeptBoundary::default(),
+            )
             .await?
             .ok_or_else(manifest_replaced)?;
         let basis = PublicationBasis {
             manifest: segments.loaded_manifest(),
-            boundary: None,
+            boundary: KeptBoundary::default(),
         };
         self.namespace
             .create_verified_snapshot_record(

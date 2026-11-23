@@ -14,7 +14,7 @@ use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
 use crate::manifest::{move_read_basis, PublishedManifest};
 use crate::namespace::basis::ReadBasis;
-use crate::namespace::boundary::{higher_boundary, LoadedBoundary};
+use crate::namespace::boundary::KeptBoundary;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use loonfs_types::{CommitSeq, ManifestNo, NamespaceId, WalNo};
@@ -58,7 +58,7 @@ pub struct CachedHead {
     /// The successor check that last confirmed `basis`.
     pub basis_checked: Observation,
     /// The manifest boundary as the last check of `basis` read it.
-    pub boundary: Option<LoadedBoundary>,
+    pub boundary: KeptBoundary,
     /// When the WAL probe last confirmed `head`, or when the head was loaded.
     /// The observation is taken before the probe or the load is sent, so
     /// `head` includes every commit acknowledged before it. An eventual read
@@ -287,7 +287,7 @@ impl HeadAndWalTailCache {
                 CachedHead {
                     basis_checked: basis_checked.unwrap_or_else(|| cached.basis_checked.clone()),
                     head_confirmed: head_confirmed.unwrap_or_else(|| cached.head_confirmed.clone()),
-                    boundary: higher_boundary(cached.boundary.clone(), candidate.boundary),
+                    boundary: cached.boundary.clone().higher(candidate.boundary),
                     ..CachedHead::clone(&cached)
                 }
             }
@@ -365,7 +365,7 @@ impl HeadAndWalTailCache {
             read_basis,
             basis_checked,
             head_confirmed: cached.head_confirmed.clone(),
-            boundary: higher_boundary(cached.boundary.clone(), manifest.boundary.clone()),
+            boundary: cached.boundary.clone().higher(manifest.boundary.clone()),
         })
     }
 
@@ -444,6 +444,7 @@ mod tests {
     use crate::block_cache::charged_bytes;
     use crate::metadata::{InodeRecord, MetadataState};
     use crate::namespace::basis::MetadataBasis;
+    use crate::namespace::boundary::LoadedBoundary;
     use crate::namespace::state::NamespaceReadState;
 
     use crate::wal::ProjectedWalTail;
@@ -495,7 +496,7 @@ mod tests {
             },
             basis_checked: checked.clone(),
             head_confirmed: checked.clone(),
-            boundary: None,
+            boundary: Default::default(),
         }
     }
 
@@ -519,7 +520,8 @@ mod tests {
                         manifest_no: ManifestNo(1),
                     },
                 },
-            }),
+            })
+            .into(),
             ..head_at(seq, 1, checked)
         }
     }
@@ -538,7 +540,7 @@ mod tests {
             folded_wal_no: WalNo(0),
             retention_floor_seq: CommitSeq(0),
             started: Some(started.clone()),
-            boundary: None,
+            boundary: Default::default(),
         }
     }
 
@@ -980,7 +982,7 @@ mod tests {
             + boundary.etag.capacity()
             + HeapBytes::heap_bytes(&boundary.state.namespace_id);
         let with = CachedHead {
-            boundary: Some(boundary),
+            boundary: Some(boundary).into(),
             ..without.clone()
         };
         assert_eq!(Arc::new(with).weight(), Arc::new(without).weight() + kept);

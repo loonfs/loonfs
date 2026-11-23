@@ -5,7 +5,7 @@ use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, PublishedManifest};
 use crate::namespace::basis::{MetadataBasis, PublicationBasis, ReadBasis};
-use crate::namespace::boundary::LoadedBoundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -26,7 +26,7 @@ pub struct NamespaceReadAnchor {
     /// `manifest` and confirmed it with a successor check.
     pub(crate) checked: crate::time::Observation,
     /// The manifest boundary as the anchor's last check read it.
-    pub(crate) boundary: Option<LoadedBoundary>,
+    pub(crate) boundary: KeptBoundary,
 }
 
 impl NamespaceReadAnchor {
@@ -53,7 +53,7 @@ impl NamespaceReadAnchor {
     }
 
     /// Returns the manifest boundary as the anchor's last check read it.
-    pub fn boundary(&self) -> Option<LoadedBoundary> {
+    pub fn boundary(&self) -> KeptBoundary {
         self.boundary.clone()
     }
 
@@ -148,7 +148,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn load_read_anchor_from_manifest(
         &self,
         manifest: LoadedManifest,
-        boundary: Option<LoadedBoundary>,
+        boundary: KeptBoundary,
         observed: crate::time::Observation,
         acquired_writer: Option<&AcquiredWriter>,
     ) -> CoreResult<NamespaceReadAnchor> {
@@ -164,7 +164,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn load_unchecked_read_anchor(
         &self,
         manifest: LoadedManifest,
-        boundary: Option<LoadedBoundary>,
+        boundary: KeptBoundary,
         observed: crate::time::Observation,
         acquired_writer: Option<&AcquiredWriter>,
     ) -> CoreResult<NamespaceReadAnchor> {
@@ -175,7 +175,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     async fn discover_read_anchor(
         &self,
         mut manifest: LoadedManifest,
-        mut boundary: Option<LoadedBoundary>,
+        mut boundary: KeptBoundary,
         mut observed: crate::time::Observation,
         acquired_writer: Option<&AcquiredWriter>,
         check_manifest: bool,
@@ -235,7 +235,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         let newest;
         (newest, anchor.boundary) = self
-            .above_boundary(manifest_no, anchor.boundary.take())
+            .above_boundary(manifest_no, std::mem::take(&mut anchor.boundary))
             .await?;
         Ok(newest)
     }
@@ -276,7 +276,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
             if payload.writer_epoch != writer_epoch || payload.status.is_deleted() {
                 break;
             }
-            moves.push(PublishedManifest::new(&loaded.envelope, None, None));
+            moves.push(PublishedManifest::new(
+                &loaded.envelope,
+                None,
+                KeptBoundary::default(),
+            ));
             manifest_no = next;
         }
         Ok(None)

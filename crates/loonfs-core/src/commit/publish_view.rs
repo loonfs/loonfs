@@ -6,7 +6,7 @@ use crate::manifest::move_read_basis;
 use crate::manifest::{metadata_basis_from_manifest, LoadedMetadataBasis, PublishedManifest};
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
-use crate::namespace::boundary::LoadedBoundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::ensure_namespace_live;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -142,7 +142,7 @@ pub struct WriterPosition {
     /// discovery that loaded the basis, or a HEAD that found no successor.
     pub basis_checked: Observation,
     /// The manifest boundary as the last check of the basis read it.
-    pub boundary: Option<LoadedBoundary>,
+    pub boundary: KeptBoundary,
 }
 
 impl WriterPosition {

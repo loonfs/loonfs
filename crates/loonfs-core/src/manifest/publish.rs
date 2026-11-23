@@ -4,7 +4,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::published::{PublicationReport, PublishedManifest};
 use crate::namespace::basis::PublicationBasis;
-use crate::namespace::boundary::LoadedBoundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest, NewestManifest};
 use crate::namespace::store::NamespaceStore;
 use crate::phase::Phase;
@@ -372,7 +372,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .settle_against_boundary(
                         &candidate,
                         expected_predecessor,
-                        current.and_then(|current| current.boundary.clone()),
+                        current
+                            .map(|current| current.boundary.clone())
+                            .unwrap_or_default(),
                     )
                     .await?;
                 if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
@@ -431,7 +433,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .map_err(CoreError::ControlObjectLoad)?;
         let outcome = match found {
             Some(found) => {
-                let kept = current.and_then(|current| current.boundary.clone());
+                let kept = current
+                    .map(|current| current.boundary.clone())
+                    .unwrap_or_default();
                 let (above, boundary) = self.candidate_above_boundary(candidate, kept).await?;
                 if above {
                     classify_current(
@@ -484,7 +488,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         candidate: &LoadedManifest,
         expected_predecessor: Option<ManifestNo>,
-        kept: Option<LoadedBoundary>,
+        kept: KeptBoundary,
     ) -> Result<ManifestPublicationOutcome> {
         let (above, boundary) = self.candidate_above_boundary(candidate, kept).await?;
         if above {
@@ -507,8 +511,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     async fn candidate_above_boundary(
         &self,
         candidate: &LoadedManifest,
-        kept: Option<LoadedBoundary>,
-    ) -> Result<(bool, Option<LoadedBoundary>)> {
+        kept: KeptBoundary,
+    ) -> Result<(bool, KeptBoundary)> {
         self.above_boundary(candidate.payload().manifest_no, kept)
             .await
             .map_err(|error| {

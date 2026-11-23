@@ -1166,7 +1166,7 @@ async fn an_initializing_namespace_is_not_found_except_by_create_fork_and_delete
             None,
             PublicationBasis {
                 manifest: namespace.load_current_manifest().await.expect("current"),
-                boundary: None,
+                boundary: Default::default(),
             },
         )
         .await;

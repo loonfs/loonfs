@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataView;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
-use crate::namespace::boundary::LoadedBoundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -431,7 +431,7 @@ impl<S: ObjectStore> FoldAttempts<'_, S> {
             if same_head(
                 &self.projection.basis,
                 &self.projection.head,
-                &PublishedManifest::new(&current.envelope, None, None),
+                &PublishedManifest::new(&current.envelope, None, KeptBoundary::default()),
             ) {
                 self.projection.basis = MetadataBasis::new(current.manifest());
                 self.projection.manifest_segments = metadata_basis_from_manifest(
@@ -483,7 +483,7 @@ pub(crate) struct ManifestProjection<'a, S: ObjectStore + ?Sized> {
     pub(crate) head: NamespaceReadState,
     pub(crate) basis: MetadataBasis,
     /// The manifest boundary as the check that confirmed `basis` read it.
-    pub(crate) boundary: Option<LoadedBoundary>,
+    pub(crate) boundary: KeptBoundary,
     pub(crate) manifest_segments: VerifiedMetadataSegments<'a, S>,
     /// Rows that are not in any segment yet: the genesis root inode when the
     /// basis is genesis, plus the replayed WAL tail.

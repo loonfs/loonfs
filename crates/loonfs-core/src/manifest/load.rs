@@ -11,7 +11,7 @@ use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
-use crate::namespace::boundary::LoadedBoundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -140,7 +140,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn load_held_manifest(
         &self,
         manifest: &ManifestRef,
-        kept: Option<LoadedBoundary>,
+        kept: KeptBoundary,
     ) -> crate::error::Result<Option<VerifiedMetadataSegments<'_, S>>> {
         let object_key =
             metadata_manifest_object(&manifest.owner_namespace_id, &manifest.manifest_no);

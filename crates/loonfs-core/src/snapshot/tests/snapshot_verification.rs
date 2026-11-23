@@ -248,7 +248,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
             },
             PublicationBasis {
                 manifest: current,
-                boundary: None,
+                boundary: Default::default(),
             },
             &clock
         ),
@@ -320,7 +320,7 @@ async fn snapshot_verification_sends_a_successor_head_and_a_boundary_read_and_re
     };
     let basis = write_and_fold("/one").await;
     assert!(
-        basis.boundary.is_some(),
+        basis.boundary.object().is_some(),
         "the fold read the boundary object"
     );
     let manifest_no = basis.manifest.payload().manifest_no;

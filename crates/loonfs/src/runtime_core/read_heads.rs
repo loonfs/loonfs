@@ -204,7 +204,7 @@ impl RuntimeCore {
         }
         let above;
         (above, head.boundary) = namespace
-            .above_boundary(manifest_no, head.boundary.take())
+            .above_boundary(manifest_no, std::mem::take(&mut head.boundary))
             .await?;
         Ok(above)
     }

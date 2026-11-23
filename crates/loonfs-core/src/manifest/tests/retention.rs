@@ -1760,7 +1760,7 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
     let verified = namespace
         .verify_snapshot_basis(crate::namespace::basis::PublicationBasis {
             manifest,
-            boundary: None,
+            boundary: Default::default(),
         })
         .await
         .expect("verification runs");

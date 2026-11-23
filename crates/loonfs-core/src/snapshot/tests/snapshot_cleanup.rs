@@ -208,7 +208,7 @@ async fn an_unverified_snapshot_left_without_its_manifest_is_deleted_at_the_grac
             owner,
             crate::namespace::basis::PublicationBasis {
                 manifest: selected.clone(),
-                boundary: None,
+                boundary: Default::default(),
             },
             &clock
         ),

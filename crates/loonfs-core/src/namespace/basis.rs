@@ -1,6 +1,6 @@
 //! The manifest that reads and publications build on.
 
-use crate::namespace::boundary::LoadedBoundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::control::ManifestRef;
@@ -50,7 +50,6 @@ pub struct SnapshotReadBasis(pub(crate) ReadBasis);
 #[derive(Debug, Clone)]
 pub struct PublicationBasis {
     pub manifest: LoadedManifest,
-    /// The manifest boundary as last read, or `None` when no boundary object
-    /// existed or none has been read.
-    pub boundary: Option<LoadedBoundary>,
+    /// The manifest boundary as last read.
+    pub boundary: KeptBoundary,
 }
