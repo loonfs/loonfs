@@ -5,9 +5,9 @@
 use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
 use crate::engine::{Administrator, NamespaceEngine, Writable};
-use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
+use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::retention::verify_manifest_segments_exist;
-use crate::manifest::{FloorObjectReport, ManifestLoadError};
+use crate::manifest::FloorObjectReport;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
 use crate::namespace::held::Held;
@@ -758,61 +758,48 @@ struct TailProjectionUpdate {
 }
 
 /// Returns `report` with each result that found a metadata segment missing
-/// replaced by `ManifestReplaced`, and the batch's effect set to drop the
-/// position, when the store shows a manifest above the batch's basis.
-/// Garbage collection keeps the segments of the current manifest and of
-/// snapshots' manifests, so a successor can drop the basis's, and the next unit
-/// plans on the current manifest. Without a successor, the segment is
-/// missing from the current manifest, and the result stays
+/// replaced by the error of [`NamespaceStore::ensure_manifest_current`] for
+/// the batch's basis, when that check fails, and otherwise unchanged.
+///
+/// When a newer manifest replaced the basis, those results become
+/// `ManifestReplaced`, which the caller publishes again, and the batch's
+/// effect drops the position, so the next unit plans on the current
+/// manifest. When the current manifest can't be loaded, they become the
+/// load's error, because the batch can't tell whether its basis was
+/// replaced. When the basis is still the current manifest, they stay
 /// `namespace_corrupt`.
 async fn classify_replaced_basis<S: ObjectStore>(
     namespace: &NamespaceStore<S>,
     position: &WriterPosition,
     mut report: PublishBatchReport,
 ) -> PublishBatchReport {
-    if !report.results.iter().any(found_segment_missing) {
-        return report;
-    }
-    let replaced_manifest_no = position.basis.manifest_no();
-    let current_manifest_no = match namespace.load_current_manifest().await {
-        Ok(current) => current.payload().manifest_no,
-        Err(_) => return report,
+    let missing = |result: &Result<Commit>| {
+        result
+            .as_ref()
+            .err()
+            .is_some_and(CoreError::is_missing_segment)
     };
-    if current_manifest_no <= replaced_manifest_no {
+    if !report.results.iter().any(missing) {
         return report;
     }
+    let Err(failed) = namespace
+        .ensure_manifest_current(position.basis.manifest_no())
+        .await
+    else {
+        return report;
+    };
+    let replaced = matches!(failed, CoreError::ManifestReplaced { .. });
     for result in &mut report.results {
-        if found_segment_missing(result) {
-            *result = Err(CoreError::ManifestReplaced {
-                replaced_manifest_no,
-                current_manifest_no,
-            });
+        if missing(result) {
+            *result = Err(failed.clone());
         }
     }
     // A put with an unknown outcome in the same batch still leaves the
     // session owing a fence.
-    if !matches!(report.effect, PublishViewEffect::OutcomeUnknown) {
+    if replaced && !matches!(report.effect, PublishViewEffect::OutcomeUnknown) {
         report.effect = PublishViewEffect::Invalidated;
     }
     report
-}
-
-/// Returns whether `result` failed because a metadata segment of the basis
-/// is missing, in the batch itself or in one of its operations.
-fn found_segment_missing(result: &Result<Commit>) -> bool {
-    let Err(error) = result else {
-        return false;
-    };
-    let error = match error {
-        CoreError::FailedOperation { error, .. } => error.as_ref(),
-        error => error,
-    };
-    matches!(
-        error,
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
-            ManifestLoadError::MissingSegment { .. }
-        ))
-    )
 }
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {

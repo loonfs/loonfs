@@ -17,7 +17,7 @@ use super::group_compaction::run_metadata_compaction;
 use super::plan::{plan_compaction, select_family_group, MetadataCompactionSpec};
 use super::publication::{input_segment_keys, CompactionPublication};
 use crate::engine::{NamespaceEngine, Writable};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::manifest::load::metadata_basis_from_manifest;
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::published::PublicationReport;
@@ -154,7 +154,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             frozen_floor_seq = spec.frozen_floor_seq().0,
             "metadata compaction unit started"
         );
-        let outcome = match run_metadata_compaction(
+        let ran = run_metadata_compaction(
             &segments,
             &self.namespace.segment_cache,
             &self.namespace.namespace_id,
@@ -162,8 +162,31 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             self.namespace.run_policy,
             cancellation,
         )
-        .await?
-        {
+        .await;
+        let ran = match ran {
+            // A collection can delete the input segments of a basis that a
+            // newer manifest replaced while the unit reads them. The unit is
+            // then abandoned, as it is when its put finds the basis replaced.
+            // A missing segment of the current manifest still returns
+            // `namespace_corrupt`.
+            Err(error) if error.is_missing_segment() => {
+                return match self
+                    .namespace
+                    .ensure_manifest_current(payload.manifest_no)
+                    .await
+                {
+                    Err(CoreError::ManifestReplaced { .. }) => {
+                        let outcome = CompactionUnitOutcome::Abandoned;
+                        log_unit_outcome(&self.namespace.namespace_id, &spec, &outcome);
+                        Ok(outcome)
+                    }
+                    Ok(()) => Err(error),
+                    Err(other) => Err(other),
+                };
+            }
+            ran => ran?,
+        };
+        let outcome = match ran {
             Ok(compacted) => {
                 drop(segments);
                 self.namespace

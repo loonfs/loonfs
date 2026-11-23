@@ -234,6 +234,71 @@ async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
     assert_eq!(code, Some(ErrorCode::WriterFenced));
 }
 
+/// Checks that a commit that finds a segment of its position's manifest
+/// missing, and can't load the current manifest to check whether a newer
+/// manifest replaced its position's manifest, returns the load's error
+/// instead of `namespace_corrupt`, as a retention advance and a compaction
+/// unit do.
+#[tokio::test]
+async fn a_commit_that_cannot_check_its_manifest_returns_the_load_error() {
+    use loonfs_test_support::stores::{FailStore, InjectedError};
+
+    let temp_dir = tempdir().expect("tempdir");
+    let base = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let writer = context("writer-a");
+    crate::test_support::NamespaceFixture::new(&base, &namespace_id, &writer)
+        .create()
+        .await
+        .expect("bootstrap");
+    let failing = FailStore::new(
+        base.clone(),
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace_id,
+        )),
+        OperationSelector::List,
+        InjectedError::Transport("listing failed".to_owned()),
+    );
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&failing, &namespace_id),
+        writer.writer_id.clone(),
+    );
+    engine
+        .publish_batch(vec![create_dir("first", "alpha")], &writer.clock())
+        .await
+        .results
+        .remove(0)
+        .expect("first commit");
+    let folded = crate::test_support::namespace_store(&failing, &namespace_id)
+        .fold_wal_tail(engine.writer_position(), &writer.clock())
+        .await
+        .expect("fold");
+    engine.record_manifest_published(folded.current);
+    let current = crate::test_support::namespace_store(&base, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the position's manifest");
+    for run in &current.payload().runs {
+        for segment in &run.segments {
+            base.delete(&loonfs_objectstore::keys::metadata_segment_object_key(
+                segment,
+            ))
+            .await
+            .expect("delete a segment");
+        }
+    }
+    failing.fail_next(1);
+    let error = engine
+        // A directory named as the folded one, so the commit reads that
+        // name's rows from the position's segments.
+        .publish_batch(vec![create_dir("second", "alpha")], &writer.clock())
+        .await
+        .results
+        .remove(0)
+        .expect_err("the commit finds a segment missing");
+    assert_matches!(error, CoreError::Store { .. }, "{error:?}");
+}
+
 /// Checks that a writer session that loads a stored manifest with a writer
 /// epoch below its own returns `namespace_corrupt`, at each entry that loads
 /// the session's writer anchor: a commit, a retention advance through the
