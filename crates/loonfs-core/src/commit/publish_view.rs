@@ -7,7 +7,7 @@ use crate::manifest::{metadata_basis_from_manifest, LoadedMetadataBasis};
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::ReadBasis;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
-use crate::namespace::held::{Held, HeldManifestForm};
+use crate::namespace::held::{Checked, Held, HeldManifestForm};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -203,6 +203,68 @@ impl WriterPosition {
     pub(crate) fn move_to(&mut self, manifest: &Held<LoadedManifest>) -> bool {
         move_read_basis(&mut self.basis, &mut self.tail, manifest)
     }
+
+    /// Checks whether the position's manifest is still the newest, and
+    /// returns where the position goes (format spec, "Warm reads from a
+    /// local writer position").
+    ///
+    /// The check sends a HEAD request for the manifest after the position's.
+    /// When that manifest exists, the check loads each manifest after the
+    /// position's while each is an active manifest of the position's writer
+    /// epoch (a fold, a compaction, or a snapshot, by this runtime or by
+    /// another process), up to [`MAX_POSITION_MOVES`] of them, and the
+    /// position moves onto the newest of them. Otherwise the check reads the
+    /// manifest boundary. Either way, a manifest at or below the boundary
+    /// drops the position, because a collection may have deleted the
+    /// manifests after it, and so does a manifest of another writer epoch, a
+    /// tombstone, or a walk past its cap. `observed` is an observation that
+    /// the caller read before the call, and it's the check time of what the
+    /// call returns.
+    ///
+    /// [`MAX_POSITION_MOVES`]: crate::limits::MAX_POSITION_MOVES
+    pub async fn check<S: ObjectStore>(
+        &self,
+        namespace: &NamespaceStore<S>,
+        observed: Observation,
+    ) -> Result<PositionCheck> {
+        let mut checked = self.basis.clone();
+        let newest = match namespace
+            .check_newest(&mut checked, observed.clone())
+            .await?
+        {
+            Checked::Newest => return Ok(PositionCheck::Newest(Box::new(checked))),
+            Checked::Successor => {
+                namespace
+                    .same_epoch_manifests_above(&checked, observed)
+                    .await?
+            }
+            Checked::AtOrBelowBoundary => None,
+        };
+        Ok(newest.map_or(PositionCheck::Drop, PositionCheck::MoveTo))
+    }
+}
+
+/// Where a writer position goes after its check (see
+/// [`WriterPosition::check`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PositionCheck {
+    /// The position's manifest is still the newest. The holder is the
+    /// position's basis with this check, which the position merges (see
+    /// [`WriterPosition::merge_check`]).
+    Newest(Box<Held<ReadBasis>>),
+    /// The position moves onto this manifest, the newest of the manifests
+    /// of its writer epoch after its own, with the check as that manifest's
+    /// check. When that manifest folds past the position's tip, the move
+    /// drops the position instead.
+    MoveTo(Held<LoadedManifest>),
+    /// The position is dropped. The check returns this when the position's
+    /// manifest is at or below the manifest boundary, when the manifests
+    /// after it include one that the position can't move onto (a manifest
+    /// of another writer epoch, a tombstone, or a manifest that is missing
+    /// when the walk loads it), when the newest of them is at or below the
+    /// boundary, or when the walk passes its cap. The next use of the
+    /// namespace then loads it by discovery.
+    Drop,
 }
 
 enum ViewSource<'a, S: ObjectStore + ?Sized> {

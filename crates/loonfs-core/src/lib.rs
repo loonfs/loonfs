@@ -181,7 +181,7 @@ pub mod control {
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::namespace::status::NamespaceWalTailUsage;
     pub use crate::namespace::{
-        Checked, Held, HeldManifestForm, MetadataBasis, ReadBasis, SnapshotReadBasis,
+        Held, HeldManifestForm, MetadataBasis, ReadBasis, SnapshotReadBasis,
     };
 }
 
@@ -194,7 +194,7 @@ pub mod publish {
         NamespaceCommitEnginePublishOutcome, SharedWriterSessionStatus, TailSource, WalTailReport,
         WriterSessionStatus,
     };
-    pub use crate::commit::publish_view::WriterPosition;
+    pub use crate::commit::publish_view::{PositionCheck, WriterPosition};
     pub use crate::commit::CommitFingerprint;
     pub use crate::namespace::writer_epoch::AcquiredWriter;
     pub use crate::path::write::{CommitIntent, FilesystemOperation};

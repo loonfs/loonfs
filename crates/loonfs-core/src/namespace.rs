@@ -22,7 +22,7 @@ pub(crate) mod store;
 pub(crate) mod writer_epoch;
 
 pub use basis::{MetadataBasis, ReadBasis, SnapshotReadBasis};
-pub use held::{Checked, Held, HeldManifestForm};
+pub use held::{Held, HeldManifestForm};
 
 #[cfg(test)]
 mod tests;

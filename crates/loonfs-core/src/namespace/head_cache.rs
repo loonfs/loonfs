@@ -97,15 +97,24 @@ impl CachedHead {
         self.basis.read_basis()
     }
 
-    /// Checks whether the head's manifest is still the newest, as
-    /// [`NamespaceStore::check_newest`] does, and keeps what the check
-    /// learned.
+    /// Checks whether the head's manifest is still the newest, with a HEAD
+    /// request for its successor and a read of the manifest boundary (format
+    /// spec, "Checking an in-memory manifest"), and returns whether the
+    /// manifest is the newest.
+    ///
+    /// The head stores the boundary that the check read. When the manifest
+    /// is the newest, the head also stores `observed` as the time of its
+    /// last check, if `observed` is later than the time that it has.
+    /// `observed` is an observation that the caller read before its WAL
+    /// probe of the head. When the manifest isn't the newest, the
+    /// head is out of date, and the caller loads the namespace by discovery
+    /// instead.
     pub async fn check_manifest<S: ObjectStore>(
         &mut self,
         namespace: &NamespaceStore<S>,
         observed: Observation,
-    ) -> Result<Checked, CoreError> {
-        namespace.check_newest(&mut self.basis, observed).await
+    ) -> Result<bool, CoreError> {
+        Ok(namespace.check_newest(&mut self.basis, observed).await? == Checked::Newest)
     }
 
     /// Advances the head over the WAL objects after it, as
