@@ -1,7 +1,7 @@
 //! Maintenance job requests and responses for the v0 HTTP API.
 
 use super::{GcRequest, GcResponse, PoolGcResponse};
-use crate::{CommitSeq, NamespaceId};
+use crate::{CommitSeq, NamespaceId, RetentionWindow};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -53,7 +53,7 @@ pub struct SetRetentionWindowRequest {
         feature = "openapi",
         schema(value_type = Option<u64>, nullable = false, minimum = 86400000)
     )]
-    pub retention_window_ms: Option<NonZeroU64>,
+    pub retention_window_ms: Option<RetentionWindow>,
 }
 
 // The schema declares the smallest retention window as a literal, because the
@@ -326,9 +326,13 @@ mod tests {
                 serde_json::json!({"kind": "retention_window", "retention_window_ms": 86_400_000}),
                 Some(RunMaintenanceJobRequest::RetentionWindow(
                     SetRetentionWindowRequest {
-                        retention_window_ms: NonZeroU64::new(86_400_000),
+                        retention_window_ms: RetentionWindow::new(86_400_000).ok(),
                     },
                 )),
+            ),
+            (
+                serde_json::json!({"kind": "retention_window", "retention_window_ms": 86_399_999}),
+                None,
             ),
             (
                 serde_json::json!({"kind": "retention_window", "bogus": 1}),

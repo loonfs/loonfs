@@ -2286,7 +2286,10 @@ impl Interceptor for WindowChangesBeforeManifestPuts {
         }
         let put = self.manifest_puts.fetch_add(1, Ordering::SeqCst);
         if put < self.losses {
-            let window_ms = std::num::NonZeroU64::new(put as u64 + 1).expect("nonzero window");
+            let window_ms = loonfs_types::RetentionWindow::new(
+                crate::limits::GC_GRACE_WINDOW_MS + put as u64 + 1,
+            )
+            .expect("a window longer than the grace window");
             crate::test_support::NamespaceFixture::new(
                 &self.rival,
                 &self.namespace_id,
@@ -2377,7 +2380,7 @@ async fn a_unit_whose_puts_lose_to_unrelated_publications_publishes_without_rewr
     assert_eq!(manifest.manifest, current.manifest());
     assert_eq!(
         current.payload().retention_window_ms,
-        std::num::NonZeroU64::new(losses as u64),
+        std::num::NonZeroU64::new(crate::limits::GC_GRACE_WINDOW_MS + losses as u64),
         "the last rival's window survives"
     );
 }

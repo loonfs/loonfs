@@ -619,7 +619,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         // A manifest after the fold, so the fold's manifest isn't current.
         crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &context(1_000))
             .engine()
-            .set_retention_window(std::num::NonZeroU64::new(60_000))
+            .set_retention_window(loonfs_types::RetentionWindow::new(2 * grace).ok())
             .await
             .expect("set the retention window");
         let aged = WriterAt {

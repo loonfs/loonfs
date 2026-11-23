@@ -9,7 +9,7 @@ use crate::scheduler::lock;
 use crate::scheduler::retries::MaintenanceCall;
 use loonfs::{
     AdvanceRetentionFloorOptions, CommitSeq, CreateNamespaceOptions, NamespaceDiagnostics,
-    NamespaceId, RetentionTarget, SharedObjectStore,
+    NamespaceId, RetentionTarget, RetentionWindow, SharedObjectStore,
 };
 use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -19,7 +19,6 @@ use loonfs_test_support::stores::{
     RecordingStore,
 };
 use loonfs_test_support::test_actor;
-use std::num::NonZeroU64;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -39,11 +38,15 @@ const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
 /// no read of the WAL. The self-hosting guide quotes this number.
 const IDLE_ADVANCE_REQUESTS: usize = 3;
 
+/// Returns the retention window of `window_ms` milliseconds.
+fn window(window_ms: u64) -> RetentionWindow {
+    RetentionWindow::new(window_ms).expect("a window at least the grace window")
+}
+
 /// A config with every default, and `window_ms` as its retention window.
 pub(super) fn retention_config(window_ms: Option<u64>) -> ServerConfig {
     let mut config = scheduler_config(None);
-    config.retention_window_ms =
-        window_ms.map(|window_ms| NonZeroU64::new(window_ms).expect("a positive window"));
+    config.retention_window_ms = window_ms.map(window);
     config
 }
 
@@ -66,7 +69,7 @@ impl SchedulerServer {
                 namespace_id,
                 &test_actor(),
                 &CreateNamespaceOptions {
-                    retention_window_ms: window_ms.and_then(NonZeroU64::new),
+                    retention_window_ms: window_ms.map(window),
                     ..CreateNamespaceOptions::default()
                 },
             )
@@ -275,7 +278,7 @@ async fn each_sweep_uses_the_window_that_the_namespace_has_when_the_sweep_runs()
     ] {
         server
             .maintenance
-            .set_retention_window(&namespace_id, window_ms.and_then(NonZeroU64::new))
+            .set_retention_window(&namespace_id, window_ms.map(window))
             .await
             .expect("set the namespace's window");
         server.scheduler.run_sweep().await.expect("list namespaces");
@@ -495,7 +498,7 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
                 &namespace_id,
                 &test_actor(),
                 &CreateNamespaceOptions {
-                    retention_window_ms: namespace_window_ms.and_then(NonZeroU64::new),
+                    retention_window_ms: namespace_window_ms.map(window),
                     ..CreateNamespaceOptions::default()
                 },
             )

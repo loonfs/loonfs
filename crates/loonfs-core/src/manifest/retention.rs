@@ -19,7 +19,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{CommitSeq, SetRetentionWindowResponse};
+use loonfs_types::{CommitSeq, RetentionWindow, SetRetentionWindowResponse};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -275,8 +275,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// change.
     pub async fn set_retention_window(
         &self,
-        retention_window_ms: Option<NonZeroU64>,
+        retention_window_ms: Option<RetentionWindow>,
     ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
+        let retention_window_ms = retention_window_ms.map(NonZeroU64::from);
         let clock = self.namespace.start_clock();
         let update = self
             .namespace

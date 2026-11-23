@@ -242,6 +242,18 @@ fn retention_window_sets_and_clears_the_window_that_namespace_show_reports() {
     assert_eq!(zero.status.code(), Some(2));
     assert_eq!(json_error(&zero)["code"], "invalid_usage");
     assert_eq!(json_error(&zero)["param"], "--retention-window-ms");
+    let short_ms = (loonfs::GC_GRACE_WINDOW_MS - 1).to_string();
+    let short = harness.run(&[
+        "--json",
+        "maintenance",
+        "retention",
+        "window",
+        "--retention-window-ms",
+        short_ms.as_str(),
+    ]);
+    assert_failure(&short);
+    assert_eq!(json_error(&short)["code"], "invalid_request");
+    assert_eq!(json_error(&short)["param"], "--retention-window-ms");
 }
 
 #[test]

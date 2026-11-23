@@ -206,11 +206,13 @@ async fn run_maintenance_retention_window(
     args: MaintenanceRetentionWindowArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, None).await?;
+    let retention_window_ms = crate::resolve::parse_retention_window(args.retention_window_ms)
+        .map_err(|error| context.fail(error))?;
     let response = context
         .profile
         .target
         .client
-        .set_retention_window(context.namespace(), args.retention_window_ms)
+        .set_retention_window(context.namespace(), retention_window_ms)
         .await
         .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(

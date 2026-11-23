@@ -39,6 +39,7 @@ mod name_policy;
 pub mod options;
 mod pagination;
 mod path;
+mod retention_window;
 mod retry;
 mod row_keys;
 mod secret;
@@ -172,6 +173,7 @@ pub use path::{
     AbsolutePath, DisplayName, InodeKind, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES,
     MAX_PATH_BYTES, MAX_PATH_DEPTH,
 };
+pub use retention_window::{RetentionWindow, RetentionWindowValidationError};
 pub use retry::{
     doubling_backoff_ms, OperationDeadline, TransportRetryOutcome, TransportRetryPolicy,
 };

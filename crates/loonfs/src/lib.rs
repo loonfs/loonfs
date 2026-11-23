@@ -114,10 +114,11 @@ pub use loonfs_types::{
     NameKey, NamespaceDiagnostics, NamespaceId, NamespaceListPageCursor, NamespaceMetadata, Page,
     PageRequest, PathEntry, PathEntryKind, PoolDeletedObjectCounts, PoolGcResponse, PoolId,
     PoolRetainedCandidates, PoolRetainedReason, PrincipalId, PrincipalSet, RetainedCandidates,
-    RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot, SnapshotId, SnapshotRecord,
-    SnapshotRecordOwner, Subject, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, DEFAULT_NAMESPACE_PAGE_LIMIT, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    RetainedReason, RetentionWindow, RetentionWindowValidationError, RevisionNo,
+    SetRetentionWindowResponse, Snapshot, SnapshotId, SnapshotRecord, SnapshotRecordOwner, Subject,
+    TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    DEFAULT_NAMESPACE_PAGE_LIMIT, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, FilesystemEvent,

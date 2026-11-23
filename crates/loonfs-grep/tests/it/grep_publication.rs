@@ -78,7 +78,10 @@ async fn publish_rival(store: &SharedObjectStore, namespace_id: &NamespaceId, wi
         .expect("rival");
     rival
         .maintenance(loonfs_test_support::ids::writer_id("rival"))
-        .set_retention_window(namespace_id, NonZeroU64::new(window_ms))
+        .set_retention_window(
+            namespace_id,
+            Some(loonfs::RetentionWindow::new(window_ms).expect("a long enough window")),
+        )
         .await
         .expect("the rival publishes");
 }

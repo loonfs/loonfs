@@ -10,7 +10,6 @@ use crate::DeleteNamespaceOptions;
 use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::BlockHandle;
 use loonfs_types::{CompactorEpoch, ExtensionName, IndexSegmentId};
-use std::num::NonZeroU64;
 
 fn grep() -> ExtensionName {
     ExtensionName::parse("grep").expect("extension name")
@@ -180,7 +179,9 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
     );
     fixture
         .engine()
-        .set_retention_window(NonZeroU64::new(60_000))
+        .set_retention_window(
+            loonfs_types::RetentionWindow::new(2 * crate::limits::GC_GRACE_WINDOW_MS).ok(),
+        )
         .await
         .expect("window");
     assert_eq!(

@@ -164,7 +164,7 @@ async fn fork_snapshots<S: ObjectStore>(store: &S, source: &NamespaceId) -> Vec<
 #[tokio::test]
 async fn a_create_finishes_a_concurrent_create_with_the_same_request_and_refuses_other_options() {
     let other_window = loonfs_types::options::CreateNamespaceOptions {
-        retention_window_ms: std::num::NonZeroU64::new(7 * 24 * 60 * 60 * 1_000),
+        retention_window_ms: loonfs_types::RetentionWindow::new(7 * 24 * 60 * 60 * 1_000).ok(),
         ..Default::default()
     };
     for (second_options, second_finishes) in [(Default::default(), true), (other_window, false)] {
@@ -668,7 +668,7 @@ async fn a_create_with_allow_existing_returns_namespace_exists_for_an_initializi
     let manifest_1 = half_done_create(directory.path(), &namespace_id, &Default::default()).await;
     let other_window = loonfs_types::options::CreateNamespaceOptions {
         allow_existing: true,
-        retention_window_ms: std::num::NonZeroU64::new(7 * 24 * 60 * 60 * 1_000),
+        retention_window_ms: loonfs_types::RetentionWindow::new(7 * 24 * 60 * 60 * 1_000).ok(),
     };
     let created = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
         .create_with_options(&other_window)

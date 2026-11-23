@@ -77,6 +77,8 @@ async fn run_namespace_create(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = ProfileContext::resolve(invocation).await?;
     let actor_id = context.actor(args.actor.actor_id.as_ref())?;
+    let retention_window_ms = crate::resolve::parse_retention_window(args.retention_window_ms)
+        .map_err(|error| context.fail(error))?;
     let namespace_id = args.namespace_id.unwrap_or_else(|| {
         let generated = NamespaceId::generate();
         if invocation.behavior.output == OutputFormat::Human {
@@ -91,7 +93,7 @@ async fn run_namespace_create(
         .create_namespace_with_options(
             Some(&namespace_id),
             &CreateNamespaceOptions {
-                retention_window_ms: args.retention_window_ms,
+                retention_window_ms,
                 allow_existing: false,
             },
         )

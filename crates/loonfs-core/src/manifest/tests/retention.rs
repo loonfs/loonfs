@@ -733,7 +733,7 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
         ),
         (
             RetentionTarget::Window,
-            std::num::NonZeroU64::new(5 * grace_ms / 2),
+            loonfs_types::RetentionWindow::new(5 * grace_ms / 2).ok(),
         ),
     ] {
         // Commits 1 to 64 are older than the target's cutoff, and commits 65
@@ -798,15 +798,16 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
     create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
-    let window = |window_ms: u64| std::num::NonZeroU64::new(window_ms);
+    let window = |window_ms: u64| {
+        loonfs_types::RetentionWindow::new(window_ms).expect("a window at least the grace window")
+    };
     let engine = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine();
-    let set_window =
-        |window_ms: Option<u64>| engine.set_retention_window(window_ms.and_then(window));
+    let set_window = |window_ms: Option<u64>| engine.set_retention_window(window_ms.map(window));
 
     // Each step sets the namespace's window, then advances at five grace
     // windows. The cutoffs are five grace windows minus the window, and all
@@ -817,7 +818,7 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
         (Some(3 * grace_ms / 2), CommitSeq(2)),
         // Once the window is cleared, the floor stays where it is.
         (None, CommitSeq(2)),
-        (Some(grace_ms / 2), CommitSeq(3)),
+        (Some(grace_ms), CommitSeq(3)),
     ] {
         let set = set_window(namespace_window_ms)
             .await
@@ -850,6 +851,83 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
         .retention_floor_seq;
         assert_eq!(floor, expected_floor, "{namespace_window_ms:?} {target:?}");
     }
+}
+
+/// Checks that a manifest that records a window shorter than the grace
+/// window, which a writer can't set, is read without an error, and that a
+/// window advance under that window stops at the grace window.
+#[tokio::test]
+async fn a_window_advance_under_a_recorded_window_shorter_than_the_grace_window_stops_at_the_grace_window(
+) {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let grace_ms = crate::limits::GC_GRACE_WINDOW_MS;
+    let now_ms = 5 * grace_ms;
+    // The window's cutoff, half a grace window before now, would pass both
+    // commits, and the grace window's cutoff passes only the first.
+    for (path, committed_at_ms) in [
+        ("/a.txt", 2 * grace_ms),
+        ("/b.txt", now_ms - 3 * grace_ms / 4),
+    ] {
+        crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &WriterAt {
+                now_ms: committed_at_ms,
+                ..context.clone()
+            },
+        )
+        .write_file_bytes(path, b"body\n", None)
+        .await
+        .expect("commit");
+    }
+    create_snapshot(&store, &namespace_id, &context)
+        .await
+        .expect("fold the commits");
+    let engine = crate::test_support::NamespaceFixture::new(
+        &store,
+        &namespace_id,
+        &crate::test_support::writer_at("test-writer", now_ms),
+    )
+    .engine();
+    let short_ms = std::num::NonZeroU64::new(grace_ms / 2);
+    engine
+        .namespace
+        .update_live_manifest(
+            None,
+            &engine.namespace.start_clock(),
+            |mut payload: loonfs_types::format::manifest::NamespaceManifestPayload| async move {
+                payload.retention_window_ms = short_ms;
+                Ok(crate::manifest::publish::ManifestChange::Next(
+                    Box::new(payload),
+                    (),
+                ))
+            },
+        )
+        .await
+        .expect("record a short window");
+    let floor = engine
+        .advance_retention_floor(RetentionTarget::Window)
+        .await
+        .expect("advance the floor")
+        .response
+        .retention_floor_seq;
+    assert_eq!(floor, CommitSeq(1));
+    assert_eq!(
+        engine
+            .namespace
+            .load_metadata()
+            .await
+            .expect("metadata")
+            .retention_window_ms,
+        short_ms.map(std::num::NonZeroU64::get),
+        "the namespace's metadata reports the recorded window"
+    );
 }
 
 #[tokio::test]

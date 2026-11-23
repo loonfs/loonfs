@@ -14,7 +14,7 @@ use crate::trace::{self, operation_span};
 use crate::{
     AdvanceRetentionFloorOptions, AdvanceRetentionResponse, FoldWalResponse,
     ListSnapshotRecordsResponse, MaintainMetadataOptions, MetadataMaintenanceOutcome,
-    MetadataMaintenanceResponse, NamespaceDiagnostics, NamespaceId, PoolId,
+    MetadataMaintenanceResponse, NamespaceDiagnostics, NamespaceId, PoolId, RetentionWindow,
     SetRetentionWindowResponse, SnapshotId, SnapshotRecord, WriterState,
 };
 use crate::{Error, Result};
@@ -25,7 +25,6 @@ use loonfs_core::{
 };
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{u64_from_usize, CommitSeq, ExtensionName, PageRequest, WriterId};
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 mod compaction;
@@ -691,9 +690,7 @@ impl Maintenance {
     /// Sets the namespace's retention window.
     ///
     /// `None` clears the window, and a host doesn't advance the floor of a
-    /// namespace without a window on a schedule. A window shorter than the
-    /// grace window ([`GC_GRACE_WINDOW_MS`](crate::GC_GRACE_WINDOW_MS))
-    /// returns [`Error::InvalidRequest`].
+    /// namespace without a window on a schedule.
     ///
     /// The call publishes a manifest that changes nothing else, and if the
     /// namespace already has the window, it publishes nothing. See
@@ -702,9 +699,8 @@ impl Maintenance {
     pub async fn set_retention_window(
         &self,
         namespace_id: &NamespaceId,
-        retention_window_ms: Option<NonZeroU64>,
+        retention_window_ms: Option<RetentionWindow>,
     ) -> Result<SetRetentionWindowResponse> {
-        crate::config::check_retention_window(retention_window_ms)?;
         trace::in_operation(
             operation_span!(self.core, "set_retention_window", namespace_id),
             async {
