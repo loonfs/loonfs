@@ -188,7 +188,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Returns the manifest of the namespace's cached head, with the manifest
     /// boundary that the head keeps, when the head is active and no writer has
     /// claimed the namespace at that head, such as the head that a create or a
-    /// fork installs (see [`Self::install_active_head`]). Returns `None` when
+    /// fork installs when it publishes the active manifest (see
+    /// [`Self::publish_active_manifest`]). Returns `None` when
     /// there's no such head, or when the manifest is at or below the boundary.
     ///
     /// A claim builds on this manifest without a request first. If another

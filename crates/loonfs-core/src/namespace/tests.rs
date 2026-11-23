@@ -1552,6 +1552,154 @@ async fn fork_head<S: ObjectStore + Clone>(
         .await
 }
 
+/// Returns the fixture of `namespace_id` at `writer`'s time with a head
+/// cache that keeps the heads that calls install, so a test can see which
+/// heads a call installed.
+fn fixture_with_head_cache<S: ObjectStore + Clone>(
+    store: S,
+    namespace_id: &NamespaceId,
+    writer: &WriterAt,
+) -> NamespaceFixture<S> {
+    let fixture = NamespaceFixture::new(store, namespace_id, writer);
+    NamespaceFixture {
+        namespace: NamespaceStore {
+            head_and_wal_tail_cache: Arc::new(crate::cache::HeadAndWalTailCache::unshared(1 << 20)),
+            ..fixture.namespace
+        },
+        ..fixture
+    }
+}
+
+/// Forks `fixture`'s namespace at the user snapshot `snapshot_id` into
+/// `target`.
+async fn fork_snapshot<S: ObjectStore + Clone>(
+    fixture: &NamespaceFixture<S>,
+    target: &NamespaceId,
+    snapshot_id: &SnapshotId,
+) -> crate::Result<loonfs_types::NamespaceMetadata> {
+    let engine = fixture.engine();
+    engine
+        .fork_namespace_at_snapshot(
+            &crate::test_support::administrator(&engine),
+            engine.find_fork_target(target).await?,
+            &loonfs_test_support::test_actor(),
+            snapshot_id,
+        )
+        .await
+}
+
+/// Checks that a fork whose manifest 2 put loses to another call that
+/// finished the same fork returns the fork's state without installing a
+/// cached head of the fork, and that the other call, which published the
+/// active manifest, installs one.
+#[tokio::test]
+async fn a_fork_that_another_call_made_active_installs_no_cached_head() {
+    let directory = tempdir().expect("directory");
+    let (source, target) = source_and_target();
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::exact(metadata_manifest_object(&target, &ManifestNo(2))),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let fixture = fixture_with_head_cache(&store, &source, &context());
+    fixture.create().await.expect("create the source");
+    fixture
+        .put_file("/tail.txt", b"tail", DestinationBehavior::NoReplace, None)
+        .await
+        .expect("a commit in the source's tail");
+    let other = fixture_with_head_cache(store.inner(), &source, &context());
+    store.block_next();
+    let (forked, other_forked) = tokio::join!(fork_head(&fixture, &target), async {
+        // The fork published manifest 1 and waits on its manifest 2.
+        store.wait_until_blocked().await;
+        let forked = fork_head(&other, &target).await;
+        store.release();
+        forked
+    });
+    assert_eq!(
+        forked.expect("the fork finds the target active"),
+        other_forked.expect("the other call finishes the fork")
+    );
+    assert!(fixture
+        .namespace
+        .head_and_wal_tail_cache
+        .get_head(&target)
+        .is_none());
+    assert!(other
+        .namespace
+        .head_and_wal_tail_cache
+        .get_head(&target)
+        .is_some());
+}
+
+/// Checks that a fork whose checks after the fork snapshot fail, and which
+/// then finds that another call made the fork active, returns the fork's
+/// state without installing a cached head of the fork.
+#[tokio::test]
+async fn a_fork_that_finds_its_target_active_after_a_failed_check_installs_no_cached_head() {
+    let directory = tempdir().expect("directory");
+    let (source, target) = source_and_target();
+    let store = BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::snapshot_prefix(&source)),
+        OperationSelector::PutCreateIfAbsent,
+    );
+    let fixture = fixture_with_head_cache(&store, &source, &context());
+    fixture.create().await.expect("create the source");
+    let named = fixture
+        .namespace
+        .create_snapshot_record(
+            SnapshotOwner::User {
+                name: Some("named".to_owned()),
+                expires_at_ms: None,
+                deleted_at_ms: None,
+            },
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+            &context().clock(),
+        )
+        .await
+        .map(|(record, _)| record)
+        .expect("take a named snapshot");
+    let other = fixture_with_head_cache(store.inner(), &source, &context());
+    store.block_next();
+    let (forked, other_forked) = tokio::join!(
+        fork_snapshot(&fixture, &target, &named.snapshot_id),
+        async {
+            // The fork waits on its fork snapshot. The other call finishes the
+            // fork, and deleting the named snapshot then makes the first
+            // fork's check after its fork snapshot fail.
+            store.wait_until_blocked().await;
+            let forked = fork_snapshot(&other, &target, &named.snapshot_id).await;
+            other
+                .engine()
+                .delete_snapshot(
+                    &crate::test_support::administrator(&other.engine()),
+                    &named.snapshot_id,
+                )
+                .await
+                .expect("delete the named snapshot");
+            store.release();
+            forked
+        }
+    );
+    assert_eq!(
+        forked.expect("the fork finds the target active"),
+        other_forked.expect("the other call finishes the fork")
+    );
+    assert!(fixture
+        .namespace
+        .head_and_wal_tail_cache
+        .get_head(&target)
+        .is_none());
+    assert!(other
+        .namespace
+        .head_and_wal_tail_cache
+        .get_head(&target)
+        .is_some());
+}
+
 /// Checks that the fork of `source` into `target` stopped after its
 /// `manifest_count` initializing manifests: the target has no other
 /// manifest, no fork point snapshot, and no member entry, and the source has
