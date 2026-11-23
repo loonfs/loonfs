@@ -253,8 +253,17 @@ impl<'a> ResolvedDestination<'a> {
         &self.path
     }
 
-    pub(super) fn occupant(&self) -> Option<&ResolvedVisiblePath> {
-        self.occupant.as_ref()
+    /// Returns the occupant that a move or copy with `behavior` replaces: an
+    /// inode other than the source `source_inode_id`, when the behavior is
+    /// `Replace`.
+    pub(super) fn replaced_occupant(
+        &self,
+        behavior: DestinationBehavior,
+        source_inode_id: InodeId,
+    ) -> Option<&ResolvedVisiblePath> {
+        self.occupant.as_ref().filter(|existing| {
+            existing.inode_id != source_inode_id && behavior == DestinationBehavior::Replace
+        })
     }
 
     pub(super) fn absence(&self) -> Absence<'a> {
@@ -659,16 +668,14 @@ pub(super) fn classify_replace_destination<'d>(
     behavior: DestinationBehavior,
     source_inode_id: InodeId,
 ) -> Result<ReplaceDestination<'d>> {
-    if let Some(existing) = &destination.occupant {
-        if existing.inode_id != source_inode_id && behavior == DestinationBehavior::Replace {
-            if existing.inode_kind != InodeKind::File {
-                return Err(CoreError::ExpectedFile {
-                    target: destination.path.clone(),
-                    kind: existing.inode_kind,
-                });
-            }
-            return Ok(ReplaceDestination::Replaced(existing));
+    if let Some(existing) = destination.replaced_occupant(behavior, source_inode_id) {
+        if existing.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                target: destination.path.clone(),
+                kind: existing.inode_kind,
+            });
         }
+        return Ok(ReplaceDestination::Replaced(existing));
     }
     // Any other occupant is the source itself, or a conflict that
     // `available_name` reports.

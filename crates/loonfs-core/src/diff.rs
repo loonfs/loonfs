@@ -6,6 +6,7 @@ use crate::changes::{ensure_event_index_allowed, CommitScan};
 use crate::error::{CoreError, HistoryPosition, Result};
 use crate::heap_bytes::HeapBytes;
 use crate::limits::{CHANGE_FEED_PAGE_BYTES, DIFF_PAGE_TOUCHES};
+use crate::metadata::access::access_revision_no;
 use crate::metadata::{
     MetadataView, MetadataViewSession, MetadataVisibilityReads, ResolvedVisiblePath,
 };
@@ -518,7 +519,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> End<'a, 'store, S> {
             revision_no: revision.map(|row| row.revision_no),
             attributes_revision_no: attributes
                 .map_or(AttributesRevisionNo(0), |row| row.attributes_revision_no),
-            access_revision_no: access.map_or(AccessRevisionNo(0), |row| row.access_revision_no),
+            access_revision_no: access_revision_no(access.as_ref()),
         };
         Ok((revisions, newest_seq))
     }

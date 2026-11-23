@@ -72,21 +72,20 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         }
     }
 
-    /// Returns the current revision of the file whose next revision an
-    /// operation writes. The planner found the file with a revision, so a file
-    /// without one is corrupt.
-    pub(super) async fn resolve_current_revision_no(
+    /// Returns the current revision of the file `inode_id`, which a write
+    /// numbers the file's next revision after, or copies into a new binding
+    /// of the file. A file has a revision from its create on, so a file
+    /// without one means the namespace is corrupt.
+    pub(super) async fn resolve_current_revision(
         &self,
         inode_id: InodeId,
-    ) -> Result<RevisionNo> {
-        let revision = self
-            .view()
+    ) -> Result<RevisionRecord> {
+        self.view()
             .latest_revision_record(inode_id)
             .await?
             .ok_or_else(|| {
                 CoreError::NamespaceCorrupt(format!("file `{inode_id}` has no current revision"))
-            })?;
-        Ok(revision.revision_no)
+            })
     }
 
     /// Returns the revision summary that a bind of `inode` copies into the
@@ -98,16 +97,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         if inode.inode_kind == InodeKind::Directory {
             return Ok(None);
         }
-        let revision = self
-            .view()
-            .latest_revision_record(inode.inode_id)
-            .await?
-            .ok_or_else(|| {
-                CoreError::NamespaceCorrupt(format!(
-                    "file `{}` has no revision to copy into its binding",
-                    inode.inode_id
-                ))
-            })?;
+        let revision = self.resolve_current_revision(inode.inode_id).await?;
         Ok(Some(RevisionSummary {
             revision_no: revision.revision_no,
             content_ref: revision.content_ref,

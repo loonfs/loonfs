@@ -7,6 +7,7 @@ use super::commit_session::CommitSession;
 use super::numbering::CommitNumbering;
 use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::Result;
+use crate::metadata::access::access_revision_no;
 use crate::metadata::InodeRecord;
 use crate::path::write::{
     AvailableName, DeletionInTrash, NewInodeId, ResolvedBinding, ResolvedTarget,
@@ -109,7 +110,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let inode_id = binding.child_inode_id();
-        let current_revision_no = self.resolve_current_revision_no(inode_id).await?;
+        let current_revision_no = self.resolve_current_revision(inode_id).await?.revision_no;
         let revision_no = next_revision_no(inode_id, current_revision_no)?;
         let delta = revision_delta(
             &mut self.numbering,
@@ -131,7 +132,7 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let inode_id = binding.child_inode_id();
-        let current_revision_no = self.resolve_current_revision_no(inode_id).await?;
+        let current_revision_no = self.resolve_current_revision(inode_id).await?.revision_no;
         let source_revision = self
             .resolve_restore_source_revision(inode_id, source_revision_no)
             .await?;
@@ -292,11 +293,8 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
         let inode_id = target.inode_id();
-        let current_access_revision_no = self
-            .view()
-            .latest_access_revision(inode_id)
-            .await?
-            .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no);
+        let current_access_revision_no =
+            access_revision_no(self.view().latest_access_revision(inode_id).await?.as_ref());
         let access_revision_no = next_access_revision_no(inode_id, current_access_revision_no)?;
         let delta = WalDelta::AppendAccessRevision {
             delta_index: self.numbering.reserve_delta_index()?,

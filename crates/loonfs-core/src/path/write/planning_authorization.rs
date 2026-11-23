@@ -50,20 +50,15 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
             return Ok(());
         }
         let parent = destination.parent_inode_id();
-        let (inode_id, rights) = match destination.occupant() {
-            Some(existing)
-                if existing.inode_id != source_inode_id
-                    && behavior == DestinationBehavior::Replace =>
-            {
-                match replacement {
-                    Replacement::RemovesEntry => (
-                        parent,
-                        AccessRights::from_iter([AccessRight::Create, AccessRight::Remove]),
-                    ),
-                    Replacement::WritesFile => (existing.inode_id, AccessRight::Write.into()),
-                }
-            }
-            _ => (parent, AccessRight::Create.into()),
+        let (inode_id, rights) = match destination.replaced_occupant(behavior, source_inode_id) {
+            Some(existing) => match replacement {
+                Replacement::RemovesEntry => (
+                    parent,
+                    AccessRights::from_iter([AccessRight::Create, AccessRight::Remove]),
+                ),
+                Replacement::WritesFile => (existing.inode_id, AccessRight::Write.into()),
+            },
+            None => (parent, AccessRight::Create.into()),
         };
         self.authorize(inode_id, rights, destination.absence())
             .await

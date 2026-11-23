@@ -3,6 +3,7 @@
 
 use super::state::{Edge, InodeState};
 use crate::error::{CoreError, Result};
+use crate::metadata::access::access_revision_no;
 use crate::metadata::RevisionRecord;
 use loonfs_types::{
     AttributesRevisionNo, BindingVersion, CommitPrecondition, CommitSeq, ContentRef,
@@ -315,14 +316,8 @@ pub(super) fn access_update(
         inode_id,
         boundary,
         grants,
-        expected_access_revision_no: theirs.map(|theirs| {
-            theirs
-                .access
-                .as_ref()
-                .map_or(loonfs_types::AccessRevisionNo(0), |row| {
-                    row.access_revision_no
-                })
-        }),
+        expected_access_revision_no: theirs
+            .map(|theirs| access_revision_no(theirs.access.as_ref())),
     }
 }
 

@@ -4,6 +4,7 @@ use super::publish_path_planning::{is_missing_visible_path, PlanningView};
 use crate::authorize::Absence;
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
+use crate::metadata::access::access_revision_no;
 use crate::metadata::{ResolvedVisiblePath, VisiblePathError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
@@ -141,11 +142,12 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
             .await?;
         let actual = self
             .visible_value(inode_id, async {
-                Ok(self
-                    .metadata
-                    .latest_access_revision(inode_id)
-                    .await?
-                    .map_or(AccessRevisionNo(0), |revision| revision.access_revision_no))
+                Ok(access_revision_no(
+                    self.metadata
+                        .latest_access_revision(inode_id)
+                        .await?
+                        .as_ref(),
+                ))
             })
             .await?;
         Ok(ensure_expected_access_revision(inode_id, expected, actual).err())
