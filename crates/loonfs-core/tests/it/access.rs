@@ -1057,7 +1057,7 @@ async fn read_fixture() -> (
     WriterAt,
     ContentRef,
 ) {
-    use AccessRight::{Create, History, Read, Remove, Write};
+    use AccessRight::{Create, History, Read};
     let (temp_dir, store, namespace_id, context) = setup().await;
     let content = namespace_store(&store, &namespace_id)
         .store_bytes_as_content(b"body")
@@ -1072,16 +1072,7 @@ async fn read_fixture() -> (
             create_directory("/team"),
             create_directory("/team/secret"),
             create_directory("/inbox"),
-            update_access(
-                "/team",
-                false,
-                access_grants(&[
-                    ("team", &[Read, Write, Create, Remove]),
-                    ("viewer", &[Read]),
-                    ("writer", &[Write]),
-                    ("historian", &[Read, History]),
-                ]),
-            ),
+            update_access("/team", false, access_grants(&team_grants())),
             update_access("/team/secret", true, grants("finance", &[Read, History])),
             update_access("/inbox", false, grants("uploader", &[Create])),
             put("/team/file", &content),
@@ -1358,9 +1349,9 @@ async fn history_needs_the_history_right() {
 }
 
 #[tokio::test]
-async fn snapshot_reads_authorize_the_historical_inode_at_head() {
+async fn reads_at_an_earlier_sequence_authorize_the_historical_inode_at_head() {
     let (_temp_dir, store, namespace_id, mutation, content) = read_fixture().await;
-    let snapshot = read_context(&store, &namespace_id).await;
+    let before_move = read_context(&store, &namespace_id).await;
     seed(
         &store,
         &namespace_id,
@@ -1369,10 +1360,13 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
     )
     .await;
     let head = read_context(&store, &namespace_id).await;
-    let viewer = read_engine(&store, &namespace_id, "viewer").with_authorization_head(head.clone());
+    let earlier = head
+        .at_seq(before_move.visible_seq())
+        .expect("the earlier sequence is at or below the head");
+    let viewer = read_engine(&store, &namespace_id, "viewer");
     assert_eq!(
         viewer
-            .read_file("/team/file", &snapshot, None)
+            .read_file("/team/file", &earlier, None)
             .await
             .expect_err("moved historical inode is hidden")
             .code(),
@@ -1380,25 +1374,24 @@ async fn snapshot_reads_authorize_the_historical_inode_at_head() {
     );
     assert_eq!(
         viewer
-            .read_file("/team/kept", &snapshot, None)
+            .read_file("/team/kept", &earlier, None)
             .await
             .expect_err("snapshot needs history")
             .code(),
         ErrorCode::Forbidden
     );
-    let finance =
-        read_engine(&store, &namespace_id, "finance").with_authorization_head(head.clone());
+    let finance = read_engine(&store, &namespace_id, "finance");
     assert_eq!(
         finance
-            .read_file("/team/file", &snapshot, None)
+            .read_file("/team/file", &earlier, None)
             .await
             .expect("historical inode")
             .bytes,
         b"body"
     );
-    let historian = read_engine(&store, &namespace_id, "historian").with_authorization_head(head);
+    let historian = read_engine(&store, &namespace_id, "historian");
     let listing = historian
-        .list_path_page("/team", read_page(10), ListOptions::default(), &snapshot)
+        .list_path_page("/team", read_page(10), ListOptions::default(), &earlier)
         .await
         .expect("historical names");
     assert_eq!(listing.items.len(), 3);
@@ -1475,7 +1468,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_the_service_context(
     let viewer = read_engine(&store, &namespace_id, "viewer");
     assert_eq!(
         viewer
-            .ensure_administrator(&context)
+            .verify_administrator(&context)
             .await
             .expect_err("feed requires administrator")
             .code(),
@@ -1494,7 +1487,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_the_service_context(
         loonfs_core::NamespaceReaderEngine::reader(namespace_store(&store, &namespace_id)),
     ] {
         engine
-            .ensure_administrator(&context)
+            .verify_administrator(&context)
             .await
             .expect("feed authorized");
         assert!(!engine
@@ -1516,6 +1509,270 @@ async fn the_feed_and_content_refs_need_an_administrator_or_the_service_context(
             b"body"
         );
     }
+}
+
+/// Runs the administrator check, and each core read that is only for the
+/// administrator, for `engine` at `context`. Returns a description of each
+/// operation with the error code that the operation returned, or `None`
+/// when it succeeded.
+async fn administrator_read_errors(
+    engine: &loonfs_core::NamespaceReaderEngine<&LocalFsStore>,
+    context: &loonfs_core::RuntimeReadContext,
+) -> Vec<(&'static str, Option<ErrorCode>)> {
+    let diff_options = loonfs_types::options::DiffOptions::default();
+    let files_options = loonfs_core::ListSnapshotFilesOptions::default();
+    let missing_snapshot = loonfs_types::SnapshotId::generate(loonfs_types::ManifestNo(1));
+    let code = |error: loonfs_core::CoreError| error.code();
+    vec![
+        (
+            "the administrator check",
+            engine.verify_administrator(context).await.err().map(code),
+        ),
+        (
+            "the change feed",
+            engine
+                .list_changes_after(
+                    loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
+                    read_page::<()>(100).limit,
+                    loonfs_types::options::CommitSplitting::Whole,
+                    context,
+                )
+                .await
+                .err()
+                .map(code),
+        ),
+        (
+            "the diff",
+            engine
+                .diff_page(CommitSeq(0), &diff_options, context)
+                .await
+                .err()
+                .map(code),
+        ),
+        (
+            "the file listing of a missing snapshot",
+            engine
+                .list_snapshot_files_page(&missing_snapshot, read_page(100), files_options, context)
+                .await
+                .err()
+                .map(code),
+        ),
+        (
+            "the retained revisions",
+            engine
+                .retained_revisions_page(read_page(100), context)
+                .await
+                .err()
+                .map(code),
+        ),
+        (
+            "the file listing at a sequence",
+            engine
+                .list_files_page(read_page(100), files_options, context)
+                .await
+                .err()
+                .map(code),
+        ),
+    ]
+}
+
+/// Checks that each core read that is only for the administrator refuses a
+/// subject that isn't the namespace administrator, and that the snapshot
+/// file listing refuses before it looks the snapshot up.
+#[tokio::test]
+async fn the_administrator_reads_refuse_a_subject_that_isnt_the_administrator() {
+    let (_temp_dir, store, namespace_id, _, _) = read_fixture().await;
+    let context = read_context(&store, &namespace_id).await;
+    let viewer = read_engine(&store, &namespace_id, "viewer");
+    for (read, error) in administrator_read_errors(&viewer, &context).await {
+        assert_eq!(
+            error,
+            Some(ErrorCode::Forbidden),
+            "{read} refuses a subject that isn't the administrator"
+        );
+    }
+}
+
+/// The `/team` grants of the read fixture.
+fn team_grants() -> Vec<(&'static str, &'static [AccessRight])> {
+    use AccessRight::{Create, History, Read, Remove, Write};
+    vec![
+        ("team", &[Read, Write, Create, Remove]),
+        ("viewer", &[Read]),
+        ("writer", &[Write]),
+        ("historian", &[Read, History]),
+    ]
+}
+
+/// A namespace in which `former` administers the namespace and `lapsed`
+/// can read `/team` with history at one sequence, and both lose those grants
+/// at a later sequence. The fixture has a context at the earlier sequence
+/// and a context of a snapshot taken at the earlier sequence, both from the
+/// current head.
+struct RevokedGrants {
+    _temp_dir: tempfile::TempDir,
+    store: LocalFsStore,
+    namespace_id: NamespaceId,
+    earlier: loonfs_core::RuntimeReadContext,
+    snapshot: loonfs_core::RuntimeReadContext,
+}
+
+async fn revoked_grants() -> RevokedGrants {
+    use AccessRight::{Admin, History, Read};
+    let (temp_dir, store, namespace_id, context, _) = read_fixture().await;
+    let mut granted = team_grants();
+    granted.push(("lapsed", &[Read, History]));
+    seed(
+        &store,
+        &namespace_id,
+        &context,
+        vec![
+            update_access(
+                "/",
+                false,
+                access_grants(&[("prn_root", &[Admin]), ("former", &[Admin])]),
+            ),
+            update_access("/team", false, access_grants(&granted)),
+        ],
+    )
+    .await;
+    let earlier_seq = read_context(&store, &namespace_id).await.visible_seq();
+    let writer = namespace_engine(&store, &namespace_id, &context);
+    let snapshot = writer
+        .create_snapshot(
+            &loonfs_core::test_support::administrator(&writer),
+            None,
+            None,
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &namespace_id))
+                .await
+                .expect("fold before the snapshot"),
+        )
+        .await
+        .expect("snapshot before the revocation");
+    seed(
+        &store,
+        &namespace_id,
+        &context,
+        vec![
+            update_access("/", false, grants("prn_root", &[Admin])),
+            update_access("/team", false, access_grants(&team_grants())),
+        ],
+    )
+    .await;
+    let head = read_context(&store, &namespace_id).await;
+    let earlier = head
+        .at_seq(earlier_seq)
+        .expect("the earlier sequence is at or below the head");
+    let snapshot = loonfs_core::RuntimeReadContext::at_snapshot(
+        namespace_store(&store, &namespace_id)
+            .load_snapshot_read_basis(&head.read_basis().head, &snapshot.snapshot_id)
+            .await
+            .expect("the snapshot's read basis"),
+        head,
+    );
+    RevokedGrants {
+        _temp_dir: temp_dir,
+        store,
+        namespace_id,
+        earlier,
+        snapshot,
+    }
+}
+
+/// Checks that a subject whose administrator grant was removed after the
+/// state that a context reads is refused by the administrator check and by
+/// each core read that is only for the administrator, at an earlier
+/// sequence and through a snapshot, because the check reads the grants at
+/// the current head.
+#[tokio::test]
+async fn a_removed_administrator_grant_does_not_return_in_an_earlier_state() {
+    let fixture = revoked_grants().await;
+    let former = read_engine(&fixture.store, &fixture.namespace_id, "former");
+    let mut seen = Vec::new();
+    let mut expected = Vec::new();
+    for (state, context) in [
+        ("an earlier sequence", &fixture.earlier),
+        ("a snapshot", &fixture.snapshot),
+    ] {
+        for (operation, error) in administrator_read_errors(&former, context).await {
+            seen.push((state, operation, error));
+            expected.push((state, operation, Some(ErrorCode::Forbidden)));
+        }
+    }
+    assert_eq!(
+        seen, expected,
+        "every operation refuses a subject whose administrator grant was removed"
+    );
+}
+
+/// Checks that a read of an earlier sequence or a snapshot is authorized at
+/// the current head: a subject who lost `read` after that state is refused,
+/// and a subject who kept `read` and `history` reads it.
+#[tokio::test]
+async fn an_earlier_state_is_read_with_the_rights_of_the_current_head() {
+    let fixture = revoked_grants().await;
+    let mut seen = Vec::new();
+    let mut expected = Vec::new();
+    for (state, context) in [
+        ("an earlier sequence", &fixture.earlier),
+        ("a snapshot", &fixture.snapshot),
+    ] {
+        for (principal, outcome) in [
+            ("lapsed", Err(ErrorCode::PathNotFound)),
+            ("historian", Ok(b"body".to_vec())),
+        ] {
+            let read = read_engine(&fixture.store, &fixture.namespace_id, principal)
+                .read_file("/team/file", context, None)
+                .await
+                .map(|file| file.bytes.to_vec())
+                .map_err(|error| error.code());
+            seen.push((state, principal, read));
+            expected.push((state, principal, outcome));
+        }
+    }
+    assert_eq!(
+        seen, expected,
+        "reads of /team/file are authorized at the current head"
+    );
+}
+
+/// Checks that administrator reads go only to a reader that the check
+/// passes, and that an engine with administrator reads that is then given
+/// another subject checks the new subject's rights, so the new subject
+/// doesn't get the administrator reads.
+#[tokio::test]
+async fn administrator_reads_go_only_to_the_subject_that_was_checked() {
+    let (_temp_dir, store, namespace_id, _, _) = read_fixture().await;
+    let head = read_context(&store, &namespace_id).await;
+    assert_eq!(
+        read_engine(&store, &namespace_id, "viewer")
+            .verify_administrator_reads(&head)
+            .await
+            .expect_err("the viewer isn't an administrator")
+            .code(),
+        ErrorCode::Forbidden
+    );
+    let viewer = read_engine(&store, &namespace_id, "prn_root")
+        .verify_administrator_reads(&head)
+        .await
+        .expect("prn_root administers the namespace")
+        .with_subject(subject(&["viewer"]));
+    assert_eq!(
+        viewer
+            .verify_administrator(&head)
+            .await
+            .expect_err("the viewer isn't an administrator")
+            .code(),
+        ErrorCode::Forbidden
+    );
+    assert_eq!(
+        viewer
+            .read_file("/team/secret/file", &head, None)
+            .await
+            .expect_err("the viewer can't read the secret file")
+            .code(),
+        ErrorCode::PathNotFound
+    );
 }
 
 /// Checks that the service context reads an item that no grant reaches, in

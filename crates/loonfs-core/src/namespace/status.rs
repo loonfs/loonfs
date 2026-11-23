@@ -106,11 +106,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let loaded = load_basis_metadata_segments(
             &self.namespace.store,
             Some(&self.namespace.segment_cache),
-            &context.read_basis.basis,
+            &context.read_basis().basis,
         )
         .await?;
         Ok(namespace_metadata(
-            context.read_basis.head.clone(),
+            context.read_basis().head.clone(),
             loaded.segments.manifest().payload(),
         ))
     }

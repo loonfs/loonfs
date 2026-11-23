@@ -5,16 +5,15 @@
 //! A read calls the engine and passes the pinned context, as in
 //! `pinned.engine.read_file(path, &pinned.context, Some(max_bytes))`. The
 //! methods here are the reads that do more than that one call: the change
-//! feed and the diff check that the reader is an administrator, and the
+//! feed maps the core's cursor error to the request's parameter, and the
 //! directory listings build the response and its next cursor.
 
 use crate::pagers::encode_next_list_cursor;
 use crate::{
-    CommitSeq, CoreError, DiffOptions, Error, InodeId, ListChangesResponse,
-    ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, NamespaceId, Result,
-    SharedObjectStore, SnapshotId,
+    CommitSeq, CoreError, Error, InodeId, ListChangesResponse, ListInodeChildrenResponse,
+    ListOptions, ListPathEntriesResponse, NamespaceId, Result, SharedObjectStore, SnapshotId,
 };
-use loonfs_core::{DiffPage, NamespaceReaderEngine, RuntimeReadContext};
+use loonfs_core::{NamespaceReaderEngine, RuntimeReadContext};
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest};
 
@@ -44,7 +43,6 @@ impl PinnedRead {
         limit: EffectiveLimit,
         splitting: CommitSplitting,
     ) -> Result<ListChangesResponse> {
-        self.engine.ensure_administrator(&self.context).await?;
         self.engine
             .list_changes_after(position, limit, splitting, &self.context)
             .await
@@ -55,20 +53,6 @@ impl PinnedRead {
                 },
                 error => error.into(),
             })
-    }
-
-    /// Reads one page of the diff from `from_seq`. A read with a subject
-    /// requires an administrator, as the change feed does.
-    pub(crate) async fn diff_page(
-        &self,
-        from_seq: CommitSeq,
-        options: &DiffOptions,
-    ) -> Result<DiffPage> {
-        self.engine.ensure_administrator(&self.context).await?;
-        Ok(self
-            .engine
-            .diff_page(from_seq, options, &self.context)
-            .await?)
     }
 
     /// Lists one page of the directory at `listed_path`, and marks the next

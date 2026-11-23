@@ -2786,7 +2786,10 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         .writer_id
         .clone(),
     )
-    .delete_namespace(Default::default())
+    .delete_namespace(
+        &crate::test_support::administrator_of(store.inner(), &namespace),
+        Default::default(),
+    )
     .await
     .expect("delete while the job runs");
     store.reset();

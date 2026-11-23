@@ -235,10 +235,10 @@ async fn queued_work_keeps_a_fenced_session_registered_until_it_settles() {
     let mut queued_commit = Box::pin(old.commit_candidate(CommitCandidate::new(
         create_directory_request("queued", "queued"),
     )));
-    let mut queued_delete = Box::pin(
-        old.session()
-            .submit_delete(DeleteNamespaceOptions::default()),
-    );
+    let mut queued_delete = Box::pin(old.session().submit_delete(
+        DeleteNamespaceOptions::default(),
+        super::administrator(&old.session().publisher),
+    ));
     assert!(futures::poll!(queued_commit.as_mut()).is_pending());
     assert!(futures::poll!(queued_delete.as_mut()).is_pending());
     assert_eq!(publisher.lock_state().queue.len(), 2);

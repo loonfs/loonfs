@@ -109,7 +109,10 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
 
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete");
     let report = collect(&store, &namespace_id).await;
@@ -150,6 +153,7 @@ async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() 
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&fork)
@@ -188,7 +192,10 @@ async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() 
 
     crate::test_support::NamespaceFixture::new(&store, &fork, &setup)
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &fork),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete the fork");
     let retired = crate::test_support::namespace_store(&store, &fork)

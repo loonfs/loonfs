@@ -291,6 +291,7 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
     let engine = namespace_engine(&store, &source, &context);
     let forked = engine
         .fork_namespace(
+            &loonfs_core::test_support::administrator(&engine),
             engine
                 .find_fork_target(&fork)
                 .await

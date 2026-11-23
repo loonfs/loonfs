@@ -44,6 +44,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
             fixture
                 .engine()
                 .fork_namespace(
+                    &crate::test_support::administrator(&fixture.engine()),
                     fixture
                         .engine()
                         .find_fork_target(namespace_id)
@@ -65,7 +66,10 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
     for namespace_id in &namespaces[..2] {
         crate::test_support::NamespaceFixture::new(&store, namespace_id, &setup)
             .engine()
-            .delete_namespace(Default::default())
+            .delete_namespace(
+                &crate::test_support::administrator_of(&store, namespace_id),
+                Default::default(),
+            )
             .await
             .expect("delete ancestor");
     }
@@ -95,7 +99,10 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
 
     crate::test_support::NamespaceFixture::new(&store, &namespaces[2], &setup)
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &namespaces[2]),
+            Default::default(),
+        )
         .await
         .expect("delete leaf");
     // Deletion alone must not release either link in the protection chain.

@@ -34,14 +34,13 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
         .load_read_anchor(loonfs_core::test_support::observed_now())
         .await
         .expect("load read anchor");
-    RuntimeReadContext {
-        read_basis: loonfs_core::control::ReadBasis {
+    RuntimeReadContext::new(
+        loonfs_core::control::ReadBasis {
             basis: anchor.basis(),
             head: anchor.read_state,
         },
-        tail: None,
-        visible_seq: None,
-    }
+        None,
+    )
 }
 
 /// Publishes one mutation request through the commit engine (the single
@@ -146,7 +145,12 @@ pub(crate) async fn create_snapshot<S: ObjectStore + ?Sized>(
     let manifest =
         loonfs_core::test_support::folded_manifest(&namespace_store(store, namespace_id)).await?;
     namespace_engine(store, namespace_id, context)
-        .create_snapshot(Some("test-snapshot".to_owned()), None, manifest)
+        .create_snapshot(
+            &loonfs_core::test_support::administrator_of(store, namespace_id),
+            Some("test-snapshot".to_owned()),
+            None,
+            manifest,
+        )
         .await
 }
 

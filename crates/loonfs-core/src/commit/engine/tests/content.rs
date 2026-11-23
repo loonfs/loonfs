@@ -113,7 +113,10 @@ async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     clock.advance_ms(1);
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(clock.now_ms()))
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            Default::default(),
+        )
         .await
         .expect("delete");
     let prepared = verify_content_token("secret", &catalog, &token, clock.now_ms())

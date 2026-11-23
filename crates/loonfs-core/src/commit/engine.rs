@@ -4,7 +4,7 @@
 
 use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
-use crate::engine::{NamespaceEngine, Writable};
+use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
 use crate::manifest::retention::verify_manifest_segments_exist;
 use crate::manifest::{FloorObjectReport, ManifestLoadError, PublishedManifest};
@@ -269,10 +269,15 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// [`NamespaceStore::tombstone_initializing_namespace`]). When manifest 2
     /// with the status `active` wins that publication, the call deletes the
     /// namespace with a writer session.
+    ///
+    /// `administrator` proves the caller administers the namespace, because
+    /// deletion is only for the administrator.
     pub async fn delete_namespace(
         &mut self,
+        administrator: &Administrator,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
+        administrator.assert_for(&self.namespace.namespace_id);
         let clock = self.namespace.start_clock();
         let acquired_writer = match self
             .position
@@ -800,11 +805,15 @@ fn failed_publication(count: usize, error: CoreError) -> NamespaceCommitEnginePu
 impl<S: ObjectStore + Clone> NamespaceEngine<S, Writable> {
     /// Deletes the current namespace by publishing a tombstone manifest.
     /// Earlier committed changes remain durable. Later operations return `namespace_deleted`.
+    /// `administrator` proves the caller administers the namespace.
     pub async fn delete_namespace(
         &self,
+        administrator: &Administrator,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
-        self.commit_engine().delete_namespace(options).await
+        self.commit_engine()
+            .delete_namespace(administrator, options)
+            .await
     }
 }
 

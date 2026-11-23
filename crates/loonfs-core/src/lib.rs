@@ -180,7 +180,7 @@ pub mod control {
     pub use crate::namespace::status::NamespaceStorageDiagnostics;
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::namespace::status::NamespaceWalTailUsage;
-    pub use crate::namespace::{MetadataBasis, PublicationBasis, ReadBasis};
+    pub use crate::namespace::{MetadataBasis, PublicationBasis, ReadBasis, SnapshotReadBasis};
     pub use crate::wal::probe_namespace_wal;
 }
 
@@ -208,7 +208,7 @@ pub use compaction::{
     SegmentBlockLoader, SegmentRowIterator,
 };
 pub use diff::DiffPage;
-pub use engine::RuntimeReadContext;
+pub use engine::{Administrator, RuntimeReadContext};
 pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, Writable,
 };

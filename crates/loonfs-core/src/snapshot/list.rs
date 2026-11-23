@@ -3,7 +3,7 @@
 
 use super::record::load_snapshot_record_at_key;
 use crate::control_object::ControlObjectLoadError;
-use crate::engine::NamespaceEngine;
+use crate::engine::{Administrator, NamespaceEngine};
 use crate::error::{CoreError, Result};
 use crate::namespace::control::ensure_namespace_live;
 use crate::namespace::state::NamespaceReadState;
@@ -114,12 +114,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ///
     /// `head` is the namespace's head as the caller read it. An initializing
     /// head returns `namespace_not_found`, and a deleted head returns
-    /// `namespace_deleted`.
+    /// `namespace_deleted`. `administrator` proves the caller administers
+    /// the namespace, because snapshots are only for the administrator.
     pub async fn list_snapshots_page(
         &self,
+        administrator: &Administrator,
         head: &NamespaceReadState,
         request: PageRequest<SnapshotPageCursor>,
     ) -> Result<Page<Snapshot, SnapshotPageCursor>> {
+        administrator.assert_for(&self.namespace.namespace_id);
         ensure_namespace_live(&head.namespace_id, head.status)?;
         let request = PageRequest {
             limit: request.limit,

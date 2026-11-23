@@ -71,6 +71,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -92,7 +93,10 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .expect("open upload");
     crate::test_support::NamespaceFixture::new(&inner, &target, &setup)
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&inner, &target),
+            Default::default(),
+        )
         .await
         .expect("delete target");
     let tombstone = crate::test_support::namespace_store(&inner, &target)
@@ -218,7 +222,10 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     clock.advance_ms(1);
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(clock.now_ms()))
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            Default::default(),
+        )
         .await
         .expect("delete");
     store
@@ -295,6 +302,7 @@ async fn an_unrecognized_snapshot_key_is_kept_and_blocks_retirement() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -309,7 +317,10 @@ async fn an_unrecognized_snapshot_key_is_kept_and_blocks_retirement() {
         .expect("fork target");
     crate::test_support::NamespaceFixture::new(&store, &target, &setup)
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &target),
+            Default::default(),
+        )
         .await
         .expect("delete target");
     let unrecognized = format!("{}notes.txt", snapshot_prefix(&target));

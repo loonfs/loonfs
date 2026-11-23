@@ -520,6 +520,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
     main_fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&main_fixture.engine()),
             main_fixture
                 .engine()
                 .find_fork_target(&fork)

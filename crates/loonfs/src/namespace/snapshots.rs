@@ -1,5 +1,6 @@
 //! Snapshot reads and mutations.
 
+use super::lifecycle::AdministratorRead;
 use crate::pagers::SnapshotsPager;
 use crate::publisher::NamespaceChange;
 use crate::trace::{self, operation_span};
@@ -27,10 +28,17 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "get_snapshot", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                let pinned = self.administrator_read().await?;
+                let AdministratorRead {
+                    pinned,
+                    administrator,
+                } = self.administrator_read().await?;
                 pinned
                     .engine
-                    .get_snapshot(&pinned.context.read_basis.head, snapshot_id)
+                    .get_snapshot(
+                        &administrator,
+                        &pinned.context.read_basis().head,
+                        snapshot_id,
+                    )
                     .await
                     .map_err(Error::from)
             },
@@ -56,10 +64,13 @@ impl<M: crate::Mode> Namespace<M> {
             operation_span!(self.core, "list_snapshots", self.namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
-                let pinned = self.administrator_read().await?;
+                let AdministratorRead {
+                    pinned,
+                    administrator,
+                } = self.administrator_read().await?;
                 let page = pinned
                     .engine
-                    .list_snapshots_page(&pinned.context.read_basis.head, request)
+                    .list_snapshots_page(&administrator, &pinned.context.read_basis().head, request)
                     .await
                     .map_err(Error::from)?;
                 Ok(ListSnapshotsResponse {
@@ -106,14 +117,20 @@ impl Namespace<Writable> {
                 let expires_at_ms = options
                     .ttl_ms
                     .map(|ttl_ms| expires_at_ms(self.core.now_ms(), ttl_ms));
-                self.ensure_administrator().await?;
+                let administrator = self.administrator().await?;
+                let administrator = &administrator;
                 self.mode
                     .publisher
                     .snapshot_after_fold(&self.namespace_id, |basis| {
                         let engine = self.engine();
                         async move {
                             engine
-                                .create_snapshot(options.name.clone(), expires_at_ms, basis)
+                                .create_snapshot(
+                                    administrator,
+                                    options.name.clone(),
+                                    expires_at_ms,
+                                    basis,
+                                )
                                 .await
                         }
                     })
@@ -134,9 +151,9 @@ impl Namespace<Writable> {
     ) -> Result<Snapshot> {
         trace::in_operation(operation_span!(self.core, "extend_snapshot", self.namespace_id, snapshot_id = %snapshot_id), async {
         let requested_expires_at_ms = expires_at_ms(self.core.now_ms(), ttl_ms);
-        self.ensure_administrator().await?;
+        let administrator = self.administrator().await?;
         let result = self.engine()
-            .extend_snapshot(snapshot_id, requested_expires_at_ms)
+            .extend_snapshot(&administrator, snapshot_id, requested_expires_at_ms)
             .await
             .map_err(Error::from);
         self.mode
@@ -157,9 +174,9 @@ impl Namespace<Writable> {
         snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
         trace::in_operation(operation_span!(self.core, "delete_snapshot", self.namespace_id, snapshot_id = %snapshot_id), async {
-        self.ensure_administrator().await?;
+        let administrator = self.administrator().await?;
         let result = self.engine()
-            .delete_snapshot(snapshot_id)
+            .delete_snapshot(&administrator, snapshot_id)
             .await
             .map_err(Error::from);
         self.mode

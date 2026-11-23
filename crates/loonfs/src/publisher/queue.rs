@@ -11,16 +11,21 @@ use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::control::LoadedManifest;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::WalPublishError;
-use loonfs_core::FloorObjectReport;
 use loonfs_core::Phase;
+use loonfs_core::{Administrator, FloorObjectReport};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::Commit;
 use loonfs_types::{u64_from_usize, CommitId};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+/// A namespace deletion that waits in the queue, with the proof that its
+/// first caller administers the namespace. While the deletion is the last
+/// item in the queue, a later caller with the same options shares it, and
+/// that caller's proof is dropped.
 pub(super) struct PendingDelete {
     pub(super) options: DeleteNamespaceOptions,
+    pub(super) administrator: Administrator,
     pub(super) waiters: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
 }
 
@@ -364,14 +369,16 @@ impl NamespacePublisher {
     pub(super) async fn submit_delete(
         &self,
         options: DeleteNamespaceOptions,
+        administrator: Administrator,
     ) -> Result<DeleteNamespaceResponse> {
-        let receiver = self.admit_delete(options)?;
+        let receiver = self.admit_delete(options, administrator)?;
         receive_delete(receiver).await
     }
 
     pub(super) fn admit_delete(
         &self,
         options: DeleteNamespaceOptions,
+        administrator: Administrator,
     ) -> std::result::Result<oneshot::Receiver<Result<DeleteNamespaceResponse>>, CoreError> {
         let (sender, receiver) = oneshot::channel();
         {
@@ -388,6 +395,7 @@ impl NamespacePublisher {
                 }
                 _ => state.queue.push_back(WorkItem::Delete(PendingDelete {
                     options,
+                    administrator,
                     waiters: vec![sender],
                 })),
             }

@@ -201,7 +201,10 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
 
     other
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator(&other.engine()),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete");
     let tombstone = crate::test_support::namespace_store(&store, &namespace_id)
@@ -379,7 +382,10 @@ async fn an_extension_publication_that_loses_to_another_change_of_its_entry_publ
 
     let basis = engine.load_extension_basis().await.expect("basis");
     engine
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator(&engine),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete");
     let deleted = engine

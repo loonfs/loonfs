@@ -497,12 +497,26 @@ async fn wait_for_queued_delete_waiters(publisher: &NamespacePublisher, expected
     }
 }
 
+/// Returns the administrator proof for the namespace of `publisher`, whose
+/// runtime has no subject in these tests, so the proof needs no read.
+fn administrator(publisher: &NamespacePublisher) -> loonfs_core::Administrator {
+    publisher
+        .context
+        .runtime_core
+        .reader_engine(&publisher.namespace_id)
+        .find_administrator_without_read()
+        .expect("a runtime without a subject needs no read for the proof")
+}
+
 fn spawn_delete(
     publisher: &NamespacePublisher,
     options: DeleteNamespaceOptions,
 ) -> tokio::task::JoinHandle<crate::Result<DeleteNamespaceResponse>> {
     let publisher = publisher.clone();
-    tokio::spawn(async move { publisher.submit_delete(options).await })
+    tokio::spawn(async move {
+        let administrator = administrator(&publisher);
+        publisher.submit_delete(options, administrator).await
+    })
 }
 
 /// Bounded: a stranded delete waiter is a hang, and a hang must fail
@@ -1138,7 +1152,7 @@ async fn publisher_limit_counts_active_duplicate_contended_and_delete_requests()
         Err(CoreError::CommitQueueFull)
     );
     assert_matches!(
-        publisher.admit_delete(DeleteNamespaceOptions::default()),
+        publisher.admit_delete(DeleteNamespaceOptions::default(), administrator(&publisher)),
         Err(CoreError::CommitQueueFull)
     );
 
@@ -1451,7 +1465,7 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         let publisher = publisher.clone();
         tokio::spawn(async move {
             publisher
-                .submit_delete(DeleteNamespaceOptions::default())
+                .submit_delete(DeleteNamespaceOptions::default(), administrator(&publisher))
                 .await
         })
     };
@@ -1538,7 +1552,7 @@ async fn deletion_folds_the_tail_with_the_configured_run_policy() {
     assert!(diagnostics.wal_tail_objects > 0, "the tail is unfolded");
 
     publisher
-        .submit_delete(DeleteNamespaceOptions::default())
+        .submit_delete(DeleteNamespaceOptions::default(), administrator(&publisher))
         .await
         .expect("delete");
     let deleted = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
@@ -1586,7 +1600,7 @@ async fn second_delete_during_inflight_delete_settles_both() {
         let publisher = publisher.clone();
         tokio::spawn(async move {
             publisher
-                .submit_delete(DeleteNamespaceOptions::default())
+                .submit_delete(DeleteNamespaceOptions::default(), administrator(&publisher))
                 .await
         })
     };
@@ -1603,7 +1617,7 @@ async fn second_delete_during_inflight_delete_settles_both() {
         let publisher = publisher.clone();
         tokio::spawn(async move {
             publisher
-                .submit_delete(DeleteNamespaceOptions::default())
+                .submit_delete(DeleteNamespaceOptions::default(), administrator(&publisher))
                 .await
         })
     };
@@ -2946,7 +2960,10 @@ async fn successful_delete_waits_for_fold_before_evicting_the_namespace_publishe
         tokio::spawn(async move {
             namespace
                 .session()
-                .submit_delete(DeleteNamespaceOptions::default())
+                .submit_delete(
+                    DeleteNamespaceOptions::default(),
+                    administrator(&namespace.session().publisher),
+                )
                 .await
         })
     };
@@ -3210,7 +3227,10 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         tokio::spawn(async move {
             namespace
                 .session()
-                .submit_delete(DeleteNamespaceOptions::default())
+                .submit_delete(
+                    DeleteNamespaceOptions::default(),
+                    administrator(&namespace.session().publisher),
+                )
                 .await
         })
     };
@@ -3663,7 +3683,10 @@ async fn registry_shares_admission_and_publication_slots_after_caller_cancellati
     assert_eq!(budget.stats().admitted_requests, 2);
     let error = writer_a
         .session()
-        .submit_delete(DeleteNamespaceOptions::default())
+        .submit_delete(
+            DeleteNamespaceOptions::default(),
+            administrator(&writer_a.session().publisher),
+        )
         .await
         .expect_err("budget remains full");
     assert_eq!(error.code(), ErrorCode::CommitQueueFull);

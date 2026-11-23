@@ -16,7 +16,7 @@ use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
     project_anchor_tail, ActiveNamespaceCatalogEntry, NamespaceReadAnchor, PublicationBasis,
-    ReadBasis, VerifiedNamespaceCatalogEntry,
+    ReadBasis, SnapshotReadBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
 use loonfs_core::time::Observation;
@@ -161,7 +161,7 @@ impl RuntimeCore {
                 if check_due {
                     head.basis_checked = observed;
                 }
-                head.read_basis.head = context.read_basis.head;
+                head.read_basis.head = context.into_read_basis().head;
                 return Ok(head);
             }
         }
@@ -333,11 +333,7 @@ impl RuntimeCore {
         read_basis: ReadBasis,
         tail: Option<Arc<ProjectedWalTail>>,
     ) -> RuntimeReadContext {
-        RuntimeReadContext {
-            read_basis,
-            tail,
-            visible_seq: None,
-        }
+        RuntimeReadContext::new(read_basis, tail)
     }
 
     /// The shared preamble of every pinned read: the read context of the
@@ -370,7 +366,7 @@ impl RuntimeCore {
             .await?;
         let basis = self
             .namespace_store(namespace_id)
-            .load_snapshot_read_basis(&live.read_basis.head, snapshot_id)
+            .load_snapshot_read_basis(&live.read_basis().head, snapshot_id)
             .await
             .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, basis, live))
@@ -413,7 +409,7 @@ impl RuntimeCore {
         };
         let basis = self
             .namespace_store(namespace_id)
-            .load_created_snapshot_read_basis(&live.read_basis.head, created.record.clone())
+            .load_created_snapshot_read_basis(&live.read_basis().head, created.record.clone())
             .await
             .map_err(Error::from)?;
         Ok(self.pinned_read_at_basis(namespace_id, basis, live))
@@ -422,14 +418,12 @@ impl RuntimeCore {
     fn pinned_read_at_basis(
         &self,
         namespace_id: &NamespaceId,
-        basis: ReadBasis,
+        basis: SnapshotReadBasis,
         live: RuntimeReadContext,
     ) -> PinnedRead {
         PinnedRead {
-            engine: self
-                .reader_engine(namespace_id)
-                .with_authorization_head(live),
-            context: self.read_context(basis, None),
+            engine: self.reader_engine(namespace_id),
+            context: RuntimeReadContext::at_snapshot(basis, live),
         }
     }
 
@@ -443,7 +437,7 @@ impl RuntimeCore {
             .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(
-            &context.read_basis.head,
+            &context.read_basis().head,
         ))
     }
 
@@ -461,7 +455,7 @@ impl RuntimeCore {
         let context = self
             .current_read_context(namespace_id, HeadConfirmation::View)
             .await?;
-        ActiveNamespaceCatalogEntry::from_head(&context.read_basis.head).map_err(Error::from)
+        ActiveNamespaceCatalogEntry::from_head(&context.read_basis().head).map_err(Error::from)
     }
 
     /// Drops the namespace's cached head, after this runtime learns of a

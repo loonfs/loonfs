@@ -32,6 +32,15 @@ pub struct ReadBasis {
     pub basis: MetadataBasis,
 }
 
+/// The head and metadata basis of the state that a snapshot kept.
+///
+/// Only the snapshot read-basis loaders return one, and
+/// [`RuntimeReadContext::at_snapshot`](crate::RuntimeReadContext::at_snapshot)
+/// is the one constructor that takes it, together with the live context at
+/// whose head the snapshot's reads are authorized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotReadBasis(pub(crate) ReadBasis);
+
 /// A manifest that a publication builds on, and the manifest boundary as
 /// this process last read it.
 ///

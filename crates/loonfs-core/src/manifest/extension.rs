@@ -160,7 +160,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let loaded = load_basis_metadata_segments(
             &self.namespace.store,
             Some(&self.namespace.segment_cache),
-            &context.read_basis.basis,
+            &context.read_basis().basis,
         )
         .await?;
         Ok(loaded

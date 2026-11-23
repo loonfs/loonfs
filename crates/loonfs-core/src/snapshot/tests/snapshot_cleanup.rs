@@ -71,9 +71,10 @@ pub(super) async fn assert_a_late_put_is_refused_by_a_deleted_snapshot<S: Object
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     let head = namespace.load_read_state().await.expect("head");
     let reader = crate::NamespaceEngine::reader(namespace);
+    let administrator = crate::test_support::administrator(&reader);
     assert_eq!(
         reader
-            .get_snapshot(&head, &put.snapshot_id)
+            .get_snapshot(&administrator, &head, &put.snapshot_id)
             .await
             .expect_err("a deleted snapshot can't be read")
             .code(),
@@ -81,6 +82,7 @@ pub(super) async fn assert_a_late_put_is_refused_by_a_deleted_snapshot<S: Object
     );
     let listed = reader
         .list_snapshots_page(
+            &administrator,
             &head,
             PageRequest {
                 limit: page_limit(10),

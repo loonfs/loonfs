@@ -13,7 +13,7 @@ use crate::{
 use futures::future::BoxFuture;
 use loonfs_core::control::LoadedManifest;
 use loonfs_core::publish::WriterPosition;
-use loonfs_core::{FloorObjectReport, Phase, PublicationReport, PublishedManifest};
+use loonfs_core::{Administrator, FloorObjectReport, Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
 use loonfs_types::{CommitSeq, NamespaceId};
 use std::collections::HashMap;
@@ -161,12 +161,15 @@ impl NamespaceSession {
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations
     /// admitted before it publish first, and mutations admitted after it
-    /// fail once the delete succeeds.
+    /// fail once the delete succeeds. `administrator` proves the caller
+    /// administers the namespace, and the queue keeps the proof until the
+    /// deletion runs.
     pub(crate) async fn submit_delete(
         &self,
         options: DeleteNamespaceOptions,
+        administrator: Administrator,
     ) -> Result<DeleteNamespaceResponse> {
-        self.publisher.submit_delete(options).await
+        self.publisher.submit_delete(options, administrator).await
     }
 
     pub(crate) fn state(&self) -> NamespaceSessionStatus {

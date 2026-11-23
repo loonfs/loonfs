@@ -3,7 +3,7 @@
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#the-next-range-query)).
 
 use super::{ensure_range_start_retained, fork_point, merge_start, rebase_basis};
-use crate::engine::{NamespaceEngine, RuntimeReadContext};
+use crate::engine::{Administrator, NamespaceEngine, RuntimeReadContext};
 use crate::error::Result;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{Merge, NextMergeRangeOutcome, NextMergeRangeResponse};
@@ -22,12 +22,22 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// the fork's newest merge. A namespace that isn't a fork of this
     /// namespace, or of the namespace that a rebase made this one from,
     /// returns `invalid_request`.
+    ///
+    /// The query is only for an administrator of both namespaces.
+    /// `administrator` proves that for this namespace, and
+    /// `fork_administrator` for the fork. The function takes proofs instead
+    /// of checking, because the caller checks this namespace before it reads
+    /// the fork's head.
     pub async fn next_merge_range<F>(
         &self,
+        administrator: &Administrator,
         context: &RuntimeReadContext,
         fork: &NamespaceEngine<S, F>,
+        fork_administrator: &Administrator,
         fork_context: &RuntimeReadContext,
     ) -> Result<NextMergeRangeResponse> {
+        administrator.assert_for(&self.namespace.namespace_id);
+        fork_administrator.assert_for(&fork.namespace.namespace_id);
         let main = self.namespace.load_metadata_view(context).await?;
         let fork_view = fork.namespace.load_metadata_view(fork_context).await?;
         let fork_head = fork_view.head();

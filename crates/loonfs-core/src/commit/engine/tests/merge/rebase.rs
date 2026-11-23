@@ -35,6 +35,7 @@ async fn fork_for_rebase(
     fixture
         .engine()
         .fork_namespace_for_rebase(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(target)

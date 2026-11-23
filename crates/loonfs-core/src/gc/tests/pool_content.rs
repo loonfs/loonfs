@@ -31,14 +31,13 @@ async fn read_context<S: ObjectStore + ?Sized>(
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("read anchor");
-    crate::RuntimeReadContext {
-        read_basis: crate::control::ReadBasis {
+    crate::RuntimeReadContext::new(
+        crate::control::ReadBasis {
             basis: anchor.basis(),
             head: anchor.read_state,
         },
-        tail: None,
-        visible_seq: None,
-    }
+        None,
+    )
 }
 
 #[tokio::test]
@@ -303,7 +302,10 @@ async fn content_only_a_snapshot_manifest_names_stays_until_the_snapshot_is_rele
 
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &aged)
         .engine()
-        .delete_snapshot(&snapshot.snapshot_id)
+        .delete_snapshot(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            &snapshot.snapshot_id,
+        )
         .await
         .expect("release the snapshot");
     // The deleted snapshot keeps its manifest and content until the delete
@@ -346,6 +348,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_snapshot_exist
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&clone)

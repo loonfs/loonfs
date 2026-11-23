@@ -6,15 +6,19 @@ use super::{NamespacePublisher, PublisherAdmissionStatus};
 use crate::trace::phase_event;
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result};
 use futures::FutureExt;
-use loonfs_core::Phase;
+use loonfs_core::{Administrator, Phase};
 use std::panic::AssertUnwindSafe;
 
 impl NamespacePublisher {
     /// Runs the delete barrier. Returns true when the publisher is now
     /// terminal and its worker should exit.
     pub(super) async fn execute_delete(&self, pending: PendingDelete) -> bool {
-        let PendingDelete { options, waiters } = pending;
-        let outcome = match AssertUnwindSafe(self.delete_through_engine(options))
+        let PendingDelete {
+            options,
+            administrator,
+            waiters,
+        } = pending;
+        let outcome = match AssertUnwindSafe(self.delete_through_engine(&administrator, options))
             .catch_unwind()
             .await
         {
@@ -88,6 +92,7 @@ impl NamespacePublisher {
     /// fold of the namespace instead of folding the same tail.
     async fn delete_through_engine(
         &self,
+        administrator: &Administrator,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
         self.wait_for_fold().await?;
@@ -98,7 +103,10 @@ impl NamespacePublisher {
         let _permit = self.context.runtime_core.fold_permit().await;
         let mut slot = self.lock_engine().await;
         let engine = self.engine_for(&mut slot, &writer.writer_id);
-        let result = engine.delete_namespace(options).await.map_err(Error::from);
+        let result = engine
+            .delete_namespace(administrator, options)
+            .await
+            .map_err(Error::from);
         // What follows a deletion depends on the namespace being deleted, not
         // on which call deleted it.
         if result

@@ -659,7 +659,12 @@ impl<M: crate::Mode> Namespace<M> {
                         &self.namespace_id,
                         options.consistency,
                         Some(options.to_seq.unwrap_or(from_seq)),
-                        |pinned| async move { pinned.diff_page(from_seq, options).await },
+                        |pinned| async move {
+                            Ok(pinned
+                                .engine
+                                .diff_page(from_seq, options, &pinned.context)
+                                .await?)
+                        },
                     )
                     .await?;
                 self.core.instruments().diff_page(&page);

@@ -36,7 +36,8 @@ impl LoonFs<Writable> {
             operation_span!(self.core, "fork_namespace_for_rebase", namespace_id),
             async {
                 self.core.ensure_merges_enabled()?;
-                self.namespace(namespace_id).ensure_administrator().await?;
+                let administrator = self.namespace(namespace_id).administrator().await?;
+                let administrator = &administrator;
                 let target = self
                     .find_fork_target(namespace_id, new_namespace_id)
                     .await?;
@@ -58,6 +59,7 @@ impl LoonFs<Writable> {
                     async move {
                         engine
                             .fork_namespace_for_rebase(
+                                administrator,
                                 target,
                                 actor,
                                 source_namespace_id,

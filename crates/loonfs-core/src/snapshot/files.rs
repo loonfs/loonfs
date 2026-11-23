@@ -85,10 +85,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// retains with `options.include_deleted`. Directories are omitted.
     ///
     /// The method ignores the current metadata basis and WAL tail, so every page
-    /// comes from the same snapshot even when new commits arrive. The read
-    /// context is used only to validate the namespace identity and confirm that
-    /// it has not been deleted. An ID that doesn't identify a snapshot, or a
-    /// snapshot that expired at or before the current wall-clock time, returns
+    /// comes from the same snapshot even when new commits arrive. The listing
+    /// requires namespace administrator access, as the change feed does, and
+    /// the read context is used only for that check, to validate the
+    /// namespace identity, and to confirm that the namespace has not been
+    /// deleted. An ID that doesn't identify a snapshot, or a snapshot that
+    /// expired at or before the current wall-clock time, returns
     /// `snapshot_not_found`, and so does a snapshot whose manifest is gone,
     /// with the cause `manifest_missing`.
     pub async fn list_snapshot_files_page(
@@ -98,7 +100,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: ListSnapshotFilesOptions,
         context: &RuntimeReadContext,
     ) -> Result<SnapshotFilesPage> {
-        // Rejects a mismatched or deleted namespace before any read work.
+        self.verify_administrator(context).await?;
+        // Rejects a mismatched or deleted namespace before reading the
+        // snapshot.
         self.ensure_live_context(context)?;
         self.namespace
             .list_snapshot_files_page(snapshot_id, request, options)
@@ -117,7 +121,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: ListSnapshotFilesOptions,
         context: &RuntimeReadContext,
     ) -> Result<SnapshotFilesPage> {
-        self.ensure_administrator(context).await?;
+        self.verify_administrator(context).await?;
         let view = self.namespace.load_metadata_view(context).await?;
         NamespaceStore::files_page(view.metadata_view(), request, options).await
     }

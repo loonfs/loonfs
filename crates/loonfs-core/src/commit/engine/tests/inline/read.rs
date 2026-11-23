@@ -18,11 +18,7 @@ use std::assert_matches;
 use std::num::NonZeroU64;
 
 fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadContext {
-    RuntimeReadContext {
-        read_basis: crate::control::ReadBasis { head, basis },
-        tail: None,
-        visible_seq: None,
-    }
+    RuntimeReadContext::new(crate::control::ReadBasis { head, basis }, None)
 }
 
 async fn fresh_context(
@@ -200,11 +196,7 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
     assert!(result.results[0].is_ok());
     let state = publisher.read_position().expect("published state");
     let tail = state.tail;
-    let context = RuntimeReadContext {
-        read_basis: state.read_basis,
-        tail: Some(Arc::clone(&tail)),
-        visible_seq: None,
-    };
+    let context = RuntimeReadContext::new(state.read_basis, Some(Arc::clone(&tail)));
     let tail_bytes = tail.decoded_bytes();
     assert_eq!(tail.inline_bytes(), value.bytes().len());
     assert!(

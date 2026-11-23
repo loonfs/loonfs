@@ -339,6 +339,7 @@ async fn deleted_fork<S: ObjectStore>(
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(target)
@@ -354,7 +355,10 @@ async fn deleted_fork<S: ObjectStore>(
     write_test_file(store, target, "/owned.txt", "target-write", &setup).await;
     crate::test_support::NamespaceFixture::new(store, target, &setup)
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(store, target),
+            Default::default(),
+        )
         .await
         .expect("delete the target");
     let tombstone = crate::test_support::namespace_store(store, target)
@@ -468,6 +472,7 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -495,7 +500,10 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
         .expect("commit before the deletion");
     crate::test_support::NamespaceFixture::new(&store, &target, &setup)
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &target),
+            Default::default(),
+        )
         .await
         .expect("delete the target");
     let eligible = context(setup.now_ms + GC_GRACE_WINDOW_MS);

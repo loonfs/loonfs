@@ -128,12 +128,16 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         head: &NamespaceReadState,
     ) -> Result<u64> {
+        let engine = self.engine(namespace_id);
+        let administrator = engine
+            .find_administrator_without_read()
+            .expect("a maintenance engine has no subject, so it needs no read for the proof");
         let mut cursor = None;
         let mut live_snapshots = 0_u64;
         loop {
-            let page = self
-                .engine(namespace_id)
+            let page = engine
                 .list_snapshots_page(
+                    &administrator,
                     head,
                     PageRequest {
                         limit: loonfs_types::EffectiveLimit::MAX,

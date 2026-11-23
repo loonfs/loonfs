@@ -54,7 +54,10 @@ async fn the_entry_of_a_namespace_that_isnt_a_member_is_deleted() {
     let pool_id = fixture.create().await.expect("create").pool_id;
     fixture
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
+            Default::default(),
+        )
         .await
         .expect("delete");
     let deadline = collect(&store, &retired, &setup)

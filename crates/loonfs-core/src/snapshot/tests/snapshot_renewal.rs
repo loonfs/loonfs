@@ -57,7 +57,8 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             fixture
         }
         .engine();
-        let renew = namespace.extend_snapshot(&snapshot.snapshot_id, 1_002);
+        let administrator = crate::test_support::administrator(&namespace);
+        let renew = namespace.extend_snapshot(&administrator, &snapshot.snapshot_id, 1_002);
         let expire = async {
             store.wait_until_blocked().await;
             clock.advance_ms(3);
@@ -130,7 +131,9 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             fixture
         }
         .engine();
-        let renew = namespace.extend_snapshot(&snapshot.snapshot_id, requested_expiry);
+        let administrator = crate::test_support::administrator(&namespace);
+        let renew =
+            namespace.extend_snapshot(&administrator, &snapshot.snapshot_id, requested_expiry);
         let expire = async {
             store.wait_until_blocked().await;
             clock.advance_ms(2);
@@ -199,7 +202,8 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         fixture
     }
     .engine();
-    let renew = namespace.extend_snapshot(&snapshot.snapshot_id, 10_000);
+    let administrator = crate::test_support::administrator(&namespace);
+    let renew = namespace.extend_snapshot(&administrator, &snapshot.snapshot_id, 10_000);
     let contender = async {
         store.wait_until_blocked().await;
         {
@@ -209,7 +213,11 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
             fixture
         }
         .engine()
-        .extend_snapshot(&snapshot.snapshot_id, 1_002)
+        .extend_snapshot(
+            &crate::test_support::administrator_of(&inner, &namespace_id),
+            &snapshot.snapshot_id,
+            1_002,
+        )
         .await
         .expect("competing extension");
         clock.advance_ms(3);
