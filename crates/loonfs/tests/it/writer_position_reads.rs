@@ -15,6 +15,7 @@ use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
     BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
 };
+use loonfs_types::format::manifest::MetadataRowFamily;
 use loonfs_types::{ChecksumAlgorithm, ManifestNo, NamespaceId};
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1109,8 +1110,16 @@ async fn a_wave_of_reads_shares_at_most_two_checks() {
 /// later raises the boundary over the position's manifest and deletes the
 /// manifest and the segments that only it lists. The position isn't checked
 /// in between, because nothing in the writer's runtime reads.
-async fn position_on_a_collected_manifest(name: &str, cached: bool) -> (Fixture, ManifestNo) {
-    use loonfs_objectstore::ObjectStore;
+///
+/// `history` chooses what the namespace has besides the fixture's files.
+/// For a variant that adds rows, the fixture checks, by listing the store,
+/// that the collection deleted the position's segments of that row family.
+async fn position_on_a_collected_manifest(
+    name: &str,
+    cached: bool,
+    history: History,
+) -> (Fixture, ManifestNo) {
+    use loonfs_objectstore::{ObjectStore, ObjectStoreExtension};
     let cache = MetadataCache::builder().max_segment_bytes(0);
     let cache = if cached {
         cache
@@ -1120,6 +1129,27 @@ async fn position_on_a_collected_manifest(name: &str, cached: bool) -> (Fixture,
     let fixture = fixture_with_cache(name, Parked::WalPuts, cache.build()).await;
     let store: SharedObjectStore = fixture.recording.clone();
     let namespace_id = fixture.namespace_id.clone();
+    let actor = loonfs_test_support::test_actor();
+    if let History::Merged = history {
+        let fork = loonfs_test_support::ids::namespace_id(&format!("{name}-fork"));
+        fixture
+            .writer
+            .fork_namespace(&namespace_id, &fork, &actor)
+            .await
+            .expect("fork");
+        fixture
+            .writer
+            .open_namespace(&fork)
+            .expect("open the fork")
+            .put_file("/forked.txt", b"fork", &actor)
+            .await
+            .expect("a commit in the fork");
+        fixture
+            .namespace
+            .merge_fork(&fork, &actor)
+            .await
+            .expect("merge the fork");
+    }
     fixture
         .writer
         .maintenance(writer_id(name))
@@ -1131,6 +1161,13 @@ async fn position_on_a_collected_manifest(name: &str, cached: bool) -> (Fixture,
         .load_current_manifest()
         .await
         .expect("the position's manifest");
+    if let History::AppendInTail = history {
+        fixture
+            .namespace
+            .append_file("/small.txt", b"more", &actor)
+            .await
+            .expect("append");
+    }
     let peer_id = format!("{name}-peer");
     let peer = peer(&fixture, &peer_id).await;
     let maintenance = peer.maintenance(writer_id(&peer_id));
@@ -1163,7 +1200,50 @@ async fn position_on_a_collected_manifest(name: &str, cached: bool) -> (Fixture,
         lost += usize::from(store.head(&key).await.expect("HEAD").is_none());
     }
     assert!(lost > 0, "the collection deletes a segment of the position");
+    let family = match history {
+        History::Files => None,
+        History::AppendInTail => Some(MetadataRowFamily::ContentLayouts),
+        History::Merged => Some(MetadataRowFamily::Merges),
+    };
+    if let Some(family) = family {
+        let listed = store
+            .list_prefix(&loonfs_objectstore::keys::metadata_segment_prefix(
+                &namespace_id,
+            ))
+            .await
+            .expect("list the segments");
+        let needed: Vec<String> = position
+            .payload()
+            .runs
+            .iter()
+            .flat_map(|run| run.segments.iter())
+            .filter(|segment| segment.family == family)
+            .map(loonfs_objectstore::keys::metadata_segment_object_key)
+            .collect();
+        assert!(
+            !needed.is_empty(),
+            "the position lists a {family:?} segment"
+        );
+        assert!(
+            needed.iter().all(|key| !listed.contains(key)),
+            "the collection deletes the position's {family:?} segments: {needed:?}"
+        );
+    }
     (fixture, position.manifest().manifest_no)
+}
+
+/// What a namespace from [`position_on_a_collected_manifest`] has besides
+/// the fixture's files.
+enum History {
+    /// Nothing else.
+    Files,
+    /// The writer's tail appends to `/small.txt`, whose first bytes the
+    /// position's manifest lays out in a segment that only that manifest
+    /// lists.
+    AppendInTail,
+    /// The writer merged a fork before its fold, so the position's manifest
+    /// indexes that merge.
+    Merged,
 }
 
 /// Checks that a retention advance from a writer position whose manifest a
@@ -1181,7 +1261,7 @@ async fn position_on_a_collected_manifest(name: &str, cached: bool) -> (Fixture,
 async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() {
     for cached in [false, true] {
         let name = format!("collected-advance-{}", if cached { "hit" } else { "miss" });
-        let (fixture, _) = position_on_a_collected_manifest(&name, cached).await;
+        let (fixture, _) = position_on_a_collected_manifest(&name, cached, History::Files).await;
         fixture.recording.reset();
         let advanced = fixture
             .writer
@@ -1236,4 +1316,229 @@ async fn a_retention_advance_from_a_position_on_a_collected_manifest_succeeds() 
             "cached={cached}"
         );
     }
+}
+
+/// Checks that a fold from a writer position whose manifest a collection
+/// deleted succeeds when the runtime's segment cache still has that manifest
+/// and the position's tail appends to a file, and that the session reads,
+/// commits and folds after it.
+///
+/// The fold writes the appended bytes after the file's first bytes, so it
+/// reads the file's layout row, and the only segment that has that row is
+/// one that the collection deleted after a compaction rewrote the layout
+/// family. The fold finds that a newer manifest replaced the position's
+/// manifest, finds the newest manifest, loads the tail above it, which has
+/// the session's commit after the collection, and publishes the next
+/// manifest. The session's position moves onto that manifest, so an
+/// eventual read after the fold sends no manifest check and reads the new
+/// manifest's segments.
+#[tokio::test]
+async fn a_fold_of_an_append_from_a_position_on_a_collected_manifest_succeeds() {
+    let name = "collected-append-fold";
+    let (fixture, _) = position_on_a_collected_manifest(name, true, History::AppendInTail).await;
+    let maintenance = fixture.writer.maintenance(writer_id(name));
+    fixture
+        .put("/before.txt")
+        .await
+        .expect("a commit before the fold");
+    fixture.recording.reset();
+    let folded = maintenance
+        .fold_wal(&fixture.namespace_id)
+        .await
+        .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    let namespace = fixture.namespace_id.to_string();
+    let line = |request: &str| request.replace("{ns}", &namespace);
+    let expected = [
+        // The lookup of the file's layout row in a segment that the
+        // collection deleted.
+        vec![line("get {ns} MetadataSegment")],
+        // The check that a newer manifest replaced the position's manifest.
+        [
+            "get {ns} Boundary",
+            "list namespaces/{ns}/manifests/",
+            "get {ns} MetadataManifest 00000000000000000018",
+            "get {ns} Boundary",
+        ]
+        .map(line)
+        .to_vec(),
+        // The next attempt finds the newest manifest above the position's.
+        [
+            "head {ns} MetadataManifest 00000000000000000005",
+            "get {ns} Boundary",
+            "get {ns} Boundary",
+            "list namespaces/{ns}/manifests/",
+            "get {ns} Boundary",
+        ]
+        .map(line)
+        .to_vec(),
+        // The rebuild loads the tail above the newest manifest.
+        [
+            "get {ns} Boundary",
+            "list namespaces/{ns}/manifests/",
+            "get {ns} Boundary",
+            "get {ns} WalObject 00000000000000000012",
+            "get {ns} WalObject 00000000000000000013",
+            "get {ns} WalObject 00000000000000000014",
+            "head {ns} MetadataManifest 00000000000000000019",
+            "get {ns} Boundary",
+        ]
+        .map(line)
+        .to_vec(),
+        // The fold writes the commit's content, its segments and the
+        // manifest, and settles the put against the boundary.
+        vec![line("assemble pool ContentBlob")],
+        vec![line("put {ns} MetadataSegment"); 7],
+        [
+            "put {ns} MetadataManifest 00000000000000000019",
+            "get {ns} Boundary",
+        ]
+        .map(line)
+        .to_vec(),
+    ]
+    .concat();
+    assert_eq!(
+        loonfs_test_support::stores::request_lines(&fixture.recording.take()),
+        expected
+    );
+    fixture
+        .reader
+        .stat("/before.txt")
+        .await
+        .expect("an eventual read after the fold");
+    let operations = fixture.recording.take();
+    assert!(
+        loonfs_test_support::stores::request_lines(&operations)
+            .iter()
+            .all(|request| *request == line("get {ns} MetadataSegment")),
+        "the read starts from the position on the fold's manifest, and reads \
+         only the segments that the runtime doesn't cache: {operations:?}"
+    );
+    fixture
+        .put("/after.txt")
+        .await
+        .expect("a commit after the fold");
+    assert_eq!(
+        maintenance
+            .fold_wal(&fixture.namespace_id)
+            .await
+            .expect("a fold after the commit")
+            .outcome,
+        FoldWalOutcome::Published
+    );
+    let file = fixture
+        .reader
+        .read_file("/small.txt")
+        .await
+        .expect("read the appended file");
+    assert_eq!(file.bytes, [&[b's'; 1024][..], b"more"].concat());
+}
+
+/// Checks that a fold whose tail appends to a file returns
+/// `namespace_corrupt` when the file's layout segment is missing from the
+/// current manifest, which no newer manifest replaced.
+#[tokio::test]
+async fn a_fold_that_finds_a_segment_of_the_current_manifest_missing_is_corrupt() {
+    use loonfs_objectstore::ObjectStore;
+    let name = "current-append-fold";
+    let cache = MetadataCache::builder().max_segment_bytes(0).build();
+    let fixture = fixture_with_cache(name, Parked::WalPuts, cache).await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let maintenance = fixture.writer.maintenance(writer_id(name));
+    maintenance
+        .fold_wal(&fixture.namespace_id)
+        .await
+        .expect("fold the file");
+    let current = loonfs_core::test_support::namespace_store(store.clone(), &fixture.namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the current manifest");
+    fixture
+        .namespace
+        .append_file("/small.txt", b"more", &loonfs_test_support::test_actor())
+        .await
+        .expect("append");
+    for segment in current
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| run.segments.iter())
+        .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
+    {
+        store
+            .delete(&loonfs_objectstore::keys::metadata_segment_object_key(
+                segment,
+            ))
+            .await
+            .expect("delete the layout segment");
+    }
+    let error = maintenance
+        .fold_wal(&fixture.namespace_id)
+        .await
+        .expect_err("a missing segment of the current manifest");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt, "{error:?}");
+    assert!(format!("{error:?}").contains("MissingSegment"), "{error:?}");
+}
+
+/// Checks that the sweep's fold, which a writer runtime's host runs once
+/// the session's tail is older than the idle fold age, and a user snapshot,
+/// which folds first, succeed from the state of
+/// [`a_fold_of_an_append_from_a_position_on_a_collected_manifest_succeeds`].
+/// The sweep's fold finds that a newer manifest already folds the tail and
+/// returns `AlreadyCurrent`.
+#[tokio::test]
+async fn a_sweep_and_a_snapshot_from_a_position_on_a_collected_manifest_succeed() {
+    for snapshot in [false, true] {
+        let name = if snapshot {
+            "collected-append-snapshot"
+        } else {
+            "collected-append-sweep"
+        };
+        let (fixture, _) =
+            position_on_a_collected_manifest(name, true, History::AppendInTail).await;
+        if snapshot {
+            fixture
+                .namespace
+                .create_snapshot()
+                .await
+                .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+        } else {
+            fixture.clock.advance_ms(
+                loonfs::RuntimeConfig::default()
+                    .idle_fold_after_ms
+                    .expect("idle fold age")
+                    .get(),
+            );
+            let swept = fixture
+                .writer
+                .maintenance(writer_id(name))
+                .maintain_metadata(&fixture.namespace_id)
+                .await
+                .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
+            assert_eq!(
+                swept.wal_fold.map(|fold| fold.outcome),
+                Some(FoldWalOutcome::AlreadyCurrent)
+            );
+        }
+    }
+}
+
+/// Checks that a rebase creates its new fork when the writer position's
+/// manifest was collected, the runtime's segment cache still has that
+/// manifest, and every segment of the namespace's merge index that the
+/// manifest lists is gone.
+#[tokio::test]
+async fn a_rebase_from_a_position_on_a_collected_manifest_succeeds() {
+    let name = "collected-rebase";
+    let (fixture, _) = position_on_a_collected_manifest(name, true, History::Merged).await;
+    fixture
+        .writer
+        .fork_namespace_for_rebase(
+            &fixture.namespace_id,
+            &namespace_id(&format!("{name}-fork")),
+            &namespace_id(&format!("{name}-rebase")),
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{:?} {error:?}", error.code()));
 }
