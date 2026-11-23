@@ -111,10 +111,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 .authorize_relocation(source.inode_id, from_parent, parent_inode_id, mover)
                 .await?;
         }
-        // A move with `Replace` deletes the destination file and rebinds the
-        // source in one commit, and checks that the destination is vacant
-        // again after the delete. As with a put, only a file can be replaced,
-        // and a path never replaces itself.
+        // With `Replace`, the planner deletes the destination file and
+        // rebinds the source in the same commit, and checks again after the
+        // delete that the destination is vacant. As with a put, only a file
+        // can be replaced, and a move onto the source's own name rebinds the
+        // source instead of replacing it.
         let available = match replaced {
             ReplaceDestination::Replaced(existing) => {
                 ensure_expected_inode(

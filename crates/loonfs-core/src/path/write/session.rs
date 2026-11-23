@@ -78,8 +78,8 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
     }
 
     /// Checks a candidate's preconditions against the batch's state before
-    /// the candidate, and then plans each of its operations, which writes the
-    /// operation's rows into the commit.
+    /// the candidate, and then plans each of its operations. Planning an
+    /// operation writes the operation's rows into the commit.
     pub(crate) async fn prepare_commit(
         &self,
         candidate: &CommitCandidate,
@@ -141,8 +141,8 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
 
     /// Plans each operation in order. Each write applies its rows to the
     /// commit's state at once, so a later operation reads the rows that
-    /// earlier operations wrote. The first failure aborts the request and
-    /// attaches the failing operation's index.
+    /// earlier operations wrote. The first operation that fails ends the
+    /// request, and the error includes that operation's index.
     ///
     /// The head is the validated source of the namespace and writer epoch:
     /// `load_publish_metadata_view` fences on epoch equality, and the batch

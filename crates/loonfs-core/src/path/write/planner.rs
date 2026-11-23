@@ -87,9 +87,10 @@ pub(crate) struct NewInodeId(InodeId);
 
 impl NewInodeId {
     /// Returns `inode_id`, the ID that a merge assigns to an inode that it
-    /// creates, after checking that no inode in `view` has it. `view`
-    /// includes the merge's earlier operations, so an ID assigned to two
-    /// creates fails at the second.
+    /// creates, after checking that no inode in `view` has it.
+    ///
+    /// `view` includes the merge's earlier operations, so an ID assigned to
+    /// two creates fails at the second.
     ///
     /// An inode row is immutable and unique, so a second row for the same ID
     /// would corrupt the namespace. The ID is present only if the merge's

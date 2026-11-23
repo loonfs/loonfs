@@ -235,6 +235,7 @@ impl<'a> Destination<'a> {
 }
 
 /// A destination resolved to its parent directory and its current occupant.
+///
 /// [`PlanningView::resolve_destination`] makes one from a [`Destination`],
 /// and [`ResolvedDestination::found`] and
 /// [`OperationPlanningSession::create_missing_directories`] make one from
@@ -294,9 +295,9 @@ impl<'a> ResolvedDestination<'a> {
         &self.path
     }
 
-    /// Returns the occupant that a move or copy with `behavior` replaces: an
-    /// inode other than the source `source_inode_id`, when the behavior is
-    /// `Replace`.
+    /// Returns the occupant that a move or a copy with `behavior` replaces,
+    /// which is any occupant other than the source `source_inode_id` when
+    /// `behavior` is `Replace`, and none otherwise.
     pub(super) fn replaced_occupant(
         &self,
         behavior: DestinationBehavior,
@@ -313,9 +314,12 @@ impl<'a> ResolvedDestination<'a> {
 
     /// Returns the destination as a name that a bind can take, which is a
     /// name that no visible inode occupies, or that `allowed_occupant`
-    /// occupies already. A move or a copy passes its source, so a move can
-    /// bind a new spelling of the source's own name, and the copy's planner
-    /// refuses a copy onto its own source.
+    /// occupies already.
+    ///
+    /// A move passes its source, so it can bind a new spelling of the
+    /// source's own name (for example, a rename of report.txt to Report.txt).
+    /// A copy passes its source too, and its planner then refuses a copy onto
+    /// the source with `destination_exists`.
     pub(super) fn available_name(
         &self,
         allowed_occupant: Option<InodeId>,
@@ -359,8 +363,9 @@ impl AvailableName {
 }
 
 /// Requires `resolved` to be a file, the only kind of inode whose content an
-/// operation replaces or copies. `target` is the target as the error message
-/// shows it.
+/// operation replaces or copies.
+///
+/// `target` is the target as the error message shows it.
 pub(super) fn ensure_file(resolved: &ResolvedVisiblePath, target: &str) -> Result<()> {
     if resolved.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {

@@ -9,8 +9,11 @@ pub(super) struct CommitNumbering {
     next_delta_index: u32,
 }
 
-/// The index of one operation in its commit. Only
-/// [`CommitNumbering::reserve_op_index`] makes one, and recording deltas
+/// The index of one write in its commit, which the WAL stores as the delta's
+/// semantic operation index. A copy to a vacant name makes two writes, so it
+/// reserves two indexes.
+///
+/// Only [`CommitNumbering::reserve_op_index`] makes one, and recording deltas
 /// consumes it, so a write records its deltas only under an index that it
 /// reserved, and only once.
 #[derive(Debug)]

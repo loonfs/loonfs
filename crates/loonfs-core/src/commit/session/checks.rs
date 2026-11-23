@@ -84,10 +84,11 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         })
     }
 
-    /// Returns the current revision of the file `inode_id`, which a write
-    /// numbers the file's next revision after, or copies into a new binding
-    /// of the file. A file has a revision from its create on, so a file
-    /// without one means the namespace is corrupt.
+    /// Returns the current revision of the file `inode_id`.
+    ///
+    /// A write uses it to assign the number of the file's next revision, or
+    /// copies it into a new binding of the file. A file has a revision from
+    /// its create on, so a file without one means the namespace is corrupt.
     pub(super) async fn resolve_current_revision(
         &self,
         inode_id: InodeId,

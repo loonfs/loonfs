@@ -28,8 +28,9 @@ pub struct ResolvedVisiblePath {
 
 impl ResolvedVisiblePath {
     /// Returns the child that `binding` binds under `directory`, built from
-    /// the binding without a read. The caller already found the child
-    /// visible.
+    /// the binding without a read.
+    ///
+    /// The caller already found the child visible.
     pub(crate) fn child_of(
         directory: &ResolvedVisiblePath,
         binding: &DirentryBindingRecord,

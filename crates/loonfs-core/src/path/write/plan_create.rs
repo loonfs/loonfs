@@ -17,10 +17,12 @@ use loonfs_types::{
     AbsolutePath, AccessRight, CommitSeq, ContentRef, DestinationBehavior, InodeId,
 };
 
-/// A deleted item's deletion in the trash: the latest tombstone event of the
-/// item's root, which is a `set` above the retention floor. Only
-/// [`OperationPlanningSession::resolve_deletion_in_trash`] makes one, so the
-/// deletion was in the trash in the commit's state when the value was made.
+/// The `set` event of a deletion in the trash, which is the latest tombstone
+/// event of the deleted item's root and is above the retention floor.
+///
+/// Only [`OperationPlanningSession::resolve_deletion_in_trash`] makes one, so
+/// the deletion was in the trash in the commit's state when the value was
+/// made.
 pub(crate) struct DeletionInTrash {
     root_inode_id: InodeId,
     position: DeltaPosition,

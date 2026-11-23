@@ -497,6 +497,7 @@ impl VisiblePathWalk {
 /// Walks `absolute_path` component by component through visible directories
 /// and visible child bindings, starting at the canonical root inode, until
 /// it reaches the path's inode or a component that has no visible child.
+///
 /// Each component folds into its name key.
 pub(crate) async fn walk_visible_path<R>(
     reads: &mut R,

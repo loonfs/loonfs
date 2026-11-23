@@ -87,10 +87,11 @@ impl<'a, S: ObjectStore + ?Sized> CommitSession<'a, S> {
         std::mem::take(&mut self.appended)
     }
 
-    /// Records the deltas of the operation that `op_index` identifies, which
-    /// the write reserved. It sets the layout of each revision that the
-    /// deltas write, applies the deltas to the overlay so that later reads
-    /// see them, and records them with the index.
+    /// Records `deltas` under `op_index`, the index that the write reserved.
+    ///
+    /// It sets the layout of each revision that the deltas write, applies the
+    /// deltas to the overlay so that later reads see them, and records them
+    /// with the index.
     pub(super) fn record_operation(&mut self, op_index: OperationIndex, mut deltas: Vec<WalDelta>) {
         let op_index = op_index.into_u32();
         for delta in &mut deltas {
