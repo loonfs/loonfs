@@ -542,7 +542,7 @@ mod tests {
                 let entry = view
                     .build_authoritative_path_entry_with_session(
                         &mut session,
-                        &resolve_visible_child(&resolved.absolute_path, &child.binding),
+                        &resolve_visible_child(&resolved, &child.binding),
                         projection,
                     )
                     .await

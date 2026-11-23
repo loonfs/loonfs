@@ -183,10 +183,11 @@ impl MetadataState {
         absolute_path: &AbsolutePath,
         base_seq: CommitSeq,
     ) -> Result<ResolvedVisiblePath, VisiblePathError> {
-        resolve_in_memory_read(visibility::resolve_visible_path(
+        resolve_in_memory_read(visibility::walk_visible_path(
             &mut self.reads_at_seq(base_seq),
             absolute_path,
-        ))
+        ))?
+        .into_resolved()
     }
 
     pub(super) fn latest_parent_binding_for_child_at_seq(

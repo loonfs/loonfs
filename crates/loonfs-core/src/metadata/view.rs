@@ -6,7 +6,7 @@ use super::manifest_index;
 use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
 use super::tail_rows::{TailFamily, TailRows};
 use super::view_session::{LeafRevisionPreload, MetadataViewSession};
-use super::visibility::{self, MetadataVisibilityReads};
+use super::visibility::{self, MetadataVisibilityReads, VisiblePathWalk};
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::HeapBytes;
 use crate::metadata::{
@@ -374,24 +374,23 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .await
     }
 
+    /// Walks `absolute_path` from the root to its inode, or to the first
+    /// component that has no visible child.
+    pub(crate) async fn walk_visible_path(
+        &self,
+        absolute_path: &AbsolutePath,
+    ) -> Result<VisiblePathWalk> {
+        self.session()
+            .walk_visible_path(absolute_path, LeafRevisionPreload::Skip)
+            .await
+    }
+
     pub(crate) async fn visible_child(
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
     ) -> Result<Option<DirentryBindingRecord>> {
         visibility::visible_child(&mut self.reads(), parent_inode_id, name_key).await
-    }
-
-    /// Returns the visible child under `(parent_inode_id, name_key)` of a
-    /// directory that the caller already found visible, without reading the
-    /// directory's inode record.
-    pub(crate) async fn visible_child_of_visible_directory(
-        &self,
-        parent_inode_id: InodeId,
-        name_key: &NameKey,
-    ) -> Result<Option<DirentryBindingRecord>> {
-        visibility::visible_child_of_visible_directory(&mut self.reads(), parent_inode_id, name_key)
-            .await
     }
 
     pub(crate) async fn visible_inode(&self, inode_id: InodeId) -> Result<Option<InodeRecord>> {

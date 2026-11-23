@@ -4,7 +4,7 @@
 //! memoizes the inputs and results of those rules.
 
 use super::durable_cache::ParentNameCacheKey;
-use super::visibility::{self, Ancestry, MetadataVisibilityReads};
+use super::visibility::{self, Ancestry, MetadataVisibilityReads, VisiblePathWalk};
 use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, ListedTrashEntry, MetadataView,
     ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord, TrashRange,
@@ -263,7 +263,22 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     ) -> Result<ResolvedVisiblePath> {
         self.preload_path_walk(absolute_path, preload_leaf_revision)
             .await?;
-        visibility::resolve_visible_path(self, absolute_path).await
+        Ok(visibility::walk_visible_path(self, absolute_path)
+            .await?
+            .into_resolved()?)
+    }
+
+    /// Walks `absolute_path` from the root to its inode, or to the first
+    /// component that has no visible child, after the same preload as
+    /// [`Self::resolve_visible_path`].
+    pub(crate) async fn walk_visible_path(
+        &mut self,
+        absolute_path: &AbsolutePath,
+        preload_leaf_revision: LeafRevisionPreload,
+    ) -> Result<VisiblePathWalk> {
+        self.preload_path_walk(absolute_path, preload_leaf_revision)
+            .await?;
+        visibility::walk_visible_path(self, absolute_path).await
     }
 
     async fn preload_path_walk(

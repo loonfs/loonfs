@@ -2,12 +2,11 @@
 
 use super::planner::OperationPlanningSession;
 use super::preconditions::{ensure_expected_inode, ExpectedFileState};
-use super::publish_path_planning::{
-    is_missing_visible_path, AvailableName, Destination, ParentDirectories, Target,
-};
+use super::publish_path_planning::{AvailableName, Destination, ResolvedDestination, Target};
 use crate::authorize::{check_rights, Absence};
 use crate::commit::{CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
+use crate::metadata::VisiblePathWalk;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, TombstoneRowAction};
@@ -65,20 +64,40 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 .await;
         }
         ensure_mutation_path(absolute_path)?;
-        let parents = self
-            .view()
-            .resolve_parent_directories(absolute_path)
-            .await?;
-        self.view()
-            .authorize(
-                parents.deepest_existing(),
+        let view = self.view();
+        let walk = view
+            .authorize_non_directory_component(
+                view.metadata.walk_visible_path(absolute_path).await,
                 AccessRight::Create.into(),
                 Absence::Path(absolute_path.as_str()),
             )
             .await?;
-        let name = self
-            .create_parents_and_resolve_path(absolute_path, parents)
-            .await?;
+        let name = match walk {
+            VisiblePathWalk::Found(existing) => {
+                let destination = ResolvedDestination::at_path(
+                    absolute_path,
+                    existing.parent_inode_id.unwrap_or(ROOT_INODE_ID),
+                    final_component(absolute_path)?,
+                    Some(existing),
+                );
+                self.view().ensure_vacant_destination(&destination).await?
+            }
+            VisiblePathWalk::Missing {
+                deepest_existing,
+                missing,
+                ..
+            } => {
+                self.view()
+                    .authorize(
+                        deepest_existing,
+                        AccessRight::Create.into(),
+                        Absence::Path(absolute_path.as_str()),
+                    )
+                    .await?;
+                self.create_missing_directories(absolute_path, deepest_existing, missing)
+                    .await?
+            }
+        };
         let new_inode = self.next_inode_id()?;
         self.commit
             .create(new_inode, name, NewChild::Directory)
@@ -198,19 +217,19 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         expected_file_state: Option<ExpectedFileState>,
     ) -> Result<()> {
         ensure_mutation_path(absolute_path)?;
-        let target = self
-            .view()
-            .resolve_visible_path_for_authorization(
-                absolute_path,
+        let view = self.view();
+        let walk = view
+            .authorize_non_directory_component(
+                view.metadata.walk_visible_path(absolute_path).await,
                 AccessRight::Create.into(),
                 Absence::Path(absolute_path.as_str()),
             )
-            .await;
+            .await?;
 
         let final_name = final_component(absolute_path)?;
 
-        match target {
-            Ok(existing) => {
+        match walk {
+            VisiblePathWalk::Found(existing) => {
                 if behavior == DestinationBehavior::NoReplace {
                     self.view()
                         .authorize(
@@ -254,14 +273,14 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 let binding = self.view().source_binding(&existing).await?;
                 self.commit.replace_file(binding, &content_ref, None).await
             }
-            Err(error) if is_missing_visible_path(&error) => {
-                let parents = self
-                    .view()
-                    .resolve_parent_directories(absolute_path)
-                    .await?;
+            VisiblePathWalk::Missing {
+                deepest_existing,
+                missing,
+                ..
+            } => {
                 self.view()
                     .authorize(
-                        parents.deepest_existing(),
+                        deepest_existing,
                         AccessRight::Create.into(),
                         Absence::Path(absolute_path.as_str()),
                     )
@@ -270,72 +289,47 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                     return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
                 }
                 let name = self
-                    .create_parents_and_resolve_path(absolute_path, parents)
+                    .create_missing_directories(absolute_path, deepest_existing, missing)
                     .await?;
                 let new_inode = self.next_inode_id()?;
                 self.commit
                     .create(new_inode, name, NewChild::File(content_ref))
                     .await
             }
-            Err(other) => Err(other),
         }
     }
 
-    /// Creates the directories above `absolute_path` that are missing, and
-    /// then returns the path as a vacant name.
+    /// Creates a directory at each name of `missing` except the last, each
+    /// under the one before it and the first under `deepest_existing`, and
+    /// returns the last name of `missing`, which is the final name of
+    /// `absolute_path`, as a vacant name under the last directory.
     ///
-    /// When every directory above the path exists, the final name is looked
-    /// up under the directory that the walk found. Otherwise the path is
-    /// resolved again after the creates, against the state that they left,
-    /// because the walk read the state before them. The caller authorized
-    /// `create` on the deepest directory that existed before the creates.
-    async fn create_parents_and_resolve_path(
+    /// A walk of `absolute_path` returned `deepest_existing` and `missing`,
+    /// so the first name is vacant under `deepest_existing`, and each later
+    /// name is under a directory that this operation created. The caller
+    /// authorized `create` on `deepest_existing`, which covers every name
+    /// below it.
+    async fn create_missing_directories(
         &mut self,
         absolute_path: &AbsolutePath,
-        parents: ParentDirectories<'_>,
-    ) -> Result<AvailableName> {
-        let destination = match &parents {
-            ParentDirectories::Existing(parent) => Destination::ExistingParent(parent),
-            ParentDirectories::Missing {
-                deepest_existing,
-                missing,
-            } => {
-                self.create_parent_directories(*deepest_existing, missing)
-                    .await?;
-                Destination::Path(absolute_path)
-            }
-        };
-        self.view()
-            .resolve_destination(destination)
-            .await?
-            .available_name(None)
-    }
-
-    /// Creates the directories `missing`, each under the one before it, and
-    /// the first under `deepest_existing`.
-    ///
-    /// Each name is checked for vacancy after the directory above it is
-    /// created, against the state that the create left.
-    async fn create_parent_directories(
-        &mut self,
         deepest_existing: InodeId,
-        missing: &[DisplayName],
-    ) -> Result<()> {
+        mut missing: Vec<DisplayName>,
+    ) -> Result<AvailableName> {
+        let final_name = missing
+            .pop()
+            .expect("a walk that stops at a missing component should report it");
         let mut parent_inode_id = deepest_existing;
         for display_name in missing {
-            let destination = Destination::name(parent_inode_id, display_name);
-            let name = self
-                .view()
-                .resolve_destination(destination)
-                .await?
-                .available_name(None)?;
+            let name =
+                ResolvedDestination::at_path(absolute_path, parent_inode_id, display_name, None)
+                    .available_name(None)?;
             let new_inode = self.next_inode_id()?;
-            let child_inode_id = new_inode.inode_id();
+            parent_inode_id = new_inode.inode_id();
             self.commit
                 .create(new_inode, name, NewChild::Directory)
                 .await?;
-            parent_inode_id = child_inode_id;
         }
-        Ok(())
+        ResolvedDestination::at_path(absolute_path, parent_inode_id, final_name, None)
+            .available_name(None)
     }
 }

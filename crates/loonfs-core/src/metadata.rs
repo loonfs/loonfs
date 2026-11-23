@@ -51,4 +51,5 @@ pub(crate) use self::rows::MetadataStateBuilder;
 
 pub(crate) use visibility::{
     ancestry_allows_read, visible_child, AncestorWalk, Ancestry, MetadataVisibilityReads,
+    VisiblePathWalk,
 };

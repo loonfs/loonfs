@@ -9,7 +9,9 @@ use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
 use futures::FutureExt;
-use loonfs_types::{AbsolutePath, CommitSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
+use loonfs_types::{
+    AbsolutePath, CommitSeq, DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+};
 use std::collections::BTreeSet;
 use std::future::Future;
 
@@ -441,31 +443,49 @@ pub(crate) async fn visible_page_child<R: MetadataVisibilityReads>(
     Ok(Some(direntry))
 }
 
-/// The visible child under `(parent, name_key)` of a parent that the caller
-/// already found to be a visible directory. It's the same child as
-/// [`visible_child`] returns, without a read of the parent's inode record,
-/// as [`visible_page_child`] explains.
-pub(crate) async fn visible_child_of_visible_directory<R: MetadataVisibilityReads>(
-    reads: &mut R,
-    parent_inode_id: InodeId,
-    name_key: &NameKey,
-) -> Result<Option<DirentryBindingRecord>, R::Error> {
-    let Some(direntry) = reads
-        .active_child_binding(parent_inode_id, name_key)
-        .await?
-    else {
-        return Ok(None);
-    };
-    visible_page_child(reads, direntry).await
+/// How far [`walk_visible_path`] got down a path.
+pub(crate) enum VisiblePathWalk {
+    /// Every component of the path is visible.
+    Found(ResolvedVisiblePath),
+    /// A component of the path has no visible child under the directory above
+    /// it.
+    Missing {
+        /// The deepest directory on the path that is visible, which is the
+        /// directory above the first missing component.
+        deepest_existing: InodeId,
+        /// The path of that directory, as the namespace stores it.
+        deepest_path: AbsolutePath,
+        /// The path's components from the first missing one to the last one,
+        /// as the path spells them.
+        missing: Vec<DisplayName>,
+    },
 }
 
-/// Resolves `absolute_path` component by component through visible
-/// directories and visible child bindings, starting at the canonical root
-/// inode. Each component folds into its name key.
-pub(crate) async fn resolve_visible_path<R>(
+impl VisiblePathWalk {
+    /// Returns the path's inode, or [`VisiblePathError::PathNotFound`] for
+    /// the first component that has no visible child.
+    pub(crate) fn into_resolved(self) -> Result<ResolvedVisiblePath, VisiblePathError> {
+        match self {
+            Self::Found(resolved) => Ok(resolved),
+            Self::Missing {
+                deepest_path,
+                missing,
+                ..
+            } => Err(VisiblePathError::PathNotFound {
+                absolute_path: deepest_path.join(&missing[0]).to_string(),
+            }),
+        }
+    }
+}
+
+/// Walks `absolute_path` component by component through visible directories
+/// and visible child bindings, starting at the canonical root inode, until
+/// it reaches the path's inode or a component that has no visible child.
+/// Each component folds into its name key.
+pub(crate) async fn walk_visible_path<R>(
     reads: &mut R,
     absolute_path: &AbsolutePath,
-) -> Result<ResolvedVisiblePath, R::Error>
+) -> Result<VisiblePathWalk, R::Error>
 where
     R: MetadataVisibilityReads,
     R::Error: From<VisiblePathError>,
@@ -476,7 +496,7 @@ where
             .visible_inode(root_inode_id)
             .await?
             .ok_or(VisiblePathError::RootMissing)?;
-        return Ok(ResolvedVisiblePath {
+        return Ok(VisiblePathWalk::Found(ResolvedVisiblePath {
             absolute_path: AbsolutePath::root(),
             inode_id: root_inode_id,
             inode_kind: root.inode_kind,
@@ -485,13 +505,14 @@ where
             parent_inode_id: None,
             display_name: String::new(),
             binding_version: None,
-        });
+        }));
     }
 
     let mut last: Option<DirentryBindingRecord> = None;
     let mut current_absolute_path = AbsolutePath::root();
 
-    for component in absolute_path.components() {
+    let components = absolute_path.components();
+    for (depth, component) in components.iter().enumerate() {
         let (parent_inode_id, parent_kind) = match &last {
             None => (root_inode_id, InodeKind::Directory),
             Some(binding) => (binding.child_inode_id, binding.child_kind),
@@ -505,14 +526,24 @@ where
             .into());
         }
 
-        let display_name = component.to_display_name();
-        let not_found = || VisiblePathError::PathNotFound {
-            absolute_path: current_absolute_path.join(&display_name).to_string(),
-        };
-        let name_key = NameKey::for_display_name(&display_name);
-        let direntry = visible_child_of_visible_directory(reads, parent_inode_id, &name_key)
+        let name_key = NameKey::for_display_name(&component.to_display_name());
+        let direntry = match reads
+            .active_child_binding(parent_inode_id, &name_key)
             .await?
-            .ok_or_else(not_found)?;
+        {
+            Some(direntry) => visible_page_child(reads, direntry).await?,
+            None => None,
+        };
+        let Some(direntry) = direntry else {
+            return Ok(VisiblePathWalk::Missing {
+                deepest_existing: parent_inode_id,
+                deepest_path: current_absolute_path,
+                missing: components[depth..]
+                    .iter()
+                    .map(|component| component.to_display_name())
+                    .collect(),
+            });
+        };
 
         current_absolute_path = current_absolute_path.join(
             direntry
@@ -528,7 +559,7 @@ where
         .expect("visible binding should be bound")
         .to_string();
     let binding_version = Some(last.bind_position);
-    Ok(ResolvedVisiblePath {
+    Ok(VisiblePathWalk::Found(ResolvedVisiblePath {
         absolute_path: current_absolute_path,
         inode_id: last.child_inode_id,
         inode_kind: last.child_kind,
@@ -537,7 +568,7 @@ where
         parent_inode_id: Some(last.parent_inode_id),
         display_name,
         binding_version,
-    })
+    }))
 }
 
 /// Drives a visibility future built over in-memory reads to completion
