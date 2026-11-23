@@ -10,6 +10,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::{ReadBasis, SnapshotReadBasis};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::path::read::{
     CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
@@ -37,7 +38,11 @@ use tracing::Instrument;
 ///
 /// A context reads at its head or at a sequence below it. Code outside this
 /// crate builds a context only through its constructors, and
-/// [`Self::at_seq`] refuses a sequence above the head.
+/// [`Self::at_seq`] refuses a sequence above the head. A context of the
+/// namespace's live head is built from a [`Held<ReadBasis>`], which only this
+/// crate's loaders return (a cached head, a writer position, a read anchor,
+/// or an initializing namespace's basis), so no caller can build a live
+/// context from the basis of an earlier state.
 ///
 /// A read of an earlier sequence or of a snapshot checks the subject's
 /// rights at the namespace's head when the read started
@@ -69,19 +74,25 @@ pub struct RuntimeReadContext {
 }
 
 impl RuntimeReadContext {
-    /// Returns a context that reads at the head of `read_basis`, with its
-    /// reads authorized at that same head. `tail` is the projected WAL tail
-    /// of a writer session's position at that head, or `None` for reads that
-    /// look the tail up in the namespace's WAL tail cache.
+    /// Returns a context that reads at the head of `basis`, which a loader
+    /// returned, with its reads authorized at that same head. `tail` is the
+    /// projected WAL tail of a writer session's position at that head, or
+    /// `None` for reads that look the tail up in the namespace's WAL tail
+    /// cache.
     ///
-    /// Warning: the reads are authorized at whatever head `read_basis` lists.
-    /// If a caller passes the read basis of an earlier state, whether built
-    /// by hand or taken from a context of a snapshot with
-    /// [`Self::read_basis`], the reads check the subject's rights at that
-    /// earlier state.
-    pub fn new(read_basis: ReadBasis, tail: Option<Arc<ProjectedWalTail>>) -> Self {
+    /// The basis of another context, such as a snapshot's, isn't a held
+    /// basis, so it can't be used to build a live context:
+    ///
+    /// ```compile_fail
+    /// use loonfs_core::RuntimeReadContext;
+    ///
+    /// fn as_live(snapshot: &RuntimeReadContext) -> RuntimeReadContext {
+    ///     RuntimeReadContext::new(snapshot.read_basis(), None)
+    /// }
+    /// ```
+    pub fn new(basis: &Held<ReadBasis>, tail: Option<Arc<ProjectedWalTail>>) -> Self {
         Self {
-            read_basis,
+            read_basis: basis.read_basis().clone(),
             tail,
             visible_seq: None,
             authorization: None,
@@ -137,7 +148,7 @@ impl RuntimeReadContext {
 
     /// Returns the head and metadata basis that this context reads, and
     /// consumes the context.
-    pub fn into_read_basis(self) -> ReadBasis {
+    pub(crate) fn into_read_basis(self) -> ReadBasis {
         self.read_basis
     }
 

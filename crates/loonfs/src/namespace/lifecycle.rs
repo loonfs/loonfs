@@ -83,7 +83,7 @@ impl<M: crate::Mode> Namespace<M> {
                 else {
                     return Err(error);
                 };
-                let context = self.core.read_context(basis, None);
+                let context = self.core.read_context(&basis, None);
                 Ok(self
                     .core
                     .reader_engine(&self.namespace_id)

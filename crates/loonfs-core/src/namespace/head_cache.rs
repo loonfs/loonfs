@@ -119,7 +119,7 @@ impl CachedHead {
         head_and_wal_tail_cache: &HeadAndWalTailCache,
         observed: Observation,
     ) -> std::result::Result<bool, ControlObjectLoadError> {
-        let mut context = RuntimeReadContext::new(self.read_basis().clone(), None);
+        let mut context = RuntimeReadContext::new(&self.basis, None);
         if !probe_namespace_wal(store, head_and_wal_tail_cache, &mut context).await? {
             return Ok(false);
         }

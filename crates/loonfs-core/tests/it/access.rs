@@ -1665,7 +1665,7 @@ async fn revoked_grants() -> RevokedGrants {
         .expect("the earlier sequence is at or below the head");
     let snapshot = loonfs_core::RuntimeReadContext::at_snapshot(
         namespace_store(&store, &namespace_id)
-            .load_snapshot_read_basis(&head.read_basis().head, &snapshot.snapshot_id)
+            .load_snapshot_read_basis(head.read_basis().head(), &snapshot.snapshot_id)
             .await
             .expect("the snapshot's read basis"),
         head,

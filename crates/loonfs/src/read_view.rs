@@ -183,7 +183,7 @@ impl ReadView {
             });
         }
         let Some(context) = self.pinned.context.at_seq(seq) else {
-            let head_seq = self.pinned.context.read_basis().head.seq;
+            let head_seq = self.pinned.context.read_basis().head().seq;
             return Err(Error::InvalidRequest {
                 message: format!("sequence `{seq}` is ahead of the read view's head `{head_seq}`"),
                 param: "seq",

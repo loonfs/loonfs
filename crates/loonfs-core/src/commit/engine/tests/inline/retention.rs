@@ -259,8 +259,15 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             .await
             .expect("snapshot still keeps original history");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let live = namespace
+        .load_read_anchor(crate::test_support::observed_now())
+        .await
+        .expect("the live head");
     let old = namespace
-        .load_metadata_view(&crate::RuntimeReadContext::new(snapshot_basis.0, None))
+        .load_metadata_view(&crate::RuntimeReadContext::at_snapshot(
+            snapshot_basis,
+            crate::RuntimeReadContext::new(&live.held_basis(), None),
+        ))
         .await
         .expect("fresh snapshot view");
     let old_receipt = old

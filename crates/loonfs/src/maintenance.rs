@@ -110,7 +110,7 @@ impl Maintenance {
                     .load_live_read_anchor(self.core.observation())
                     .await?;
                 let live_snapshots = self
-                    .count_live_snapshots(namespace_id, &anchor.read_state)
+                    .count_live_snapshots(namespace_id, anchor.read_state())
                     .await?;
                 Ok(Self::namespace_diagnostics(
                     NamespaceStorageDiagnostics::from(&anchor),

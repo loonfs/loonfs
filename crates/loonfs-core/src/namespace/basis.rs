@@ -24,10 +24,26 @@ impl MetadataBasis {
 
 /// A namespace head and the metadata basis that the head was read against,
 /// which every read at the head starts from.
+///
+/// Code outside this crate can't build a read basis, so it can only use one
+/// that this crate returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadBasis {
-    pub head: NamespaceReadState,
-    pub basis: MetadataBasis,
+    pub(crate) head: NamespaceReadState,
+    pub(crate) basis: MetadataBasis,
+}
+
+impl ReadBasis {
+    /// Returns the head.
+    pub fn head(&self) -> &NamespaceReadState {
+        &self.head
+    }
+
+    /// Returns the metadata basis, the manifest that the head was read
+    /// against.
+    pub fn basis(&self) -> &MetadataBasis {
+        &self.basis
+    }
 }
 
 /// The head and metadata basis of the state that a snapshot kept.

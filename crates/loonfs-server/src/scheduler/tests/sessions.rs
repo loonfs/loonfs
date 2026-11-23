@@ -615,7 +615,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
         )))
         .await
         .expect("anchor")
-        .read_state
+        .read_state()
         .writer_epoch;
     store.reset();
     server
@@ -673,7 +673,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
             )))
             .await
             .expect("anchor")
-            .read_state
+            .read_state()
             .writer_epoch
             .0,
         first_epoch.0 + 1

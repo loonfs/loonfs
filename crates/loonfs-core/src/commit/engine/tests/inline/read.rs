@@ -4,8 +4,6 @@ use super::*;
 use crate::cache::{
     DecodedBlockCacheStats, HeadAndWalTailCache, MetadataSegmentCache, WalTailCacheKey,
 };
-use crate::namespace::basis::MetadataBasis;
-use crate::namespace::state::NamespaceReadState;
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::content_location::ContentLocation;
 use crate::storage::content_stream::StreamRange;
@@ -17,10 +15,6 @@ use loonfs_types::{DestinationPrecondition, RevisionNo, WalNo};
 use std::assert_matches;
 use std::num::NonZeroU64;
 
-fn read_context(head: NamespaceReadState, basis: MetadataBasis) -> RuntimeReadContext {
-    RuntimeReadContext::new(crate::control::ReadBasis { head, basis }, None)
-}
-
 async fn fresh_context(
     store: &RecordingStore<LocalFsStore>,
     namespace_id: &NamespaceId,
@@ -29,8 +23,7 @@ async fn fresh_context(
         .load_read_anchor(crate::test_support::observed_now())
         .await
         .expect("read basis");
-    let basis = loaded.basis();
-    read_context(loaded.read_state, basis)
+    RuntimeReadContext::new(&loaded.held_basis(), None)
 }
 
 /// Returns the namespace's components with caches that keep every segment
@@ -195,9 +188,9 @@ async fn published_projection_reads_without_replay_and_counts_inline_bytes() {
         .await;
     assert!(result.results[0].is_ok());
     let state = publisher.read_position().expect("published state");
-    let read_basis = state.read_basis().clone();
+    let basis = state.basis().clone();
     let tail = state.tail;
-    let context = RuntimeReadContext::new(read_basis, Some(Arc::clone(&tail)));
+    let context = RuntimeReadContext::new(&basis, Some(Arc::clone(&tail)));
     let tail_bytes = tail.decoded_bytes();
     assert_eq!(tail.inline_bytes(), value.bytes().len());
     assert!(

@@ -125,10 +125,10 @@ impl ReadPositionSlot {
         let read_basis = position.read_basis();
         self.head_and_wal_tail_cache.insert_tail(
             WalTailCacheKey {
-                namespace_id: read_basis.head.namespace_id.clone(),
-                manifest_no: read_basis.basis.manifest_no(),
-                head_seq: read_basis.head.seq,
-                wal_no: read_basis.head.wal_no,
+                namespace_id: read_basis.head().namespace_id.clone(),
+                manifest_no: read_basis.basis().manifest_no(),
+                head_seq: read_basis.head().seq,
+                wal_no: read_basis.head().wal_no,
             },
             Arc::clone(position.tail()),
         );

@@ -334,13 +334,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_snapshot_reads() {
     assert_names(&current, &[("/a", replacement), ("/b", inode_id)]).await;
     for (anchor, path) in [(&original, "/a"), (&moved, "/b")] {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-        let context = crate::RuntimeReadContext::new(
-            crate::control::ReadBasis {
-                basis: anchor.basis(),
-                head: anchor.read_state.clone(),
-            },
-            None,
-        );
+        let context = crate::RuntimeReadContext::new(&anchor.held_basis(), None);
         let snapshot_view = namespace
             .load_metadata_view(&context)
             .await
