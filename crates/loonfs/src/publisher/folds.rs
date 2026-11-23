@@ -253,7 +253,10 @@ impl PublisherRegistry {
     /// returns, so no fold in this runtime replaces the manifest before the
     /// snapshot is verified, and other snapshots run at the same time. A compaction
     /// unit, an extension's publication, or another process can still
-    /// replace the manifest, so the attempts stay.
+    /// replace the manifest. Each attempt's result goes through
+    /// [`Self::finish_namespace_mutation`], so an attempt that finds its
+    /// manifest replaced drops the session's position and the cached head,
+    /// and the next attempt's fold loads the newest manifest from the store.
     pub(crate) async fn snapshot_after_fold<T, SnapshotFuture>(
         &self,
         namespace_id: &NamespaceId,
@@ -269,13 +272,16 @@ impl PublisherRegistry {
             let (basis, turn) = self
                 .fold_for_snapshot(namespace_id, &turns, arrival)
                 .await?;
-            let created = create(basis).await;
+            let created = create(basis).await.map_err(Error::from);
             drop(turn);
+            let created = self
+                .finish_namespace_mutation(namespace_id, created, |_| NamespaceChange::Unchanged)
+                .await;
             match created {
-                Err(CoreError::HeadMoved(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
+                Err(Error::Core(CoreError::HeadMoved(_))) if attempts < MAX_CONTENTION_ATTEMPTS => {
                     attempts += 1;
                 }
-                created => return created.map_err(Error::from),
+                created => return created,
             }
         }
     }
