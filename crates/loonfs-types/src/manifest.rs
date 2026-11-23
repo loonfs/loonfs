@@ -10,7 +10,7 @@ use crate::Checksum;
 use crate::CompactorEpoch;
 use crate::PoolId;
 use crate::{ActorId, CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
-use crate::{ExtensionName, IndexSegmentId, WalNo, WriterEpoch};
+use crate::{ExtensionName, IndexSegmentId, PublicationId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -328,6 +328,11 @@ pub struct NamespaceManifestPayload {
     pub folded_wal_no: WalNo,
     /// Positive publication number matching the manifest object key.
     pub manifest_no: ManifestNo,
+    /// The ID that the put of this manifest generated, which LoonFS never
+    /// interprets. It makes each put's payload checksum unique, so a
+    /// publisher can tell its own put from another publication's (see
+    /// [Conflicting and unknown installations](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#93-conflicting-and-unknown-installations)).
+    pub publication_id: PublicationId,
     /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
     /// Grep publishes the steps of one maintenance interval together, so a lost race costs
@@ -401,6 +406,7 @@ impl NamespaceManifestPayload {
             status: NamespaceStatus::Initializing {},
             writer: None,
             manifest_no: ManifestNo(1),
+            publication_id: PublicationId::generate(),
             compactor_epoch: CompactorEpoch(0),
             head_seq: CommitSeq(0),
             activity: ManifestActivity::default(),
@@ -492,6 +498,7 @@ impl NamespaceManifestPayload {
             writer: self.writer.clone(),
             folded_wal_no: self.folded_wal_no,
             manifest_no: self.manifest_no.successor()?,
+            publication_id: self.publication_id.clone(),
             compactor_epoch: self.compactor_epoch,
             head_seq: self.head_seq,
             activity: self.activity,
@@ -629,6 +636,7 @@ impl NamespaceManifestPayload {
                 };
                 let expected = Self {
                     manifest_no: successor.manifest_no,
+                    publication_id: successor.publication_id.clone(),
                     ..expected
                 };
                 if *successor != expected {
@@ -663,6 +671,7 @@ impl NamespaceManifestPayload {
         };
         let expected = Self {
             manifest_no: ManifestNo(2),
+            publication_id: successor.publication_id.clone(),
             head_seq: basis.fork_point_seq,
             next_run_no: successor.next_run_no,
             runs: successor.runs.clone(),
@@ -931,8 +940,10 @@ mod tests {
         initializing
             .ensure_first_manifest()
             .expect("a fork's manifest 1 is initializing");
+        // Each put stores a new publication ID, which the rules don't read.
         let numbered = |payload: NamespaceManifestPayload| NamespaceManifestPayload {
             manifest_no: ManifestNo(2),
+            publication_id: crate::PublicationId::generate(),
             ..payload
         };
         let active = numbered(initializing.activated());
@@ -1012,6 +1023,7 @@ mod tests {
             .expect("manifest 1 is at the source manifest's head");
         let manifest_2 = NamespaceManifestPayload {
             manifest_no: ManifestNo(2),
+            publication_id: crate::PublicationId::generate(),
             head_seq: CommitSeq(5),
             next_run_no: crate::RunNo(1),
             runs: vec![super::MetadataRunRef {

@@ -442,12 +442,12 @@ pub(crate) async fn half_done_fork<S: ObjectStore + Clone>(
         },
         source_manifest.payload(),
     );
-    namespace
+    let published = namespace
         .with_namespace(target.clone())
-        .publish_first_manifest(manifest_1.clone(), &clock)
+        .publish_first_manifest(manifest_1, &clock)
         .await
         .expect("publish manifest 1");
-    (temporary, manifest_1)
+    (temporary, published.manifest.payload().clone())
 }
 
 /// Writes the fork snapshot that `manifest_1`, a fork's manifest 1, records,

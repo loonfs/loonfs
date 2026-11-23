@@ -478,6 +478,14 @@ string_id! {
 }
 
 string_id! {
+    /// The random ID of one manifest put. Every put generates a new ID, so
+    /// two puts of the same manifest content store different bytes (see
+    /// [Conflicting and unknown installations](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#93-conflicting-and-unknown-installations)).
+    PublicationId,
+    prefix = "pub"
+}
+
+string_id! {
     /// Identifies one streaming metadata compaction job for log correlation only.
     MetadataCompactionId,
     prefix = "cmp"

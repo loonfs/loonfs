@@ -18,6 +18,10 @@ A small control object (`namespaces/{namespace_id}/boundary.json`) storing eithe
 
 Only a namespace [collection](#collection) raises the boundary, right before deleting old manifests, and [namespace retirement](#namespace-retirement) raises it to `retired` (which sorts above every manifest number and is never deleted, preserving the tombstone of the namespace ID). Cold readers list manifests strictly above the boundary and re-read it after loading, while publishers and cached readers re-check it to discard obsolete state. See [Resolving the metadata basis](format.md#41-resolving-the-metadata-basis) and [One complete collection](format.md#111-one-complete-collection).
 
+### Publication ID
+
+A random ID (`publication_id`, such as `pub_5b7tx2k9wq0mhd4yzc8vn3jr6e`) that each put of a [manifest](#manifest) generates and stores in the manifest, new for every put, even a put of content that an earlier put already tried. LoonFS never interprets it. It lets a publisher whose put lost its acknowledgment recognize its own manifest when it reads back the manifest at that number. See [Conflicting and unknown installations](format.md#93-conflicting-and-unknown-installations).
+
 ### WAL
 
 The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits, one [fence](#fence), or one [floor object](#floor-object). Writing the next WAL object commits every record inside it. See [Publishing a commit](format.md#6-publishing-a-commit).

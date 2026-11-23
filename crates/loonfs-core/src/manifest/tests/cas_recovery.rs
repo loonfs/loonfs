@@ -25,7 +25,6 @@ async fn a_manifest_put_returning_after_its_budget_is_published() {
     let mut payload = current.payload().clone();
     payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
     let object_key = metadata_manifest_object(&namespace_id, &payload.manifest_no);
-    let manifest = encode_manifest(payload);
     let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
     let deadline = OperationClock::start(0, timer.clone());
     store.reset();
@@ -37,7 +36,7 @@ async fn a_manifest_put_returning_after_its_budget_is_published() {
             metadata
         },
     );
-    let outcome = publish_once_within(&store, manifest, &deadline)
+    let outcome = publish_once_within(&store, payload, &deadline)
         .await
         .expect("a late put above the boundary");
     assert_matches!(outcome, ManifestPublicationOutcome::Published(_));
@@ -76,7 +75,7 @@ async fn a_manifest_put_that_writes_nothing_and_loses_its_answer_has_an_unknown_
         InjectedError::Transport("lost request".to_owned()),
     );
     store.fail_next(1);
-    let error = publish_once(&store, encode_manifest(payload))
+    let error = publish_once(&store, payload)
         .await
         .expect_err("a put nobody can confirm has no answer");
     assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
@@ -93,9 +92,9 @@ async fn a_manifest_put_that_writes_nothing_and_loses_its_answer_has_an_unknown_
 }
 
 /// Checks that a manifest put whose response is lost, and whose read-back
-/// ends after the publication budget, is settled by the read-back: a fork's
-/// first manifest is its own, and a successor is covered by the manifest
-/// found at its number.
+/// ends after the publication budget, is settled by the read-back: the
+/// manifest found at its number is its own, for a fork's first manifest and
+/// for a successor.
 #[tokio::test]
 async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
     use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
@@ -161,17 +160,14 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
                 .await
                 .map(|_| None)
         } else {
-            publish_once_within(&store, encode_manifest(payload), &deadline)
+            publish_once_within(&store, payload, &deadline)
                 .await
                 .map(Some)
         };
         if fork {
             assert_matches!(outcome, Ok(None));
         } else {
-            assert_matches!(
-                outcome,
-                Ok(Some(ManifestPublicationOutcome::CoveredByCurrent(_)))
-            );
+            assert_matches!(outcome, Ok(Some(ManifestPublicationOutcome::Published(_))));
         }
         assert_eq!(store.remaining(), 0);
         assert_eq!(store.inner().inner().counts().create_if_absent_puts, 1);
@@ -185,8 +181,10 @@ async fn an_ambiguous_manifest_read_back_after_its_budget_settles_the_put() {
     }
 }
 
+/// Checks that of two compactor claims with the same content, which store
+/// different bytes, the claim whose put loses reports `CoveredByCurrent`.
 #[tokio::test]
-async fn identical_compactor_claims_report_the_loser_as_covered() {
+async fn compactor_claims_with_the_same_content_report_the_loser_as_covered() {
     for race_at_put in [false, true] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -201,7 +199,7 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
         let mut payload = current.payload().clone();
         payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
         payload.compactor_epoch.0 += 1;
-        let claim = encode_manifest(payload);
+        let claim = payload;
         let blocked = BlockingStore::new(
             store.clone(),
             KeyPredicate::manifest(&namespace_id),
@@ -257,7 +255,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         let predecessor = current.manifest().manifest_no;
         let mut payload = current.payload().clone();
         payload.manifest_no = predecessor.successor().expect("next number");
-        let first = encode_manifest(payload.clone());
+        let first = payload.clone();
         if newer_head {
             let session = Arc::new(std::sync::Mutex::new(
                 crate::commit::engine::WriterSessionStatus::Acquired(
@@ -316,7 +314,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         } else {
             payload.next_run_no = RunNo(payload.next_run_no.0 + 1);
         }
-        let second = encode_manifest(payload);
+        let second = payload;
         store.reset();
         let blocked = BlockingStore::new(
             store.clone(),
@@ -353,12 +351,10 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         assert_eq!(keys.len(), 4);
         if newer_head {
             assert_matches!(losing, ManifestPublicationOutcome::PredecessorChanged(_));
-            let mut retry = second.into_parts().0.into_payload();
+            let mut retry = second;
             retry.manifest_no = retry.manifest_no.successor().expect("next number");
             assert_matches!(
-                publish_once(&store, encode_manifest(retry))
-                    .await
-                    .expect("publish retry"),
+                publish_once(&store, retry).await.expect("publish retry"),
                 ManifestPublicationOutcome::Published(_)
             );
         } else {
@@ -420,6 +416,7 @@ async fn an_advance_without_a_session_creates_a_floor_object_and_folds_it() {
     expected.manifest_no = expected.manifest_no.successor().expect("next");
     expected.folded_wal_no = expected.folded_wal_no.successor().expect("next");
     expected.retention_floor_seq = before.payload().head_seq;
+    expected.publication_id = after.payload().publication_id.clone();
     assert_eq!(after.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, before.payload().head_seq);
     let expected = after.payload().clone();
@@ -468,7 +465,7 @@ async fn a_failed_boundary_read_after_a_put_has_an_unknown_outcome() {
     store.fail_next(1);
     let outcome = namespace
         .publish_manifest_from(
-            encode_manifest(payload),
+            payload,
             &OperationClock::start(0, crate::test_support::std_timer()),
             Some(&basis),
         )
@@ -503,8 +500,7 @@ async fn manifest_publication_recovers_an_ambiguous_put() {
         .expect("current");
     let mut payload = current.payload().clone();
     payload.manifest_no = payload.manifest_no.successor().expect("next");
-    let candidate = encode_manifest(payload);
-    let candidate_manifest_no = candidate.envelope().payload().manifest_no;
+    let candidate_manifest_no = payload.manifest_no;
     let store = FailStore::new(
         store,
         KeyPredicate::manifest(&namespace_id),
@@ -513,10 +509,9 @@ async fn manifest_publication_recovers_an_ambiguous_put() {
     )
     .apply_then_fail();
     store.fail_next(1);
-    let outcome = publish_once(&store, candidate).await.expect("published");
-    // The put succeeded, but a rival could have written the same bytes, so
-    // the read-back counts as the current manifest.
-    assert_matches!(outcome, ManifestPublicationOutcome::CoveredByCurrent(_));
+    let outcome = publish_once(&store, payload).await.expect("published");
+    // The manifest that the read-back finds has the put's publication ID.
+    assert_matches!(outcome, ManifestPublicationOutcome::Published(_));
     assert_eq!(
         crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_manifest()
@@ -730,7 +725,7 @@ async fn namespace_status_and_change_feed_report_the_floor_at_the_head_after_an_
 }
 
 #[tokio::test]
-async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
+async fn an_ambiguous_compactor_claim_confirms_its_own_claim() {
     use loonfs_test_support::stores::{FailStore, InjectedError};
 
     let directory = tempdir().expect("directory");
@@ -748,8 +743,8 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         .create()
         .await
         .expect("create");
-    // The claim was written, but a rival could have written the same bytes, so the
-    // claimant reads it as the rival's and takes the next epoch.
+    // The claim was written, and the read-back finds the claim's own
+    // publication ID, so the claimant holds the first epoch.
     let epoch = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -762,14 +757,106 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
     .response
     .manifest
     .compactor_epoch();
-    assert_eq!(epoch, loonfs_types::CompactorEpoch(2));
+    assert_eq!(epoch, loonfs_types::CompactorEpoch(1));
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
         .expect("current manifest");
-    assert_eq!(current.payload().manifest_no, ManifestNo(4));
+    assert_eq!(current.payload().manifest_no, ManifestNo(3));
     assert_eq!(
         current.payload().compactor_epoch,
-        loonfs_types::CompactorEpoch(2)
+        loonfs_types::CompactorEpoch(1)
+    );
+}
+
+/// Checks that two puts of one payload at one number store different bytes,
+/// which differ only in the publication ID.
+#[tokio::test]
+async fn two_puts_of_one_payload_store_different_bytes() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
+        .await
+        .expect("create");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let basis = namespace.load_current_basis().await.expect("current");
+    let mut payload = basis.manifest.payload().clone();
+    payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
+    let mut published = Vec::new();
+    for _ in 0..2 {
+        let outcome = namespace
+            .publish_manifest_from(
+                payload.clone(),
+                &OperationClock::start(0, crate::test_support::std_timer()),
+                Some(&basis),
+            )
+            .await
+            .expect("publish");
+        let ManifestPublicationOutcome::Published(outcome) = outcome else {
+            panic!("the put is published, got {outcome:?}");
+        };
+        published.push(outcome.manifest);
+        // The number is free again for the second put.
+        store
+            .delete(&metadata_manifest_object(
+                &namespace_id,
+                &payload.manifest_no,
+            ))
+            .await
+            .expect("delete");
+    }
+    let [first, second] = &published[..] else {
+        panic!("two publications");
+    };
+    assert_ne!(first.manifest(), second.manifest());
+    assert_ne!(
+        first.payload().publication_id,
+        second.payload().publication_id
+    );
+    let mut second_payload = second.payload().clone();
+    second_payload.publication_id = first.payload().publication_id.clone();
+    assert_eq!(first.payload(), &second_payload);
+}
+
+/// Checks that a successor built as a copy of its predecessor's payload is
+/// published with a publication ID of its own.
+#[tokio::test]
+async fn a_successor_that_copies_its_predecessor_gets_its_own_publication_id() {
+    use super::super::publish::ManifestChange;
+
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &test_context())
+        .create()
+        .await
+        .expect("create");
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let predecessor = namespace.load_current_manifest().await.expect("current");
+    let update = namespace
+        .update_manifest(
+            None,
+            &OperationClock::start(0, crate::test_support::std_timer()),
+            |current: crate::namespace::control::LoadedManifest| async move {
+                Ok(ManifestChange::Next(
+                    Box::new(current.payload().clone()),
+                    (),
+                ))
+            },
+        )
+        .await
+        .expect("publish a copy");
+    assert!(update.published);
+    let successor = namespace.load_current_manifest().await.expect("current");
+    assert_eq!(successor.manifest(), update.current.manifest.manifest());
+    assert_eq!(
+        successor.payload().manifest_no,
+        predecessor.payload().manifest_no.successor().expect("next")
+    );
+    assert_ne!(
+        successor.payload().publication_id,
+        predecessor.payload().publication_id
     );
 }

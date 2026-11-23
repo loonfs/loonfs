@@ -618,6 +618,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),
+        publication_id: loonfs_types::PublicationId::generate(),
 
         head_seq: materialization.head.seq,
         writer_epoch: materialization.head.writer_epoch,
@@ -751,13 +752,14 @@ async fn create_snapshot_keeps_a_current_basis_without_building_a_new_manifest()
     )
     .await
     .expect("build manifest");
-    let manifest_checksum = manifest_without_snapshot.payload_checksum().to_owned();
-    publish_once(
-        &store,
-        encode_manifest(manifest_without_snapshot.into_payload()),
-    )
-    .await
-    .expect("publish manifest");
+    let ManifestPublicationOutcome::Published(published) =
+        publish_once(&store, manifest_without_snapshot.into_payload())
+            .await
+            .expect("publish manifest")
+    else {
+        panic!("the manifest is published");
+    };
+    let manifest_checksum = published.manifest.envelope.payload_checksum().to_owned();
 
     let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await

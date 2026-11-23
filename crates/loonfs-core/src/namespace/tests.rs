@@ -105,6 +105,19 @@ async fn half_done_create(
     manifest_1.clone()
 }
 
+/// Returns `manifests` with each publication ID replaced by the first
+/// manifest's, so a test can compare a later manifest with the first one as
+/// the successor rules change it. (Each put generates its own ID.)
+fn with_the_first_publication_id(
+    mut manifests: Vec<NamespaceManifestPayload>,
+) -> Vec<NamespaceManifestPayload> {
+    let first = manifests[0].publication_id.clone();
+    for manifest in &mut manifests {
+        manifest.publication_id = first.clone();
+    }
+    manifests
+}
+
 /// Returns every manifest of `namespace_id`, from manifest 1 up to the first
 /// number without a manifest.
 async fn manifest_payloads<S: ObjectStore>(
@@ -430,6 +443,7 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
         manifest_2,
         &NamespaceManifestPayload {
             manifest_no: ManifestNo(2),
+            publication_id: manifest_2.publication_id.clone(),
             ..manifest_1.activated()
         }
     );
@@ -586,7 +600,7 @@ async fn a_create_that_stopped_after_manifest_one_is_finished_by_the_same_reques
         [pool_member(&manifest_1.pool_id, &namespace_id)]
     );
     assert_eq!(
-        manifest_payloads(&store, &namespace_id).await,
+        with_the_first_publication_id(manifest_payloads(&store, &namespace_id).await),
         [
             manifest_1.clone(),
             NamespaceManifestPayload {
@@ -1031,7 +1045,7 @@ async fn a_fork_that_stopped_after_manifest_one_is_finished_by_the_same_request(
         std::slice::from_ref(&basis.source_snapshot_id)
     );
     assert_eq!(
-        manifest_payloads(&store, &target).await,
+        with_the_first_publication_id(manifest_payloads(&store, &target).await),
         [
             manifest_1.clone(),
             NamespaceManifestPayload {
@@ -1252,6 +1266,7 @@ async fn a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a
             manifest_1.clone(),
             NamespaceManifestPayload {
                 manifest_no: ManifestNo(2),
+                publication_id: manifests[1].publication_id.clone(),
                 ..manifest_1.tombstone(deleted_at_ms)
             }
         ]
@@ -1261,6 +1276,76 @@ async fn a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a
         fixture.engine().find_fork_target(&target).await,
         Err(CoreError::NamespaceDeleted { .. })
     );
+}
+
+/// Deletes `namespace_id` through a new writer session at the time of
+/// [`context`].
+async fn delete<S: ObjectStore + Clone>(
+    store: S,
+    namespace_id: &NamespaceId,
+) -> crate::error::Result<loonfs_types::DeleteNamespaceResponse> {
+    let administrator = crate::test_support::administrator_of(store.clone(), namespace_id);
+    NamespaceCommitEngine::new(
+        NamespaceFixture::new(store, namespace_id, &context()).namespace,
+        context().writer_id,
+    )
+    .delete_namespace(&administrator, Default::default())
+    .await
+}
+
+/// Checks that a delete of an initializing namespace whose tombstone put
+/// loses its response returns the deletion's response when the put was
+/// written, and `namespace_deleted` when another delete published the same
+/// tombstone content at that number first.
+#[tokio::test]
+async fn a_delete_of_an_initializing_namespace_whose_put_loses_its_response_reads_back_whose_tombstone_it_is(
+) {
+    for rival in [false, true] {
+        let directory = tempdir().expect("directory");
+        let base = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+        let (source, target) = source_and_target();
+        crate::test_support::half_done_fork(&base, &source, &target, &context()).await;
+        let tombstone = metadata_manifest_object(&target, &ManifestNo(2));
+        let failing = FailStore::new(
+            base.clone(),
+            KeyPredicate::exact(&tombstone),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost response".to_owned()),
+        );
+        // Without a rival, the put is written and its response is lost. With
+        // one, the put waits while the rival publishes, and then fails before
+        // it reaches the store.
+        let failing = if rival {
+            failing
+        } else {
+            failing.apply_then_fail()
+        };
+        failing.fail_next(1);
+        let store = BlockingStore::new(
+            failing,
+            KeyPredicate::exact(&tombstone),
+            OperationSelector::PutCreateIfAbsent,
+        );
+        if rival {
+            store.block_next();
+        }
+        let (deleted, ()) = tokio::join!(delete(&store, &target), async {
+            if rival {
+                store.wait_until_blocked().await;
+                delete(&base, &target).await.expect("the rival delete");
+                store.release();
+            }
+        });
+        assert_eq!(store.inner().remaining(), 0);
+        if rival {
+            assert_matches!(deleted, Err(CoreError::NamespaceDeleted { .. }));
+        } else {
+            assert_eq!(deleted.expect("the delete").namespace_id, target);
+        }
+        let manifests = manifest_payloads(&base, &target).await;
+        assert_eq!(manifests.len(), 2);
+        assert!(manifests[1].status.is_deleted());
+    }
 }
 
 /// Checks that a call that finishes a fork after the fork's temporary
@@ -1410,7 +1495,7 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
         .collect::<Vec<_>>();
     assert_eq!(manifest_2_puts, [manifest_2_key.clone(), manifest_2_key]);
     assert_eq!(
-        manifest_payloads(&store, &target).await,
+        with_the_first_publication_id(manifest_payloads(&store, &target).await),
         [
             manifest_1.clone(),
             NamespaceManifestPayload {
@@ -1628,7 +1713,7 @@ async fn a_finishing_fork_that_folds_no_tail_has_no_deadline() {
     .await;
     assert_matches!(finished, Ok(ForkOutcome::Created(_)));
     assert_eq!(
-        manifest_payloads(&store, &target).await,
+        with_the_first_publication_id(manifest_payloads(&store, &target).await),
         [
             manifest_1.clone(),
             NamespaceManifestPayload {

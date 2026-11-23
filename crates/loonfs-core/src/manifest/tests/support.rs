@@ -827,6 +827,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
+        publication_id: loonfs_types::PublicationId::generate(),
 
         head_seq,
         writer_epoch: head.writer_epoch,
@@ -894,28 +895,26 @@ pub(crate) fn control_requests(
         .collect()
 }
 
-/// Publishes `manifest` with one attempt of the publication loop, over the
+/// Publishes `payload` with one attempt of the publication loop, over the
 /// current manifest that it loads first.
 pub(super) async fn publish_once<S: ObjectStore + ?Sized>(
     store: &S,
-    manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
+    payload: NamespaceManifestPayload,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
     let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
-    publish_once_within(store, manifest, &deadline).await
+    publish_once_within(store, payload, &deadline).await
 }
 
 /// The same, under the caller's deadline.
 pub(super) async fn publish_once_within<S: ObjectStore + ?Sized>(
     store: &S,
-    manifest: loonfs_types::format::envelope::EncodedEnvelope<NamespaceManifestPayload>,
+    payload: NamespaceManifestPayload,
     deadline: &OperationClock,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
-    let namespace_id = manifest.envelope().payload().namespace_id.clone();
-    let basis = crate::test_support::namespace_store(store, &namespace_id)
-        .load_current_basis()
-        .await?;
-    crate::test_support::namespace_store(store, &manifest.envelope().payload().namespace_id)
-        .publish_manifest_from(manifest, deadline, Some(&basis))
+    let namespace = crate::test_support::namespace_store(store, &payload.namespace_id);
+    let basis = namespace.load_current_basis().await?;
+    namespace
+        .publish_manifest_from(payload, deadline, Some(&basis))
         .await
 }
 
@@ -940,6 +939,7 @@ pub(crate) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
+        publication_id: loonfs_types::PublicationId::generate(),
 
         head_seq,
 

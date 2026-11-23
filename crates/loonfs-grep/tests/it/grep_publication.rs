@@ -9,8 +9,8 @@ use crate::common::{
 use loonfs::{LoonFs, SharedObjectStore, Writable};
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepEnableOutcome, GrepError, GrepPublicationStats,
-    GrepPublishOutcome,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome, GrepError,
+    GrepPublicationStats, GrepPublishOutcome,
 };
 use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -408,4 +408,82 @@ async fn an_enable_whose_put_has_an_unknown_outcome_fails() {
 
     assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
     assert_matches!(host.worker.entry(&namespace_id).await, Ok(None));
+}
+
+/// Checks that an enable and a disable whose put loses its response return
+/// `Enabled` and `Disabled` when the put was written, and `Superseded` when
+/// another process published the same entry at that number first.
+#[tokio::test]
+async fn an_enable_or_disable_whose_put_loses_its_response_reads_back_whose_manifest_it_is() {
+    for rival in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+        let namespace_id = namespace_id("lost-response");
+        let writer = seed(&base, &namespace_id, &["/a"]).await;
+        writer.shutdown().await.expect("shutdown");
+        let manifests = KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id));
+        let failing = FailStore::new(
+            base.clone(),
+            manifests.clone(),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost response".to_owned()),
+        );
+        // Without a rival, the put is written and its response is lost. With
+        // one, the put waits while the rival publishes, and then fails before
+        // it reaches the store.
+        let failing = if rival {
+            failing
+        } else {
+            failing.apply_then_fail()
+        };
+        let gate = Arc::new(BlockingStore::new(
+            failing,
+            manifests,
+            OperationSelector::PutCreateIfAbsent,
+        ));
+        let gated: SharedObjectStore = gate.clone();
+        let host = GrepHost::new(&gated, "lost-response").await;
+        let other = GrepHost::new(&base, "lost-response-rival").await;
+        let arm = || {
+            gate.inner().fail_next(1);
+            if rival {
+                gate.block_next();
+            }
+        };
+
+        arm();
+        let (enabled, ()) = tokio::join!(host.worker.enable(&namespace_id), async {
+            if rival {
+                gate.wait_until_blocked().await;
+                assert_matches!(
+                    other.worker.enable(&namespace_id).await,
+                    Ok(GrepEnableOutcome::Enabled { .. })
+                );
+                gate.release();
+            }
+        });
+        if rival {
+            assert_matches!(enabled, Ok(GrepEnableOutcome::Superseded));
+        } else {
+            assert_matches!(enabled, Ok(GrepEnableOutcome::Enabled { .. }));
+        }
+
+        arm();
+        let (disabled, ()) = tokio::join!(host.worker.disable(&namespace_id), async {
+            if rival {
+                gate.wait_until_blocked().await;
+                assert_matches!(
+                    other.worker.disable(&namespace_id).await,
+                    Ok(GrepDisableOutcome::Disabled)
+                );
+                gate.release();
+            }
+        });
+        assert_eq!(gate.inner().remaining(), 0);
+        if rival {
+            assert_matches!(disabled, Ok(GrepDisableOutcome::Superseded));
+        } else {
+            assert_matches!(disabled, Ok(GrepDisableOutcome::Disabled));
+        }
+    }
 }

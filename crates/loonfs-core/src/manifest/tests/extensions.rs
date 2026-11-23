@@ -333,6 +333,7 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
         assert_eq!(
             NamespaceManifestPayload {
                 manifest_no: winner.payload().manifest_no,
+                publication_id: winner.payload().publication_id.clone(),
                 extensions: winner.payload().extensions.clone(),
                 ..current.payload().clone()
             },

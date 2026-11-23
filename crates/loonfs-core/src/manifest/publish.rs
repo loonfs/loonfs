@@ -17,11 +17,10 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
-    encode_namespace_manifest_json, ExtensionEntry, NamespaceManifestEnvelope,
-    NamespaceManifestPayload, MAX_NAMESPACE_MANIFEST_BYTES,
+    encode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MAX_NAMESPACE_MANIFEST_BYTES,
 };
-use loonfs_types::{ManifestNo, NamespaceId};
-use std::collections::HashSet;
+use loonfs_types::{ManifestNo, NamespaceId, PublicationId};
 use std::sync::Arc;
 
 /// The outcome of one manifest put, with the manifest that's current after
@@ -155,9 +154,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 ManifestChange::Next(payload, result) => {
                     let mut payload = *payload;
                     payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
-                    let manifest = encode_manifest(payload);
                     let outcome = self
-                        .publish_manifest_from(manifest, clock, Some(&current))
+                        .publish_manifest_from(payload, clock, Some(&current))
                         .await?;
                     let (lost_to, winner) = match outcome {
                         ManifestPublicationOutcome::Published(published) => {
@@ -273,10 +271,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         payload: NamespaceManifestPayload,
         clock: &OperationClock,
     ) -> Result<PublicationBasis> {
-        match self
-            .publish_manifest_from(encode_manifest(payload), clock, None)
-            .await?
-        {
+        match self.publish_manifest_from(payload, clock, None).await? {
             ManifestPublicationOutcome::Published(basis) => Ok(basis),
             ManifestPublicationOutcome::CoveredByCurrent(current)
             | ManifestPublicationOutcome::PredecessorChanged(current) => Err(existing_namespace(
@@ -286,8 +281,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
     }
 
-    /// Publishes `manifest` once with put-if-absent, as the successor of
+    /// Publishes `payload` once with put-if-absent, as the successor of
     /// `current`, or as manifest 1 when `current` is `None`.
+    ///
+    /// Every manifest put goes through this call, which replaces the
+    /// payload's `publication_id` with a new ID before it encodes the
+    /// payload, so a manifest with the same reference is this call's own put
+    /// (format spec, "Conflicting and unknown installations").
     ///
     /// After a put that loses, the call finds the current manifest by probing
     /// above `current` (see [`find_current_above`]). It finds the newest
@@ -304,10 +304,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     )]
     pub(super) async fn publish_manifest_from(
         &self,
-        manifest: EncodedEnvelope<NamespaceManifestPayload>,
+        mut payload: NamespaceManifestPayload,
         clock: &OperationClock,
         current: Option<&PublicationBasis>,
     ) -> Result<ManifestPublicationOutcome> {
+        payload.publication_id = PublicationId::generate();
+        let manifest = encode_manifest(payload);
         let namespace_id = manifest.envelope().payload().namespace_id.clone();
         let namespace_id = &namespace_id;
         debug_assert_eq!(
@@ -331,7 +333,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .checked_sub(1)
             .filter(|number| *number > 0)
             .map(ManifestNo);
-        let references_own_object = references_own_object(manifest.envelope().payload(), current);
         let object_key =
             metadata_manifest_object(namespace_id, &manifest.envelope().payload().manifest_no);
         let candidate = LoadedManifest {
@@ -341,10 +342,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
         if let Some(current) = current {
             let current_manifest = &current.manifest;
-            // A tombstone ends its namespace; work that raced the deletion stops here.
-            if current_manifest.payload().status.is_deleted()
-                && current_manifest.manifest() != candidate.manifest()
-            {
+            // A tombstone ends its namespace, so work that raced the deletion
+            // stops here.
+            if current_manifest.payload().status.is_deleted() {
                 return Err(CoreError::NamespaceDeleted {
                     namespace_id: namespace_id.clone(),
                 });
@@ -355,7 +355,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     current.clone(),
                 ));
             }
-            match classify_current(current, &candidate, expected_predecessor, false) {
+            match classify_current(current, &candidate, expected_predecessor) {
                 ManifestKind::Installable => {}
                 ManifestKind::Settled(outcome) => return Ok(outcome),
             }
@@ -387,18 +387,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 outcome
             }
             Err(ObjectStoreError::PreconditionFailed { .. }) => self
-                .classify_current_manifest(current, &candidate, expected_predecessor, false)
+                .classify_current_manifest(current, &candidate, expected_predecessor)
                 .await?
                 .settled_after_conflict(namespace_id)?,
             Err(error @ ObjectStoreError::Transport { .. }) => {
-                self.settle_unconfirmed_put(
-                    &error,
-                    &candidate,
-                    current,
-                    expected_predecessor,
-                    references_own_object,
-                )
-                .await?
+                self.settle_unconfirmed_put(&error, &candidate, current, expected_predecessor)
+                    .await?
             }
             Err(error) => {
                 tracing::error!(
@@ -428,7 +422,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         candidate: &LoadedManifest,
         current: Option<&PublicationBasis>,
         expected_predecessor: Option<ManifestNo>,
-        references_own_object: bool,
     ) -> Result<ManifestPublicationOutcome> {
         // Only the exact manifest at this number confirms the put;
         // a later manifest may already cover it.
@@ -448,21 +441,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         },
                         candidate,
                         expected_predecessor,
-                        references_own_object,
                     )
                 } else {
-                    self.classify_current_manifest(None, candidate, expected_predecessor, false)
+                    self.classify_current_manifest(None, candidate, expected_predecessor)
                         .await?
                 }
             }
             None => {
-                self.classify_current_manifest(
-                    current,
-                    candidate,
-                    expected_predecessor,
-                    references_own_object,
-                )
-                .await?
+                self.classify_current_manifest(current, candidate, expected_predecessor)
+                    .await?
             }
         };
         let ManifestKind::Settled(outcome) = outcome else {
@@ -506,7 +493,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 boundary,
             }));
         }
-        self.classify_current_manifest(None, candidate, expected_predecessor, false)
+        self.classify_current_manifest(None, candidate, expected_predecessor)
             .await?
             .settled_after_conflict(&self.namespace_id)
     }
@@ -549,7 +536,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         basis: Option<&PublicationBasis>,
         candidate: &LoadedManifest,
         expected_predecessor: Option<ManifestNo>,
-        confirm_authorship: bool,
     ) -> Result<ManifestKind> {
         let current = match basis {
             Some(basis) => self.find_current_above(basis).await?,
@@ -559,12 +545,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 NewestManifest::Manifest(current) => current,
             },
         };
-        Ok(classify_current(
-            &current,
-            candidate,
-            expected_predecessor,
-            confirm_authorship,
-        ))
+        Ok(classify_current(&current, candidate, expected_predecessor))
     }
 }
 
@@ -575,39 +556,6 @@ fn existing_namespace(namespace_id: NamespaceId, current: &LoadedManifest) -> Co
     } else {
         CoreError::NamespaceExists { namespace_id }
     }
-}
-
-/// Returns whether `payload` references an ID that this attempt generated.
-///
-/// Every manifest 1, which is the only manifest without a `current`, refers to
-/// one (a plain create's pool ID, or the fork snapshot of a fork). A successor refers
-/// to one when it lists a metadata or extension segment that `current`
-/// doesn't list. Identical bytes prove authorship only for such a manifest. A
-/// rival can rebuild any other manifest byte for byte.
-fn references_own_object(
-    payload: &NamespaceManifestPayload,
-    current: Option<&PublicationBasis>,
-) -> bool {
-    let Some(current) = current else {
-        return true;
-    };
-    let listed = segment_ids(current.manifest.payload()).collect::<HashSet<_>>();
-    segment_ids(payload).any(|segment_id| !listed.contains(segment_id))
-}
-
-fn segment_ids(manifest: &NamespaceManifestPayload) -> impl Iterator<Item = &str> {
-    manifest
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .map(|segment| segment.segment_id.as_str())
-        .chain(
-            manifest
-                .extensions
-                .values()
-                .flat_map(ExtensionEntry::segments)
-                .map(|segment| segment.segment_id.as_str()),
-        )
 }
 
 /// Asserts that `payload` is a legal successor of the current manifest, or a
@@ -631,15 +579,11 @@ fn classify_current(
     basis: &PublicationBasis,
     candidate: &LoadedManifest,
     expected_predecessor: Option<ManifestNo>,
-    confirm_authorship: bool,
 ) -> ManifestKind {
     let current = &basis.manifest;
+    // Only this call's put stores the candidate's publication ID.
     let outcome = if current.manifest() == candidate.manifest() {
-        if confirm_authorship {
-            ManifestPublicationOutcome::Published(basis.clone())
-        } else {
-            ManifestPublicationOutcome::CoveredByCurrent(basis.clone())
-        }
+        ManifestPublicationOutcome::Published(basis.clone())
     } else if current.compactor_epoch() > candidate.compactor_epoch() {
         ManifestPublicationOutcome::PredecessorChanged(basis.clone())
     } else if current.folded_wal_no() >= candidate.folded_wal_no()

@@ -247,8 +247,11 @@ fn layout(
 ) {
     let payload = manifest.envelope.payload();
     (
+        // Each put generates its own publication ID.
         NamespaceManifestPayload {
             runs: Vec::new(),
+            publication_id: loonfs_types::PublicationId::parse("pub_00000000000000000000000000")
+                .expect("a publication ID"),
             ..payload.clone()
         },
         payload
