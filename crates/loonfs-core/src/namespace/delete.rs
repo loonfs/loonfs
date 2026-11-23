@@ -7,8 +7,7 @@ use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
-use crate::namespace::writer_epoch::ensure_writer_not_fenced;
-use crate::namespace::writer_epoch::AcquiredWriter;
+use crate::namespace::writer_epoch::{ensure_writer_not_fenced, AcquiredWriter};
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
@@ -51,11 +50,30 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .clone()
                     .filter(|held| held.read_basis().basis.manifest() == &current.manifest());
                 let head = match &held {
-                    Some(held) => held.read_basis().head.clone(),
-                    None => self.load_read_anchor(clock.observe()).await?.read_state,
+                    // The session's own position is compared with the
+                    // session, as the publish view compares its position (see
+                    // `ensure_writer_not_fenced`). The position is active,
+                    // because it was built from a writer anchor and moves
+                    // only onto active manifests.
+                    Some(held) => {
+                        let head = held.read_basis().head.clone();
+                        ensure_writer_not_fenced(
+                            head.writer_epoch,
+                            head.writer.as_ref(),
+                            acquired_writer,
+                        )?;
+                        head
+                    }
+                    // The writer anchor's load returns `writer_fenced` for
+                    // another writer's epoch, `namespace_corrupt` for a lower
+                    // one, and then `namespace_deleted` for a tombstone (see
+                    // `WriterAnchor`).
+                    None => self
+                        .load_writer_read_anchor(acquired_writer, clock.observe())
+                        .await?
+                        .read_state
+                        .clone(),
                 };
-                super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
-                ensure_writer_not_fenced(head.writer_epoch, head.writer.as_ref(), acquired_writer)?;
                 if let Some(expected) = options.expected_head_seq {
                     if head.seq != expected {
                         return Err(CoreError::StaleHeadPrecondition {

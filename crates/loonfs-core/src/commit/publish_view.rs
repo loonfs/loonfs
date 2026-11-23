@@ -6,9 +6,9 @@ use crate::manifest::move_read_basis;
 use crate::manifest::{metadata_basis_from_manifest, LoadedMetadataBasis};
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::ReadBasis;
-use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::held::{Checked, Held, HeldManifestForm};
-use crate::namespace::read_anchor::NamespaceReadAnchor;
+use crate::namespace::read_anchor::WriterAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -269,7 +269,7 @@ pub enum PositionCheck {
 
 enum ViewSource<'a, S: ObjectStore + ?Sized> {
     Cached(Box<WriterPosition>, VerifiedMetadataSegments<'a, S>),
-    Cold(Box<NamespaceReadAnchor>),
+    Cold(Box<WriterAnchor>),
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -284,7 +284,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         acquired_writer: AcquiredWriter,
         cached_position: Option<WriterPosition>,
-        acquired_anchor: Option<NamespaceReadAnchor>,
+        acquired_anchor: Option<WriterAnchor>,
         attempt: Observation,
     ) -> Result<PublishMetadataView<'_, S>> {
         let cached = match cached_position.filter(|_| acquired_anchor.is_none()) {
@@ -305,21 +305,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .await?,
             )),
         };
-        // An anchor's loader checked the writer epoch of the anchor's manifest
-        // before the load read the tail, and replay doesn't change the epoch.
-        let head = match &source {
-            ViewSource::Cached(cached, _) => {
-                let head = &cached.read_basis().head;
-                ensure_writer_not_fenced(
-                    head.writer_epoch,
-                    head.writer.as_ref(),
-                    &acquired_writer,
-                )?;
-                head
-            }
-            ViewSource::Cold(anchor) => &anchor.read_state,
-        };
-        ensure_namespace_live(&head.namespace_id, head.status)?;
+        // A writer anchor's load checked the writer epoch of the anchor's
+        // manifest and the namespace's status (see `WriterAnchor`). This
+        // check compares the session's own position with the session, which
+        // is a different comparison. An engine that shares its session with
+        // another engine can keep a position of another epoch, so another
+        // epoch here returns `writer_fenced`, not `namespace_corrupt`. The
+        // position is active, because it was built from a writer anchor and
+        // moves only onto active manifests.
+        if let ViewSource::Cached(cached, _) = &source {
+            let head = &cached.read_basis().head;
+            ensure_writer_not_fenced(head.writer_epoch, head.writer.as_ref(), &acquired_writer)?;
+        }
         let tail_discovered = matches!(source, ViewSource::Cold(_));
         let (position, manifest_segments) = match source {
             ViewSource::Cached(cached, segments) => (*cached, segments),
@@ -348,7 +345,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 /// Returns the position at `anchor`'s head above the anchor's manifest,
 /// with the check that confirmed the manifest when the anchor loaded it.
 fn load_writer_position<S: ObjectStore + ?Sized>(
-    anchor: &NamespaceReadAnchor,
+    anchor: &WriterAnchor,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<WriterPosition> {
     Ok(WriterPosition {

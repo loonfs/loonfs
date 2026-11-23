@@ -381,7 +381,7 @@ async fn read_member_roots<S: ObjectStore>(
     now_ms: u64,
     roots: &Mutex<SharedRoots<'_>>,
 ) -> Result<RetirementStatus> {
-    let anchor = member.load_read_anchor_from_manifest(current, None).await?;
+    let anchor = member.load_read_anchor_from_manifest(current).await?;
     let member_roots = NamespaceRoots::new(member, anchor.current_manifest().payload(), now_ms);
     // A tombstone's runs cover its whole WAL, so it has no tail.
     if member_roots.status == RetirementStatus::Active {

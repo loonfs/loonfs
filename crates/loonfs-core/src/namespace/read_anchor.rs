@@ -15,6 +15,7 @@ use crate::time::Observation;
 use crate::wal::{discover_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
+use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CommitSeq, ManifestNo};
 use std::sync::Arc;
 
@@ -83,27 +84,50 @@ impl NamespaceReadAnchor {
     }
 }
 
+/// A read anchor that a writer session loaded under its writer epoch, which
+/// a writer position, a fence and a deletion start from.
+///
+/// Only the writer loaders build one ([`NamespaceStore::load_writer_read_anchor`]
+/// and [`NamespaceStore::load_unchecked_writer_anchor`]), so the anchor's
+/// manifest has the session's writer epoch, and the namespace is active.
+/// Each manifest that the load finds is checked before the WAL tail above it
+/// is read (see [`ensure_stored_writer_epoch`]), and the anchor's status is
+/// checked after the epoch, so a session whose namespace another writer
+/// deleted gets `writer_fenced`. A fence put moves the anchor's tip through
+/// the inner anchor, which code in the `namespace` module can reach.
+#[derive(Debug, Clone)]
+pub(crate) struct WriterAnchor(pub(super) NamespaceReadAnchor);
+
+impl std::ops::Deref for WriterAnchor {
+    type Target = NamespaceReadAnchor;
+
+    fn deref(&self) -> &NamespaceReadAnchor {
+        &self.0
+    }
+}
+
 impl<S: ObjectStore> NamespaceStore<S> {
     pub async fn load_read_anchor(
         &self,
         observed: crate::time::Observation,
     ) -> CoreResult<NamespaceReadAnchor> {
         let current = self.load_current_basis(observed).await?;
-        self.load_read_anchor_from_manifest(current, None).await
+        self.load_read_anchor_from_manifest(current).await
     }
 
     /// Loads the read anchor that the writer session of `acquired_writer`
-    /// publishes from. Each manifest that the load finds is checked for the
-    /// session's writer epoch before the WAL tail above it is read, so a
-    /// fenced session fails with `writer_fenced` without reading the tail.
+    /// publishes from (see [`WriterAnchor`]). A manifest with another writer
+    /// epoch fails the load before the WAL tail above that manifest is read.
     pub(crate) async fn load_writer_read_anchor(
         &self,
         acquired_writer: &AcquiredWriter,
         observed: crate::time::Observation,
-    ) -> CoreResult<NamespaceReadAnchor> {
+    ) -> CoreResult<WriterAnchor> {
         let current = self.load_current_basis(observed).await?;
-        self.load_read_anchor_from_manifest(current, Some(acquired_writer))
-            .await
+        let anchor = self
+            .discover_read_anchor(current, Some(acquired_writer), true)
+            .await?;
+        writer_anchor(anchor)
     }
 
     /// Loads the read anchor of a namespace that is not deleted.
@@ -144,12 +168,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads the read anchor at `held`'s manifest, a manifest that the caller
     /// keeps with the check that found it.
     ///
-    /// With `acquired_writer`, the call checks the writer epoch of each
-    /// manifest before it reads the WAL tail above that manifest, and fails
-    /// with `writer_fenced` at a manifest of another epoch. Replay doesn't
-    /// change the writer epoch, so the anchor's head has the epoch of its
-    /// manifest.
-    ///
     /// After the WAL tail above the manifest, the call checks the manifest
     /// with [`Self::check_newest`]. A successor, or a manifest at or
     /// below the boundary, makes the call find the newest manifest from the
@@ -158,25 +176,34 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn load_read_anchor_from_manifest(
         &self,
         held: Held<LoadedManifest>,
-        acquired_writer: Option<&AcquiredWriter>,
     ) -> CoreResult<NamespaceReadAnchor> {
-        self.discover_read_anchor(held, acquired_writer, true).await
+        self.discover_read_anchor(held, None, true).await
     }
 
-    /// Loads the anchor at `manifest` as
-    /// [`Self::load_read_anchor_from_manifest`] does, but sends no check of
-    /// the manifest after the WAL tail. A writer acquisition reads its fence's
-    /// tail this way and checks the manifest after the fence put, so the
-    /// anchor is never used before that check.
-    pub(crate) async fn load_unchecked_read_anchor(
+    /// Loads the writer anchor at `held`'s manifest, the claim manifest of
+    /// `acquired_writer`'s acquisition, as [`Self::load_writer_read_anchor`]
+    /// does, but sends no check of the manifest after the WAL tail. An
+    /// acquisition reads its fence's tail this way and checks the manifest
+    /// after the fence put, so the anchor is never used before that check.
+    pub(crate) async fn load_unchecked_writer_anchor(
         &self,
         held: Held<LoadedManifest>,
-        acquired_writer: Option<&AcquiredWriter>,
-    ) -> CoreResult<NamespaceReadAnchor> {
-        self.discover_read_anchor(held, acquired_writer, false)
-            .await
+        acquired_writer: &AcquiredWriter,
+    ) -> CoreResult<WriterAnchor> {
+        let anchor = self
+            .discover_read_anchor(held, Some(acquired_writer), false)
+            .await?;
+        writer_anchor(anchor)
     }
 
+    /// Loads the anchor at `held`'s manifest, and restarts from the newest
+    /// manifest when the check after the tail finds a newer one (see
+    /// [`Self::load_read_anchor_from_manifest`]).
+    ///
+    /// With `acquired_writer`, the call checks the writer epoch of each
+    /// manifest before it reads the WAL tail above that manifest (see
+    /// [`ensure_stored_writer_epoch`]). Replay doesn't change the writer
+    /// epoch, so the anchor's head has the epoch of its manifest.
     async fn discover_read_anchor(
         &self,
         mut held: Held<LoadedManifest>,
@@ -185,12 +212,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> CoreResult<NamespaceReadAnchor> {
         for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
             if let Some(acquired_writer) = acquired_writer {
-                let payload = held.manifest().payload();
-                ensure_writer_not_fenced(
-                    payload.writer_epoch,
-                    payload.writer.as_ref(),
-                    acquired_writer,
-                )?;
+                ensure_stored_writer_epoch(held.manifest().payload(), acquired_writer)?;
             }
             match discover_tail(&self.store, held.manifest()).await {
                 Ok(DiscoveredTail { head: state, tail }) => {
@@ -284,6 +306,46 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         Ok(None)
     }
+}
+
+/// Returns `anchor` as a writer anchor, or `namespace_deleted` when its head
+/// is a tombstone and `namespace_not_found` when it's initializing. The
+/// writer loaders check the epoch first, so this check comes after it.
+fn writer_anchor(anchor: NamespaceReadAnchor) -> CoreResult<WriterAnchor> {
+    crate::namespace::control::ensure_namespace_live(
+        &anchor.read_state.namespace_id,
+        anchor.read_state.status,
+    )?;
+    Ok(WriterAnchor(anchor))
+}
+
+/// Fails when `manifest`, a manifest that a writer session's load read from
+/// the store, doesn't have the session's writer epoch. A higher epoch is
+/// another writer's claim and returns `writer_fenced`, and a lower epoch
+/// returns `namespace_corrupt`.
+///
+/// A lower epoch means a corrupt store, because the session's epoch is in
+/// a claim manifest that the session published, and no manifest after a
+/// claim has a lower epoch than the claim (format spec, "Writer ownership").
+/// This rule compares a stored manifest with the session. The publish view
+/// compares the session's own position with the session separately (see
+/// [`ensure_writer_not_fenced`]).
+fn ensure_stored_writer_epoch(
+    manifest: &NamespaceManifestPayload,
+    acquired_writer: &AcquiredWriter,
+) -> CoreResult<()> {
+    if manifest.writer_epoch < acquired_writer.writer_epoch {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "manifest {} records writer epoch {}, below the writer epoch {} that this \
+             session acquired",
+            manifest.manifest_no, manifest.writer_epoch, acquired_writer.writer_epoch
+        )));
+    }
+    ensure_writer_not_fenced(
+        manifest.writer_epoch,
+        manifest.writer.as_ref(),
+        acquired_writer,
+    )
 }
 
 pub fn project_anchor_tail<S: ObjectStore + ?Sized>(
