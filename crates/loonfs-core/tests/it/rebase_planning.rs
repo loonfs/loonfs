@@ -5,7 +5,9 @@
 
 use crate::common::{default_writer, namespace_engine, read_context};
 use loonfs_core::test_support::{administrator_of, namespace_store, NamespaceFixture, WriterAt};
-use loonfs_core::{CoreError, MergeAllowance, MergeRequest, RuntimeReadContext};
+use loonfs_core::{
+    CoreError, MergeAllowance, MergeBound, MergePlan, MergeRequest, RuntimeReadContext,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::options::StatOptions;
@@ -14,6 +16,7 @@ use loonfs_types::{
     MergeConflictRevision, MergeConflictVersion, NamespaceId, NamespaceRebasedFrom,
     NextMergeRangeOutcome, NextMergeRangeResponse, PathEntry, PathEntryKind,
 };
+use std::assert_matches;
 use tempfile::TempDir;
 
 /// `main`, a fork of it, and the name of the new fork that a rebase of the
@@ -210,6 +213,42 @@ impl Family {
 
     /// Merges `source`, a fork of `main`, into `main` under `commit_id`.
     async fn merge_into_main(&self, source: &NamespaceId, commit_id: &str) -> Commit {
+        self.try_merge_into_main(source, commit_id, None)
+            .await
+            .expect("merge")
+    }
+
+    /// Merges `source`, a fork of `main`, into `main` under `commit_id`
+    /// through `through_seq`, or through its head, as the merge route does
+    /// after it folds `source`, and returns the plan's or the commit's error.
+    async fn try_merge_into_main(
+        &self,
+        source: &NamespaceId,
+        commit_id: &str,
+        through_seq: Option<CommitSeq>,
+    ) -> Result<Commit, CoreError> {
+        let allowance = MergeAllowance::unshared(std::num::NonZeroUsize::MAX, 3);
+        let candidate = self
+            .plan_into_main(source, commit_id, through_seq, allowance)
+            .await?
+            .into_candidate()?;
+        self.fixture(&self.main)
+            .publish_candidates(vec![candidate])
+            .await
+            .pop()
+            .expect("one result")
+    }
+
+    /// Plans a merge of `source`, a fork of `main`, into `main` under
+    /// `commit_id` through `through_seq`, or through its head, under
+    /// `allowance`, after it folds `source`, as the merge route does.
+    async fn plan_into_main(
+        &self,
+        source: &NamespaceId,
+        commit_id: &str,
+        through_seq: Option<CommitSeq>,
+        allowance: MergeAllowance,
+    ) -> Result<MergePlan, CoreError> {
         let main = namespace_engine(&self.store, &self.main, &self.writer);
         let source_engine = namespace_engine(&self.store, source, &self.writer);
         source_engine
@@ -218,27 +257,50 @@ impl Family {
             .expect("fold the merged fork");
         let request = MergeRequest {
             source_namespace_id: source.clone(),
-            ..self.request(commit_id, None)
+            ..self.request(commit_id, through_seq)
         };
-        let candidate = main
-            .plan_merge(
+        main.plan_merge(
+            &read_context(&self.store, &self.main).await,
+            &source_engine,
+            &read_context(&self.store, source).await,
+            &request,
+            self.writer.now_ms,
+            allowance,
+        )
+        .await
+    }
+
+    /// Returns `source`'s newest row in `main`'s merge index, and where
+    /// `source`'s next merge into `main` starts.
+    async fn main_range(&self, source: &NamespaceId) -> (Option<Merge>, CommitSeq) {
+        let response = namespace_engine(&self.store, &self.main, &self.writer)
+            .next_merge_range(
+                &administrator_of(&self.store, &self.main),
                 &read_context(&self.store, &self.main).await,
-                &source_engine,
+                &namespace_engine(&self.store, source, &self.writer),
+                &administrator_of(&self.store, source),
                 &read_context(&self.store, source).await,
-                &request,
-                self.writer.now_ms,
-                MergeAllowance::unshared(std::num::NonZeroUsize::MAX, 3),
             )
             .await
-            .expect("plan the merge")
-            .into_candidate()
-            .expect("the merge has no conflict");
-        self.fixture(&self.main)
-            .publish_candidates(vec![candidate])
-            .await
-            .pop()
-            .expect("one result")
-            .expect("merge")
+            .expect("the next range");
+        let NextMergeRangeOutcome::Open {
+            merge,
+            next_after_seq,
+        } = response.outcome
+        else {
+            panic!("the floors allow the merge: {:?}", response.outcome);
+        };
+        (merge, next_after_seq)
+    }
+
+    /// Returns the range of the fork that `main`'s merge index says a merge
+    /// covered, after `after_seq` through `through_seq`.
+    fn fork_range(&self, after_seq: CommitSeq, through_seq: CommitSeq) -> Option<Merge> {
+        Some(Merge {
+            source_namespace_id: self.fork.clone(),
+            source_after_seq: after_seq,
+            source_through_seq: through_seq,
+        })
     }
 
     /// Advances the new fork's floor to its fork point, and compacts it, so
@@ -789,4 +851,258 @@ async fn a_subtree_change_on_main_before_the_rebase_is_found_through_the_snapsho
             .as_deref(),
         Some(&b"theirs"[..])
     );
+}
+
+/// Checks that a merge of a new fork whose replay covered only a prefix of
+/// the fork covers that prefix in `main`'s merge index, and that the fork's
+/// next merge applies the rest of its commits.
+#[tokio::test]
+async fn a_merge_of_a_prefix_replay_leaves_the_rest_of_the_fork_to_merge() {
+    let family = Family::new().await;
+    let prefix = family.write(&family.fork, "/x.txt", b"x").await;
+    family.write(&family.fork, "/y.txt", b"y").await;
+    let last = family.write(&family.fork, "/z.txt", b"z").await;
+    family.create_rebase().await;
+    family
+        .replay("prefix", Some(prefix.committed_seq))
+        .await
+        .expect("replay the prefix");
+    family
+        .merge_into_main(&family.rebase, "merge-new-fork")
+        .await;
+    assert_eq!(
+        family.main_range(&family.fork).await,
+        (
+            family.fork_range(CommitSeq(2), prefix.committed_seq),
+            prefix.committed_seq
+        )
+    );
+
+    let merged = family.merge_into_main(&family.fork, "merge-rest").await;
+    let merge = merged.merge.expect("a merge");
+    assert_eq!(
+        (merge.source_after_seq, merge.source_through_seq),
+        (prefix.committed_seq, last.committed_seq)
+    );
+    for path in ["/x.txt", "/y.txt", "/z.txt"] {
+        assert!(family.entry(&family.main, path).await.is_some(), "{path}");
+    }
+}
+
+/// Checks that a merge of a new fork that holds two replay pieces covers
+/// the fork from the first piece's start through the second piece's end,
+/// and that a merge of the fork with nothing after that returns
+/// `invalid_request`.
+#[tokio::test]
+async fn a_merge_of_two_replay_pieces_covers_both_and_leaves_nothing_to_merge() {
+    let family = Family::new().await;
+    let first = family.write(&family.fork, "/x.txt", b"x").await;
+    let last = family.write(&family.fork, "/y.txt", b"y").await;
+    family.create_rebase().await;
+    family
+        .replay("piece-1", Some(first.committed_seq))
+        .await
+        .expect("the first piece");
+    family
+        .replay("piece-2", None)
+        .await
+        .expect("the second piece");
+    family
+        .merge_into_main(&family.rebase, "merge-new-fork")
+        .await;
+    assert_eq!(
+        family.main_range(&family.fork).await,
+        (
+            family.fork_range(CommitSeq(2), last.committed_seq),
+            last.committed_seq
+        )
+    );
+
+    let error = family
+        .try_merge_into_main(&family.fork, "merge-again", None)
+        .await
+        .expect_err("nothing of the fork is left to merge");
+    assert_eq!(
+        error.code(),
+        loonfs_types::ErrorCode::InvalidRequest,
+        "{error:?}"
+    );
+}
+
+/// Checks that a replay piece whose every change conflicted, and which
+/// committed with its merge record and no operation, still counts: a merge
+/// of the new fork covers the fork through the piece's end.
+#[tokio::test]
+async fn a_replay_piece_whose_every_change_conflicted_is_covered() {
+    let family = Family::new().await;
+    family.write(&family.main, "/docs/a.txt", b"theirs").await;
+    let last = family.write(&family.fork, "/docs/a.txt", b"ours").await;
+    family.create_rebase().await;
+    let replay = family.replay("replay-1", None).await.expect("replay");
+    assert_eq!(replay.conflicts.len(), 1);
+    assert!(replay.commit.events.is_empty());
+
+    family
+        .merge_into_main(&family.rebase, "merge-new-fork")
+        .await;
+    assert_eq!(
+        family.main_range(&family.fork).await,
+        (
+            family.fork_range(CommitSeq(2), last.committed_seq),
+            last.committed_seq
+        )
+    );
+    assert_eq!(
+        family.bytes(&family.main, "/docs/a.txt").await.as_deref(),
+        Some(&b"theirs"[..])
+    );
+}
+
+/// Checks that when a merge of a new fork is split so that its second piece
+/// holds no replay commit, only the first piece covers the fork, and the
+/// second leaves `main`'s row for the fork as the first wrote it.
+#[tokio::test]
+async fn a_split_whose_second_piece_holds_no_replay_commit_covers_nothing() {
+    let family = Family::new().await;
+    let last = family.write(&family.fork, "/x.txt", b"x").await;
+    family.create_rebase().await;
+    let replay = family.replay("replay-1", None).await.expect("replay");
+    family
+        .write(&family.rebase, "/resolved.txt", b"resolved")
+        .await;
+    family
+        .try_merge_into_main(&family.rebase, "piece-1", Some(replay.commit.committed_seq))
+        .await
+        .expect("the first piece");
+    let expected = (
+        family.fork_range(CommitSeq(2), last.committed_seq),
+        last.committed_seq,
+    );
+    assert_eq!(family.main_range(&family.fork).await, expected);
+
+    family.merge_into_main(&family.rebase, "piece-2").await;
+    assert_eq!(family.main_range(&family.fork).await, expected);
+    assert!(family.entry(&family.main, "/resolved.txt").await.is_some());
+}
+
+/// Checks that the split hint of a merge of a new fork counts the range of
+/// the fork that the merge covers, as the planner's running bound and its
+/// final check do. The new fork holds a replay commit and then two commits
+/// of its own. With an allowance of exactly the planned bytes of a merge
+/// through the replay commit, a merge of all three has the replay commit as
+/// its hint, and with one byte less, it doesn't, because the covered range
+/// takes the piece over the allowance.
+#[tokio::test]
+async fn the_split_hint_of_a_new_forks_merge_counts_its_covered_range() {
+    let family = Family::new().await;
+    family.write(&family.fork, "/x.txt", b"x").await;
+    family.create_rebase().await;
+    let replay = family.replay("replay-1", None).await.expect("replay");
+    for path in ["/m1.txt", "/m2.txt"] {
+        family.write(&family.rebase, path, b"m").await;
+    }
+    let through_seq = replay.commit.committed_seq;
+    let planned_bytes = family
+        .plan_into_main(
+            &family.rebase,
+            "piece",
+            Some(through_seq),
+            MergeAllowance::unshared(std::num::NonZeroUsize::MAX, 1),
+        )
+        .await
+        .and_then(MergePlan::into_candidate)
+        .expect("a merge through the replay commit")
+        .wal_record_bytes_upper_bound();
+
+    for (max_bytes, fits) in [(planned_bytes, true), (planned_bytes - 1, false)] {
+        let error = family
+            .plan_into_main(
+                &family.rebase,
+                "whole",
+                None,
+                MergeAllowance::unshared(
+                    std::num::NonZeroUsize::new(max_bytes).expect("a nonzero allowance"),
+                    1,
+                ),
+            )
+            .await
+            .expect_err("too large");
+        let split_at_seq = error.details().and_then(|details| details.split_at_seq);
+        assert_matches!(
+            error,
+            CoreError::MergeTooLarge {
+                bound: MergeBound::MergeAllowance,
+                ..
+            }
+        );
+        assert_eq!(split_at_seq == Some(through_seq), fits, "{max_bytes}");
+    }
+}
+
+/// Checks that the split hint never names a range that the planner then
+/// refuses, at allowances around the smallest allowance that admits a merge
+/// through a replay piece whose every change conflicted. That piece touches
+/// no inode and still records the fork's covered range, so the commit's
+/// fixed fields and its covered range are all that it plans. Below that
+/// allowance no piece fits, and the refusal has no `split_at_seq`, as a
+/// merge whose first commit alone is too large has none.
+#[tokio::test]
+async fn a_split_hint_through_a_piece_with_no_operation_is_admitted() {
+    let family = Family::new().await;
+    family.write(&family.main, "/docs/a.txt", b"theirs").await;
+    family.write(&family.fork, "/docs/a.txt", b"ours").await;
+    family.create_rebase().await;
+    let replay = family.replay("replay-1", None).await.expect("replay");
+    assert_eq!(replay.conflicts.len(), 1);
+    assert!(replay.commit.events.is_empty());
+    for path in ["/m1.txt", "/m2.txt"] {
+        family.write(&family.rebase, path, b"m").await;
+    }
+    let plan = |name: &'static str, through_seq: Option<CommitSeq>, max_bytes: usize| {
+        let family = &family;
+        async move {
+            let max_bytes = std::num::NonZeroUsize::new(max_bytes).expect("a nonzero allowance");
+            family
+                .plan_into_main(
+                    &family.rebase,
+                    name,
+                    through_seq,
+                    MergeAllowance::unshared(max_bytes, 3),
+                )
+                .await
+                .and_then(MergePlan::into_candidate)
+        }
+    };
+    // The smallest allowance that admits the piece, which the planner's
+    // estimate makes monotonic in the allowance. The search halves a range
+    // of at most 2^20 bytes, so it ends within 21 plans.
+    let piece_seq = Some(replay.commit.committed_seq);
+    let (mut refused, mut admitted) = (1, 1 << 20);
+    plan("piece", piece_seq, admitted)
+        .await
+        .expect("the piece fits 1 MiB");
+    while admitted - refused > 1 {
+        let middle = refused + (admitted - refused) / 2;
+        match plan("piece", piece_seq, middle).await {
+            Ok(_) => admitted = middle,
+            Err(_) => refused = middle,
+        }
+    }
+
+    for max_bytes in admitted - 32..admitted + 32 {
+        let error = plan("whole", None, max_bytes)
+            .await
+            .expect_err("the whole range is too large");
+        let split_at_seq = error.details().and_then(|details| details.split_at_seq);
+        if let Some(split_at_seq) = split_at_seq {
+            plan("split", Some(split_at_seq), max_bytes)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{max_bytes}: the hint {split_at_seq} is refused: {error:?}")
+                });
+        }
+        if max_bytes < admitted {
+            assert_eq!(split_at_seq, None, "{max_bytes}: {error:?}");
+        }
+    }
 }

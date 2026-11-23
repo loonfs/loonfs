@@ -24,7 +24,7 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_types::format::wal::{
-    MergeRecord, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
+    ForkRange, MergeRecord, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
 };
 use loonfs_types::options::RestoreDeletedDestination;
 use loonfs_types::{
@@ -551,7 +551,15 @@ impl HeapBytes for WalCommitPayload {
 
 impl HeapBytes for MergeRecord {
     fn heap_bytes(&self) -> usize {
-        self.source_namespace_id.heap_bytes() + self.conflicts.heap_bytes()
+        self.source_namespace_id.heap_bytes()
+            + self.covered_ranges.heap_bytes()
+            + self.conflicts.heap_bytes()
+    }
+}
+
+impl HeapBytes for ForkRange {
+    fn heap_bytes(&self) -> usize {
+        self.source_namespace_id.heap_bytes()
     }
 }
 

@@ -3534,7 +3534,7 @@
           },
           "merge": {
             "$ref": "#/components/schemas/Merge",
-            "description": "The fork's newest merge into the namespace, which the next merge continues. It's\nabsent before the fork's first merge. In a rebase's new fork, it's the fork's newest\nreplay commit, never a merge that the new fork inherited."
+            "description": "The fork's newest range in the namespace's merge index, which the next merge\ncontinues. After a merge of a rebase's new fork, it's the range of this fork that the\nnew fork's replay commits applied, so its source is this fork, not the new fork. It's\nabsent before the fork's first merge. In a rebase's new fork, it's the fork's newest\nreplay commit, never a merge that the new fork inherited."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -3579,7 +3579,7 @@
           },
           "merge": {
             "$ref": "#/components/schemas/Merge",
-            "description": "The fork's newest merge into the namespace, as for `open`. It's absent before the\nfork's first merge."
+            "description": "The fork's newest range in the namespace's merge index, as for `open`. It's absent\nbefore the fork's first merge."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",

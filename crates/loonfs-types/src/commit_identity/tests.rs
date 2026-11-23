@@ -88,6 +88,7 @@ fn a_merge_fingerprint_covers_the_merge_record_and_matches_the_spec_example() {
         source_namespace_id: NamespaceId::parse("demo-fork").expect("namespace"),
         source_after_seq: CommitSeq(418),
         source_through_seq: CommitSeq(425),
+        covered_ranges: Vec::new(),
         conflicts: Vec::new(),
     };
     let input = MergeFingerprintInput {
@@ -126,17 +127,18 @@ fn a_merge_fingerprint_covers_the_merge_record_and_matches_the_spec_example() {
     }
 }
 
-/// Checks that a replay commit's conflict report isn't part of its
-/// identity: a record with conflicts has the fingerprint of the same
-/// record without them.
+/// Checks that a replay commit's conflict report and a merge's covered
+/// ranges aren't part of its identity: a record with either has the
+/// fingerprint of the same record without them.
 #[test]
-fn a_merge_fingerprint_leaves_out_the_conflict_report() {
+fn a_merge_fingerprint_leaves_out_the_conflict_report_and_the_covered_ranges() {
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let actor_id = ActorId::parse("usr_8f3c").expect("actor");
     let merge = MergeRecord {
         source_namespace_id: NamespaceId::parse("demo-fork").expect("namespace"),
         source_after_seq: CommitSeq(418),
         source_through_seq: CommitSeq(425),
+        covered_ranges: Vec::new(),
         conflicts: Vec::new(),
     };
     let reported = MergeRecord {
@@ -152,6 +154,14 @@ fn a_merge_fingerprint_leaves_out_the_conflict_report() {
         }],
         ..merge.clone()
     };
+    let covering = MergeRecord {
+        covered_ranges: vec![crate::wal::ForkRange {
+            source_namespace_id: NamespaceId::parse("demo-original").expect("namespace"),
+            source_after_seq: CommitSeq(4),
+            source_through_seq: CommitSeq(17),
+        }],
+        ..merge.clone()
+    };
     let fingerprint = |merge| {
         MergeFingerprintInput {
             namespace_id: &namespace_id,
@@ -162,6 +172,7 @@ fn a_merge_fingerprint_leaves_out_the_conflict_report() {
         .fingerprint()
     };
     assert_eq!(fingerprint(&reported), fingerprint(&merge));
+    assert_eq!(fingerprint(&covering), fingerprint(&merge));
 }
 
 #[test]

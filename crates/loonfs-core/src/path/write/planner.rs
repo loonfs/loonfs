@@ -83,35 +83,35 @@ pub(super) struct OperationPlanningSession<'p, 'c, S: ObjectStore + ?Sized> {
 /// make one, so the ID is new to the namespace. A generated ID includes the
 /// low 32 bits of the commit's sequence, the create's number within the
 /// commit and 64 random bits, so it differs from every existing inode's ID,
-/// and [`NewInodeId::merged`] checks that no inode has a merge's assigned ID.
+/// and [`NewInodeId::merged`] asserts that no inode has a merge's assigned ID.
 pub(crate) struct NewInodeId(InodeId);
 
 impl NewInodeId {
     /// Returns `inode_id`, the ID that a merge assigns to an inode that it
-    /// creates, after checking that no inode in `view` has it.
+    /// creates, after asserting that no inode in `view` has it.
     ///
     /// `view` includes the merge's earlier operations, so an ID assigned to
     /// two creates fails at the second.
     ///
     /// An inode row is immutable and unique, so a second row for the same ID
-    /// would corrupt the namespace. The ID can be present without a bug when
-    /// another merge created the inode after this merge was planned. A
-    /// rebase replays a fork's commits into a new fork, and the replayed
-    /// creates keep the old fork's inode IDs. So if a merge of the old fork
-    /// and a merge of the new fork are both planned before either commits,
-    /// the second merge to commit finds the inodes that it creates already
-    /// present. The ID is also present if the merge's planner has a bug: it
-    /// mistook an inode that this namespace already has for a new one, or it
-    /// assigned one ID to two creates.
+    /// would corrupt the namespace. A merge creates an inode under the ID
+    /// that a fork's create gave it. Of the namespaces that can merge into
+    /// this one, only the fork and the new forks that rebases replayed the
+    /// fork's commits into can have that ID while this namespace doesn't, and
+    /// every merge of one of them covers a range of the fork that starts
+    /// where this namespace's merge index says. The range rule admits one
+    /// merge for each such start, before the merge's operations are planned
+    /// (format spec, "Merges"). So the ID is present only if the merge's
+    /// planner has a bug: it mistook an inode that this namespace already has
+    /// for a new one, or it assigned one ID to two creates.
     pub(super) async fn merged<S: ObjectStore + ?Sized>(
         view: &MetadataView<'_, '_, S>,
         inode_id: InodeId,
     ) -> Result<Self> {
-        if view.inode_at_seq(inode_id).await?.is_some() {
-            return Err(CoreError::InvalidCommitRequest(format!(
-                "a merge creates inode `{inode_id}`, which already exists"
-            )));
-        }
+        assert!(
+            view.inode_at_seq(inode_id).await?.is_none(),
+            "a merge should create inode `{inode_id}` only where it doesn't exist"
+        );
         Ok(Self(inode_id))
     }
 

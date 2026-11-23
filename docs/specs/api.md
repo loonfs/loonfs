@@ -201,7 +201,7 @@ The codes that populate it:
 | `below_retention_floor` | `retention_floor_seq`, plus the sequence that fell below it: `after_seq` for a change feed, `from_seq` for a diff, or `fork_point_seq` when a merge's fork point is below the target namespace's floor. When a merge's range start is below the fork's own floor, `source_namespace_id` identifies the fork, `source_after_seq` is the range start, and `retention_floor_seq` is the fork's floor. For a read at an earlier sequence (such as a later grep page), only `retention_floor_seq` is included. |
 | `merge_conflict` | `conflict_count` (total conflicting inodes) and `conflict` (the conflict entry for the conflicting inode with the smallest ID, see [POST /merges](#614-post-merges)). This is the only nested object in details. |
 | `merge_too_large` | `merge_bound` (the bound exceeded, listed in the registry below), plus `split_at_seq` (a fork sequence where a shorter merge fits, when one exists, see [POST /merges](#614-post-merges)). |
-| `merge_range_conflict` | `source_namespace_id` identifies the fork, `expected_after_seq` is where the merge had to start (after the previous merge, or at the fork point for a first merge), and `actual_after_seq` is where the merge started. |
+| `merge_range_conflict` | `source_namespace_id` identifies the fork whose range didn't continue its previous merge (the merge's source, or a fork whose range a merge of a rebase's new fork covers, see [Merges](format.md#merges)), `expected_after_seq` is where the merge had to start (after the previous merge, or at the fork point for a first merge), and `actual_after_seq` is where the merge started. |
 | `stale_head` | `expected_head_seq` and `actual_head_seq` for a caller-supplied head precondition, plus `precondition_index` for a failed request precondition. |
 | `snapshot_not_found` | `cause`, present when the snapshot record exists but its manifest is missing (value listed in the registry below). |
 | `store_contention` | `cause`, present when a metadata publication hit its time budget before publishing (value listed in the registry below). |
@@ -253,7 +253,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `writer_fenced` | 409 | Another writer superseded this writer session. The session is dead, this request fails, and a later request opens a new session whose first publish reclaims the namespace. Repeated fencing means two writers are receiving traffic for one namespace. |
 | `would_cycle` | 409 | The move would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The `commit_id` was reused with different operations, content, actor, or preconditions. |
-| `merge_range_conflict` | 409 | A [merge](glossary.md#merge) range overlaps or skips past the fork's previous merge (or a first merge doesn't start at the fork point), usually because two merges of the same fork ran concurrently. Retry with a new `commit_id`. Clients don't retry this automatically. |
+| `merge_range_conflict` | 409 | A [merge](glossary.md#merge) range overlaps or skips past the fork's previous merge (or a first merge doesn't start at the fork point), usually because two merges of the same fork ran concurrently, or because a merge of a [rebase](glossary.md#rebase)'s new fork covers a range of the original fork that another merge already applied. Retry with a new `commit_id`. Clients don't retry this automatically. |
 | `merge_conflict` | 409 | The fork's net change conflicts with the target namespace under the conflict rule ([Validation](format.md#62-validation)). Nothing is committed. `details` reports `conflict_count` and the first `conflict`. Clients don't retry this automatically. |
 | `upload_already_completed` | 409 | The upload session is already completed, so it can't accept new content or be aborted. |
 | `upload_content_conflict` | 409 | Different bytes were already staged under this upload ID. Open a new upload session (restaging identical bytes succeeds). |
@@ -2571,7 +2571,7 @@ Merge-specific errors beyond ordinary commit errors:
 | Code | Status | Meaning |
 | --- | --- | --- |
 | `merge_conflict` | 409 | Fork changes conflict with this namespace (`details.conflict_count` and `details.conflict`). |
-| `merge_range_conflict` | 409 | Another merge of the fork committed after this merge planned its range. |
+| `merge_range_conflict` | 409 | Another merge of the fork, or another merge that covers the same range of a fork, committed after this merge planned its range. |
 | `merge_too_large` | 413 | Exceeded touched-inode cap, WAL object size, or merge allowance (`details.merge_bound`, plus optional `details.split_at_seq`). |
 | `below_retention_floor` | 409 | Fork point is below this namespace's floor, or range start is below the fork's floor (`details` specifies which). |
 | `stale_head`, `stale_revision`, `stale_attributes`, `stale_access`, `binding_version_mismatch`, `path_conflict`, `not_deleted` | 409 | Target namespace changed between plan and commit four times in a row. Retry the merge. |
@@ -2622,7 +2622,7 @@ Rather than returning `below_retention_floor` when steps 3 to 5 of [`POST /merge
 
 | `outcome` | Fields | Means |
 | --- | --- | --- |
-| `open` | `merge`, `next_after_seq` | Floors allow the next merge. `merge` is the latest merge record (absent before the first merge), and `next_after_seq` is its `source_through_seq` (or `fork_point_seq` before the first merge). |
+| `open` | `merge`, `next_after_seq` | Floors allow the next merge. `merge` is the fork's newest row in the [merge index](glossary.md#merge-index) (absent before the first merge), and `next_after_seq` is its `source_through_seq` (or `fork_point_seq` before the first merge). |
 | `range_start_below_floor` | `merge`, `next_after_seq`, `retention_floor_seq` | Range start is below the fork's own floor (`retention_floor_seq`), so `POST /merges` will return `below_retention_floor`. |
 | `fork_point_below_floor` | `retention_floor_seq` | Fork point is below this namespace's floor (`retention_floor_seq`), so `POST /merges` will return `below_retention_floor` (and `merge` / `next_after_seq` are omitted because compaction may have pruned the [merge index](glossary.md#merge-index)). |
 
@@ -2631,6 +2631,8 @@ Example when the parent's floor has passed the fork point:
 ```json
 {"namespace_id":"demo","source_namespace_id":"demo-branch","fork_point_seq":418,"source_head_seq":440,"outcome":"fork_point_below_floor","retention_floor_seq":450}
 ```
+
+`merge.source_namespace_id` is always the queried fork, even when the merge that wrote the row had another source. After a merge of a [rebase](glossary.md#rebase)'s new fork, `merge` for the original fork is the range of the original fork that the new fork's replay commits applied (see [Merges](format.md#merges)), and the original fork's next merge starts after it.
 
 When queried on a rebase fork with `source_namespace_id` set to its `fork_basis.rebased_from.source_namespace_id`, the route inspects replay progress for [`POST /replays`](#617-post-replays): `merge` is the newest replay commit in the rebase fork (ignoring inherited merges from the parent namespace), `next_after_seq` starts at `resume_after_seq`, `fork_point_seq` is the source fork's fork point in the parent namespace, and `outcome` is `fork_point_below_floor` if the rebase fork's floor passed its own fork point.
 

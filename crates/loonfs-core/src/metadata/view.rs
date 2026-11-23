@@ -527,7 +527,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .row_states()
             .flat_map(MetadataState::commits)
             .filter(|commit| commit.committed_seq <= self.visible_seq())
-            .filter_map(MergeIndexRecord::from_commit)
+            .flat_map(MergeIndexRecord::from_commit)
             .filter(|merge| merge.source_namespace_id == *source_namespace_id)
             .max_by_key(|merge| merge.committed_seq);
         Ok(newest(

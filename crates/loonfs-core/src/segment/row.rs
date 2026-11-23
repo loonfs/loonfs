@@ -79,7 +79,7 @@ pub(crate) fn manifest_rows_for_family(
         MetadataRowFamily::Merges => metadata_state
             .commits()
             .iter()
-            .filter_map(MergeIndexRecord::from_commit)
+            .flat_map(MergeIndexRecord::from_commit)
             .map(MetadataRow::Merge)
             .collect::<Vec<_>>(),
         MetadataRowFamily::Attributes => metadata_state

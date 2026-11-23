@@ -24,6 +24,7 @@ fn merge_through(commit_id: &str, name: &str, after_seq: u64, through_seq: u64) 
             source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
             source_after_seq: CommitSeq(after_seq),
             source_through_seq: CommitSeq(through_seq),
+            covered_ranges: Vec::new(),
             conflicts: Vec::new(),
         },
         CommitSeq(3),

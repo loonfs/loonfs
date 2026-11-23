@@ -3,14 +3,14 @@
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#the-split-hint)).
 
 use super::memory::PlanningMemory;
-use super::net_change::{fork_layout_extents, inode_change, touched_inodes, InodeChange};
+use super::net_change::{fork_layout_extents, inode_change, range_commits, InodeChange};
 use super::operations::{
     access_update, attributes_update, create_plan, delete_change, move_change, restore_change,
     revision_update, InodePlan,
 };
 use super::state::StateReader;
 use super::MergeAllowance;
-use crate::commit::wal_size::merge_operation_bytes;
+use crate::commit::wal_size::{covered_ranges_bytes, merge_operation_bytes};
 use crate::error::{CoreError, MergeBound, Result};
 use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
@@ -61,7 +61,8 @@ pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
 /// through `through_seq` that doesn't fit one WAL object or `allowance`: the
 /// largest fork sequence that a probe showed a merge through it to fit (see
 /// [`net_change_fits`]), or `None` when no probe fit. `fields_bytes` bounds
-/// the merge commit's fields other than its operations.
+/// the merge commit's fields other than its operations and its covered
+/// ranges.
 async fn split_hint<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
     after_seq: CommitSeq,
@@ -142,7 +143,9 @@ impl SplitSearch {
 /// through `through_seq` fits one WAL object and `allowance`, measured from
 /// the fork alone as a merge's plan measures its planned bytes and its
 /// working bytes (see [`MergeAllowance::check`]). `fields_bytes` bounds the
-/// commit's fields other than its operations, as it does for the merge.
+/// commit's fields other than its operations and its covered ranges, as it
+/// does for the merge, and the measure adds the covered ranges that the
+/// replay commits in the measured range cover, as the merge's plan does.
 ///
 /// The measure is the plan of a merge of the net change into a namespace
 /// whose rows are the fork's own at the range's start. A merge into another
@@ -185,8 +188,13 @@ async fn measure_net_change<S: ObjectStore + ?Sized>(
         StateReader::new(end, &memory),
         StateReader::new(start, &memory),
     );
-    let mut planned_bytes = fields_bytes;
-    for inode_id in touched_inodes(end, after_seq, &memory).await? {
+    let commits = range_commits(end, fork_view.head(), after_seq, &memory).await?;
+    let mut planned_bytes =
+        fields_bytes.saturating_add(covered_ranges_bytes(&commits.covered_ranges));
+    // A range whose net change is empty plans no operation, so the fixed
+    // bytes are checked before the loop as well as with each inode.
+    memory.check_planned(planned_bytes)?;
+    for inode_id in commits.touched {
         let plan = match inode_change(&mut ours, &mut before, fork, inode_id).await? {
             Some(change) => net_change_plan(start, fork, inode_id, &change).await?,
             None => None,

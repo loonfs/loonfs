@@ -4,16 +4,16 @@
 
 use super::classify::Classifier;
 use super::memory::PlanningMemory;
-use super::net_change::fork_layouts;
+use super::net_change::{fork_layouts, range_commits, RangeCommits};
 use super::operations::BindingChange;
 use super::order::MergeOperations;
 use super::replay::Replay;
 use super::size::with_split_hint;
 use super::state::StateReader;
-use super::{through_seq, MergeAllowance, MergeRequest};
+use super::{ensure_ranges_continue, through_seq, MergeAllowance, MergeRequest};
 use crate::authorize::Authorizer;
 use crate::commit::engine::CommitCandidate;
-use crate::commit::wal_size::commit_fields_bytes;
+use crate::commit::wal_size::{commit_fields_bytes, covered_ranges_bytes};
 use crate::engine::NamespaceEngine;
 use crate::error::Result;
 use crate::limits::OPERATION_SNAPSHOT_TTL_MS;
@@ -43,6 +43,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// `snapshot` is the source that `main`, the rebase's new fork, was forked
     /// from, read through its snapshot (see [`Self::plan_merge`] and
     /// [`Self::plan_replay`]).
+    ///
+    /// When `fork` is a rebase's new fork, the commit's record also covers
+    /// every range that the replay commits in its range cover, and the plan
+    /// returns `merge_range_conflict` when one of those ranges doesn't start
+    /// where `main`'s merge index says (see [`ensure_ranges_continue`]).
     ///
     /// The commit expects `main`'s head when it deletes or moves a
     /// directory, or moves an inode through a temporary name, for a replay
@@ -86,9 +91,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 source_after_seq,
                 request.through_seq,
             )?,
+            covered_ranges: Vec::new(),
             conflicts: Vec::new(),
         };
         let intent = self.merge_intent(request, Vec::new(), Vec::new());
+        // Bounds the commit's fields other than its operations and its
+        // covered ranges. Each size check adds the covered ranges of the
+        // range that it checks, with `covered_ranges_bytes`, once it has read
+        // the range's commits, so the running bound, the split hint and the
+        // final check count them alike.
         let fields_bytes = commit_fields_bytes(
             &intent.commit_id,
             &intent.actor_id,
@@ -96,6 +107,50 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             Some(&record),
         );
         let memory = PlanningMemory::new(allowance.clone());
+        let range = (source_after_seq, record.source_through_seq);
+        let RangeCommits {
+            touched,
+            covered_ranges,
+        } = with_split_hint(
+            range_commits(
+                fork_view.metadata_view_at(record.source_through_seq),
+                fork_head,
+                source_after_seq,
+                &memory,
+            )
+            .await,
+            fork_view,
+            range,
+            fields_bytes,
+            allowance,
+        )
+        .await?;
+        // The merge's own range was checked before the plan. The covered
+        // ranges are known only once the range's commits are read, so they're
+        // checked here, before the classification. A covered range that
+        // another merge already applied then returns `merge_range_conflict`,
+        // not the conflicts that applying it a second time would report.
+        ensure_ranges_continue(
+            &main.metadata_view(),
+            main.head(),
+            covered_ranges.iter().cloned(),
+            source_namespace_id,
+            fork_point_seq,
+        )
+        .await?;
+        let planned_bytes = fields_bytes.saturating_add(covered_ranges_bytes(&covered_ranges));
+        // A merge whose net change is empty plans no operation, so its fixed
+        // bytes are checked before the classification, as the split hint's
+        // measure checks them, and not only by the final check.
+        with_split_hint(
+            memory.check_planned(planned_bytes),
+            fork_view,
+            range,
+            fields_bytes,
+            allowance,
+        )
+        .await?;
+        record.covered_ranges = covered_ranges;
         let mut classifier = Classifier {
             main,
             theirs: StateReader::new(main.metadata_view(), &memory),
@@ -115,7 +170,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             memory: Arc::clone(&memory),
             own_seqs: HashMap::new(),
             plans: Vec::new(),
-            planned_bytes: fields_bytes,
+            planned_bytes,
             subtree_checks: Vec::new(),
             conflicted: HashSet::new(),
             first_conflict: None,
@@ -124,9 +179,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 report: Vec::new(),
             }),
         };
-        let range = (source_after_seq, record.source_through_seq);
         with_split_hint(
-            classifier.classify().await,
+            classifier.classify(touched).await,
             fork_view,
             range,
             fields_bytes,

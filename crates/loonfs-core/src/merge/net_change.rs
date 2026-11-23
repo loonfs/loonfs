@@ -10,12 +10,13 @@ use crate::error::{CoreError, MergeBound, Result};
 use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use crate::metadata::MetadataView;
+use crate::namespace::state::NamespaceReadState;
 use crate::storage::content_location::ContentLocation;
 use crate::storage::tail_content::{cut_layout, materialize_content_layout, ContentWrites};
 use crate::wal::ProjectedWalTail;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES;
+use loonfs_types::format::wal::{ForkRange, MergeRecord, MAX_WAL_OBJECT_BYTES};
 use loonfs_types::{CommitSeq, ContentId, ContentLayout, ContentRef, InodeId, NamespaceId, PoolId};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem::size_of;
@@ -104,8 +105,23 @@ pub(super) async fn inode_change<S: ObjectStore + ?Sized>(
     )
 }
 
+/// What a merge reads from the fork's commits in its range: the inodes that
+/// the commits touched, and the ranges of other forks that the replay
+/// commits among them cover.
+pub(super) struct RangeCommits {
+    pub(super) touched: BTreeSet<InodeId>,
+    /// One range for each fork, from the smallest `source_after_seq` to the
+    /// largest `source_through_seq` of the replay commits' ranges of that
+    /// fork, in the order in which the commits first refer to each fork.
+    pub(super) covered_ranges: Vec<ForkRange>,
+}
+
 /// Lists the inodes that the fork's commits after `source_after_seq` touched,
-/// through the sequence that `view` reads at.
+/// through the sequence that `view` reads at, and the ranges that the replay
+/// commits among them cover. The fork is the namespace whose head is
+/// `fork_head`, and a replay commit is a commit whose merge record's source
+/// is the fork that a rebase made the fork from, so a fork that no rebase
+/// made covers no range.
 ///
 /// [`MAX_MERGED_INODES`] bounds the set. A range that touched more inodes
 /// than one WAL object could contain operations for fails with
@@ -118,12 +134,21 @@ pub(super) async fn inode_change<S: ObjectStore + ?Sized>(
 /// `memory`, which checks the merge allowance. When the set and the page
 /// exceed the allowance, the error's `split_at_seq` is the last commit
 /// before the page, unless the first page crossed the allowance.
-pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
+pub(super) async fn range_commits<S: ObjectStore + ?Sized>(
     view: MetadataView<'_, '_, S>,
+    fork_head: &NamespaceReadState,
     source_after_seq: CommitSeq,
     memory: &PlanningMemory,
-) -> Result<BTreeSet<InodeId>> {
-    let mut touched = BTreeSet::new();
+) -> Result<RangeCommits> {
+    let rebased_from = fork_head
+        .fork_basis
+        .as_ref()
+        .and_then(|basis| basis.rebased_from.as_ref())
+        .map(|rebased_from| &rebased_from.source_namespace_id);
+    let mut commits = RangeCommits {
+        touched: BTreeSet::new(),
+        covered_ranges: Vec::new(),
+    };
     let mut after_seq = source_after_seq;
     // Each pass reads the next page of the range's commits, and the view
     // ends at the range's end, so the loop ends when a page is empty.
@@ -133,10 +158,30 @@ pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
             .await?;
         if page.is_empty() {
             memory.release_page();
-            return Ok(touched);
+            return Ok(commits);
         }
         let page_after_seq = after_seq;
         for commit in &page {
+            let replayed = commit
+                .merge
+                .as_ref()
+                .filter(|merge| Some(&merge.source_namespace_id) == rebased_from);
+            for range in replayed.into_iter().flat_map(MergeRecord::ranges) {
+                let covered = &mut commits.covered_ranges;
+                match covered
+                    .iter_mut()
+                    .find(|covered| covered.source_namespace_id == range.source_namespace_id)
+                {
+                    Some(covered) => {
+                        covered.source_after_seq =
+                            covered.source_after_seq.min(range.source_after_seq);
+                        covered.source_through_seq =
+                            covered.source_through_seq.max(range.source_through_seq);
+                    }
+                    None => covered.push(range),
+                }
+            }
+            let touched = &mut commits.touched;
             touched.extend(crate::diff::touched_inodes(&commit.deltas));
             if touched.len() > MAX_MERGED_INODES {
                 return Err(CoreError::MergeTooLarge {
@@ -148,7 +193,7 @@ pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
             }
             after_seq = commit.committed_seq;
         }
-        let touched_bytes = touched.len().saturating_mul(TOUCHED_INODE_BYTES);
+        let touched_bytes = commits.touched.len().saturating_mul(TOUCHED_INODE_BYTES);
         match memory.check_commits(touched_bytes, page.heap_bytes()) {
             Err(CoreError::MergeTooLarge {
                 bound: MergeBound::MergeAllowance,

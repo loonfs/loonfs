@@ -4,7 +4,9 @@
 //! and plans what the merge's commit does to each inode.
 
 use super::memory::PlanningMemory;
-use super::net_change::{fork_layout_extents, inode_change, touched_inodes, Changed, InodeChange};
+#[cfg(doc)]
+use super::net_change::range_commits;
+use super::net_change::{fork_layout_extents, inode_change, Changed, InodeChange};
 use super::operations::{
     access_update, attributes_update, create_plan, delete_change, move_change, restore_change,
     revision_update, BindingChange, InodePlan,
@@ -83,12 +85,10 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
 }
 
 impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
-    /// Classifies each inode that the fork's commits in the range touched,
-    /// in inode ID order, and checks the merge allowance against the plan's
-    /// memory after each inode.
-    pub(super) async fn classify(&mut self) -> Result<()> {
-        let touched =
-            touched_inodes(self.ours.view(), self.record.source_after_seq, &self.memory).await?;
+    /// Classifies each inode in `touched`, the inodes that the fork's commits
+    /// in the range touched (see [`range_commits`]), in inode ID order, and
+    /// checks the merge allowance against the plan's memory after each inode.
+    pub(super) async fn classify(&mut self, touched: BTreeSet<InodeId>) -> Result<()> {
         for inode_id in touched {
             self.classify_inode(inode_id).await?;
             self.memory.check()?;

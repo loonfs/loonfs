@@ -3,12 +3,12 @@
 use crate::path::write::CommitIntent;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::wal::{
-    cbor_map_bytes, cbor_string_bytes, conflict_report_cbor_bytes, MergeRecord, WalCommitDelta,
-    WalInlineContent, MAX_WAL_OBJECT_BYTES,
+    cbor_map_bytes, cbor_string_bytes, conflict_report_cbor_bytes, ForkRange, MergeRecord,
+    WalCommitDelta, WalInlineContent, MAX_WAL_OBJECT_BYTES,
 };
 use loonfs_types::{
     AbsolutePath, AccessRight, ActorId, CommitId, ContentRef, FilesystemOperation, MergeConflict,
-    MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ACTOR_ID_BYTES,
+    NamespaceId, MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ACTOR_ID_BYTES,
     MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES,
     MAX_NAME_KEY_BYTES,
 };
@@ -257,8 +257,9 @@ pub(crate) fn commit_fields_bytes(
     ]) + merge.map_or(0, merge_bytes)
 }
 
-/// Bounds a merge record and its field name in the commit record, with a
-/// replay commit's conflict report.
+/// Bounds a merge record and its field name in the commit record, with the
+/// ranges of other forks that it covers and a replay commit's conflict
+/// report.
 fn merge_bytes(merge: &MergeRecord) -> usize {
     let conflicts_bytes = if merge.conflicts.is_empty() {
         0
@@ -266,16 +267,37 @@ fn merge_bytes(merge: &MergeRecord) -> usize {
         cbor_string_bytes("conflicts".len())
             .saturating_add(conflict_report_cbor_bytes(&merge.conflicts))
     };
-    (cbor_string_bytes("merge".len())
-        + cbor_map_bytes(&[
-            (
-                "source_namespace_id",
-                cbor_string_bytes(merge.source_namespace_id.as_str().len()),
-            ),
-            ("source_after_seq", INTEGER_BYTES),
-            ("source_through_seq", INTEGER_BYTES),
-        ]))
-    .saturating_add(conflicts_bytes)
+    (cbor_string_bytes("merge".len()) + fork_range_bytes(&merge.source_namespace_id))
+        .saturating_add(covered_ranges_bytes(&merge.covered_ranges))
+        .saturating_add(conflicts_bytes)
+}
+
+/// Bounds a merge record's `covered_ranges` and its field name, which a
+/// record leaves out when the list is empty. The merge planner's running
+/// bound and its split hint add it to the bound of the record's other fields
+/// as they learn the list, so every size check of a merge counts the list
+/// as [`merge_bytes`] does.
+pub(crate) fn covered_ranges_bytes(covered_ranges: &[ForkRange]) -> usize {
+    if covered_ranges.is_empty() {
+        return 0;
+    }
+    // The field name, the array header, which a u64 bounds, and each range.
+    covered_ranges.iter().fold(
+        cbor_string_bytes("covered_ranges".len()) + INTEGER_BYTES,
+        |bytes, range| bytes.saturating_add(fork_range_bytes(&range.source_namespace_id)),
+    )
+}
+
+/// Bounds the map of one range of `source_namespace_id`'s commits.
+fn fork_range_bytes(source_namespace_id: &NamespaceId) -> usize {
+    cbor_map_bytes(&[
+        (
+            "source_namespace_id",
+            cbor_string_bytes(source_namespace_id.as_str().len()),
+        ),
+        ("source_after_seq", INTEGER_BYTES),
+        ("source_through_seq", INTEGER_BYTES),
+    ])
 }
 
 /// Bounds one entry of a replay commit's conflict report, with the report's

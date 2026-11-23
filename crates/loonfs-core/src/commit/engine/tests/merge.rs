@@ -10,7 +10,7 @@ use crate::changes::list_changes_after;
 use crate::compaction::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
-use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES};
+use loonfs_types::format::wal::{ForkRange, MergeRecord, MAX_WAL_OBJECT_BYTES};
 use loonfs_types::{AbsolutePath, CompactorEpoch, DisplayName, EffectiveLimit, InodeId, Merge};
 use std::collections::BTreeMap;
 
@@ -27,6 +27,7 @@ fn merge(after_seq: u64, through_seq: u64) -> MergeRecord {
         source_namespace_id: fork(),
         source_after_seq: CommitSeq(after_seq),
         source_through_seq: CommitSeq(through_seq),
+        covered_ranges: Vec::new(),
         conflicts: Vec::new(),
     }
 }
@@ -280,6 +281,89 @@ async fn a_repeat_merge_continues_the_previous_merge_exactly() {
     .await
     .expect("a retry of the first merge");
     assert_eq!(replayed, first);
+}
+
+/// Checks that each range of another fork that a merge record covers has to
+/// continue that fork's newest row in the merge index, whether a covered
+/// range or the fork's own merge wrote the row, and that a covered range of
+/// a fork with no row is admitted where it starts, because nothing in the
+/// namespace contradicts it.
+#[tokio::test]
+async fn a_covered_range_continues_its_forks_newest_row() {
+    let (_directory, store, namespace_id, writer) = setup().await;
+    let original = NamespaceId::parse("main-original").expect("namespace");
+    let covering = |after_seq, through_seq, covered_after_seq, covered_through_seq| MergeRecord {
+        covered_ranges: vec![ForkRange {
+            source_namespace_id: original.clone(),
+            source_after_seq: CommitSeq(covered_after_seq),
+            source_through_seq: CommitSeq(covered_through_seq),
+        }],
+        ..merge(after_seq, through_seq)
+    };
+    publish(
+        &store,
+        &namespace_id,
+        &writer,
+        merge_candidate("first", "first", covering(3, 7, 11, 20)),
+    )
+    .await
+    .expect("a covered range of a fork with no row");
+    for (covered_after_seq, why) in [(15, "an overlap"), (21, "a gap")] {
+        let error = publish(
+            &store,
+            &namespace_id,
+            &writer,
+            merge_candidate("second", "second", covering(7, 9, covered_after_seq, 25)),
+        )
+        .await
+        .expect_err(why);
+        assert_eq!(error.code(), ErrorCode::MergeRangeConflict, "{why}");
+        assert_matches!(
+            error,
+            CoreError::MergeRangeConflict {
+                source_namespace_id,
+                expected_after_seq: CommitSeq(20),
+                actual_after_seq,
+            } if source_namespace_id == original && actual_after_seq == CommitSeq(covered_after_seq),
+            "{why}"
+        );
+    }
+    let own = MergeRecord {
+        source_namespace_id: original.clone(),
+        ..merge(20, 22)
+    };
+    publish(
+        &store,
+        &namespace_id,
+        &writer,
+        merge_candidate("original", "original", own),
+    )
+    .await
+    .expect("the fork's own merge continues the covered range");
+    let error = publish(
+        &store,
+        &namespace_id,
+        &writer,
+        merge_candidate("stale", "stale", covering(7, 9, 20, 25)),
+    )
+    .await
+    .expect_err("a covered range that the fork's own merge applied");
+    assert_matches!(
+        error,
+        CoreError::MergeRangeConflict {
+            expected_after_seq: CommitSeq(22),
+            actual_after_seq: CommitSeq(20),
+            ..
+        }
+    );
+    publish(
+        &store,
+        &namespace_id,
+        &writer,
+        merge_candidate("second", "second", covering(7, 9, 22, 25)),
+    )
+    .await
+    .expect("a covered range that continues the fork's own merge");
 }
 
 fn intent(commit_id: &str, operations: Vec<FilesystemOperation>) -> CommitIntent {
@@ -590,6 +674,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
             source_namespace_id: fork.clone(),
             source_after_seq: fork_point_seq,
             source_through_seq: written.committed_seq,
+            covered_ranges: Vec::new(),
             conflicts: Vec::new(),
         },
         fork_point_seq,
@@ -798,23 +883,13 @@ fn created_inode(commit: &Commit) -> InodeId {
     }
 }
 
-/// Checks that a merge failed at `operation_index` with `InvalidCommitRequest`
-/// and `message`.
-fn assert_refused_merge(error: CoreError, operation_index: u32, message: &str) {
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-    assert_matches!(
-        error,
-        CoreError::FailedOperation { operation_index: index, error }
-            if index == operation_index
-                && matches!(&*error, CoreError::InvalidCommitRequest(actual) if actual == message)
-    );
-}
-
-/// Checks that a merge can't create an inode under an ID that the namespace
+/// Checks that a merge that creates an inode under an ID that the namespace
 /// already has, whether an ordinary commit or an earlier merge created it, or
-/// under one ID twice, and that a refused merge publishes nothing.
+/// under one ID twice, fails with `server_error` because its preparation
+/// panics, since the range rule leaves only a planner bug to send one, and
+/// that a refused merge publishes nothing.
 #[tokio::test]
-async fn a_merge_refuses_an_inode_id_that_already_exists() {
+async fn a_merge_of_an_inode_id_that_already_exists_panics_in_its_preparation() {
     let (_directory, store, namespace_id, writer) = setup().await;
     let ordinary = publish(
         &store,
@@ -857,10 +932,12 @@ async fn a_merge_refuses_an_inode_id_that_already_exists() {
         let error = publish(&store, &namespace_id, &writer, candidate)
             .await
             .expect_err("a merge of an inode ID that exists");
-        assert_refused_merge(
-            error,
-            u32::try_from(refused_index).expect("index"),
-            &format!("a merge creates inode `{inode_id}`, which already exists"),
+        assert_eq!(error.code(), ErrorCode::ServerError);
+        let message =
+            format!("a merge should create inode `{inode_id}` only where it doesn't exist");
+        assert_matches!(
+            &error,
+            CoreError::CommitPreparationPanicked(panic) if panic.contains(&message)
         );
     }
     assert_eq!(feed(&store, &namespace_id).await, [ordinary, merged]);
