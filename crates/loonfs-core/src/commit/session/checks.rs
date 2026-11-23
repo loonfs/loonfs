@@ -3,7 +3,7 @@
 use super::commit_session::CommitSession;
 use crate::commit::CommitValidationError;
 use crate::error::{CoreError, Result};
-use crate::metadata::{InodeRecord, RevisionRecord};
+use crate::metadata::RevisionRecord;
 use crate::path::write::DeletionInTrash;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
@@ -88,16 +88,18 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
             })
     }
 
-    /// Returns the revision summary that a bind of `inode` copies into the
-    /// new edge, which is `None` for a directory.
+    /// Returns the revision summary that a bind of `inode_id`, of the kind
+    /// `inode_kind`, copies into the new edge, which is `None` for a
+    /// directory.
     pub(super) async fn resolve_revision_summary(
         &self,
-        inode: &InodeRecord,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
     ) -> Result<Option<RevisionSummary>> {
-        if inode.inode_kind == InodeKind::Directory {
+        if inode_kind == InodeKind::Directory {
             return Ok(None);
         }
-        let revision = self.resolve_current_revision(inode.inode_id).await?;
+        let revision = self.resolve_current_revision(inode_id).await?;
         Ok(Some(RevisionSummary {
             revision_no: revision.revision_no,
             content_ref: revision.content_ref,
@@ -142,17 +144,18 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
 
     pub(super) async fn ensure_rename_does_not_cycle(
         &self,
-        inode: &InodeRecord,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
         new_parent_inode_id: InodeId,
     ) -> Result<()> {
-        if inode.inode_kind == InodeKind::Directory
+        if inode_kind == InodeKind::Directory
             && self
                 .view()
-                .would_create_directory_cycle(inode.inode_id, new_parent_inode_id)
+                .would_create_directory_cycle(inode_id, new_parent_inode_id)
                 .await?
         {
             return Err(CommitValidationError::RenameWouldCycleDirectory {
-                inode_id: inode.inode_id,
+                inode_id,
                 new_parent_inode_id,
             }
             .into());

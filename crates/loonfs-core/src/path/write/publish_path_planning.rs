@@ -162,6 +162,8 @@ pub(crate) struct ResolvedBinding {
     name_key: NameKey,
     display_name: DisplayName,
     child_inode_id: InodeId,
+    /// The child's kind, as the binding records it.
+    child_kind: InodeKind,
     /// Position of the bind event that established the binding.
     bind_position: DeltaPosition,
     /// Actor of the child's creating commit, as the binding records it.
@@ -186,6 +188,10 @@ impl ResolvedBinding {
 
     pub(crate) fn child_inode_id(&self) -> InodeId {
         self.child_inode_id
+    }
+
+    pub(crate) fn child_kind(&self) -> InodeKind {
+        self.child_kind
     }
 
     pub(crate) fn bind_position(&self) -> DeltaPosition {
@@ -733,6 +739,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
                 .expect("visible binding should be bound")
                 .clone(),
             child_inode_id: binding.child_inode_id,
+            child_kind: binding.child_kind,
             bind_position: binding.bind_position,
             child_created_by: binding.child_created_by.clone(),
             child_created_at_ms: binding.child_created_at_ms,

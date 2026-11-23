@@ -8,7 +8,6 @@ use super::numbering::CommitNumbering;
 use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::Result;
 use crate::metadata::access::access_revision_no;
-use crate::metadata::InodeRecord;
 use crate::path::write::{
     AvailableName, DeletionInTrash, NewInodeId, ResolvedBinding, ResolvedTarget,
 };
@@ -151,19 +150,12 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
     /// Deletes the file or directory subtree that `binding` binds.
     pub(crate) async fn delete(&mut self, binding: ResolvedBinding) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
-        let inode_id = binding.child_inode_id();
-        let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
-            CommitValidationError::InodeMissing {
-                operand: CommitOperand::DeleteTarget,
-                inode_id,
-            },
-        )?;
         let deltas = vec![
-            unbind_delta(&mut self.numbering, &binding, &inode)?,
+            unbind_delta(&mut self.numbering, &binding)?,
             WalDelta::TombstoneSubtree {
                 delta_index: self.numbering.reserve_delta_index()?,
-                root_inode_id: inode.inode_id,
-                root_kind: inode.inode_kind,
+                root_inode_id: binding.child_inode_id(),
+                root_kind: binding.child_kind(),
                 deleted_binding: DeletedBinding {
                     parent_inode_id: binding.parent_inode_id(),
                     name_key: binding.name_key().clone(),
@@ -184,28 +176,23 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         let op_index = self.numbering.reserve_op_index()?;
         let new_parent_inode_id = destination.parent_inode_id();
         let inode_id = source_binding.child_inode_id();
-        let inode = self.view().inode_at_seq(inode_id).await?.ok_or(
-            CommitValidationError::InodeMissing {
-                operand: CommitOperand::RenameSource,
-                inode_id,
-            },
-        )?;
+        let inode_kind = source_binding.child_kind();
         self.ensure_child_unbound(inode_id, Some(source_binding.bind_position()))
             .await?;
-        self.ensure_rename_does_not_cycle(&inode, new_parent_inode_id)
+        self.ensure_rename_does_not_cycle(inode_id, inode_kind, new_parent_inode_id)
             .await?;
-        let revision = self.resolve_revision_summary(&inode).await?;
+        let revision = self.resolve_revision_summary(inode_id, inode_kind).await?;
         let deltas = vec![
-            unbind_delta(&mut self.numbering, &source_binding, &inode)?,
+            unbind_delta(&mut self.numbering, &source_binding)?,
             WalDelta::BindDirentry {
                 delta_index: self.numbering.reserve_delta_index()?,
                 parent_inode_id: new_parent_inode_id,
                 name_key: destination.name_key(),
                 display_name: destination.display_name().clone(),
                 child_inode_id: inode_id,
-                child_kind: inode.inode_kind,
-                child_created_by: inode.committed_by,
-                child_created_at_ms: inode.committed_at_ms,
+                child_kind: inode_kind,
+                child_created_by: source_binding.child_created_by().clone(),
+                child_created_at_ms: source_binding.child_created_at_ms(),
                 revision,
             },
         ];
@@ -235,7 +222,9 @@ impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
         )?;
         self.ensure_restorable_deletion(&deletion, deletion_seq)?;
         self.ensure_child_unbound(inode_id, None).await?;
-        let revision = self.resolve_revision_summary(&inode).await?;
+        let revision = self
+            .resolve_revision_summary(inode_id, inode.inode_kind)
+            .await?;
         let deltas = vec![
             WalDelta::RevokeSubtreeTombstone {
                 delta_index: self.numbering.reserve_delta_index()?,
@@ -338,7 +327,6 @@ fn revision_delta(
 fn unbind_delta(
     numbering: &mut CommitNumbering,
     binding: &ResolvedBinding,
-    inode: &InodeRecord,
 ) -> std::result::Result<WalDelta, CommitValidationError> {
     Ok(WalDelta::UnbindDirentry {
         delta_index: numbering.reserve_delta_index()?,
@@ -346,9 +334,9 @@ fn unbind_delta(
         name_key: binding.name_key().clone(),
         display_name: binding.display_name().clone(),
         child_inode_id: binding.child_inode_id(),
-        child_kind: inode.inode_kind,
-        child_created_by: inode.committed_by.clone(),
-        child_created_at_ms: inode.committed_at_ms,
+        child_kind: binding.child_kind(),
+        child_created_by: binding.child_created_by().clone(),
+        child_created_at_ms: binding.child_created_at_ms(),
         target: binding.bind_position(),
     })
 }
