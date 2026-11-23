@@ -78,9 +78,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// (format spec, "Creating and verifying a snapshot"), and returns the
     /// record with the version that its write stored.
     ///
-    /// The manifest comes from the segment cache, or from the store after a
-    /// check against the manifest boundary. If the manifest stopped being
-    /// current before the load or before the snapshot's verification, the call
+    /// The manifest comes from the segment cache or from the store. If a
+    /// collection deleted the manifest before the load, or the manifest
+    /// stopped being current before the snapshot's verification, the call
     /// returns `stale_head`, and the caller reads the namespace's head again
     /// and takes another snapshot.
     ///

@@ -130,30 +130,26 @@ pub(crate) async fn load_basis_metadata_segments<'a, S: ObjectStore + ?Sized>(
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads `manifest`, which a holder keeps by reference with the manifest
     /// boundary `kept`, through the segment cache, or returns `None` when the
-    /// manifest is at or below the boundary, so that the holder finds the
-    /// newest manifest from the start.
+    /// store doesn't have the manifest and the manifest is at or below the
+    /// boundary, so that the holder finds the newest manifest from the start.
     ///
-    /// A manifest in the segment cache is loaded without a request. Before a
-    /// manifest is read from the store, [`Self::above_boundary`] checks the
-    /// manifest against `kept`. A read that finds the manifest missing reads
-    /// the boundary again, and a missing manifest above the boundary is a
-    /// corrupt store.
+    /// A manifest in the segment cache is loaded without a request, and any
+    /// other manifest is read from the store. Neither load checks whether a
+    /// newer manifest replaced the manifest, so each caller finds that out
+    /// later, in the same way after either load. A manifest publication
+    /// reads the boundary after its put. A commit's WAL put is valid however
+    /// old its manifest is, and collides with the fence of any writer that
+    /// claimed the namespace since, because garbage collection never deletes
+    /// a fence. A snapshot is verified after its record is written, and an
+    /// operation that finds a segment missing checks whether the manifest is
+    /// still the current one. A read that finds the manifest missing reads
+    /// the boundary, and a missing manifest above the boundary is a corrupt
+    /// store.
     pub(crate) async fn load_held_manifest(
         &self,
         manifest: &ManifestRef,
         kept: KeptBoundary,
     ) -> crate::error::Result<Option<VerifiedMetadataSegments<'_, S>>> {
-        let object_key =
-            metadata_manifest_object(&manifest.owner_namespace_id, &manifest.manifest_no);
-        let kept = if self.segment_cache.holds_manifest(&object_key) {
-            kept
-        } else {
-            let (above, boundary) = self.above_boundary(manifest.manifest_no, kept).await?;
-            if !above {
-                return Ok(None);
-            }
-            boundary
-        };
         let loaded = load_manifest_segments(&self.store, Some(&self.segment_cache), manifest).await;
         if matches!(
             loaded,
@@ -197,7 +193,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Returns the manifest of a writer session's position as a basis that a
     /// publication can build on, with the position's check time and the
     /// manifest boundary that the position keeps, or `None` when the manifest
-    /// is at or below the boundary (see [`Self::load_held_manifest`]).
+    /// is missing from the store and at or below the boundary (see
+    /// [`Self::load_held_manifest`]).
     pub async fn load_position_basis(
         &self,
         position: &WriterPosition,

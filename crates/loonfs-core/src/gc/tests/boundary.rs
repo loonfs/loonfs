@@ -3,7 +3,8 @@
 //! raises it to retired to retire a deleted namespace.
 
 use super::*;
-use loonfs_objectstore::keys::boundary;
+use crate::wal::WalPublishError;
+use loonfs_objectstore::keys::{boundary, namespace_prefix};
 use loonfs_types::format::control::ManifestBoundary;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -451,9 +452,18 @@ async fn a_retired_boundary_stays_retired() {
 }
 
 /// Checks that a read, a commit through a writer session that committed
-/// before the deletion, a create with the ID, and a fork to the ID each
-/// return `namespace_deleted` once the namespace is retired, and that none
-/// of them writes anything.
+/// before the deletion, a create with the ID, and a fork to the ID each end
+/// in `namespace_deleted` once the namespace is retired, and that none of
+/// them stores anything.
+///
+/// The retiring collection leaves the session's manifest in the store, and
+/// the session's store caches no manifest, so the session's first publish
+/// reads that manifest and puts at the WAL number after its tip. The fence
+/// that the deletion wrote there refuses the put, so the first publish
+/// returns the collision, and the session's next publish loads the
+/// namespace from the store and returns `namespace_deleted`. A client sees
+/// only the second answer, because the runtime publishes a batch again
+/// after a collision.
 #[tokio::test]
 async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
     let directory = tempdir().expect("directory");
@@ -513,6 +523,8 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
         Some(ManifestBoundary::Retired {})
     );
 
+    let prefix = namespace_prefix(&target);
+    let objects = store.list_prefix(&prefix).await.expect("list the prefix");
     store.reset();
     assert_matches!(
         crate::test_support::namespace_store(&store, &target)
@@ -520,14 +532,21 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
             .await,
         Err(CoreError::NamespaceDeleted { .. })
     );
-    assert_matches!(
-        session
+    for expected_deleted in [false, true] {
+        let published = session
             .publish_batch(commit("after"), &eligible.clock())
             .await
             .results
-            .remove(0),
-        Err(CoreError::NamespaceDeleted { .. })
-    );
+            .remove(0);
+        if expected_deleted {
+            assert_matches!(published, Err(CoreError::NamespaceDeleted { .. }));
+        } else {
+            assert_matches!(
+                published,
+                Err(CoreError::WalPublish(WalPublishError::NumberTaken))
+            );
+        }
+    }
     assert_matches!(
         crate::test_support::NamespaceFixture::new(&store, &target, &setup)
             .create()
@@ -538,8 +557,13 @@ async fn every_request_to_a_retired_namespace_returns_namespace_deleted() {
         fixture.engine().find_fork_target(&target).await,
         Err(CoreError::NamespaceDeleted { .. })
     );
+    // The session's put is the one put, and the fence refused it.
     let counts = store.counts();
-    assert_eq!((counts.puts, counts.deletes), (0, 0));
+    assert_eq!((counts.puts, counts.deletes), (1, 0));
+    assert_eq!(
+        store.list_prefix(&prefix).await.expect("list the prefix"),
+        objects
+    );
 }
 
 /// Checks that the pool's collection keeps the content of a deleted first

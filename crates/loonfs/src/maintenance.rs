@@ -659,9 +659,9 @@ impl Maintenance {
     }
 
     /// Returns the manifest and the retention floor that a retention advance
-    /// plans from: this runtime's writer position when its manifest is above
-    /// the manifest boundary, and otherwise the current manifest and that
-    /// manifest's floor.
+    /// plans from: this runtime's writer position, or the current manifest
+    /// and its floor when the position's manifest is missing from the store
+    /// and at or below the manifest boundary (see [`Self::position_basis`]).
     async fn load_retention_view(
         &self,
         namespace_id: &NamespaceId,

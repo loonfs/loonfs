@@ -274,11 +274,12 @@ enum ViewSource<'a, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads the view that a batch publishes from. The view starts from
     /// `acquired_anchor` when the caller passes one, and otherwise from
-    /// `cached_position`, unless the position's manifest is at or below the
-    /// manifest boundary (see `load_held_manifest`). Without either, the
-    /// view starts from the namespace's current state in the store, found by
-    /// a discovery that began after `attempt`, an observation that the
-    /// caller read before the call.
+    /// `cached_position`, unless the position's manifest is missing from the
+    /// store and at or below the manifest boundary (see
+    /// `load_held_manifest`). Without either, the view starts from the
+    /// namespace's current state in the store, found by a discovery that
+    /// began after `attempt`, an observation that the caller read before the
+    /// call.
     pub(crate) async fn load_publish_metadata_view(
         &self,
         acquired_writer: AcquiredWriter,
