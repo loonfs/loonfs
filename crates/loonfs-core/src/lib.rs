@@ -169,7 +169,7 @@ pub mod cache {
 pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::manifest::NamespaceStatistics;
-    pub use crate::namespace::boundary::{higher_boundary, LoadedBoundary};
+    pub use crate::namespace::boundary::{KeptBoundary, LoadedBoundary};
     pub use crate::namespace::catalog::{
         ActiveNamespaceCatalogEntry, VerifiedNamespaceCatalogEntry,
     };
@@ -180,7 +180,7 @@ pub mod control {
     pub use crate::namespace::status::NamespaceStorageDiagnostics;
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::namespace::status::NamespaceWalTailUsage;
-    pub use crate::namespace::{MetadataBasis, PublicationBasis, ReadBasis, SnapshotReadBasis};
+    pub use crate::namespace::{Held, MetadataBasis, ReadBasis, SnapshotReadBasis};
     pub use crate::wal::probe_namespace_wal;
 }
 

@@ -1,7 +1,5 @@
-//! The manifest that reads and publications build on.
+//! The manifest and head that reads build on.
 
-use crate::namespace::boundary::LoadedBoundary;
-use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::control::ManifestRef;
 use loonfs_types::ManifestNo;
@@ -40,17 +38,3 @@ pub struct ReadBasis {
 /// whose head the snapshot's reads are authorized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotReadBasis(pub(crate) ReadBasis);
-
-/// A manifest that a publication builds on, and the manifest boundary as
-/// this process last read it.
-///
-/// A publication puts the basis's successor without a request first, and
-/// after its put it reads the boundary conditionally on `boundary` (format
-/// spec, "Publishing a manifest").
-#[derive(Debug, Clone)]
-pub struct PublicationBasis {
-    pub manifest: LoadedManifest,
-    /// The manifest boundary as last read, or `None` when no boundary object
-    /// existed or none has been read.
-    pub boundary: Option<LoadedBoundary>,
-}

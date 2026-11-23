@@ -1693,7 +1693,7 @@ async fn snapshot_creation_deletes_its_snapshot_when_the_floor_passed_its_manife
                 expires_at_ms: None,
                 deleted_at_ms: None,
             },
-            initial.publication_basis(),
+            initial.held().clone(),
             &context.clock(),
         )
         .await
@@ -1758,10 +1758,11 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
         .expect("load the snapshot's manifest")
         .expect("the snapshot's manifest exists");
     let verified = namespace
-        .verify_snapshot_basis(crate::namespace::basis::PublicationBasis {
-            manifest,
-            boundary: None,
-        })
+        .verify_snapshot_basis(
+            &manifest,
+            Default::default(),
+            crate::test_support::observed_now(),
+        )
         .await
         .expect("verification runs");
     assert_matches!(
@@ -1800,7 +1801,7 @@ async fn snapshot_basis_verification_store_failure_deletes_the_snapshot() {
                 expires_at_ms: None,
                 deleted_at_ms: None,
             },
-            initial.publication_basis(),
+            initial.held().clone(),
             &context.clock(),
         )
         .await

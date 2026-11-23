@@ -6,9 +6,11 @@ use crate::control_object::{
 };
 use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
-use crate::namespace::basis::PublicationBasis;
+use crate::namespace::boundary::KeptBoundary;
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
-use crate::time::OperationClock;
+use crate::time::{Observation, OperationClock};
 use bytes::Bytes;
 use loonfs_objectstore::keys::snapshot_record;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
@@ -162,25 +164,27 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .map_err(|error| CoreError::store(&object_key, &error))
     }
 
-    /// Checks that `basis`, the manifest of a snapshot that the call wrote,
-    /// is still the newest manifest of an active namespace.
+    /// Checks that `manifest`, the manifest of a snapshot that the call
+    /// wrote, is still the newest manifest of an active namespace.
     ///
     /// The call checks the status in the manifest that it has. It then checks
     /// that the manifest is still the newest, with a HEAD request for its
     /// successor and a read of the manifest boundary that is conditional on
-    /// `basis`'s boundary (see [`NamespaceStore::find_current_above`]).
-    /// `Verified` has the newest manifest with the boundary that the call
-    /// read.
+    /// `kept` (see [`NamespaceStore::find_current_above`]). `Verified` has the
+    /// newest manifest with the boundary that the call read, checked at
+    /// `observed`, an observation that the caller read before the call.
     pub(crate) async fn verify_snapshot_basis(
         &self,
-        basis: PublicationBasis,
+        manifest: &LoadedManifest,
+        kept: KeptBoundary,
+        observed: Observation,
     ) -> Result<SnapshotBasisVerification> {
-        if !basis.manifest.payload().status.is_active() {
+        if !manifest.payload().status.is_active() {
             return Ok(SnapshotBasisVerification::Invalid);
         }
-        let manifest_no = basis.manifest.payload().manifest_no;
-        let current = self.find_current_above(&basis).await?;
-        Ok(if current.manifest.payload().manifest_no != manifest_no {
+        let manifest_no = manifest.payload().manifest_no;
+        let current = self.find_current_above(manifest, kept, observed).await?;
+        Ok(if current.manifest().payload().manifest_no != manifest_no {
             SnapshotBasisVerification::Invalid
         } else {
             SnapshotBasisVerification::Verified(current)
@@ -193,7 +197,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 pub(crate) enum SnapshotBasisVerification {
     /// The snapshot's manifest is the newest manifest, with the manifest
     /// boundary that the verification read.
-    Verified(PublicationBasis),
+    Verified(Held<LoadedManifest>),
     Invalid,
 }
 

@@ -6,7 +6,7 @@ use crate::trace::phase_span;
 use crate::NamespaceId;
 use futures::future::BoxFuture;
 use loonfs_core::cache::{CachedHead, HeadAndWalTailCache, SharedCheck, WalTailCacheKey};
-use loonfs_core::control::{higher_boundary, LoadedBoundary};
+use loonfs_core::control::KeptBoundary;
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::time::Observation;
 use loonfs_core::Phase;
@@ -96,7 +96,7 @@ impl ReadPositionSlot {
             if current.basis_checked.age_ms() < position.basis_checked.age_ms() {
                 position.basis_checked = current.basis_checked.clone();
             }
-            position.boundary = higher_boundary(position.boundary, current.boundary.clone());
+            position.boundary = position.boundary.higher(current.boundary.clone());
         }
         Some(Arc::new(position))
     }
@@ -157,12 +157,7 @@ impl ReadPositionSlot {
     /// position's manifest is `manifest_no` or a later one, as
     /// [`Self::prepare`] explains, unless the position has a later check
     /// already.
-    fn record_check(
-        &self,
-        checked: Observation,
-        manifest_no: ManifestNo,
-        boundary: Option<LoadedBoundary>,
-    ) {
+    fn record_check(&self, checked: Observation, manifest_no: ManifestNo, boundary: KeptBoundary) {
         let Some(current) = self.current() else {
             return;
         };
@@ -173,7 +168,7 @@ impl ReadPositionSlot {
         }
         let updated = Arc::new(WriterPosition {
             basis_checked: checked,
-            boundary: higher_boundary(current.boundary.clone(), boundary),
+            boundary: current.boundary.clone().higher(boundary),
             ..WriterPosition::clone(&current)
         });
         let mut slot = self.lock();
@@ -260,7 +255,7 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
         checked: Observation,
         manifest_no: ManifestNo,
-        boundary: Option<LoadedBoundary>,
+        boundary: KeptBoundary,
     ) -> Option<Arc<WriterPosition>> {
         let slot = self
             .inner

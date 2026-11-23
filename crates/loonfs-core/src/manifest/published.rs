@@ -4,7 +4,7 @@
 //! of an earlier one.
 
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
-use crate::namespace::boundary::LoadedBoundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::state::NamespaceReadState;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
@@ -37,15 +37,15 @@ pub struct PublishedManifest {
     pub started: Option<Observation>,
     /// The manifest boundary that the call read after it published the
     /// manifest or found it current, which a position or a cached head that
-    /// moves onto the manifest keeps. `None` when the call read none.
-    pub boundary: Option<LoadedBoundary>,
+    /// moves onto the manifest keeps.
+    pub boundary: KeptBoundary,
 }
 
 impl PublishedManifest {
     pub(crate) fn new(
         manifest: &NamespaceManifestEnvelope,
         started: Option<Observation>,
-        boundary: Option<LoadedBoundary>,
+        boundary: KeptBoundary,
     ) -> Self {
         let payload = manifest.payload();
         Self {

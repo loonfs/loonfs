@@ -10,8 +10,8 @@ use crate::limits::{MAX_CONTENTION_ATTEMPTS, METADATA_COMPACTION_BUDGET_MS};
 use crate::manifest::fold::{next_run_no_after, no_manifest_after};
 use crate::manifest::publish::{ManifestChange, ManifestUpdate};
 use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
-use crate::namespace::PublicationBasis;
 use crate::segment::runs::{runs_newest_first, MetadataRunManifest};
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -49,7 +49,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// of the potentially long rebuild.
     pub(crate) async fn finalize_metadata_compaction(
         &self,
-        basis: Option<PublicationBasis>,
+        basis: Option<Held<LoadedManifest>>,
         spec: &MetadataCompactionSpec,
         input_keys: &BTreeSet<String>,
         result: GroupCompactionReport,

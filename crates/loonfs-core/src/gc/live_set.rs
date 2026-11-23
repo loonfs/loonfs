@@ -13,6 +13,7 @@ use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::GC_GRACE_WINDOW_MS;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use crate::wal::wal_no_is_unfolded;
@@ -73,12 +74,14 @@ impl LiveSet {
         let current = match namespace.find_newest_manifest().await? {
             NewestManifest::Absent => return Err(namespace.namespace_not_found()),
             NewestManifest::Retired => return Ok(None),
-            NewestManifest::Manifest(current) => current,
+            NewestManifest::Manifest(current, boundary) => {
+                Held::new(current, clock.origin(), boundary)
+            }
         };
-        let found = NamespaceRoots::new(namespace, current.manifest.payload(), now_ms).status;
+        let found = NamespaceRoots::new(namespace, current.manifest().payload(), now_ms).status;
         let current = match found {
             RetirementStatus::Initializing { tombstone_at_ms } if now_ms >= tombstone_at_ms => {
-                let created_at_ms = current.manifest.payload().created_at_ms;
+                let created_at_ms = current.manifest().payload().created_at_ms;
                 let update = namespace
                     .tombstone_initializing_namespace(current, clock)
                     .await?;
@@ -93,7 +96,7 @@ impl LiveSet {
             }
             _ => current,
         };
-        let head = current.manifest.payload();
+        let head = current.manifest().payload();
         let roots = NamespaceRoots::new(namespace, head, now_ms);
         let mut live = Self {
             current_tombstone: roots.status.is_deleted().then(|| head.clone()),
@@ -108,7 +111,7 @@ impl LiveSet {
             live_folded_wal_no: (!roots.status.is_deleted()).then_some(head.folded_wal_no),
         };
         let outcome = async {
-            protect_manifest(&mut live.objects, &current.manifest)?;
+            protect_manifest(&mut live.objects, current.manifest())?;
             live.load_snapshots(&roots).await
         }
         .await;

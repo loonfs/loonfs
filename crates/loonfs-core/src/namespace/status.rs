@@ -37,7 +37,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let tail = crate::manifest::load::metadata_basis_from_manifest(
             &self.store,
             None,
-            &loaded.manifest,
+            loaded.current_manifest(),
         )
         .project_tail(&loaded)?;
         Ok(NamespaceWalTailUsage {
@@ -55,7 +55,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await?;
         Ok(namespace_metadata(
             anchor.read_state,
-            anchor.manifest.payload(),
+            anchor.held.manifest().payload(),
         ))
     }
 
@@ -149,7 +149,7 @@ impl From<&NamespaceReadAnchor> for NamespaceStorageDiagnostics {
             fork_basis: fork_basis(head.fork_basis.clone()),
             head_seq: head.seq,
             retention_floor_seq: anchor.retention_floor_seq(),
-            current_manifest_no: anchor.manifest.manifest().manifest_no,
+            current_manifest_no: anchor.current_manifest().manifest().manifest_no,
             wal_tail_objects: head.unfolded_wal_objects(),
             wal_tail_newest_commit_at_ms: anchor.tail.newest_commit_at_ms(),
         }

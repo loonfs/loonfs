@@ -621,15 +621,14 @@ impl Maintenance {
     ) -> Result<(LoadedManifest, CommitSeq)> {
         if let Some(position) = self.publisher.current_position(namespace_id) {
             if let Some(basis) = self.position_basis(namespace_id, &position).await? {
-                return Ok((basis.manifest, position.retention_floor_seq()));
+                return Ok((basis.into_manifest(), position.retention_floor_seq()));
             }
         }
         let current = self
             .core
             .namespace_store(namespace_id)
-            .load_current_basis()
-            .await?
-            .manifest;
+            .load_current_manifest()
+            .await?;
         let retention_floor_seq = current.retention_floor_seq();
         Ok((current, retention_floor_seq))
     }

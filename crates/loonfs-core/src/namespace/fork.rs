@@ -16,8 +16,9 @@ use crate::manifest::load_namespace_manifest_envelope;
 use crate::manifest::publish::ExistingNamespace;
 use crate::manifest::ForkPointTail;
 use crate::merge::merge_start;
-use crate::namespace::basis::PublicationBasis;
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::control::NewestManifest;
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::snapshot::ensure_live;
 use crate::snapshot::record::write_snapshot_record;
@@ -170,9 +171,9 @@ pub struct ForkTarget {
 
 /// A fork whose manifest 1 this call published.
 struct StartedFork<'a, S: ObjectStore> {
-    manifest_1: PublicationBasis,
+    manifest_1: Held<LoadedManifest>,
     /// The source's newest manifest as the call read it.
-    source: PublicationBasis,
+    source: Held<LoadedManifest>,
     /// The source's head, when the fork folds its WAL tail into manifest 2.
     head: Option<ManifestProjection<'a, S>>,
     deadline: ForkDeadline,
@@ -191,7 +192,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let target = self.namespace.with_namespace(new_namespace_id.clone());
         let initializing = match target.find_existing_namespace().await? {
             None => false,
-            Some(ExistingNamespace::Initializing(_)) => true,
+            Some(ExistingNamespace::Initializing(..)) => true,
             Some(ExistingNamespace::Active) => {
                 return Err(CoreError::NamespaceExists {
                     namespace_id: new_namespace_id.clone(),
@@ -325,7 +326,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let new_namespace_id = &target.namespace_id;
         let target_store = self.namespace.with_namespace(new_namespace_id.clone());
         let newest = if target.initializing {
-            load_initializing_target(&target_store).await?
+            load_initializing_target(&target_store, &clock).await?
         } else {
             match self
                 .publish_fork_manifest_1(&target_store, actor_id, &at, &clock)
@@ -358,7 +359,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                         .map(ForkOutcome::Created);
                 }
                 Err(CoreError::NamespaceExists { .. }) => {
-                    load_initializing_target(&target_store).await?
+                    load_initializing_target(&target_store, &clock).await?
                 }
                 Err(error) => return Err(error),
             }
@@ -386,14 +387,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     async fn finish_initializing_fork(
         &self,
         target: &NamespaceStore<&S>,
-        newest: PublicationBasis,
+        newest: Held<LoadedManifest>,
         at: &ForkAt<'_>,
         clock: &OperationClock,
     ) -> Result<NamespaceMetadata> {
         let fork_basis = self
-            .ensure_fork_request_matches(newest.manifest.payload(), at)?
+            .ensure_fork_request_matches(newest.manifest().payload(), at)?
             .clone();
-        let source = self.namespace.load_current_basis().await?;
+        let source = self.namespace.load_current_basis(clock.origin()).await?;
         // The call that wrote manifest 1 found the snapshot of step 2 live
         // after it started, and the budget of the fork snapshot write runs
         // from that observation. This call made no such observation, so it
@@ -406,12 +407,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, clock)
             .await?;
         let deadline = ForkDeadline::new(&fork_basis, &snapshot);
-        let newest = if newest.manifest.payload().manifest_no == ManifestNo(1)
-            && fork_basis.fork_point_seq > newest.manifest.payload().head_seq
+        let newest = if newest.manifest().payload().manifest_no == ManifestNo(1)
+            && fork_basis.fork_point_seq > newest.manifest().payload().head_seq
         {
             let tail = self
                 .namespace
-                .load_fork_point_tail(&fork_basis, source.manifest.payload().writer_epoch)
+                .load_fork_point_tail(&fork_basis, source.manifest().payload().writer_epoch)
                 .await?;
             target
                 .publish_fork_point_manifest(newest, &tail, &deadline, clock)
@@ -434,12 +435,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     async fn finish_fork(
         &self,
         target: &NamespaceStore<&S>,
-        newest: PublicationBasis,
-        source: PublicationBasis,
+        newest: Held<LoadedManifest>,
+        source: Held<LoadedManifest>,
         deadline: &ForkDeadline,
         clock: &OperationClock,
     ) -> Result<NamespaceMetadata> {
-        let payload = newest.manifest.payload();
+        let payload = newest.manifest().payload();
         if payload.status.is_active() {
             target.install_active_head(&newest, clock.origin());
             return Ok(crate::namespace::status::created_namespace(payload));
@@ -457,20 +458,22 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             // Another call that finished the fork may have used the same fork
             // snapshot, so the call deletes nothing.
             return match target.find_newest_manifest().await {
-                Ok(NewestManifest::Manifest(current))
-                    if current.manifest.payload().status.is_active() =>
+                Ok(NewestManifest::Manifest(current, boundary))
+                    if current.payload().status.is_active() =>
                 {
-                    target.install_active_head(&current, clock.origin());
-                    Ok(crate::namespace::status::created_namespace(
-                        current.manifest.payload(),
-                    ))
+                    let created = crate::namespace::status::created_namespace(current.payload());
+                    target.install_active_head(
+                        &Held::new(current, clock.origin(), boundary),
+                        clock.origin(),
+                    );
+                    Ok(created)
                 }
                 _ => Err(error),
             };
         }
         let active = target.publish_active_manifest(newest, clock).await?;
         Ok(crate::namespace::status::created_namespace(
-            active.manifest.payload(),
+            active.manifest().payload(),
         ))
     }
 
@@ -499,7 +502,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 (built_from, source, Some(head))
             }
             ForkAt::Snapshot(snapshot_id) => {
-                let source = self.namespace.load_current_basis().await?;
+                let source = self.namespace.load_current_basis(clock.origin()).await?;
                 let built_from = self
                     .namespace
                     .load_snapshot_fork_basis(snapshot_id, &source, clock)
@@ -515,8 +518,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         // copies the manifest that the call holds. A fork of an older user
         // snapshot reads the snapshot's manifest.
         let source_manifest =
-            if source.manifest.payload().manifest_no == built_from.snapshot_id.manifest_no() {
-                source.manifest.envelope().clone()
+            if source.manifest().payload().manifest_no == built_from.snapshot_id.manifest_no() {
+                source.manifest().envelope().clone()
             } else {
                 Arc::new(
                     load_namespace_manifest_envelope(
@@ -589,7 +592,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         mut held: Option<WriterPosition>,
         clock: &OperationClock,
-    ) -> Result<Option<(SnapshotPayload, PublicationBasis, ManifestProjection<'_, S>)>> {
+    ) -> Result<
+        Option<(
+            SnapshotPayload,
+            Held<LoadedManifest>,
+            ManifestProjection<'_, S>,
+        )>,
+    > {
         let expires_at_ms = clock
             .request_at_ms()
             .saturating_add(OPERATION_SNAPSHOT_TTL_MS);
@@ -609,7 +618,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 .create_verified_snapshot_record(
                     None,
                     Some(expires_at_ms),
-                    head.publication_basis(),
+                    head.held.manifest(),
+                    head.held.boundary().clone(),
                     clock,
                 )
                 .await
@@ -679,7 +689,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     async fn write_fork_snapshot(
         &self,
         fork: &NamespaceManifestPayload,
-        source: PublicationBasis,
+        source: Held<LoadedManifest>,
         deadline: &ForkDeadline,
         clock: &OperationClock,
     ) -> Result<()> {
@@ -703,7 +713,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             clock,
         )
         .await?;
-        let source = self.namespace.find_current_above(&source).await?;
+        let source = self
+            .namespace
+            .find_current_above(source.manifest(), source.boundary().clone(), clock.origin())
+            .await?;
         self.namespace
             .load_snapshot_fork_basis(&fork_basis.forked_from_snapshot_id, &source, clock)
             .await?;
@@ -720,9 +733,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 /// `namespace_deleted` for a tombstone or a retired ID.
 async fn load_initializing_target<S: ObjectStore>(
     target: &NamespaceStore<S>,
-) -> Result<PublicationBasis> {
+    clock: &OperationClock,
+) -> Result<Held<LoadedManifest>> {
     match target.find_existing_namespace().await? {
-        Some(ExistingNamespace::Initializing(newest)) => Ok(newest),
+        Some(ExistingNamespace::Initializing(newest, boundary)) => {
+            Ok(Held::new(newest, clock.origin(), boundary))
+        }
         Some(ExistingNamespace::Active) => Err(CoreError::NamespaceExists {
             namespace_id: target.namespace_id().clone(),
         }),
@@ -779,10 +795,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// (`NamespaceRoots::missing_manifest` in `gc/roots.rs`).
     pub(crate) async fn write_fork_point_snapshot(
         &self,
-        newest: &PublicationBasis,
+        newest: &Held<LoadedManifest>,
         clock: &OperationClock,
     ) -> Result<()> {
-        let payload = newest.manifest.payload();
+        let payload = newest.manifest().payload();
         let fork_basis = payload
             .fork_basis
             .as_ref()
@@ -792,7 +808,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             payload.manifest_no,
             "the fork point snapshot is on the fork's manifest at the fork point"
         );
-        let manifest = newest.manifest.manifest();
+        let manifest = newest.manifest().manifest();
         write_snapshot_record(
             &self.store,
             &SnapshotPayload {
@@ -817,10 +833,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     async fn load_snapshot_fork_basis(
         &self,
         snapshot_id: &SnapshotId,
-        source: &PublicationBasis,
+        source: &Held<LoadedManifest>,
         clock: &OperationClock,
     ) -> Result<SnapshotPayload> {
-        let source = source.manifest.payload();
+        let source = source.manifest().payload();
         crate::namespace::control::ensure_namespace_live(&source.namespace_id, source.status)?;
         let snapshot = self.load_user_snapshot(snapshot_id).await?;
         Ok(ensure_live(snapshot, clock.now_ms())?.state)

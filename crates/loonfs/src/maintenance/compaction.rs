@@ -9,7 +9,7 @@ use crate::{Error, Result};
 use crate::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, NamespaceId, SharedObjectStore,
 };
-use loonfs_core::control::{ensure_namespace_live, PublicationBasis};
+use loonfs_core::control::{ensure_namespace_live, Held, LoadedManifest};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::{CoreError, MetadataCompactionCancellation, Phase};
 use loonfs_types::CompactorEpoch;
@@ -81,13 +81,13 @@ impl Maintenance {
     pub(super) async fn load_live_basis(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<PublicationBasis> {
+    ) -> Result<Held<LoadedManifest>> {
         let basis = self
             .core
             .namespace_store(namespace_id)
-            .load_current_basis()
+            .load_current_basis(self.core.observation())
             .await?;
-        ensure_namespace_live(namespace_id, basis.manifest.payload().status)?;
+        ensure_namespace_live(namespace_id, basis.manifest().payload().status)?;
         Ok(basis)
     }
 
@@ -98,7 +98,7 @@ impl Maintenance {
     pub(super) async fn load_position_basis(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<Option<PublicationBasis>> {
+    ) -> Result<Option<Held<LoadedManifest>>> {
         match self.publisher.current_position(namespace_id) {
             Some(position) => self.position_basis(namespace_id, &position).await,
             None => Ok(None),
@@ -115,7 +115,7 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         position: &WriterPosition,
-    ) -> Result<Option<PublicationBasis>> {
+    ) -> Result<Option<Held<LoadedManifest>>> {
         let basis = self
             .core
             .namespace_store(namespace_id)
@@ -148,7 +148,7 @@ impl Maintenance {
     pub(crate) async fn compact_namespace(
         &self,
         namespace_id: &NamespaceId,
-        mut observed: Option<PublicationBasis>,
+        mut observed: Option<Held<LoadedManifest>>,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<MetadataMaintenanceResponse> {
         let closed = self.publisher.session_compaction_cancellation(namespace_id);
@@ -215,8 +215,8 @@ impl Maintenance {
     pub(crate) async fn compactor_epoch(
         &self,
         namespace_id: &NamespaceId,
-        basis: Option<PublicationBasis>,
-    ) -> Result<(CompactorEpoch, Option<PublicationBasis>)> {
+        basis: Option<Held<LoadedManifest>>,
+    ) -> Result<(CompactorEpoch, Option<Held<LoadedManifest>>)> {
         let turns = self.publisher.namespace_turns(namespace_id);
         let turn = turns.compaction.lock().await;
         self.compactor_epoch_with_turn(namespace_id, basis, &turn)
@@ -226,9 +226,9 @@ impl Maintenance {
     async fn compactor_epoch_with_turn(
         &self,
         namespace_id: &NamespaceId,
-        basis: Option<PublicationBasis>,
+        basis: Option<Held<LoadedManifest>>,
         _turn: &tokio::sync::MutexGuard<'_, ()>,
-    ) -> Result<(CompactorEpoch, Option<PublicationBasis>)> {
+    ) -> Result<(CompactorEpoch, Option<Held<LoadedManifest>>)> {
         if let Some(epoch) = self.claimed_compactor_epoch(namespace_id) {
             return Ok((epoch, basis));
         }
@@ -242,7 +242,7 @@ impl Maintenance {
                 .record_manifest_published(namespace_id, published)
                 .await;
         }
-        let epoch = claimed.response.manifest.compactor_epoch();
+        let epoch = claimed.response.manifest().compactor_epoch();
         self.writer
             .compactor_epochs
             .lock()
@@ -282,8 +282,8 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         claimed: Option<CompactorEpoch>,
-        observed: Option<PublicationBasis>,
-    ) -> Result<ControlFlow<MetadataCompactionOutcome, Option<PublicationBasis>>> {
+        observed: Option<Held<LoadedManifest>>,
+    ) -> Result<ControlFlow<MetadataCompactionOutcome, Option<Held<LoadedManifest>>>> {
         let (basis, from_position) = match observed {
             Some(basis) => (basis, false),
             None => match self.load_position_basis(namespace_id).await? {
@@ -312,7 +312,7 @@ impl Maintenance {
             }
         } else {
             let namespace = self.core.namespace_store(namespace_id);
-            let manifest_no = basis.manifest.manifest().manifest_no;
+            let manifest_no = basis.manifest().manifest().manifest_no;
             if namespace
                 .manifest_has_successor(manifest_no)
                 .await
@@ -321,15 +321,14 @@ impl Maintenance {
                 self.load_live_basis(namespace_id).await?
             } else {
                 let (above, boundary) = namespace
-                    .above_boundary(manifest_no, basis.boundary.clone())
+                    .above_boundary(manifest_no, basis.boundary().clone())
                     .await?;
                 if !above {
                     self.load_live_basis(namespace_id).await?
                 } else {
-                    return Ok(ControlFlow::Continue(Some(PublicationBasis {
-                        boundary,
-                        ..basis
-                    })));
+                    let mut basis = basis;
+                    basis.raise_boundary(boundary);
+                    return Ok(ControlFlow::Continue(Some(basis)));
                 }
             }
         };
@@ -346,15 +345,15 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         claimed: Option<CompactorEpoch>,
-        basis: PublicationBasis,
-    ) -> ControlFlow<MetadataCompactionOutcome, Option<PublicationBasis>> {
-        if let Some(epoch) = claimed.filter(|epoch| *epoch != basis.manifest.compactor_epoch()) {
+        basis: Held<LoadedManifest>,
+    ) -> ControlFlow<MetadataCompactionOutcome, Option<Held<LoadedManifest>>> {
+        if let Some(epoch) = claimed.filter(|epoch| *epoch != basis.manifest().compactor_epoch()) {
             self.forget_fenced_compactor_epoch(namespace_id, epoch);
             return ControlFlow::Break(MetadataCompactionOutcome::Fenced);
         }
         if !self
             .engine(namespace_id)
-            .metadata_compaction_due(&basis.manifest)
+            .metadata_compaction_due(basis.manifest())
         {
             return ControlFlow::Break(MetadataCompactionOutcome::NotNeeded);
         }
@@ -390,7 +389,7 @@ impl Maintenance {
     pub(crate) async fn compact_once(
         &self,
         namespace_id: &NamespaceId,
-        observed: Option<PublicationBasis>,
+        observed: Option<Held<LoadedManifest>>,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<MetadataCompactionOutcome> {
         if cancellation.is_cancelled() {
@@ -429,7 +428,7 @@ impl Maintenance {
         // from. The writer position moves onto that claim, so the unit plans
         // from the position, or loads the current manifest itself.
         let in_epoch =
-            |basis: &PublicationBasis| basis.manifest.compactor_epoch() == compactor_epoch;
+            |basis: &Held<LoadedManifest>| basis.manifest().compactor_epoch() == compactor_epoch;
         let basis = match basis.filter(in_epoch) {
             Some(basis) => Some(basis),
             None => self

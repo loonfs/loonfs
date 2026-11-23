@@ -7,7 +7,7 @@ use super::worker::elapsed_ms_from;
 use super::{NamespacePublisher, PublisherRegistry};
 use crate::trace::phase_span;
 use crate::{CoreError, Error, FoldWalOutcome, NamespaceId, Result};
-use loonfs_core::control::{NamespaceStorageDiagnostics, PublicationBasis};
+use loonfs_core::control::{Held, LoadedManifest, NamespaceStorageDiagnostics};
 use loonfs_core::limits::{FOLD_AT_WAL_BYTES, MAX_CONTENTION_ATTEMPTS};
 use loonfs_core::publish::WriterPosition;
 use loonfs_core::time::OperationClock;
@@ -111,7 +111,7 @@ pub(crate) enum NamespaceFold {
         idle_fold_due_at_ms: Option<u64>,
         /// The current manifest, when the check loaded it from the store,
         /// for a compaction unit to plan from.
-        observed: Option<PublicationBasis>,
+        observed: Option<Held<LoadedManifest>>,
     },
     /// The call folded the tail, or found it folded.
     Folded(Box<FoldedWalTail>),
@@ -257,7 +257,7 @@ impl PublisherRegistry {
     pub(crate) async fn snapshot_after_fold<T, SnapshotFuture>(
         &self,
         namespace_id: &NamespaceId,
-        mut create: impl FnMut(PublicationBasis) -> SnapshotFuture,
+        mut create: impl FnMut(Held<LoadedManifest>) -> SnapshotFuture,
     ) -> Result<T>
     where
         SnapshotFuture: Future<Output = loonfs_core::Result<T>>,
@@ -285,7 +285,7 @@ impl PublisherRegistry {
         namespace_id: &NamespaceId,
         turns: &'a NamespaceTurns,
         arrival: u64,
-    ) -> Result<(PublicationBasis, RwLockReadGuard<'a, ()>)> {
+    ) -> Result<(Held<LoadedManifest>, RwLockReadGuard<'a, ()>)> {
         let shared = turns.fold.read().await;
         if let Some(folded) = turns.folded_after(arrival) {
             return Ok((folded.basis, shared));
@@ -356,7 +356,7 @@ impl PublisherRegistry {
                     anchor.wal_tail_bytes(),
                     status.wal_tail_newest_commit_at_ms,
                     core.now_ms(),
-                    Some(anchor.publication_basis()),
+                    Some(anchor.held().clone()),
                 )
             }
         };

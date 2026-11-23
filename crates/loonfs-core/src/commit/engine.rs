@@ -8,9 +8,9 @@ use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
 use crate::manifest::retention::verify_manifest_segments_exist;
 use crate::manifest::{FloorObjectReport, ManifestLoadError, PublishedManifest};
-use crate::namespace::boundary::higher_boundary;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
 use crate::namespace::delete::TombstoneOutcome;
+use crate::namespace::held::Held;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
@@ -229,7 +229,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             state.invalidate_projection();
             return;
         }
-        position.boundary = higher_boundary(position.boundary.take(), manifest.boundary);
+        position.boundary = std::mem::take(&mut position.boundary).higher(manifest.boundary);
         let Some(started) = manifest.started else {
             return;
         };
@@ -286,12 +286,13 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         {
             Ok(acquired_writer) => acquired_writer,
             Err(error @ CoreError::NamespaceNotFound { .. }) => {
-                let NewestManifest::Manifest(current) =
+                let NewestManifest::Manifest(current, boundary) =
                     self.namespace.find_newest_manifest().await?
                 else {
                     return Err(error);
                 };
-                let payload = current.manifest.payload();
+                let current = Held::new(current, clock.origin(), boundary);
+                let payload = current.manifest().payload();
                 if !matches!(payload.status, NamespaceStatus::Initializing {}) {
                     return Err(error);
                 }

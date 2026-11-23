@@ -12,8 +12,8 @@ use crate::gc::roots::{
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::in_flight::POOL_MEMBER_READS_IN_FLIGHT;
 use crate::limits::POOL_ROOTS_READ_BUDGET_MS;
-use crate::namespace::basis::PublicationBasis;
 use crate::namespace::control::{LoadedManifest, NewestManifest};
+use crate::namespace::held::Held;
 use crate::namespace::read_anchor::project_anchor_tail;
 use crate::namespace::store::NamespaceStore;
 use crate::pool_store::PoolStore;
@@ -341,16 +341,17 @@ async fn load_member_roots<S: ObjectStore>(
 ) -> Result<Option<RetirementStatus>> {
     let observed = Observation::now(Arc::clone(&member.timer));
     let reason = match member.find_newest_manifest().await? {
-        NewestManifest::Manifest(current) if current.manifest.payload().pool_id == *pool_id => {
-            let found = NamespaceRoots::new(member, current.manifest.payload(), now_ms).status;
+        NewestManifest::Manifest(current, boundary) if current.payload().pool_id == *pool_id => {
+            let found = NamespaceRoots::new(member, current.payload(), now_ms).status;
             let status = if matches!(found, RetirementStatus::Initializing { .. }) {
                 found
             } else {
-                read_member_roots(member, current, observed, now_ms, roots).await?
+                let current = Held::new(current, observed, boundary);
+                read_member_roots(member, current, now_ms, roots).await?
             };
             return Ok(Some(status));
         }
-        NewestManifest::Manifest(_) => "other_pool",
+        NewestManifest::Manifest(..) => "other_pool",
         NewestManifest::Retired => "retired",
         NewestManifest::Absent => "absent",
     };
@@ -360,10 +361,11 @@ async fn load_member_roots<S: ObjectStore>(
     Ok(None)
 }
 
-/// Adds to `roots` the content IDs of the WAL tail above `current`, the
-/// layout segments of the current manifest while its view is a root, and the
-/// layout segments of the manifests that the member's snapshots keep, and
-/// returns the member's retirement status.
+/// Adds to `roots` the content IDs of the WAL tail above `current` (the
+/// manifest that the member's discovery found), the layout segments of the
+/// current manifest while its view is a root, and the layout segments of the
+/// manifests that the member's snapshots keep, and returns the member's
+/// retirement status.
 ///
 /// A deleted member stays a member until its boundary is retired. The
 /// tombstone's own view stops being a root at the retirement deadline, and
@@ -376,15 +378,12 @@ async fn load_member_roots<S: ObjectStore>(
 /// collection deletes them.
 async fn read_member_roots<S: ObjectStore>(
     member: &NamespaceStore<S>,
-    current: PublicationBasis,
-    observed: Observation,
+    current: Held<LoadedManifest>,
     now_ms: u64,
     roots: &Mutex<SharedRoots<'_>>,
 ) -> Result<RetirementStatus> {
-    let anchor = member
-        .load_read_anchor_from_manifest(current.manifest, current.boundary, observed, None)
-        .await?;
-    let member_roots = NamespaceRoots::new(member, anchor.manifest.payload(), now_ms);
+    let anchor = member.load_read_anchor_from_manifest(current, None).await?;
+    let member_roots = NamespaceRoots::new(member, anchor.current_manifest().payload(), now_ms);
     // A tombstone's runs cover its whole WAL, so it has no tail.
     if member_roots.status == RetirementStatus::Active {
         let tail = project_anchor_tail(&member.store, &member.segment_cache, &anchor)?;
@@ -412,7 +411,7 @@ async fn read_member_roots<S: ObjectStore>(
     }
     drop(snapshots);
     if member_roots.status.current_view_is_root() {
-        protect_layout_segments(&anchor.manifest, roots)?;
+        protect_layout_segments(anchor.current_manifest(), roots)?;
     }
     Ok(member_roots.status)
 }

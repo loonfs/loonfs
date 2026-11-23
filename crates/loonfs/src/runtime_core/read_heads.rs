@@ -15,7 +15,7 @@ use crate::{Consistency, CoreError, NamespaceId, SnapshotId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
-    project_anchor_tail, ActiveNamespaceCatalogEntry, NamespaceReadAnchor, PublicationBasis,
+    project_anchor_tail, ActiveNamespaceCatalogEntry, Held, LoadedManifest, NamespaceReadAnchor,
     ReadBasis, SnapshotReadBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::limits::READ_REVALIDATION_BOUND_MS;
@@ -204,7 +204,7 @@ impl RuntimeCore {
         }
         let above;
         (above, head.boundary) = namespace
-            .above_boundary(manifest_no, head.boundary.take())
+            .above_boundary(manifest_no, std::mem::take(&mut head.boundary))
             .await?;
         Ok(above)
     }
@@ -385,14 +385,14 @@ impl RuntimeCore {
         &self,
         namespace_id: &NamespaceId,
         created: &CreatedSnapshot,
-        verified: PublicationBasis,
+        verified: Held<LoadedManifest>,
         checked: Observation,
     ) -> Result<PinnedRead> {
         let checked_position = self.record_writer_position_check(
             namespace_id,
             checked,
-            verified.manifest.payload().manifest_no,
-            verified.boundary,
+            verified.manifest().payload().manifest_no,
+            verified.boundary().clone(),
         );
         let live = match checked_position {
             Some(position) => {
@@ -486,7 +486,7 @@ impl RuntimeCore {
 /// Returns the head that a load observed at `observed` read, with both its
 /// manifest check and its head confirmed at that observation.
 fn cached_head(anchor: NamespaceReadAnchor, observed: Observation) -> CachedHead {
-    let boundary = anchor.boundary();
+    let boundary = anchor.held().boundary().clone();
     CachedHead {
         read_basis: ReadBasis {
             basis: anchor.basis(),

@@ -27,26 +27,54 @@ impl HeapBytes for LoadedBoundary {
     }
 }
 
-/// Returns the higher of two boundaries of one namespace, or the one that's
-/// an object when the other is `None`.
-pub fn higher_boundary(
-    left: Option<LoadedBoundary>,
-    right: Option<LoadedBoundary>,
-) -> Option<LoadedBoundary> {
-    match right {
-        Some(right) if !reaches(left.as_ref(), right.state.boundary) => Some(right),
-        right => left.or(right),
+/// The manifest boundary object that this process last read, or nothing when
+/// the process keeps no boundary object.
+///
+/// A process keeps nothing when its last read found no boundary object, and
+/// also before it has read one. Both cases behave the same way. Nothing kept
+/// is below every manifest number, so the next check of a manifest reads the
+/// boundary object with an unconditional read. When the process keeps an
+/// object, that read is conditional on the object's ETag, and the check skips
+/// the read when the kept boundary is already at or above the manifest's
+/// number (see [`NamespaceStore::above_boundary`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeptBoundary(Option<LoadedBoundary>);
+
+impl KeptBoundary {
+    /// Returns the boundary object that the process keeps, or `None` when it
+    /// keeps nothing.
+    pub(crate) fn object(&self) -> Option<&LoadedBoundary> {
+        self.0.as_ref()
+    }
+
+    /// Returns whether manifest `manifest_no` is at or below this boundary. A
+    /// retired boundary is above every manifest number, and nothing kept is
+    /// below every manifest number.
+    pub(crate) fn covers(&self, manifest_no: ManifestNo) -> bool {
+        reaches(self.object(), ManifestBoundary::Manifest { manifest_no })
+    }
+
+    /// Returns the higher of this boundary and `other`, two boundaries of one
+    /// namespace. Because the boundary only rises, the higher one is the
+    /// newer.
+    pub fn higher(self, other: Self) -> Self {
+        match other.0 {
+            Some(other) if !reaches(self.object(), other.state.boundary) => Self(Some(other)),
+            _ => self,
+        }
     }
 }
 
-/// Returns whether manifest `manifest_no` is at or below `boundary`. A
-/// missing boundary object is at 0, and a retired boundary is above every
-/// manifest number.
-pub(crate) fn at_or_below_boundary(
-    manifest_no: ManifestNo,
-    boundary: Option<&LoadedBoundary>,
-) -> bool {
-    reaches(boundary, ManifestBoundary::Manifest { manifest_no })
+impl From<Option<LoadedBoundary>> for KeptBoundary {
+    fn from(loaded: Option<LoadedBoundary>) -> Self {
+        Self(loaded)
+    }
+}
+
+impl HeapBytes for KeptBoundary {
+    fn heap_bytes(&self) -> usize {
+        self.0.heap_bytes()
+    }
 }
 
 /// Returns whether `boundary` is at or above `target`, where a missing
@@ -110,14 +138,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// When `last` is an object, the call reads the object only if its ETag
     /// isn't the one that `last` has, and returns `last` when it is. A
     /// boundary object that `last` found and that's now missing is a corrupt
-    /// store, because nothing deletes the object. When `last` is `None`, the
-    /// call loads the boundary.
+    /// store, because nothing deletes the object. When `last` keeps nothing,
+    /// the call loads the boundary.
     pub(crate) async fn reload_boundary(
         &self,
-        last: Option<LoadedBoundary>,
-    ) -> crate::error::Result<Option<LoadedBoundary>> {
-        let Some(last) = last else {
-            return self.load_boundary().await;
+        last: KeptBoundary,
+    ) -> crate::error::Result<KeptBoundary> {
+        let Some(last) = last.0 else {
+            return self.load_boundary().await.map(KeptBoundary);
         };
         let object_key = last.object_key.clone();
         let read = self
@@ -126,7 +154,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await
             .map_err(|error| store_load_error(&object_key, &error))?;
         let reloaded = match read {
-            Some(GetIfChangedOutcome::Unchanged) => return Ok(Some(last)),
+            Some(GetIfChangedOutcome::Unchanged) => return Ok(KeptBoundary(Some(last))),
             Some(GetIfChangedOutcome::Changed(body)) => decode_control_object_body(
                 object_key,
                 body,
@@ -141,7 +169,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .into())
             }
         };
-        Ok(Some(reloaded))
+        Ok(KeptBoundary(Some(reloaded)))
     }
 
     /// Returns whether `manifest_no` is above the namespace's manifest
@@ -157,16 +185,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub async fn above_boundary(
         &self,
         manifest_no: ManifestNo,
-        kept: Option<LoadedBoundary>,
-    ) -> crate::error::Result<(bool, Option<LoadedBoundary>)> {
-        if at_or_below_boundary(manifest_no, kept.as_ref()) {
+        kept: KeptBoundary,
+    ) -> crate::error::Result<(bool, KeptBoundary)> {
+        if kept.covers(manifest_no) {
             return Ok((false, kept));
         }
         let boundary = self.reload_boundary(kept).await?;
-        Ok((
-            !at_or_below_boundary(manifest_no, boundary.as_ref()),
-            boundary,
-        ))
+        Ok((!boundary.covers(manifest_no), boundary))
     }
 
     /// Raises the namespace's manifest boundary to at least `manifest_no`
@@ -298,12 +323,12 @@ mod tests {
             .expect("raise to 2");
         store.reset();
         let (above, kept) = namespace
-            .above_boundary(ManifestNo(3), None)
+            .above_boundary(ManifestNo(3), KeptBoundary::default())
             .await
             .expect("check without a kept boundary");
         assert!(above);
         assert_eq!(
-            kept.as_ref().map(|loaded| loaded.state.boundary),
+            kept.object().map(|loaded| loaded.state.boundary),
             Some(ManifestBoundary::Manifest {
                 manifest_no: ManifestNo(2)
             })
@@ -329,7 +354,7 @@ mod tests {
             .expect("check above the kept boundary");
         assert!(!above);
         assert_eq!(
-            raised.as_ref().map(|loaded| loaded.state.boundary),
+            raised.object().map(|loaded| loaded.state.boundary),
             Some(ManifestBoundary::Manifest {
                 manifest_no: ManifestNo(4)
             })

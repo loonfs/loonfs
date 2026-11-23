@@ -241,7 +241,7 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
             .await
             .expect("create");
         let basis = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_basis()
+            .load_current_basis(crate::test_support::observed_now())
             .await
             .expect("manifest 2");
         // Other processes publish manifests 3 to 5, and a collection one grace
@@ -292,7 +292,7 @@ async fn a_put_at_a_number_that_a_collection_emptied_is_lost() {
             )
             .await
             .expect("publish");
-        assert_eq!(published.manifest.manifest().manifest_no, ManifestNo(6));
+        assert_eq!(published.manifest().manifest().manifest_no, ManifestNo(6));
         let manifest = |number| metadata_manifest_object(&namespace_id, &ManifestNo(number));
         let boundary = boundary(&namespace_id);
         let read_back = ambiguous.then(|| ("get", manifest(3)));

@@ -4,8 +4,9 @@
 use crate::cache::CachedHead;
 use crate::error::Result;
 use crate::manifest::publish::ManifestChange;
-use crate::namespace::basis::{MetadataBasis, PublicationBasis, ReadBasis};
+use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::time::{Observation, OperationClock};
@@ -22,9 +23,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// the namespace's cached head (see [`Self::install_active_head`]).
     pub(crate) async fn publish_active_manifest(
         &self,
-        manifest_1: PublicationBasis,
+        manifest_1: Held<LoadedManifest>,
         clock: &OperationClock,
-    ) -> Result<PublicationBasis> {
+    ) -> Result<Held<LoadedManifest>> {
         let update = self
             .update_manifest(Some(manifest_1), clock, |current: LoadedManifest| {
                 let changed = match current.payload().status {
@@ -50,15 +51,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `started` is when the create or the fork started. The namespace wasn't
     /// active then, so no commit had been acknowledged and no manifest
     /// followed `active`. Both checks of the head are at `started`.
-    pub(crate) fn install_active_head(&self, active: &PublicationBasis, started: Observation) {
+    pub(crate) fn install_active_head(&self, active: &Held<LoadedManifest>, started: Observation) {
         self.head_and_wal_tail_cache.replace_head(CachedHead {
             read_basis: ReadBasis {
-                head: NamespaceReadState::from(active.manifest.payload()),
-                basis: MetadataBasis::new(active.manifest.manifest().clone()),
+                head: NamespaceReadState::from(active.manifest().payload()),
+                basis: MetadataBasis::new(active.manifest().manifest().clone()),
             },
             basis_checked: started.clone(),
             head_confirmed: started,
-            boundary: active.boundary.clone(),
+            boundary: active.boundary().clone(),
         });
     }
 }

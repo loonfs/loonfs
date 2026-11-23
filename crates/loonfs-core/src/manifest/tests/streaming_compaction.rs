@@ -2693,7 +2693,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     .await
     .expect("claim")
     .response
-    .manifest
+    .manifest()
     .compactor_epoch();
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
     let input = input_keys_now(&store, &namespace, &spec).await;
@@ -2723,7 +2723,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
     .await
     .expect("another claim")
     .response
-    .manifest
+    .manifest()
     .compactor_epoch();
     assert_eq!(next_epoch, loonfs_types::CompactorEpoch(epoch.0 + 1));
     let store = RecordingStore::new(store, KeyPredicate::any());
@@ -2835,7 +2835,7 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     .await
     .expect("claim")
     .response
-    .manifest
+    .manifest()
     .compactor_epoch();
     let before = current_manifest_number(&store, &namespace).await;
     let first = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
@@ -3011,7 +3011,7 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
         let basis = match with_basis {
             true => Some(
                 crate::test_support::namespace_store(&store, &namespace)
-                    .load_current_basis()
+                    .load_current_basis(crate::test_support::observed_now())
                     .await
                     .expect("current manifest"),
             ),
@@ -3066,7 +3066,7 @@ async fn a_unit_planned_from_a_claim_loads_no_manifest() {
     seed_bindings_workload(&store, &namespace).await;
     let current = current_manifest_number(&store, &namespace).await;
     let basis = crate::test_support::namespace_store(&store, &namespace)
-        .load_current_basis()
+        .load_current_basis(crate::test_support::observed_now())
         .await
         .expect("current manifest");
     let claim = current.successor().expect("the claim's number");
@@ -3087,8 +3087,8 @@ async fn a_unit_planned_from_a_claim_loads_no_manifest() {
         .await
         .expect("claim")
         .response;
-    assert_eq!(claimed.manifest.manifest().manifest_no, claim);
-    let epoch = claimed.manifest.compactor_epoch();
+    assert_eq!(claimed.manifest().manifest().manifest_no, claim);
+    let epoch = claimed.manifest().compactor_epoch();
     let outcome = engine
         .compact_metadata_unit(
             Some(claimed),
@@ -3195,7 +3195,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     .await
     .expect("claim")
     .response
-    .manifest
+    .manifest()
     .compactor_epoch();
     let before = current_manifest_number(&store, &namespace).await;
     let store = RecordingStore::new(store, KeyPredicate::any());

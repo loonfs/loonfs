@@ -1088,10 +1088,9 @@ async fn an_advance_past_the_manifests_floor_finds_a_floor_object_in_the_tail_wh
         // failed leaves it.
         let core = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace);
         let planned = core
-            .load_current_basis()
+            .load_current_manifest()
             .await
-            .expect("find the current manifest")
-            .manifest;
+            .expect("find the current manifest");
         core.publish_floor_object(&planned, tail_floor)
             .await
             .expect("create the floor object");

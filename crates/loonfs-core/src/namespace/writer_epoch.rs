@@ -4,7 +4,8 @@ use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::{PublicationReport, PublishedManifest};
-use crate::namespace::basis::PublicationBasis;
+use crate::namespace::control::LoadedManifest;
+use crate::namespace::held::Held;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
@@ -98,12 +99,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // check after the put does, and it also tells whether the fence is
         // live.
         let anchor = self
-            .load_unchecked_read_anchor(
-                update.current.manifest,
-                update.current.boundary,
-                clock.origin(),
-                Some(&acquired),
-            )
+            .load_unchecked_read_anchor(update.current, Some(&acquired))
             .await?;
         let anchor = self.put_fence(&acquired, anchor, &clock).await?;
         Ok(WriterAcquisition {
@@ -197,7 +193,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// process published past the manifest, the claim's put is lost and the
     /// claim builds on the manifest that won (format spec, "Publishing a
     /// manifest").
-    async fn unclaimed_head_basis(&self) -> Result<Option<PublicationBasis>> {
+    async fn unclaimed_head_basis(&self) -> Result<Option<Held<LoadedManifest>>> {
         let Some(head) = self.head_and_wal_tail_cache.get_head(&self.namespace_id) else {
             return Ok(None);
         };
@@ -208,9 +204,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let segments = self
             .load_held_manifest(head.read_basis.basis.manifest(), head.boundary.clone())
             .await?;
-        Ok(segments.map(|segments| PublicationBasis {
-            manifest: segments.loaded_manifest(),
-            boundary: head.boundary.clone(),
+        Ok(segments.map(|segments| {
+            Held::new(
+                segments.loaded_manifest(),
+                head.basis_checked.clone(),
+                head.boundary.clone(),
+            )
         }))
     }
 }

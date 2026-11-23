@@ -912,7 +912,9 @@ pub(super) async fn publish_once_within<S: ObjectStore + ?Sized>(
     deadline: &OperationClock,
 ) -> crate::error::Result<ManifestPublicationOutcome> {
     let namespace = crate::test_support::namespace_store(store, &payload.namespace_id);
-    let basis = namespace.load_current_basis().await?;
+    let basis = namespace
+        .load_current_basis(crate::test_support::observed_now())
+        .await?;
     namespace
         .publish_manifest_from(payload, deadline, Some(&basis))
         .await

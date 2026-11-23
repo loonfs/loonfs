@@ -3,9 +3,9 @@
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::published::{PublicationReport, PublishedManifest};
-use crate::namespace::basis::PublicationBasis;
-use crate::namespace::boundary::LoadedBoundary;
+use crate::namespace::boundary::KeptBoundary;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest, NewestManifest};
+use crate::namespace::held::Held;
 use crate::namespace::store::NamespaceStore;
 use crate::phase::Phase;
 use crate::segment::runs::runs_newest_first;
@@ -27,9 +27,9 @@ use std::sync::Arc;
 /// the put and the manifest boundary that the put's check read.
 #[derive(Debug, Clone)]
 pub(crate) enum ManifestPublicationOutcome {
-    Published(PublicationBasis),
-    CoveredByCurrent(PublicationBasis),
-    PredecessorChanged(PublicationBasis),
+    Published(Held<LoadedManifest>),
+    CoveredByCurrent(Held<LoadedManifest>),
+    PredecessorChanged(Held<LoadedManifest>),
 }
 
 enum ManifestKind {
@@ -55,22 +55,23 @@ pub(crate) struct ManifestUpdate<T> {
     pub(crate) response: T,
     /// The manifest that the call published, or that the last attempt built
     /// on when that attempt returned `Finished`, with the manifest boundary
-    /// that the call read last.
-    pub(crate) current: PublicationBasis,
+    /// that the call read last. Its check time is the start of the call's
+    /// clock, whatever path produced it. When the first attempt returned
+    /// `Finished` on the caller's basis, the call sent no request after that
+    /// time, so the check time is later than the check that found the basis.
+    pub(crate) current: Held<LoadedManifest>,
     /// Whether the call published `current`.
     pub(crate) published: bool,
-    /// When the caller started the call's clock.
-    started: Observation,
 }
 
 impl<T> ManifestUpdate<T> {
-    /// Returns the current manifest, with the start of the call's clock as
-    /// its start observation: no manifest followed it then.
+    /// Returns the current manifest, with its check time as its start
+    /// observation.
     pub(crate) fn current_manifest(&self) -> PublishedManifest {
         PublishedManifest::new(
-            &self.current.manifest.envelope,
-            Some(self.started.clone()),
-            self.current.boundary.clone(),
+            &self.current.manifest().envelope,
+            Some(self.current.checked().clone()),
+            self.current.boundary().clone(),
         )
     }
 
@@ -88,17 +89,18 @@ impl<T> ManifestUpdate<T> {
 pub(crate) enum ExistingNamespace {
     /// The namespace's newest manifest is active.
     Active,
-    /// The namespace's newest manifest is initializing.
-    Initializing(PublicationBasis),
+    /// The namespace's newest manifest is initializing, with the manifest
+    /// boundary that the find read.
+    Initializing(LoadedManifest, KeptBoundary),
 }
 
 /// Where the next attempt of [`update_manifest`] starts.
 enum NextAttempt {
     /// Builds on this manifest without a request first.
-    BuildOn(PublicationBasis),
+    BuildOn(Held<LoadedManifest>),
     /// Builds on the newest manifest above this one, which the last attempt
     /// found to have a successor (see [`NamespaceStore::find_current_above`]).
-    BuildAbove(PublicationBasis),
+    BuildAbove(Held<LoadedManifest>),
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -125,7 +127,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// as lost (format spec, "Publishing a manifest").
     pub(crate) async fn update_manifest<T, F, Fut>(
         &self,
-        basis: Option<PublicationBasis>,
+        basis: Option<Held<LoadedManifest>>,
         clock: &OperationClock,
         mut change: F,
     ) -> Result<ManifestUpdate<T>>
@@ -135,22 +137,31 @@ impl<S: ObjectStore> NamespaceStore<S> {
     {
         let mut next = basis.map(NextAttempt::BuildOn);
         let mut attempt = 0;
-        let update = |response, current, published| ManifestUpdate {
-            response,
-            current,
-            published,
-            started: clock.origin(),
+        let update = |response, current: Held<LoadedManifest>, published| {
+            let boundary = current.boundary().clone();
+            ManifestUpdate {
+                response,
+                current: Held::new(current.into_manifest(), clock.origin(), boundary),
+                published,
+            }
         };
         loop {
             attempt += 1;
             let current = match next.take() {
                 Some(NextAttempt::BuildOn(basis)) => basis,
-                Some(NextAttempt::BuildAbove(basis)) => self.find_current_above(&basis).await?,
-                None => self.load_current_basis().await?,
+                Some(NextAttempt::BuildAbove(basis)) => {
+                    self.find_current_above(
+                        basis.manifest(),
+                        basis.boundary().clone(),
+                        clock.origin(),
+                    )
+                    .await?
+                }
+                None => self.load_current_basis(clock.origin()).await?,
             };
-            let built_on = current.manifest.object_key.clone();
-            let predecessor = current.manifest.payload().manifest_no;
-            match change(current.manifest.clone()).await? {
+            let built_on = current.manifest().object_key.clone();
+            let predecessor = current.manifest().payload().manifest_no;
+            match change(current.manifest().clone()).await? {
                 ManifestChange::Next(payload, result) => {
                     let mut payload = *payload;
                     payload.manifest_no = super::fold::next_manifest_no_after(predecessor)?;
@@ -198,7 +209,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// manifest's payload to `change`.
     pub(crate) async fn update_live_manifest<T, F, Fut>(
         &self,
-        basis: Option<PublicationBasis>,
+        basis: Option<Held<LoadedManifest>>,
         clock: &OperationClock,
         mut change: F,
     ) -> Result<ManifestUpdate<T>>
@@ -216,7 +227,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Returns the current manifest, with the manifest boundary, for a
-    /// caller that holds `basis`.
+    /// caller that keeps `basis` and the boundary `kept`. The returned
+    /// manifest is checked at `observed`, an observation that the caller
+    /// read before the call.
     ///
     /// The call first sends a HEAD request for the successor of `basis`'s
     /// manifest. When the successor exists, the call probes above the
@@ -228,20 +241,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// boundary instead (format spec, "Publishing a manifest").
     pub(crate) async fn find_current_above(
         &self,
-        basis: &PublicationBasis,
-    ) -> Result<PublicationBasis> {
+        basis: &LoadedManifest,
+        kept: KeptBoundary,
+        observed: Observation,
+    ) -> Result<Held<LoadedManifest>> {
         let manifest = self
-            .find_newest_manifest_above(&basis.manifest)
+            .find_newest_manifest_above(basis)
             .await
             .map_err(CoreError::ControlObjectLoad)?
-            .unwrap_or_else(|| basis.manifest.clone());
+            .unwrap_or_else(|| basis.clone());
         let (above, boundary) = self
-            .above_boundary(manifest.payload().manifest_no, basis.boundary.clone())
+            .above_boundary(manifest.payload().manifest_no, kept)
             .await?;
         if above {
-            return Ok(PublicationBasis { manifest, boundary });
+            return Ok(Held::new(manifest, observed, boundary));
         }
-        self.load_current_basis().await
+        self.load_current_basis(observed).await
     }
 
     /// Finds the namespace that has this ID for a create or a fork, and
@@ -249,13 +264,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// that a create or fork for a deleted ID writes nothing (format spec,
     /// "Creating a namespace").
     pub(crate) async fn find_existing_namespace(&self) -> Result<Option<ExistingNamespace>> {
-        let current = match self.find_newest_manifest().await? {
+        let (current, boundary) = match self.find_newest_manifest().await? {
             NewestManifest::Absent => return Ok(None),
             NewestManifest::Retired => return Err(self.namespace_deleted()),
-            NewestManifest::Manifest(current) => current,
+            NewestManifest::Manifest(manifest, boundary) => (manifest, boundary),
         };
-        match current.manifest.payload().status {
-            NamespaceStatus::Initializing {} => Ok(Some(ExistingNamespace::Initializing(current))),
+        match current.payload().status {
+            NamespaceStatus::Initializing {} => {
+                Ok(Some(ExistingNamespace::Initializing(current, boundary)))
+            }
             NamespaceStatus::Active {} => Ok(Some(ExistingNamespace::Active)),
             NamespaceStatus::Deleted { .. } => Err(self.namespace_deleted()),
         }
@@ -270,13 +287,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         payload: NamespaceManifestPayload,
         clock: &OperationClock,
-    ) -> Result<PublicationBasis> {
+    ) -> Result<Held<LoadedManifest>> {
         match self.publish_manifest_from(payload, clock, None).await? {
             ManifestPublicationOutcome::Published(basis) => Ok(basis),
             ManifestPublicationOutcome::CoveredByCurrent(current)
             | ManifestPublicationOutcome::PredecessorChanged(current) => Err(existing_namespace(
                 self.namespace_id.clone(),
-                &current.manifest,
+                current.manifest(),
             )),
         }
     }
@@ -306,7 +323,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         mut payload: NamespaceManifestPayload,
         clock: &OperationClock,
-        current: Option<&PublicationBasis>,
+        current: Option<&Held<LoadedManifest>>,
     ) -> Result<ManifestPublicationOutcome> {
         payload.publication_id = PublicationId::generate();
         let manifest = encode_manifest(payload);
@@ -341,7 +358,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             envelope: std::sync::Arc::new(manifest.envelope().clone()),
         };
         if let Some(current) = current {
-            let current_manifest = &current.manifest;
+            let current_manifest = current.manifest();
             // A tombstone ends its namespace, so work that raced the deletion
             // stops here.
             if current_manifest.payload().status.is_deleted() {
@@ -372,7 +389,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .settle_against_boundary(
                         &candidate,
                         expected_predecessor,
-                        current.and_then(|current| current.boundary.clone()),
+                        current
+                            .map(|current| current.boundary().clone())
+                            .unwrap_or_default(),
+                        clock,
                     )
                     .await?;
                 if matches!(outcome, ManifestPublicationOutcome::Published(_)) {
@@ -387,12 +407,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 outcome
             }
             Err(ObjectStoreError::PreconditionFailed { .. }) => self
-                .classify_current_manifest(current, &candidate, expected_predecessor)
+                .classify_current_manifest(current, &candidate, expected_predecessor, clock)
                 .await?
                 .settled_after_conflict(namespace_id)?,
             Err(error @ ObjectStoreError::Transport { .. }) => {
-                self.settle_unconfirmed_put(&error, &candidate, current, expected_predecessor)
-                    .await?
+                self.settle_unconfirmed_put(
+                    &error,
+                    &candidate,
+                    current,
+                    expected_predecessor,
+                    clock,
+                )
+                .await?
             }
             Err(error) => {
                 tracing::error!(
@@ -420,8 +446,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         error: &ObjectStoreError,
         candidate: &LoadedManifest,
-        current: Option<&PublicationBasis>,
+        current: Option<&Held<LoadedManifest>>,
         expected_predecessor: Option<ManifestNo>,
+        clock: &OperationClock,
     ) -> Result<ManifestPublicationOutcome> {
         // Only the exact manifest at this number confirms the put;
         // a later manifest may already cover it.
@@ -431,24 +458,23 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .map_err(CoreError::ControlObjectLoad)?;
         let outcome = match found {
             Some(found) => {
-                let kept = current.and_then(|current| current.boundary.clone());
+                let kept = current
+                    .map(|current| current.boundary().clone())
+                    .unwrap_or_default();
                 let (above, boundary) = self.candidate_above_boundary(candidate, kept).await?;
                 if above {
                     classify_current(
-                        &PublicationBasis {
-                            manifest: found,
-                            boundary,
-                        },
+                        &Held::new(found, clock.origin(), boundary),
                         candidate,
                         expected_predecessor,
                     )
                 } else {
-                    self.classify_current_manifest(None, candidate, expected_predecessor)
+                    self.classify_current_manifest(None, candidate, expected_predecessor, clock)
                         .await?
                 }
             }
             None => {
-                self.classify_current_manifest(current, candidate, expected_predecessor)
+                self.classify_current_manifest(current, candidate, expected_predecessor, clock)
                     .await?
             }
         };
@@ -484,16 +510,18 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         candidate: &LoadedManifest,
         expected_predecessor: Option<ManifestNo>,
-        kept: Option<LoadedBoundary>,
+        kept: KeptBoundary,
+        clock: &OperationClock,
     ) -> Result<ManifestPublicationOutcome> {
         let (above, boundary) = self.candidate_above_boundary(candidate, kept).await?;
         if above {
-            return Ok(ManifestPublicationOutcome::Published(PublicationBasis {
-                manifest: candidate.clone(),
+            return Ok(ManifestPublicationOutcome::Published(Held::new(
+                candidate.clone(),
+                clock.origin(),
                 boundary,
-            }));
+            )));
         }
-        self.classify_current_manifest(None, candidate, expected_predecessor)
+        self.classify_current_manifest(None, candidate, expected_predecessor, clock)
             .await?
             .settled_after_conflict(&self.namespace_id)
     }
@@ -507,8 +535,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     async fn candidate_above_boundary(
         &self,
         candidate: &LoadedManifest,
-        kept: Option<LoadedBoundary>,
-    ) -> Result<(bool, Option<LoadedBoundary>)> {
+        kept: KeptBoundary,
+    ) -> Result<(bool, KeptBoundary)> {
         self.above_boundary(candidate.payload().manifest_no, kept)
             .await
             .map_err(|error| {
@@ -530,19 +558,25 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// The function finds that manifest by probing above `basis` (see
     /// [`find_current_above`]), or from the manifest boundary when `basis` is
-    /// `None`.
+    /// `None`. That manifest is checked at the start of `clock`.
     async fn classify_current_manifest(
         &self,
-        basis: Option<&PublicationBasis>,
+        basis: Option<&Held<LoadedManifest>>,
         candidate: &LoadedManifest,
         expected_predecessor: Option<ManifestNo>,
+        clock: &OperationClock,
     ) -> Result<ManifestKind> {
         let current = match basis {
-            Some(basis) => self.find_current_above(basis).await?,
+            Some(basis) => {
+                self.find_current_above(basis.manifest(), basis.boundary().clone(), clock.origin())
+                    .await?
+            }
             None => match self.find_newest_manifest().await? {
                 NewestManifest::Absent => return Ok(ManifestKind::Installable),
                 NewestManifest::Retired => return Err(self.namespace_deleted()),
-                NewestManifest::Manifest(current) => current,
+                NewestManifest::Manifest(manifest, boundary) => {
+                    Held::new(manifest, clock.origin(), boundary)
+                }
             },
         };
         Ok(classify_current(&current, candidate, expected_predecessor))
@@ -560,10 +594,13 @@ fn existing_namespace(namespace_id: NamespaceId, current: &LoadedManifest) -> Co
 
 /// Asserts that `payload` is a legal successor of the current manifest, or a
 /// legal first manifest when there is none.
-fn assert_legal_successor(payload: &NamespaceManifestPayload, current: Option<&PublicationBasis>) {
+fn assert_legal_successor(
+    payload: &NamespaceManifestPayload,
+    current: Option<&Held<LoadedManifest>>,
+) {
     let legal = match current {
         Some(current) => current
-            .manifest
+            .manifest()
             .payload()
             .ensure_successor(payload)
             .map_err(|error| error.to_string()),
@@ -576,11 +613,11 @@ fn assert_legal_successor(payload: &NamespaceManifestPayload, current: Option<&P
 }
 
 fn classify_current(
-    basis: &PublicationBasis,
+    basis: &Held<LoadedManifest>,
     candidate: &LoadedManifest,
     expected_predecessor: Option<ManifestNo>,
 ) -> ManifestKind {
-    let current = &basis.manifest;
+    let current = basis.manifest();
     // Only this call's put stores the candidate's publication ID.
     let outcome = if current.manifest() == candidate.manifest() {
         ManifestPublicationOutcome::Published(basis.clone())

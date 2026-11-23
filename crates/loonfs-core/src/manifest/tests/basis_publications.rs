@@ -4,7 +4,7 @@ use super::super::publish::{ManifestChange, ManifestUpdate};
 use super::*;
 use crate::limits::{MANIFEST_PROBE_WINDOW, READ_REVALIDATION_BOUND_MS};
 use crate::namespace::control::LoadedManifest;
-use crate::namespace::PublicationBasis;
+use crate::namespace::held::Held;
 use loonfs_test_support::clock::ManualClock;
 
 /// The probe window, as a count of manifest numbers.
@@ -33,9 +33,9 @@ async fn created_namespace(
 async fn current_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> PublicationBasis {
+) -> Held<LoadedManifest> {
     crate::test_support::namespace_store(store, namespace_id)
-        .load_current_basis()
+        .load_current_basis(crate::test_support::observed_now())
         .await
         .expect("current manifest")
 }
@@ -45,7 +45,7 @@ async fn current_basis<S: ObjectStore + ?Sized>(
 async fn republish<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    basis: Option<PublicationBasis>,
+    basis: Option<Held<LoadedManifest>>,
     deadline: &OperationClock,
 ) -> LoadedManifest {
     let ManifestUpdate {
@@ -59,7 +59,7 @@ async fn republish<S: ObjectStore + ?Sized>(
         })
         .await
         .expect("publish");
-    published.manifest
+    published.into_manifest()
 }
 
 /// Returns the manifest objects from `first` through `last`.
