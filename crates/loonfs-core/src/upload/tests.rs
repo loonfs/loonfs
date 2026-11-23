@@ -1176,3 +1176,36 @@ async fn a_completed_session_keeps_its_content_ref_after_token_minting_closes() 
     assert!(replay.response.content_token().is_none());
     assert!(replay.evidence.is_none());
 }
+
+/// Checks that a call whose publication budget passed before it wrote the
+/// upload session's record returns the budget error and writes nothing.
+#[tokio::test]
+async fn an_upload_session_past_its_publication_budget_writes_nothing() {
+    use std::sync::Arc;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("stalled-session").expect("namespace id");
+    let context = context(1_000);
+    crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context)
+        .create()
+        .await
+        .expect("bootstrap");
+    let catalog = crate::test_support::load_catalog(&inner, &namespace_id).await;
+    let pool_id = crate::test_support::load_pool_id(&inner, &namespace_id).await;
+    let store = RecordingStore::new(inner, KeyPredicate::prefix(upload_session_prefix(&pool_id)));
+    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let clock = crate::time::OperationClock::start(context.now_ms, timer.clone());
+    timer.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+    let error = create_upload_session(
+        &store,
+        &catalog,
+        loonfs_test_support::test_actor(),
+        NewUploadSession::service_proxied(),
+        &clock,
+    )
+    .await
+    .expect_err("a call past its budget is refused");
+    assert_matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. });
+    assert_eq!(store.take(), [], "no request for the session's record");
+}

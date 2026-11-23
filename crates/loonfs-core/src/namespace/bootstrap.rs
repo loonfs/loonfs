@@ -91,7 +91,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         clock: &OperationClock,
     ) -> Result<NamespaceMetadata> {
         self.namespace
-            .write_member_entry(&manifest_1.manifest.payload().pool_id)
+            .write_member_entry(&manifest_1.manifest.payload().pool_id, clock)
             .await?;
         let active = self
             .namespace

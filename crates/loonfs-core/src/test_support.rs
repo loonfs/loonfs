@@ -372,8 +372,9 @@ pub async fn write_member_entry<S: ObjectStore>(
     pool_id: &PoolId,
     namespace_id: &NamespaceId,
 ) {
-    namespace_store(store, namespace_id)
-        .write_member_entry(pool_id)
+    let namespace = namespace_store(store, namespace_id);
+    namespace
+        .write_member_entry(pool_id, &namespace.start_clock())
         .await
         .expect("write the member entry");
 }
@@ -470,6 +471,7 @@ pub(crate) async fn write_fork_snapshot<S: ObjectStore>(
                 target_namespace_id: manifest_1.namespace_id.clone(),
             },
         },
+        &crate::time::OperationClock::start(manifest_1.created_at_ms, std_timer()),
     )
     .await
     .expect("write the fork snapshot");

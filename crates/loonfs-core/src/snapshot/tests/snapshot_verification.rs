@@ -544,3 +544,41 @@ async fn a_fork_snapshot_id_is_read_like_a_user_snapshot_and_refused_by_every_ot
         3
     );
 }
+
+/// Checks that a creation whose publication budget passed before the
+/// record's put returns the budget error and sends no request for the
+/// snapshot's record, so it has nothing to delete either.
+#[tokio::test]
+async fn a_snapshot_creation_past_its_publication_budget_writes_nothing() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let inner = LocalFsStore::new(directory.path()).expect("store");
+    let context = test_context();
+    bootstrap_namespace(&inner, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let basis = crate::test_support::folded_manifest(&crate::test_support::namespace_store(
+        &inner,
+        &namespace_id,
+    ))
+    .await
+    .expect("fold the WAL tail");
+    let store = RecordingStore::new(inner, KeyPredicate::prefix(snapshot_prefix(&namespace_id)));
+    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let clock = crate::time::OperationClock::start(context.now_ms, timer.clone());
+    timer.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+    let error = crate::test_support::namespace_store(&store, &namespace_id)
+        .create_snapshot_record(
+            SnapshotOwner::User {
+                name: Some("stalled".to_owned()),
+                expires_at_ms: None,
+                deleted_at_ms: None,
+            },
+            basis,
+            &clock,
+        )
+        .await
+        .expect_err("a creation past its budget is refused");
+    assert_matches!(error, CoreError::MetadataPublicationBudgetExceeded { .. });
+    assert_eq!(store.take(), [], "no request for the snapshot's record");
+}

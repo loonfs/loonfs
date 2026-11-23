@@ -369,6 +369,7 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
                     }
                 },
             },
+            &setup.clock(),
         )
         .await
         .expect("write snapshot");
@@ -418,4 +419,127 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
             .expect("snapshot")
             .is_some());
     }
+}
+
+/// A store whose first create-if-absent put of a snapshot record is lost
+/// before it's applied, and whose read-back of that put waits until the test
+/// releases it.
+fn lost_put_store(
+    directory: &std::path::Path,
+    namespace_id: &NamespaceId,
+) -> BlockingStore<FailStore<LocalFsStore>> {
+    let store = BlockingStore::new(
+        FailStore::new(
+            LocalFsStore::new(directory).expect("store"),
+            KeyPredicate::prefix(snapshot_prefix(namespace_id)),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost snapshot write request".to_owned()),
+        ),
+        KeyPredicate::prefix(snapshot_prefix(namespace_id)),
+        OperationSelector::GetWithMetadata,
+    );
+    store.inner().fail_next(1);
+    store.block_next();
+    store
+}
+
+/// Checks that a creation whose first put was lost, and whose budget passed
+/// while the read-back of that put found nothing, sends no second put. The
+/// creation returns the lost put's store error, and its cleanup leaves a
+/// deleted record, because the lost put could still be applied.
+#[tokio::test]
+async fn a_creation_whose_budget_ends_after_a_lost_put_sends_no_second_put() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let context = test_context();
+    let setup = LocalFsStore::new(directory.path()).expect("store");
+    bootstrap_namespace(&setup, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let basis = crate::test_support::folded_manifest(&crate::test_support::namespace_store(
+        &setup,
+        &namespace_id,
+    ))
+    .await
+    .expect("fold the WAL tail");
+    let store = lost_put_store(directory.path(), &namespace_id);
+    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let clock = crate::time::OperationClock::start(context.now_ms, timer.clone());
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let (created, ()) = tokio::join!(
+        namespace.create_snapshot_record(
+            SnapshotOwner::User {
+                name: Some("stalled".to_owned()),
+                expires_at_ms: None,
+                deleted_at_ms: None,
+            },
+            basis,
+            &clock,
+        ),
+        async {
+            store.wait_until_blocked().await;
+            timer.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+            store.release();
+        }
+    );
+    let error = created.expect_err("the creation ran out of budget after a lost put");
+    assert_matches!(error, CoreError::Store { .. });
+    assert_eq!(
+        store.inner().attempts(),
+        2,
+        "the lost put and the cleanup's put of the deleted record"
+    );
+    assert_eq!(
+        crate::test_support::deleted_snapshot_records(&store, &namespace_id)
+            .await
+            .len(),
+        1
+    );
+}
+
+/// Checks that a fork snapshot's write whose first put was lost, and whose
+/// budget passed while the read-back of that put found nothing, sends no
+/// second put and writes nothing, so a stalled fork call can't write a fork
+/// snapshot again after the fork's retirement deleted it.
+#[tokio::test]
+async fn a_fork_snapshot_write_whose_budget_ends_after_a_lost_put_writes_nothing() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let context = test_context();
+    let setup = LocalFsStore::new(directory.path()).expect("store");
+    bootstrap_namespace(&setup, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let manifest = crate::test_support::namespace_store(&setup, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("manifest");
+    let record = SnapshotPayload {
+        snapshot_id: SnapshotId::generate(manifest.manifest().manifest_no),
+        namespace_id: namespace_id.clone(),
+        head_seq: manifest.manifest().head_seq,
+        payload_checksum: manifest.manifest().payload_checksum.clone(),
+        created_at_ms: context.now_ms,
+        owner: SnapshotOwner::Fork {
+            target_namespace_id: NamespaceId::parse("fork").expect("namespace"),
+        },
+    };
+    let store = lost_put_store(directory.path(), &namespace_id);
+    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+    let clock = crate::time::OperationClock::start(context.now_ms, timer.clone());
+    let (written, ()) = tokio::join!(
+        record::write_snapshot_record(&store, &record, &clock),
+        async {
+            store.wait_until_blocked().await;
+            timer.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+            store.release();
+        }
+    );
+    assert_matches!(written, Err(CoreError::Store { .. }));
+    assert_eq!(store.inner().attempts(), 1, "only the lost put");
+    assert!(store
+        .list_prefix(&snapshot_prefix(&namespace_id))
+        .await
+        .expect("snapshots")
+        .is_empty());
 }

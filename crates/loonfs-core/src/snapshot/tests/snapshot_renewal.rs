@@ -5,6 +5,7 @@ use crate::snapshot::lifecycle::ensure_live;
 use loonfs_objectstore::keys;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_types::format::control::SnapshotOwner;
+use std::assert_matches;
 
 #[tokio::test]
 async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
@@ -234,4 +235,75 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         .expect("load")
         .expect("retained expired snapshot");
     assert_eq!(stored.state.owner.expires_at_ms(), Some(1_002));
+}
+
+/// Checks that an extension whose publication budget passed while it loaded
+/// the record returns the budget error and sends no compare-and-swap, so the
+/// expiry stays as it was.
+#[tokio::test]
+async fn an_extension_past_its_publication_budget_writes_nothing() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("snapshot-budget").expect("namespace");
+    let inner = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let context = writer_at("writer", 1_000);
+    bootstrap_namespace(&inner, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let namespace = crate::test_support::namespace_store(&inner, &namespace_id);
+    let expires_at_ms = 1_000 + 10 * crate::limits::GC_GRACE_WINDOW_MS;
+    let snapshot = namespace
+        .create_snapshot_record(
+            SnapshotOwner::User {
+                name: Some("stalled extension".to_owned()),
+                expires_at_ms: Some(expires_at_ms),
+                deleted_at_ms: None,
+            },
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
+            &context.clock(),
+        )
+        .await
+        .map(|(record, _)| record)
+        .expect("snapshot");
+    let key = keys::snapshot_record(&namespace_id, &snapshot.snapshot_id);
+    let store = BlockingStore::new(
+        RecordingStore::new(inner.clone(), KeyPredicate::exact(&key)),
+        KeyPredicate::exact(&key),
+        OperationSelector::Read,
+    );
+    let clock = Arc::new(ManualClock::new(context.now_ms));
+    store.block_next();
+    let namespace = {
+        let mut fixture =
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        fixture.namespace.timer = clock.clone();
+        fixture
+    }
+    .engine();
+    let administrator = crate::test_support::administrator(&namespace);
+    let extend =
+        namespace.extend_snapshot(&administrator, &snapshot.snapshot_id, expires_at_ms + 1);
+    let stall = async {
+        store.wait_until_blocked().await;
+        clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
+        store.release();
+    };
+    let (result, ()) = futures::join!(extend, stall);
+    assert_matches!(
+        result,
+        Err(CoreError::MetadataPublicationBudgetExceeded { .. })
+    );
+    let counts = store.inner().counts();
+    assert_eq!(
+        (counts.puts, counts.compare_and_swaps),
+        (0, 0),
+        "an extension past its budget sends no write"
+    );
+    let stored = crate::test_support::namespace_store(&inner, &namespace_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
+        .await
+        .expect("load")
+        .expect("snapshot");
+    assert_eq!(stored.state.owner.expires_at_ms(), Some(expires_at_ms));
 }
