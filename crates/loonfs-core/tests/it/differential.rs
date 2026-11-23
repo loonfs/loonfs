@@ -1573,9 +1573,9 @@ async fn assert_head_reads_match_model(
 ) {
     const ACCEPTED: &str = "the model should answer for a state it accepted";
     let context = crate::common::read_context(store, namespace_id).await;
-    assert_eq!(context.read_basis.head.seq, head_seq);
+    assert_eq!(context.read_basis().head.seq, head_seq);
     let commits = wal_commits(store, namespace_id).await;
-    let mut model = loonfs_model::bootstrap_metadata_state(context.read_basis.head.created_at_ms);
+    let mut model = loonfs_model::bootstrap_metadata_state(context.read_basis().head.created_at_ms);
     for commit in &commits {
         let deltas: Vec<_> = commit
             .deltas

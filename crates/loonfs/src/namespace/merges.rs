@@ -106,15 +106,21 @@ impl<M: Mode> Namespace<M> {
                     .core
                     .pinned_read(&self.namespace_id, options.consistency)
                     .await?;
-                main.engine.ensure_administrator(&main.context).await?;
+                let main_administrator = main.engine.verify_administrator(&main.context).await?;
                 let fork = self
                     .core
                     .pinned_read(source_namespace_id, options.consistency)
                     .await?;
-                fork.engine.ensure_administrator(&fork.context).await?;
+                let fork_administrator = fork.engine.verify_administrator(&fork.context).await?;
                 Ok(main
                     .engine
-                    .next_merge_range(&main.context, &fork.engine, &fork.context)
+                    .next_merge_range(
+                        &main_administrator,
+                        &main.context,
+                        &fork.engine,
+                        &fork_administrator,
+                        &fork.context,
+                    )
                     .await?)
             },
         )

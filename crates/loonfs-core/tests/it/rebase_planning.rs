@@ -4,7 +4,7 @@
 //! the changes that conflict and reports them.
 
 use crate::common::{default_writer, namespace_engine, read_context};
-use loonfs_core::test_support::{namespace_store, NamespaceFixture, WriterAt};
+use loonfs_core::test_support::{administrator_of, namespace_store, NamespaceFixture, WriterAt};
 use loonfs_core::{CoreError, MergeAllowance, MergeRequest, RuntimeReadContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -57,6 +57,7 @@ impl Family {
         let engine = namespace_engine(&family.store, &family.main, &family.writer);
         engine
             .fork_namespace(
+                &loonfs_core::test_support::administrator(&engine),
                 engine
                     .find_fork_target(&family.fork)
                     .await
@@ -98,6 +99,7 @@ impl Family {
             .await
             .expect("the fork point");
         main.fork_namespace_for_rebase(
+            &administrator_of(&self.store, &self.main),
             main.find_fork_target(&self.rebase)
                 .await
                 .expect("find the fork target"),
@@ -132,20 +134,19 @@ impl Family {
     async fn snapshot_context(&self) -> RuntimeReadContext {
         let live = read_context(&self.store, &self.rebase).await;
         let snapshot_id = live
-            .read_basis
+            .read_basis()
             .head
             .fork_basis
             .clone()
             .expect("the new fork's basis")
             .fork_point_snapshot_id;
-        RuntimeReadContext {
-            read_basis: namespace_store(&self.store, &self.rebase)
-                .load_snapshot_read_basis(&live.read_basis.head, &snapshot_id)
+        RuntimeReadContext::new(
+            namespace_store(&self.store, &self.rebase)
+                .load_snapshot_read_basis(&live.read_basis().head, &snapshot_id)
                 .await
                 .expect("the new fork through its fork point snapshot"),
-            tail: None,
-            visible_seq: None,
-        }
+            None,
+        )
     }
 
     /// Replays the fork into the new fork as the route does: the receipt
@@ -197,8 +198,10 @@ impl Family {
     async fn next_range(&self) -> NextMergeRangeResponse {
         namespace_engine(&self.store, &self.rebase, &self.writer)
             .next_merge_range(
+                &administrator_of(&self.store, &self.rebase),
                 &read_context(&self.store, &self.rebase).await,
                 &namespace_engine(&self.store, &self.fork, &self.writer),
+                &administrator_of(&self.store, &self.fork),
                 &read_context(&self.store, &self.fork).await,
             )
             .await

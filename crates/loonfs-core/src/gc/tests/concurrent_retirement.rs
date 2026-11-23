@@ -25,6 +25,7 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
         fixture
             .engine()
             .fork_namespace(
+                &crate::test_support::administrator(&fixture.engine()),
                 fixture
                     .engine()
                     .find_fork_target(fork)
@@ -86,7 +87,10 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
     for namespace in [&source, &target] {
         crate::test_support::NamespaceFixture::new(&inner, namespace, &setup)
             .engine()
-            .delete_namespace(Default::default())
+            .delete_namespace(
+                &crate::test_support::administrator_of(&inner, namespace),
+                Default::default(),
+            )
             .await
             .expect("delete");
     }

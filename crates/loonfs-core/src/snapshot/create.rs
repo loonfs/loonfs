@@ -2,7 +2,7 @@
 //! found current, or that a caller's read of the namespace's head found.
 
 use super::record::{write_snapshot_record, SnapshotBasisVerification};
-use crate::engine::{NamespaceEngine, RuntimeReadContext, Writable};
+use crate::engine::{Administrator, NamespaceEngine, RuntimeReadContext, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::namespace::basis::PublicationBasis;
@@ -26,13 +26,17 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// snapshot's verification returns `stale_head`, so the caller folds and
     /// snapshots again. A snapshot with `expires_at_ms` can't be read
     /// after that time, and it stays listed until collection deletes it.
-    /// `None` keeps the snapshot until it's deleted.
+    /// `None` keeps the snapshot until it's deleted. `administrator` proves
+    /// the caller administers the namespace, because snapshots are only for
+    /// the administrator.
     pub async fn create_snapshot(
         &self,
+        administrator: &Administrator,
         name: Option<String>,
         expires_at_ms: Option<u64>,
         basis: PublicationBasis,
     ) -> Result<Snapshot> {
+        administrator.assert_for(&self.namespace.namespace_id);
         self.create_verified_snapshot(name, expires_at_ms, basis)
             .await
             .map(|(created, _)| super::snapshot_summary(created.record))
@@ -41,6 +45,15 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a snapshot as [`Self::create_snapshot`] does, and returns the
     /// record with the version that its write stored, beside the newest
     /// manifest and the manifest boundary that the verification read.
+    ///
+    /// A merge calls this function to snapshot its fork, so the function
+    /// makes no administrator check. A merge isn't only for the
+    /// administrator, because it needs the subject's rights on the inodes it
+    /// applies, and its snapshot keeps the fork's manifest safe from garbage
+    /// collection while the merge plans and commits. The
+    /// record that this call writes is a user snapshot like any other, so
+    /// the merge sets an expiry on it and deletes it with
+    /// [`Self::delete_created_snapshot`] once the merge's commit returns.
     pub async fn create_verified_snapshot(
         &self,
         name: Option<String>,
@@ -67,6 +80,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// current before the load or before the snapshot's verification, the call
     /// returns `stale_head`, and the caller reads the namespace's head again
     /// and takes another snapshot.
+    ///
+    /// A merge calls this function to snapshot a fork that needs no fold, so
+    /// the function makes no administrator check, for the reason that
+    /// [`Self::create_verified_snapshot`] describes.
     pub async fn create_verified_snapshot_of_view(
         &self,
         expires_at_ms: Option<u64>,
@@ -74,7 +91,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<CreatedSnapshot> {
         let segments = self
             .namespace
-            .load_held_manifest(context.read_basis.basis.manifest(), None)
+            .load_held_manifest(context.read_basis().basis.manifest(), None)
             .await?
             .ok_or_else(manifest_replaced)?;
         let basis = PublicationBasis {

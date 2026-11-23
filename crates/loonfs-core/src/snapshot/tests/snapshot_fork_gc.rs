@@ -127,7 +127,10 @@ impl Fixture {
             &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
-        .delete_snapshot(&self.snapshot.snapshot_id)
+        .delete_snapshot(
+            &crate::test_support::administrator_of(self.store.as_ref(), &self.source),
+            &self.snapshot.snapshot_id,
+        )
         .await
         .expect("delete snapshot");
     }
@@ -205,6 +208,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
         .engine();
         engine
             .fork_namespace_at_snapshot(
+                &crate::test_support::administrator(&engine),
                 engine
                     .find_fork_target(&fixture.target)
                     .await
@@ -271,8 +275,14 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         .find_fork_target(&fixture.target)
         .await
         .expect("find the fork target");
+    let administrator = crate::test_support::administrator(&engine);
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(fork_target, &actor, &fixture.snapshot.snapshot_id),
+        engine.fork_namespace_at_snapshot(
+            &administrator,
+            fork_target,
+            &actor,
+            &fixture.snapshot.snapshot_id
+        ),
         async {
             gate.wait_until_blocked().await;
             assert_eq!(fixture.source_snapshot_keys().await.len(), 2);
@@ -330,8 +340,14 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
         .find_fork_target(&fixture.target)
         .await
         .expect("find the fork target");
+    let administrator = crate::test_support::administrator(&engine);
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(fork_target, &actor, &fixture.snapshot.snapshot_id),
+        engine.fork_namespace_at_snapshot(
+            &administrator,
+            fork_target,
+            &actor,
+            &fixture.snapshot.snapshot_id
+        ),
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
@@ -410,8 +426,14 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         .find_fork_target(&target)
         .await
         .expect("find the fork target");
+    let administrator = crate::test_support::administrator(&namespace);
     let (fork, ()) = tokio::join!(
-        namespace.fork_namespace_at_snapshot(fork_target, &actor, &snapshot.snapshot_id),
+        namespace.fork_namespace_at_snapshot(
+            &administrator,
+            fork_target,
+            &actor,
+            &snapshot.snapshot_id
+        ),
         async {
             store.wait_until_blocked().await;
             clock.advance_ms(10);
@@ -486,8 +508,14 @@ async fn snapshot_fork_writes_no_fork_snapshot_after_its_publication_budget() {
         .find_fork_target(&target)
         .await
         .expect("find the fork target");
+    let administrator = crate::test_support::administrator(&namespace);
     let (fork, ()) = tokio::join!(
-        namespace.fork_namespace_at_snapshot(fork_target, &actor, &snapshot.snapshot_id),
+        namespace.fork_namespace_at_snapshot(
+            &administrator,
+            fork_target,
+            &actor,
+            &snapshot.snapshot_id
+        ),
         async {
             store.wait_until_blocked().await;
             clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);

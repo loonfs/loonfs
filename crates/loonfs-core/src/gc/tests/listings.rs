@@ -63,6 +63,7 @@ async fn only_a_pool_collection_heads_a_successor() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -77,7 +78,10 @@ async fn only_a_pool_collection_heads_a_successor() {
         .expect("fork");
     crate::test_support::NamespaceFixture::new(&recorded, &target, &context(1_000))
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&recorded, &target),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete target");
     recorded.reset();

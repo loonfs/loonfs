@@ -8,7 +8,7 @@
 //! the source is copied.
 
 use crate::commit::publish_view::WriterPosition;
-use crate::engine::{NamespaceEngine, Writable};
+use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{MAX_CONTENTION_ATTEMPTS, OPERATION_SNAPSHOT_TTL_MS};
 use crate::manifest::fold::ManifestProjection;
@@ -212,25 +212,30 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// history, and this namespace publishes nothing. Returns the target's
     /// state after its active manifest, or
     /// [`ForkOutcome::SourceTailTooOld`] when the fork has to wait for a fold
-    /// of this namespace.
+    /// of this namespace. `administrator` proves the caller administers this
+    /// namespace, because forking it is only for the administrator.
     pub async fn fork_namespace(
         &self,
+        administrator: &Administrator,
         target: ForkTarget,
         actor_id: &loonfs_types::ActorId,
         held: Option<WriterPosition>,
     ) -> Result<ForkOutcome> {
+        administrator.assert_for(&self.namespace.namespace_id);
         self.install_fork(target, actor_id, ForkAt::Head { held, rebase: None })
             .await
     }
 
     /// Creates a new namespace at the unexpired snapshot `snapshot_id`, as
-    /// [`Self::fork_namespace`] does at the head.
+    /// [`Self::fork_namespace`] does at the head, with the same proof.
     pub async fn fork_namespace_at_snapshot(
         &self,
+        administrator: &Administrator,
         target: ForkTarget,
         actor_id: &loonfs_types::ActorId,
         snapshot_id: &SnapshotId,
     ) -> Result<NamespaceMetadata> {
+        administrator.assert_for(&self.namespace.namespace_id);
         Ok(self
             .install_fork(target, actor_id, ForkAt::Snapshot(snapshot_id))
             .await?
@@ -247,15 +252,18 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// sequence that the fork's next merge into this namespace would start
     /// after, read from the head that the new fork starts from. A fork point
     /// below the retention floor of that head returns
-    /// `below_retention_floor`, and the call then creates no namespace.
+    /// `below_retention_floor`, and the call then creates no namespace. It
+    /// takes the proof that [`Self::fork_namespace`] takes.
     pub async fn fork_namespace_for_rebase(
         &self,
+        administrator: &Administrator,
         target: ForkTarget,
         actor_id: &loonfs_types::ActorId,
         source_namespace_id: &NamespaceId,
         fork_point_seq: CommitSeq,
         held: Option<WriterPosition>,
     ) -> Result<ForkOutcome> {
+        administrator.assert_for(&self.namespace.namespace_id);
         let rebase = Rebase {
             source_namespace_id,
             fork_point_seq,

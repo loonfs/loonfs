@@ -208,7 +208,7 @@ pub use compaction::{
     SegmentBlockLoader, SegmentRowIterator,
 };
 pub use diff::DiffPage;
-pub use engine::RuntimeReadContext;
+pub use engine::{Administrator, RuntimeReadContext};
 pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, Writable,
 };

@@ -935,6 +935,7 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
     let engine = namespace_engine(&store, &source, &context);
     engine
         .fork_namespace(
+            &loonfs_core::test_support::administrator(&engine),
             engine
                 .find_fork_target(&target)
                 .await

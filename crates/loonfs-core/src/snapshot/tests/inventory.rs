@@ -109,7 +109,10 @@ async fn two_snapshots_under_one_label_list_as_two_records() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&first)
+    .delete_snapshot(
+        &crate::test_support::administrator_of(&store, &namespace_id),
+        &first,
+    )
     .await
     .expect("delete snapshot");
     let after_delete = list_all_snapshot_records(&store, &namespace_id)
@@ -246,7 +249,10 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
             &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
-        .delete_snapshot(snapshot_id)
+        .delete_snapshot(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            snapshot_id,
+        )
         .await
         .expect("delete snapshot in filtered run");
     }
@@ -258,6 +264,7 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
     let first =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .list_snapshots_page(
+                &crate::test_support::administrator_of(&store, &namespace_id),
                 &head,
                 PageRequest {
                     limit: page_limit(1),
@@ -271,6 +278,7 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
     let second =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .list_snapshots_page(
+                &crate::test_support::administrator_of(&store, &namespace_id),
                 &head,
                 PageRequest {
                     limit: page_limit(1),
@@ -294,6 +302,7 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
     let third =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .list_snapshots_page(
+                &crate::test_support::administrator_of(&store, &namespace_id),
                 &head,
                 PageRequest {
                     limit: page_limit(1),
@@ -553,6 +562,7 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
             &namespace_id,
         ))
         .list_snapshots_page(
+            &crate::test_support::administrator_of(&store, &namespace_id),
             &head,
             PageRequest {
                 limit: page_limit(2),
@@ -680,11 +690,20 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
     let reader =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
     assert_eq!(
-        code(reader.get_snapshot(&head, &expiring).await),
+        code(
+            reader
+                .get_snapshot(
+                    &crate::test_support::administrator(&reader),
+                    &head,
+                    &expiring
+                )
+                .await
+        ),
         ErrorCode::SnapshotNotFound
     );
     let live = reader
         .list_snapshots_page(
+            &crate::test_support::administrator(&reader),
             &head,
             PageRequest {
                 limit: page_limit(2),
@@ -724,7 +743,11 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
                 &store,
                 &namespace_id
             ))
-            .get_snapshot(&head, &fork)
+            .get_snapshot(
+                &crate::test_support::administrator_of(&store, &namespace_id),
+                &head,
+                &fork
+            )
             .await
         ),
         ErrorCode::SnapshotNotFound
@@ -782,7 +805,10 @@ async fn a_repeated_delete_writes_nothing_and_a_fork_snapshot_is_not_a_user_snap
             &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
-        .delete_snapshot(&snapshot)
+        .delete_snapshot(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            &snapshot,
+        )
         .await
         .expect("delete succeeds whether or not the snapshot is deleted");
         assert_eq!(deleted.snapshot_id, snapshot);
@@ -799,7 +825,10 @@ async fn a_repeated_delete_writes_nothing_and_a_fork_snapshot_is_not_a_user_snap
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&fork)
+    .delete_snapshot(
+        &crate::test_support::administrator_of(&store, &namespace_id),
+        &fork,
+    )
     .await
     .expect_err("a fork snapshot isn't a user snapshot");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
@@ -829,7 +858,10 @@ async fn a_deleted_snapshot_is_refused_by_a_host_whose_clock_is_behind() {
         &crate::test_support::writer_at("test-writer", behind.now_ms + 1_000),
     )
     .engine()
-    .delete_snapshot(&snapshot)
+    .delete_snapshot(
+        &crate::test_support::administrator_of(&store, &namespace_id),
+        &snapshot,
+    )
     .await
     .expect("delete snapshot");
 
@@ -847,7 +879,11 @@ async fn a_deleted_snapshot_is_refused_by_a_host_whose_clock_is_behind() {
     );
     assert_eq!(
         engine
-            .extend_snapshot(&snapshot, behind.now_ms + 60_000)
+            .extend_snapshot(
+                &crate::test_support::administrator(&engine),
+                &snapshot,
+                behind.now_ms + 60_000
+            )
             .await
             .expect_err("extend a deleted snapshot")
             .code(),
@@ -856,6 +892,7 @@ async fn a_deleted_snapshot_is_refused_by_a_host_whose_clock_is_behind() {
     assert_eq!(
         engine
             .fork_namespace_at_snapshot(
+                &crate::test_support::administrator(&engine),
                 engine
                     .find_fork_target(&NamespaceId::parse("clone").expect("namespace id"))
                     .await
@@ -906,7 +943,11 @@ async fn a_created_snapshot_is_deleted_with_the_version_its_write_stored() {
     without_version.etag = None;
     let extended = create().await;
     engine
-        .extend_snapshot(&extended.record.snapshot_id, expires_at_ms + 60_000)
+        .extend_snapshot(
+            &crate::test_support::administrator(&engine),
+            &extended.record.snapshot_id,
+            expires_at_ms + 60_000,
+        )
         .await
         .expect("extend the snapshot");
     for (label, created, expected) in [

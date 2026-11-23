@@ -1165,7 +1165,10 @@ async fn a_repeated_collection_of_an_emptied_pool_lists_once_and_returns_pool_no
     let mut context = loonfs_core::test_support::writer_at("deleter", 1_000);
     loonfs_core::test_support::NamespaceFixture::new(store.as_ref(), &namespace_id, &context)
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(store.as_ref(), &namespace_id),
+            Default::default(),
+        )
         .await
         .expect("delete");
     context.now_ms += crate::GC_GRACE_WINDOW_MS + GC_SAFETY_MARGIN_MS;

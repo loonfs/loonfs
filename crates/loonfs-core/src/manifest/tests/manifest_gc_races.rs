@@ -346,7 +346,10 @@ async fn a_manifest_put_after_the_retirement_is_lost() {
         blocked.wait_until_blocked().await;
         crate::test_support::NamespaceFixture::new(blocked.inner(), &namespace_id, &context)
             .engine()
-            .delete_namespace(Default::default())
+            .delete_namespace(
+                &crate::test_support::administrator_of(blocked.inner(), &namespace_id),
+                Default::default(),
+            )
             .await
             .expect("delete");
         let retirement = WriterAt {

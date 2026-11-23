@@ -55,6 +55,7 @@ async fn fork_head<S: ObjectStore>(
     let engine = NamespaceFixture::new(store, source, &default_writer()).engine();
     engine
         .fork_namespace(
+            &loonfs_core::test_support::administrator(&engine),
             engine.find_fork_target(target).await?,
             &loonfs_test_support::test_actor(),
             None,
@@ -229,7 +230,10 @@ async fn a_fork_point_snapshot_keeps_a_replaced_revisions_content_until_the_fork
     assert!(store.head(&first).await.expect("head").is_some());
 
     namespace_engine(&store, &fork, &default_writer())
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, &fork),
+            Default::default(),
+        )
         .await
         .expect("delete the fork");
     let retired = namespace_store(&store, &fork)

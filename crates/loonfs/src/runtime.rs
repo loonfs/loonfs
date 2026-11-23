@@ -461,9 +461,8 @@ impl LoonFs<Writable> {
         trace::in_operation(
             operation_span!(self.core, "fork_namespace", source_namespace_id),
             async {
-                self.namespace(source_namespace_id)
-                    .ensure_administrator()
-                    .await?;
+                let administrator = self.namespace(source_namespace_id).administrator().await?;
+                let administrator = &administrator;
                 let target = self
                     .find_fork_target(source_namespace_id, new_namespace_id)
                     .await?;
@@ -471,7 +470,7 @@ impl LoonFs<Writable> {
                     Some(snapshot_id) => {
                         let result = self
                             .engine(source_namespace_id)
-                            .fork_namespace_at_snapshot(target, actor, snapshot_id)
+                            .fork_namespace_at_snapshot(administrator, target, actor, snapshot_id)
                             .await
                             .map_err(Error::from);
                         self.finish_fork(source_namespace_id, result).await
@@ -479,7 +478,11 @@ impl LoonFs<Writable> {
                     None => {
                         self.install_fork(source_namespace_id, |engine, held| {
                             let target = target.clone();
-                            async move { engine.fork_namespace(target, actor, held).await }
+                            async move {
+                                engine
+                                    .fork_namespace(administrator, target, actor, held)
+                                    .await
+                            }
                         })
                         .await
                     }

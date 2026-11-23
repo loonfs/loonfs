@@ -24,6 +24,7 @@ async fn a_create_generates_a_pool_and_every_fork_records_its_source_pool() {
         let forked = fixture
             .engine()
             .fork_namespace(
+                &crate::test_support::administrator(&fixture.engine()),
                 fixture
                     .engine()
                     .find_fork_target(target)

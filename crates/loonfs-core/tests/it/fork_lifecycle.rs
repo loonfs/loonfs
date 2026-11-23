@@ -47,6 +47,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     let engine = namespace_engine(store, source_namespace_id, context);
     engine
         .fork_namespace(
+            &loonfs_core::test_support::administrator(&engine),
             engine.find_fork_target(new_namespace_id).await?,
             &loonfs_test_support::test_actor(),
             held,
@@ -111,6 +112,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
         .create_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             Some("basis".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
@@ -142,6 +144,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     assert!(collected.deleted.metadata_segments > 0);
     let fork = engine
         .fork_namespace_at_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             engine
                 .find_fork_target(&target)
                 .await
@@ -167,7 +170,10 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         snapshot_record
     );
     engine
-        .delete_snapshot(&snapshot.snapshot_id)
+        .delete_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
+            &snapshot.snapshot_id,
+        )
         .await
         .expect("release snapshot");
     aged.now_ms = u64::MAX / 2;
@@ -201,6 +207,7 @@ async fn invalid_snapshot_forks_write_nothing() {
     let engine = namespace_engine(&store, &source, &context);
     let expired = engine
         .create_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             Some("expired".to_owned()),
             Some(1),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
@@ -211,6 +218,7 @@ async fn invalid_snapshot_forks_write_nothing() {
         .expect("expired snapshot");
     let foreign = namespace_engine(&store, &other, &context)
         .create_snapshot(
+            &loonfs_core::test_support::administrator_of(&store, &other),
             Some("foreign".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &other))
@@ -226,6 +234,7 @@ async fn invalid_snapshot_forks_write_nothing() {
         store.take();
         let error = engine
             .fork_namespace_at_snapshot(
+                &loonfs_core::test_support::administrator(&engine),
                 engine
                     .find_fork_target(&target)
                     .await
@@ -258,6 +267,7 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
         .create_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             Some("basis".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
@@ -281,7 +291,9 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
     let engine = namespace_engine(&store, &source, &context);
     store.block_next();
     let actor_id = loonfs_test_support::test_actor();
+    let administrator = loonfs_core::test_support::administrator(&engine);
     let forking = engine.fork_namespace_at_snapshot(
+        &administrator,
         engine
             .find_fork_target(&target)
             .await
@@ -303,7 +315,10 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
             2
         );
         namespace_engine(store.inner().inner(), &source, &context)
-            .delete_snapshot(&snapshot.snapshot_id)
+            .delete_snapshot(
+                &loonfs_core::test_support::administrator_of(store.inner().inner(), &source),
+                &snapshot.snapshot_id,
+            )
             .await
             .expect("delete snapshot after fork snapshot is durable");
         store.inner().release();
@@ -344,7 +359,10 @@ async fn snapshot_deletion_during_fork_leaves_the_target_initializing_and_its_fo
         .expect("list records");
     assert_eq!(records, expected);
     namespace_engine(&store, &target, &context)
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, &target),
+            Default::default(),
+        )
         .await
         .expect("delete the initializing target");
     assert!(head_state(&store, &target).await.status.is_deleted());
@@ -371,6 +389,7 @@ async fn a_fork_with_a_stale_initializing_target_writes_nothing_after_the_target
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
         .create_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             Some("basis".to_owned()),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
@@ -383,6 +402,7 @@ async fn a_fork_with_a_stale_initializing_target_writes_nothing_after_the_target
     store.fail_all();
     engine
         .fork_namespace_at_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             engine.find_fork_target(&target).await.expect("free ID"),
             &actor_id,
             &snapshot.snapshot_id,
@@ -396,7 +416,10 @@ async fn a_fork_with_a_stale_initializing_target_writes_nothing_after_the_target
         .expect("the target is initializing");
 
     namespace_engine(&store, &target, &context)
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, &target),
+            Default::default(),
+        )
         .await
         .expect("delete the initializing target");
     let mut aged = context.clone();
@@ -422,7 +445,12 @@ async fn a_fork_with_a_stale_initializing_target_writes_nothing_after_the_target
     );
 
     let error = engine
-        .fork_namespace_at_snapshot(stale, &actor_id, &snapshot.snapshot_id)
+        .fork_namespace_at_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
+            stale,
+            &actor_id,
+            &snapshot.snapshot_id,
+        )
         .await
         .expect_err("the target was retired after the caller found it");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
@@ -747,6 +775,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .expect("seed shared file");
     namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
+            &loonfs_core::test_support::administrator_of(&store, &source_namespace_id),
             Some("test-snapshot".to_owned()),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(
@@ -1122,11 +1151,17 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     assert!(published > 0);
 
     namespace_engine(&store, &parent, &context)
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, &parent),
+            loonfs_core::DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete parent");
     namespace_engine(&store, &ancestor, &context)
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, &ancestor),
+            loonfs_core::DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete ancestor");
 
@@ -1163,7 +1198,10 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .expect("ancestor waits");
     assert_eq!(ancestor_waiting.deleted_snapshots_by_owner.fork, 0);
     namespace_engine(&store, &descendant, &aged)
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, &descendant),
+            Default::default(),
+        )
         .await
         .expect("delete descendant");
     aged.now_ms = namespace_store(&store, &descendant)
@@ -1257,6 +1295,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
     let snapshot = namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
+            &loonfs_core::test_support::administrator_of(&store, &source_namespace_id),
             Some("test-snapshot".to_owned()),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(
@@ -1427,15 +1466,21 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
     // A stale precondition deletes nothing.
     let engine = namespace_engine(&store, &namespace_id, &context);
     let stale = engine
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions {
-            expected_head_seq: Some(CommitSeq(0)),
-        })
+        .delete_namespace(
+            &loonfs_core::test_support::administrator(&engine),
+            loonfs_core::DeleteNamespaceOptions {
+                expected_head_seq: Some(CommitSeq(0)),
+            },
+        )
         .await
         .expect_err("stale precondition");
     assert_eq!(stale.code(), ErrorCode::StaleHead);
 
     let response = engine
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator(&engine),
+            loonfs_core::DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete namespace");
     assert_eq!(response.head_seq, CommitSeq(1));
@@ -1462,7 +1507,10 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
     .expect_err("commit after delete");
     assert_eq!(commit.code(), ErrorCode::NamespaceDeleted);
     let again = engine
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator(&engine),
+            loonfs_core::DeleteNamespaceOptions::default(),
+        )
         .await
         .expect_err("repeat delete");
     assert_eq!(again.code(), ErrorCode::NamespaceDeleted);
@@ -1512,7 +1560,10 @@ async fn gc_preserves_unfolded_data_then_collects_the_retired_prefix() {
     );
 
     namespace_engine(&store, &namespace_id, &context)
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, &namespace_id),
+            loonfs_core::DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete");
     let report = namespace_store(&store, &namespace_id)
@@ -1953,7 +2004,10 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .iter()
             .all(|key| !key.contains("/content/")));
         namespace_engine(&store, &leaf, &setup)
-            .delete_namespace(Default::default())
+            .delete_namespace(
+                &loonfs_core::test_support::administrator_of(&store, &leaf),
+                Default::default(),
+            )
             .await
             .expect("delete leaf");
         store.reset();
@@ -2005,7 +2059,10 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         );
     }
     namespace_engine(&store, &source, &aged)
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, &source),
+            Default::default(),
+        )
         .await
         .expect("delete source");
     let source_deadline = namespace_store(&store, &source)

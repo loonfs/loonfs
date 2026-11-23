@@ -4,7 +4,9 @@
 
 use crate::common::{default_writer, namespace_engine, read_context, resolve_path, submit_commit};
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
-use loonfs_core::test_support::{namespace_store_with_segment_cache, NamespaceFixture, WriterAt};
+use loonfs_core::test_support::{
+    administrator_of, namespace_store_with_segment_cache, NamespaceFixture, WriterAt,
+};
 use loonfs_core::{
     CoreError, MergeAllowance, MergeBound, MergePlan, MergeRequest, NamespaceWriterEngine,
     RetentionTarget,
@@ -100,6 +102,7 @@ impl Family {
         let engine = namespace_engine(&self.store, &self.main, &self.writer);
         engine
             .fork_namespace(
+                &loonfs_core::test_support::administrator(&engine),
                 engine
                     .find_fork_target(&self.fork)
                     .await
@@ -222,8 +225,10 @@ impl Family {
     async fn next_range(&self) -> NextMergeRangeResponse {
         namespace_engine(&self.store, &self.main, &self.writer)
             .next_merge_range(
+                &administrator_of(&self.store, &self.main),
                 &read_context(&self.store, &self.main).await,
                 &namespace_engine(&self.store, &self.fork, &self.writer),
+                &administrator_of(&self.store, &self.fork),
                 &read_context(&self.store, &self.fork).await,
             )
             .await

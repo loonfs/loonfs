@@ -23,7 +23,10 @@ async fn namespace_listing_returns_every_namespace_id_and_skips_other_children()
     }
     let deleted = &namespace_ids[1];
     namespace_engine(&store, deleted, &context)
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator_of(&store, deleted),
+            Default::default(),
+        )
         .await
         .expect("delete namespace");
     let mut aged = context.clone();

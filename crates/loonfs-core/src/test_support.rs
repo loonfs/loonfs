@@ -253,6 +253,28 @@ pub fn writer_at(writer_id: &str, now_ms: u64) -> WriterAt {
     }
 }
 
+/// Returns the administrator proof of `engine`, an engine with no subject,
+/// which needs no read for the proof.
+pub fn administrator<S: ObjectStore, M>(
+    engine: &crate::NamespaceEngine<S, M>,
+) -> crate::Administrator {
+    engine
+        .find_administrator_without_read()
+        .expect("a test engine without a subject needs no read for the proof")
+}
+
+/// Returns the administrator proof for `namespace_id` over `store`, from a
+/// reader engine with no subject.
+pub fn administrator_of<S: ObjectStore>(
+    store: S,
+    namespace_id: &NamespaceId,
+) -> crate::Administrator {
+    administrator(&crate::NamespaceEngine::reader(namespace_store(
+        store,
+        namespace_id,
+    )))
+}
+
 /// Returns the content head of `content_id` that commit validation reads,
 /// from a view over `state` at its newest sequence above a first manifest
 /// over `store`.

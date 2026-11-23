@@ -49,6 +49,7 @@ async fn fork<S: ObjectStore + Clone>(store: S, source: &NamespaceId, target: &N
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(target)
@@ -161,7 +162,10 @@ async fn collect_pool_at<S: ObjectStore>(
 async fn delete_namespace<S: ObjectStore>(store: &S, namespace_id: &NamespaceId, now_ms: u64) {
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context(now_ms))
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(store, namespace_id),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete the namespace");
 }

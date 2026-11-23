@@ -14,7 +14,6 @@ use crate::{
     ListSnapshotFilesOptions, NamespaceId, PathEntry, ReadAt, ReadFileStreamOptions, Result,
     RevisionNo, SharedObjectStore, SnapshotId, StatOptions,
 };
-use loonfs_core::RuntimeReadContext;
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{
@@ -183,26 +182,20 @@ impl ReadView {
                 param: "seq",
             });
         }
-        let head = RuntimeReadContext {
-            visible_seq: None,
-            ..self.pinned.context.clone()
-        };
-        let head_seq = head.read_basis.head.seq;
-        if seq > head_seq {
+        let head = self.pinned.context.at_head();
+        let Some(context) = head.at_seq(seq) else {
+            let head_seq = head.read_basis().head.seq;
             return Err(Error::InvalidRequest {
                 message: format!("sequence `{seq}` is ahead of the read view's head `{head_seq}`"),
                 param: "seq",
             });
-        }
+        };
         let pinned = PinnedRead {
             engine: self
                 .core
                 .reader_engine(self.namespace_id())
-                .with_authorization_head(head.clone()),
-            context: RuntimeReadContext {
-                visible_seq: Some(seq),
-                ..head
-            },
+                .with_authorization_head(head),
+            context,
         };
         let _permit = self.core.read_permit().await;
         self.read(pinned.engine.ensure_retained(&pinned.context))
@@ -219,17 +212,18 @@ impl ReadView {
     /// Otherwise it returns `forbidden`.
     pub async fn as_administrator(&self) -> Result<ReadView> {
         let _permit = self.core.read_permit().await;
-        self.read(
-            self.pinned
-                .engine
-                .ensure_administrator(&self.pinned.context),
-        )
-        .await?;
+        let administrator = self
+            .read(
+                self.pinned
+                    .engine
+                    .verify_administrator(&self.pinned.context),
+            )
+            .await?;
         let pinned = PinnedRead {
             engine: self
                 .core
                 .reader_engine(self.namespace_id())
-                .with_administrator_reads(),
+                .with_administrator_reads(administrator),
             context: self.pinned.context.clone(),
         };
         Ok(ReadView::new(

@@ -898,6 +898,7 @@ async fn a_file_listing_leaves_out_a_file_whose_expired_ancestry_lost_its_bindin
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&fork)

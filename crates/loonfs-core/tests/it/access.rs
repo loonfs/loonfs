@@ -1475,7 +1475,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_the_service_context(
     let viewer = read_engine(&store, &namespace_id, "viewer");
     assert_eq!(
         viewer
-            .ensure_administrator(&context)
+            .verify_administrator(&context)
             .await
             .expect_err("feed requires administrator")
             .code(),
@@ -1494,7 +1494,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_the_service_context(
         loonfs_core::NamespaceReaderEngine::reader(namespace_store(&store, &namespace_id)),
     ] {
         engine
-            .ensure_administrator(&context)
+            .verify_administrator(&context)
             .await
             .expect("feed authorized");
         assert!(!engine
@@ -1514,6 +1514,73 @@ async fn the_feed_and_content_refs_need_an_administrator_or_the_service_context(
                 .await
                 .expect("content"),
             b"body"
+        );
+    }
+}
+
+/// Checks that each core read that is only for the administrator refuses a
+/// subject that isn't the namespace administrator, and that the snapshot
+/// file listing refuses before it looks the snapshot up.
+#[tokio::test]
+async fn the_administrator_reads_refuse_a_subject_that_isnt_the_administrator() {
+    let (_temp_dir, store, namespace_id, _, _) = read_fixture().await;
+    let context = read_context(&store, &namespace_id).await;
+    let viewer = read_engine(&store, &namespace_id, "viewer");
+    let diff_options = loonfs_types::options::DiffOptions::default();
+    let files_options = loonfs_core::ListSnapshotFilesOptions::default();
+    let missing_snapshot = loonfs_types::SnapshotId::generate(loonfs_types::ManifestNo(1));
+    let refusals = [
+        (
+            "the change feed",
+            viewer
+                .list_changes_after(
+                    loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
+                    read_page::<()>(100).limit,
+                    loonfs_types::options::CommitSplitting::Whole,
+                    &context,
+                )
+                .await
+                .err(),
+        ),
+        (
+            "the diff",
+            viewer
+                .diff_page(CommitSeq(0), &diff_options, &context)
+                .await
+                .err(),
+        ),
+        (
+            "the file listing of a missing snapshot",
+            viewer
+                .list_snapshot_files_page(
+                    &missing_snapshot,
+                    read_page(100),
+                    files_options,
+                    &context,
+                )
+                .await
+                .err(),
+        ),
+        (
+            "the retained revisions",
+            viewer
+                .retained_revisions_page(read_page(100), &context)
+                .await
+                .err(),
+        ),
+        (
+            "the file listing at a sequence",
+            viewer
+                .list_files_page(read_page(100), files_options, &context)
+                .await
+                .err(),
+        ),
+    ];
+    for (read, error) in refusals {
+        assert_eq!(
+            error.map(|error| error.code()),
+            Some(ErrorCode::Forbidden),
+            "{read} refuses a subject that isn't the administrator"
         );
     }
 }

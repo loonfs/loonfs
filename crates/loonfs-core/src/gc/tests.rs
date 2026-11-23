@@ -273,7 +273,10 @@ async fn a_retired_namespace_keeps_its_boundary_fences_floor_objects_and_unrecog
     advance_floor_past(&store, &namespace_id, &setup).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete namespace");
     // The WAL objects that no collection deletes: the fences of the writer
@@ -496,6 +499,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&clone)
@@ -510,7 +514,10 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .expect("fork");
     crate::test_support::NamespaceFixture::new(&store, &source, &setup)
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &source),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete source");
 
@@ -542,7 +549,10 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
 
     crate::test_support::NamespaceFixture::new(&store, &clone, &setup)
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &clone),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("delete clone");
     let retired = collect(&store, &clone, &aged).await;
@@ -1306,7 +1316,10 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&second.snapshot_id)
+    .delete_snapshot(
+        &crate::test_support::administrator_of(&store, &namespace_id),
+        &second.snapshot_id,
+    )
     .await
     .expect("release one owner");
     let aged =
@@ -1391,6 +1404,7 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&clone)
@@ -1424,7 +1438,10 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
 
     crate::test_support::NamespaceFixture::new(&store, &clone, &setup)
         .engine()
-        .delete_namespace(DeleteNamespaceOptions::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &clone),
+            DeleteNamespaceOptions::default(),
+        )
         .await
         .expect("terminal delete of the fork target");
     let aged = context(setup.now_ms + GC_GRACE_WINDOW_MS - 1);
@@ -1493,6 +1510,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&clone)
@@ -1789,7 +1807,10 @@ async fn retired_content_namespace<S: ObjectStore>(
     let keys = publish_owned_content(store, namespace_id, 3).await;
     crate::test_support::NamespaceFixture::new(store, namespace_id, &setup)
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(store, namespace_id),
+            Default::default(),
+        )
         .await
         .expect("delete");
     let report = crate::test_support::namespace_store(store, namespace_id)
@@ -1849,7 +1870,10 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             complete_upload_for_gc(&store, &namespace_id, b"content", &setup).await;
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
             .engine()
-            .delete_namespace(Default::default())
+            .delete_namespace(
+                &crate::test_support::administrator_of(&store, &namespace_id),
+                Default::default(),
+            )
             .await
             .expect("delete");
         let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
@@ -2245,7 +2269,10 @@ async fn expiry_deletes_snapshots_without_a_released_state() {
     let deleted_at = 3_000 + GC_GRACE_WINDOW_MS;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(deleted_at))
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            Default::default(),
+        )
         .await
         .expect("delete");
     let retired = crate::test_support::namespace_store(&store, &namespace_id)
@@ -2343,6 +2370,7 @@ async fn a_source_collection_keeps_every_fork_snapshot_and_reads_no_target() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&source)
@@ -2361,6 +2389,7 @@ async fn a_source_collection_keeps_every_fork_snapshot_and_reads_no_target() {
         fixture
             .engine()
             .fork_namespace(
+                &crate::test_support::administrator(&fixture.engine()),
                 fixture
                     .engine()
                     .find_fork_target(&target)

@@ -1328,7 +1328,8 @@ async fn deleting_a_snapshot_never_reuses_its_id() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine();
-    let delete = engine.delete_snapshot(&first.snapshot_id);
+    let administrator = crate::test_support::administrator(&engine);
+    let delete = engine.delete_snapshot(&administrator, &first.snapshot_id);
     let recreate = create_snapshot(&store, &namespace_id, &context);
     let (delete, second) = tokio::join!(delete, recreate);
     assert_eq!(delete.expect("delete").snapshot_id, first.snapshot_id);
@@ -1364,7 +1365,10 @@ async fn deleting_a_snapshot_never_reuses_its_id() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&first.snapshot_id)
+    .delete_snapshot(
+        &crate::test_support::administrator_of(&store, &namespace_id),
+        &first.snapshot_id,
+    )
     .await
     .expect("a second delete succeeds");
 }
@@ -1556,7 +1560,10 @@ async fn a_snapshot_without_a_ttl_is_kept_until_it_is_deleted() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&snapshot.snapshot_id)
+    .delete_snapshot(
+        &crate::test_support::administrator_of(&store, &namespace_id),
+        &snapshot.snapshot_id,
+    )
     .await
     .expect("delete");
     let error = read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
@@ -3037,7 +3044,10 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&snapshot.snapshot_id)
+    .delete_snapshot(
+        &crate::test_support::administrator_of(&store, &namespace_id),
+        &snapshot.snapshot_id,
+    )
     .await
     .expect("delete snapshot");
     // The first collection deletes the snapshot's record, and the second

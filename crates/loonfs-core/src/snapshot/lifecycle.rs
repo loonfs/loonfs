@@ -8,7 +8,7 @@ use super::create::CreatedSnapshot;
 use super::read_basis::load_snapshot_read_basis_from_record;
 use super::record::{encode_snapshot_record, LoadedSnapshotRecord};
 use crate::control_update::{retry_while_contended, CasOutcome};
-use crate::engine::{NamespaceEngine, Writable};
+use crate::engine::{Administrator, NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::basis::ReadBasis;
 use crate::namespace::control::ensure_namespace_live;
@@ -162,12 +162,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ///
     /// `head` is the namespace's head as the caller read it. An initializing
     /// head returns `namespace_not_found`, and a deleted head returns
-    /// `namespace_deleted`.
+    /// `namespace_deleted`. `administrator` proves the caller administers
+    /// the namespace, because snapshots are only for the administrator.
     pub async fn get_snapshot(
         &self,
+        administrator: &Administrator,
         head: &NamespaceReadState,
         snapshot_id: &SnapshotId,
     ) -> Result<Snapshot> {
+        administrator.assert_for(&self.namespace.namespace_id);
         ensure_namespace_live(&head.namespace_id, head.status)?;
         let now_ms = self.now_ms();
         let loaded = ensure_live(
@@ -181,11 +184,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Moves the expiry of an unexpired snapshot that isn't deleted to
     /// `requested_expires_at_ms`, never earlier. A snapshot without an expiry is returned unchanged.
+    /// `administrator` proves the caller administers the namespace.
     pub async fn extend_snapshot(
         &self,
+        administrator: &Administrator,
         snapshot_id: &SnapshotId,
         requested_expires_at_ms: u64,
     ) -> Result<Snapshot> {
+        administrator.assert_for(&self.namespace.namespace_id);
         let clock = self.namespace.start_clock();
         let object_key = snapshot_record(&self.namespace.namespace_id, snapshot_id);
         retry_while_contended(|| async {
@@ -246,8 +252,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// collection deletes its record after the grace window. A missing or
     /// already deleted snapshot succeeds without a write, so a retried delete
     /// returns the same response. A fork snapshot returns `snapshot_not_found`,
-    /// because only garbage collection deletes it.
+    /// because only garbage collection deletes it. `administrator` proves the
+    /// caller administers the namespace.
     pub async fn delete_snapshot(
+        &self,
+        administrator: &Administrator,
+        snapshot_id: &SnapshotId,
+    ) -> Result<DeleteSnapshotResponse> {
+        administrator.assert_for(&self.namespace.namespace_id);
+        self.delete_snapshot_record(snapshot_id).await
+    }
+
+    /// Deletes a snapshot as [`Self::delete_snapshot`] does, without the
+    /// proof.
+    async fn delete_snapshot_record(
         &self,
         snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
@@ -275,6 +293,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// compare-and-swap against the version that the write stored. A record
     /// that changed after the write, and a write that returned no version,
     /// delete as [`Self::delete_snapshot`] does, which loads the record first.
+    ///
+    /// A merge calls this function to delete its snapshot of the fork, so the
+    /// function makes no administrator check, for the reason that
+    /// [`Self::create_verified_snapshot`] describes.
     pub async fn delete_created_snapshot(
         &self,
         created: &CreatedSnapshot,
@@ -296,7 +318,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 return Ok(self.deleted_snapshot(snapshot_id));
             }
         }
-        self.delete_snapshot(snapshot_id).await
+        self.delete_snapshot_record(snapshot_id).await
     }
 
     fn deleted_snapshot(&self, snapshot_id: &SnapshotId) -> DeleteSnapshotResponse {

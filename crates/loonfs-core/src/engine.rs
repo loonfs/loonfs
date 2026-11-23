@@ -35,24 +35,98 @@ use tracing::Instrument;
 /// The head and metadata basis that the runtime pins for one request, so
 /// every read of the request sees the same namespace state.
 ///
+/// A context reads at its head or at a sequence below it. Code outside this
+/// crate builds a context only through its constructors, and
+/// [`Self::at_seq`] refuses a sequence above the head.
+///
 /// This type supports the `loonfs` runtime. Applications should use the
 /// higher-level `loonfs` runtime and namespace handles instead.
 #[derive(Debug, Clone)]
 pub struct RuntimeReadContext {
-    pub read_basis: ReadBasis,
+    pub(crate) read_basis: ReadBasis,
     /// The projected WAL tail above the basis at the head, when the context
     /// starts from a writer session's position. Reads then take this tail
     /// and don't look one up in the namespace's WAL tail cache.
-    pub tail: Option<Arc<ProjectedWalTail>>,
+    pub(crate) tail: Option<Arc<ProjectedWalTail>>,
     /// The sequence that reads see: a retained sequence below the head, or
     /// `None` to read at the head.
-    pub visible_seq: Option<CommitSeq>,
+    pub(crate) visible_seq: Option<CommitSeq>,
 }
 
 impl RuntimeReadContext {
+    /// Returns a context that reads at the head of `read_basis`. `tail` is
+    /// the projected WAL tail of a writer session's position at that head,
+    /// or `None` for reads that look the tail up in the namespace's WAL tail
+    /// cache.
+    pub fn new(read_basis: ReadBasis, tail: Option<Arc<ProjectedWalTail>>) -> Self {
+        Self {
+            read_basis,
+            tail,
+            visible_seq: None,
+        }
+    }
+
+    /// Returns a context of the same head that reads at `seq`, or `None`
+    /// when `seq` is above the head.
+    pub fn at_seq(&self, seq: CommitSeq) -> Option<Self> {
+        (seq <= self.read_basis.head.seq).then(|| Self {
+            visible_seq: Some(seq),
+            ..self.clone()
+        })
+    }
+
+    /// Returns a context of the same head that reads at the head.
+    pub fn at_head(&self) -> Self {
+        Self {
+            visible_seq: None,
+            ..self.clone()
+        }
+    }
+
+    /// Returns the head and metadata basis that this context reads.
+    pub fn read_basis(&self) -> &ReadBasis {
+        &self.read_basis
+    }
+
+    /// Returns the head and metadata basis that this context reads, and
+    /// consumes the context.
+    pub fn into_read_basis(self) -> ReadBasis {
+        self.read_basis
+    }
+
     /// Returns the sequence that reads of this context see.
     pub fn visible_seq(&self) -> CommitSeq {
         self.visible_seq.unwrap_or(self.read_basis.head.seq)
+    }
+}
+
+/// Proof that an engine's subject is the administrator of one namespace, or
+/// that the engine has no subject, as in the service context.
+///
+/// Only [`NamespaceEngine::verify_administrator`] and
+/// [`NamespaceEngine::find_administrator_without_read`] return one. A
+/// function that is only for the administrator takes the proof and asserts
+/// that it was made for the function's own namespace.
+///
+/// A function that is only for the administrator and takes a read context
+/// makes the check itself, at that context. It takes this proof instead
+/// when it has no read context (as a snapshot's creation doesn't), or when
+/// the check has to run before a step that the caller takes outside the
+/// function. For example, the caller of the next merge range checks this
+/// namespace before it reads the fork's head.
+#[derive(Debug)]
+pub struct Administrator {
+    namespace_id: NamespaceId,
+}
+
+impl Administrator {
+    /// Asserts that this proof was made for `namespace_id`. A mismatch is a
+    /// bug in the caller, not an error of the request.
+    pub(crate) fn assert_for(&self, namespace_id: &NamespaceId) {
+        assert_eq!(
+            &self.namespace_id, namespace_id,
+            "an administrator proof is used for the namespace it was checked for"
+        );
     }
 }
 
@@ -139,10 +213,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Makes this engine's per-subject reads check no rights, as reads in
-    /// the service context do. The caller first checks that the reader is
-    /// the namespace administrator or has no subject, with
-    /// [`NamespaceEngine::ensure_administrator`].
-    pub fn with_administrator_reads(mut self) -> Self {
+    /// the service context do, for a reader that `administrator` proves
+    /// administers the namespace or has no subject.
+    pub fn with_administrator_reads(mut self, administrator: Administrator) -> Self {
+        administrator.assert_for(&self.namespace.namespace_id);
         self.read_authority = ReadAuthority::Administrator;
         self
     }
@@ -194,25 +268,59 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self.namespace.load_metadata_view(context).await.map(drop)
     }
 
-    /// The change feed and bare content reference reads work in the service
-    /// context and for an administrator; any other subject is refused.
-    pub async fn ensure_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
-        let Some(subject) = &self.subject else {
-            return Ok(());
+    /// Returns the subject whose administrator rights a check has to read,
+    /// or `None` when the reader passes without a read: an engine with no
+    /// subject, as in the service context, or one whose reads were granted
+    /// administrator rights with a proof.
+    fn subject_to_check(&self) -> Option<&Subject> {
+        match self.read_authority {
+            ReadAuthority::Administrator => None,
+            ReadAuthority::Subject | ReadAuthority::SubjectAtHead(_) => self.subject.as_ref(),
+        }
+    }
+
+    fn administrator(&self) -> Administrator {
+        Administrator {
+            namespace_id: self.namespace.namespace_id.clone(),
+        }
+    }
+
+    /// Returns the administrator proof when this engine needs no read to
+    /// make it: when it has no subject, or its reads were granted
+    /// administrator rights. Returns `None` when the proof needs a check at
+    /// a read context with [`Self::verify_administrator`].
+    pub fn find_administrator_without_read(&self) -> Option<Administrator> {
+        self.subject_to_check()
+            .is_none()
+            .then(|| self.administrator())
+    }
+
+    /// Checks that this engine's reader administers the namespace, and
+    /// returns the proof. The service context and an administrator pass,
+    /// and any other subject is refused with `forbidden`.
+    ///
+    /// The check reads the access row of `/` at `context`, or at the current
+    /// head when this engine authorizes historical reads there, because
+    /// reading an earlier sequence doesn't restore the administrator grants
+    /// that the namespace had at that sequence. It makes no read when
+    /// [`Self::find_administrator_without_read`] returns the proof.
+    pub async fn verify_administrator(
+        &self,
+        context: &RuntimeReadContext,
+    ) -> Result<Administrator> {
+        let Some(subject) = self.subject_to_check() else {
+            return Ok(self.administrator());
         };
         let context = match &self.read_authority {
-            // The caller made this check when it granted administrator reads.
-            ReadAuthority::Administrator => return Ok(()),
-            ReadAuthority::Subject => context,
-            // Historical data does not restore historical administrator grants.
             ReadAuthority::SubjectAtHead(head) => head,
+            ReadAuthority::Subject | ReadAuthority::Administrator => context,
         };
         let view = self
             .namespace
             .load_metadata_view_for_authorization(context)
             .await?;
         if is_administrator(&mut view.metadata_view().session(), &subject.principals).await? {
-            Ok(())
+            Ok(self.administrator())
         } else {
             Err(CoreError::Forbidden {
                 inode_id: ROOT_INODE_ID,
@@ -495,7 +603,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             view.resolve_published_content_location(content_ref).await
         } else {
             Ok(ContentLocation::whole(
-                &context.read_basis.head.pool_id,
+                &context.read_basis().head.pool_id,
                 content_ref,
             ))
         }
@@ -514,7 +622,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         max_bytes: u64,
         context: &RuntimeReadContext,
     ) -> Result<Vec<u8>> {
-        self.ensure_administrator(context).await?;
+        self.verify_administrator(context).await?;
         let view = self.namespace.load_metadata_view(context).await?;
         if !view
             .metadata_view()
@@ -541,7 +649,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     pub(crate) fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {
-        let head = &context.read_basis.head;
+        let head = &context.read_basis().head;
         crate::namespace::control::ensure_head_identity(head, &self.namespace.namespace_id)?;
         crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)
     }
@@ -568,7 +676,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         request: PageRequest<RetainedRevisionsPageCursor>,
         context: &RuntimeReadContext,
     ) -> Result<RetainedRevisionsPage> {
-        self.ensure_administrator(context).await?;
+        self.verify_administrator(context).await?;
         let view = self.namespace.load_metadata_view(context).await?;
         view.retained_revisions_page(request).await
     }
@@ -615,6 +723,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Reads up to `limit` committed changes from `position`, and with
     /// [`CommitSplitting::AtPageBudget`], ends the page inside a commit that
     /// alone exceeds the page's budget.
+    ///
+    /// The change feed is only for the namespace's administrator, and
+    /// [`Self::verify_administrator`] checks that at `context` before the
+    /// feed is read.
     pub async fn list_changes_after(
         &self,
         position: ChangeFeedPosition,
@@ -622,6 +734,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         splitting: CommitSplitting,
         context: &RuntimeReadContext,
     ) -> Result<ListChangesResponse> {
+        self.verify_administrator(context).await?;
         let view = self.namespace.load_metadata_view(context).await?;
         crate::changes::list_changes_after(&view, position, limit, splitting).await
     }
@@ -631,13 +744,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// ([API section 6.12](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#612-get-diff)).
     ///
     /// `to_seq` defaults to the head of `context`, and `after_seq` to
-    /// `from_seq`. The page reads at most `options.limit` commits.
+    /// `from_seq`. The page reads at most `options.limit` commits. The diff
+    /// requires namespace administrator access, as the change feed does.
     pub async fn diff_page(
         &self,
         from_seq: CommitSeq,
         options: &DiffOptions,
         context: &RuntimeReadContext,
     ) -> Result<DiffPage> {
+        self.verify_administrator(context).await?;
         let view = self.namespace.load_metadata_view(context).await?;
         crate::diff::diff_page(&view, from_seq, options).await
     }

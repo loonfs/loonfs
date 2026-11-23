@@ -197,7 +197,7 @@ async fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
             return Ok(loonfs_types::ListFileRevisionsResponse {
                 namespace_id: namespace_id.clone(),
                 inode_id,
-                head_seq: context.read_basis.head.seq,
+                head_seq: context.read_basis().head.seq,
                 revisions,
                 next_cursor: None,
             });
@@ -2604,10 +2604,9 @@ async fn a_view_below_the_manifest_head_lists_every_revision_of_a_file_once() {
         .expect("stat file")
         .inode_id;
     let head = read_context(&store, &namespace_id).await;
-    let pinned = RuntimeReadContext {
-        visible_seq: pinned_seq,
-        ..head.clone()
-    };
+    let pinned = head
+        .at_seq(pinned_seq.expect("the fifth revision's commit"))
+        .expect("the pinned sequence is at or below the head");
 
     assert_eq!(
         drain_file_revisions(&store, &namespace_id, inode_id, &pinned).await,

@@ -56,12 +56,17 @@ fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCo
 }
 
 impl Maintenance {
-    /// A mutating engine that commits as this value's writer ID.
+    /// Returns a mutating engine that commits as this value's writer ID, with
+    /// no subject, because maintenance acts in the service context whatever
+    /// subject the runtime has.
     pub(super) fn engine(
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs_core::NamespaceWriterEngine<SharedObjectStore> {
-        let engine = self.core.writer_engine(&self.writer_id, namespace_id);
+        let engine = loonfs_core::NamespaceWriterEngine::writer(
+            self.core.namespace_store(namespace_id),
+            self.writer_id.clone(),
+        );
         #[cfg(test)]
         let engine = match self.segment_row_budget {
             Some(rows) => engine.narrow_segment_row_budget(rows),

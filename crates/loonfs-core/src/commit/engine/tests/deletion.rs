@@ -45,7 +45,8 @@ async fn deletion_budget_includes_writer_acquisition() {
         context.writer_id.clone(),
     );
     store.block_next();
-    let delete = publisher.delete_namespace(Default::default());
+    let administrator = crate::test_support::administrator_of(&store, &namespace_id);
+    let delete = publisher.delete_namespace(&administrator, Default::default());
     let delay = async {
         store.wait_until_blocked().await;
         clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
@@ -102,7 +103,10 @@ async fn a_stale_writer_stays_fenced_after_namespace_deletion() {
         crate::test_support::namespace_store(&store, &namespace_id),
         context.writer_id.clone(),
     )
-    .delete_namespace(Default::default())
+    .delete_namespace(
+        &crate::test_support::administrator_of(&store, &namespace_id),
+        Default::default(),
+    )
     .await
     .expect("delete");
     let candidate = CommitCandidate::new(CommitIntent::single(

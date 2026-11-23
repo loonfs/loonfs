@@ -52,7 +52,6 @@ impl<M: crate::Mode> Namespace<M> {
                     .core
                     .pinned_read(&self.namespace_id, Consistency::Strong)
                     .await?;
-                pinned.engine.ensure_administrator(&pinned.context).await?;
                 Ok(pinned
                     .engine
                     .list_snapshot_files_page(snapshot_id, request, options, &pinned.context)

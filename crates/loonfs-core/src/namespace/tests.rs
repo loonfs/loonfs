@@ -327,6 +327,7 @@ async fn a_new_namespace_is_looked_up_before_its_first_write() {
     let forked = fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -488,6 +489,7 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
     let forked = fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -631,6 +633,7 @@ async fn a_create_never_finishes_a_fork_and_a_fork_never_finishes_a_create() {
     let forked = fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&created)
@@ -702,6 +705,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -737,6 +741,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&nested)
@@ -814,7 +819,10 @@ async fn fork_into_a_deleted_id_leaves_no_source_snapshot() {
         crate::test_support::namespace_store(&store, &target),
         context.writer_id.clone(),
     )
-    .delete_namespace(Default::default())
+    .delete_namespace(
+        &crate::test_support::administrator_of(&store, &target),
+        Default::default(),
+    )
     .await
     .expect("delete target");
     store.reset();
@@ -860,7 +868,9 @@ async fn a_fork_that_loses_target_publication_writes_no_fork_snapshot() {
             .expect("source");
         store.block_next();
         let engine = crate::test_support::NamespaceFixture::new(&store, &source, &setup).engine();
+        let administrator = crate::test_support::administrator(&engine);
         let fork = engine.fork_namespace(
+            &administrator,
             engine
                 .find_fork_target(&target)
                 .await
@@ -879,7 +889,10 @@ async fn a_fork_that_loses_target_publication_writes_no_fork_snapshot() {
             if deleted {
                 crate::test_support::NamespaceFixture::new(store.inner(), &target, &setup)
                     .engine()
-                    .delete_namespace(Default::default())
+                    .delete_namespace(
+                        &crate::test_support::administrator_of(store.inner(), &target),
+                        Default::default(),
+                    )
                     .await
                     .expect("competing delete");
             }
@@ -937,7 +950,10 @@ async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
     store.reset();
 
     let deleted = engine
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &namespace_id),
+            Default::default(),
+        )
         .await
         .expect("delete");
 
@@ -996,6 +1012,7 @@ async fn a_fork_that_stopped_after_manifest_one_is_finished_by_the_same_request(
     let forked = fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -1053,6 +1070,7 @@ async fn a_fork_request_that_differs_from_manifest_one_returns_namespace_exists(
     let from_other = other_fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&other_fixture.engine()),
             other_fixture
                 .engine()
                 .find_fork_target(&target)
@@ -1085,6 +1103,7 @@ async fn a_fork_request_that_differs_from_manifest_one_returns_namespace_exists(
     let at_named = source_fixture
         .engine()
         .fork_namespace_at_snapshot(
+            &crate::test_support::administrator(&source_fixture.engine()),
             source_fixture
                 .engine()
                 .find_fork_target(&target)
@@ -1128,6 +1147,7 @@ async fn an_initializing_namespace_is_not_found_except_by_create_fork_and_delete
     let snapshot = fixture
         .engine()
         .create_snapshot(
+            &crate::test_support::administrator(&fixture.engine()),
             None,
             None,
             PublicationBasis {
@@ -1140,6 +1160,7 @@ async fn an_initializing_namespace_is_not_found_except_by_create_fork_and_delete
     let fork = fixture
         .engine()
         .fork_namespace_at_snapshot(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&NamespaceId::parse("nested").expect("nested"))
@@ -1186,14 +1207,20 @@ async fn a_delete_of_an_initializing_namespace_publishes_the_tombstone_without_a
         context().writer_id,
     );
     let stale = engine
-        .delete_namespace(loonfs_types::options::DeleteNamespaceOptions {
-            expected_head_seq: Some(loonfs_types::CommitSeq(manifest_1.head_seq.0 + 1)),
-        })
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &target),
+            loonfs_types::options::DeleteNamespaceOptions {
+                expected_head_seq: Some(loonfs_types::CommitSeq(manifest_1.head_seq.0 + 1)),
+            },
+        )
         .await;
     assert_matches!(stale, Err(CoreError::StaleHeadPrecondition { .. }));
     store.reset();
     let deleted = engine
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator_of(&store, &target),
+            Default::default(),
+        )
         .await
         .expect("delete the initializing namespace");
     let operations = store.take();
@@ -1258,6 +1285,7 @@ async fn a_finishing_fork_whose_snapshot_ended_returns_snapshot_not_found_and_le
         let finished = fixture
             .engine()
             .fork_namespace(
+                &crate::test_support::administrator(&fixture.engine()),
                 fixture
                     .engine()
                     .find_fork_target(&target)
@@ -1290,12 +1318,16 @@ async fn a_finishing_fork_whose_source_was_deleted_returns_namespace_deleted() {
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
     fixture
         .engine()
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
+            Default::default(),
+        )
         .await
         .expect("delete the source");
     let finished = fixture
         .engine()
         .fork_namespace(
+            &crate::test_support::administrator(&fixture.engine()),
             fixture
                 .engine()
                 .find_fork_target(&target)
@@ -1361,8 +1393,9 @@ async fn a_finisher_whose_manifest_two_put_loses_to_another_finisher_returns_suc
         store.release();
     };
     let actor = loonfs_test_support::test_actor();
+    let administrator = crate::test_support::administrator(&finisher);
     let (finished, ()) = tokio::join!(
-        finisher.fork_namespace(fork_target, &actor, None),
+        finisher.fork_namespace(&administrator, fork_target, &actor, None),
         other_finisher
     );
     let finished = finished.expect("the finisher returns success");
@@ -1425,6 +1458,7 @@ async fn fork_head<S: ObjectStore + Clone>(
     let engine = fixture.engine();
     engine
         .fork_namespace(
+            &crate::test_support::administrator(&engine),
             engine.find_fork_target(target).await?,
             &loonfs_test_support::test_actor(),
             None,
@@ -1540,7 +1574,11 @@ async fn a_finishing_fork_of_a_tail_ends_when_its_temporary_snapshot_would_have_
             fork_of_a_tail_stopped_after_manifest_one(directory.path(), &source, &target).await;
         NamespaceFixture::new(&store, &source, &context())
             .engine()
-            .extend_snapshot(&temporary, context().now_ms + 48 * 60 * 60 * 1_000)
+            .extend_snapshot(
+                &crate::test_support::administrator_of(&store, &source),
+                &temporary,
+                context().now_ms + 48 * 60 * 60 * 1_000,
+            )
             .await
             .expect("extend the temporary snapshot");
         let later = crate::test_support::writer_at("writer", context().now_ms + elapsed_ms);
@@ -1575,6 +1613,7 @@ async fn a_finishing_fork_that_folds_no_tail_has_no_deadline() {
     NamespaceFixture::new(&store, &source, &context())
         .engine()
         .extend_snapshot(
+            &crate::test_support::administrator_of(&store, &source),
             &temporary.snapshot_id,
             context().now_ms + 48 * 60 * 60 * 1_000,
         )
@@ -1670,8 +1709,9 @@ async fn a_fork_past_its_budget_writes_no_fork_point_snapshot() {
         .expect("find the fork target");
     store.block_next();
     let actor = loonfs_test_support::test_actor();
+    let administrator = crate::test_support::administrator(&engine);
     let (forked, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(fork_target, &actor, &named.snapshot_id),
+        engine.fork_namespace_at_snapshot(&administrator, fork_target, &actor, &named.snapshot_id),
         async {
             store.wait_until_blocked().await;
             timer.advance_ms(METADATA_PUBLICATION_BUDGET_MS + 1);

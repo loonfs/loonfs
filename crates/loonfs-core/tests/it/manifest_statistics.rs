@@ -204,6 +204,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
     let engine = namespace_engine(&store, &parent, &context);
     let snapshot = engine
         .create_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             Some("baseline".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &parent))
@@ -237,6 +238,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
     engine.fold_wal().await.expect("fold parent");
     let layout_snapshot = engine
         .create_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             Some("layout".to_owned()),
             Some(u64::MAX / 2),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &parent))
@@ -298,6 +300,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
     );
     engine
         .fork_namespace_at_snapshot(
+            &loonfs_core::test_support::administrator(&engine),
             engine
                 .find_fork_target(&child)
                 .await
@@ -342,6 +345,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprin
     );
     child_engine
         .fork_namespace(
+            &loonfs_core::test_support::administrator(&child_engine),
             child_engine
                 .find_fork_target(&grandchild)
                 .await
@@ -477,7 +481,10 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
     let engine = namespace_engine(&store, &ns, &context);
     store.fail_all();
     engine
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator(&engine),
+            Default::default(),
+        )
         .await
         .expect_err("cannot delete with an unaccounted tail");
     assert!(!namespace_store(&store, &ns)
@@ -497,7 +504,10 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
     );
     store.clear();
     engine
-        .delete_namespace(Default::default())
+        .delete_namespace(
+            &loonfs_core::test_support::administrator(&engine),
+            Default::default(),
+        )
         .await
         .expect("retry deletion");
     let final_manifest = namespace_store(&store, &ns)
