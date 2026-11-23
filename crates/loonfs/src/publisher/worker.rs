@@ -22,7 +22,7 @@ use loonfs_core::publish::{
 use loonfs_core::time::OperationClock;
 use loonfs_core::Phase;
 use loonfs_types::Commit;
-use loonfs_types::{u64_from_usize, CommitId, WriterId};
+use loonfs_types::{panic_message, u64_from_usize, CommitId, WriterId};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -146,7 +146,9 @@ impl NamespacePublisher {
     /// panics, each request in the batch receives `outcome_unknown`
     /// because the panic may have occurred before or after the WAL put. Callers
     /// can retry with the same commit ID and use the durable receipt to resolve
-    /// the outcome. The worker then continues with queued work.
+    /// the outcome. The worker then continues with queued work. (A panic in
+    /// one commit's preparation doesn't reach this catch, because the core
+    /// fails only that commit, before the WAL put.)
     pub(super) async fn publish_batch(
         &self,
         candidates: Vec<BatchCandidate>,
@@ -162,7 +164,7 @@ impl NamespacePublisher {
             Ok(waiting) => return waiting,
             Err(payload) => payload,
         };
-        self.record_panic("publish", payload);
+        self.record_panic("publish", panic_message(payload.as_ref()));
         // A panic can follow the WAL put, so the position's tail may omit
         // committed bytes.
         if let Some(engine) = self.lock_engine().await.engine.as_mut() {
@@ -470,6 +472,14 @@ impl NamespacePublisher {
                     .map(|_| Err(CoreError::ShuttingDown))
                     .collect(),
             };
+            // The core contains a panic in one commit's preparation and
+            // returns it as that commit's result, so each panic is recorded
+            // here, in the attempt that hit it, whatever the caller gets.
+            for result in &observed {
+                if let Err(CoreError::CommitPreparationPanicked(panic)) = result {
+                    self.record_panic("commit_preparation", panic);
+                }
+            }
             for ((index, candidate), result) in indices.iter().zip(&candidates).zip(&observed) {
                 if result.as_ref().err().is_some_and(is_maintenance_required) {
                     stopped[*index] = Some(candidate.clone());

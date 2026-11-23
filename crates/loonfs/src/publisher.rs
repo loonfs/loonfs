@@ -464,16 +464,15 @@ impl NamespacePublisher {
         }
     }
 
-    pub(super) fn record_panic(&self, unit: &'static str, payload: Box<dyn std::any::Any + Send>) {
-        let panic_message = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("non-string panic payload");
+    /// Records a panic that the publisher or the core contained, in the log
+    /// at error level, in the count of panicked tasks that a drain reports,
+    /// and in the `loonfs.publisher.panics` metric. `unit` identifies the work that
+    /// panicked, and `panic` is the panic's message.
+    pub(super) fn record_panic(&self, unit: &'static str, panic: &str) {
         tracing::error!(
             namespace_id = %self.namespace_id,
             unit,
-            panic = panic_message,
+            panic,
             "publisher task panicked"
         );
         if let Some(shared) = self.shared.upgrade() {

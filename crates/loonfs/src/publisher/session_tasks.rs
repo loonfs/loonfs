@@ -9,6 +9,7 @@ use crate::Maintenance;
 use crate::{Error, FoldWalOutcome, Result};
 use futures::FutureExt;
 use loonfs_core::Phase;
+use loonfs_types::panic_message;
 use std::panic::AssertUnwindSafe;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
@@ -82,7 +83,7 @@ impl NamespacePublisher {
                     Ok(true) => publisher.start_compaction(),
                     Ok(false) => return,
                     Err(payload) => {
-                        publisher.record_panic("fold", payload);
+                        publisher.record_panic("fold", panic_message(payload.as_ref()));
                         return;
                     }
                 }
@@ -113,7 +114,7 @@ impl NamespacePublisher {
                 .catch_unwind()
                 .await
             {
-                publisher.record_panic("compaction", payload);
+                publisher.record_panic("compaction", panic_message(payload.as_ref()));
             }
         });
         state.compaction = Some(compaction);

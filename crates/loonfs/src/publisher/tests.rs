@@ -209,6 +209,8 @@ struct TestCore {
     run_policy: loonfs_core::MetadataRunPolicy,
     timer: Arc<dyn loonfs_types::MonotonicTimer>,
     wall_clock: Arc<dyn crate::WallClock>,
+    /// The recorder of the core's metrics, or `None` to record none.
+    metrics_recorder: Option<Arc<DefaultMetricsRecorder>>,
 }
 
 impl Default for TestCore {
@@ -223,6 +225,7 @@ impl Default for TestCore {
             run_policy: loonfs_core::MetadataRunPolicy::default(),
             timer: Arc::new(loonfs_types::StdMonotonicTimer::default()),
             wall_clock: Arc::new(loonfs_core::time::SystemWallClock),
+            metrics_recorder: None,
         }
     }
 }
@@ -245,7 +248,10 @@ impl TestCore {
             self.run_policy,
             Some(ConfiguredObjectStoreKind::LocalFs),
             metadata_cache,
-            RuntimeInstruments::new(None),
+            RuntimeInstruments::new(
+                self.metrics_recorder
+                    .map(|recorder| recorder as Arc<dyn crate::metrics::MetricsRecorder>),
+            ),
             self.timer,
             self.wall_clock,
         )
@@ -3789,6 +3795,7 @@ mod fenced_session;
 mod head_positions;
 mod inline_writer;
 mod merges;
+mod preparation_panic;
 mod publication_clock;
 mod retention_expiry;
 mod session_compaction;

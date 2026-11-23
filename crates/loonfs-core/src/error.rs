@@ -266,6 +266,13 @@ pub enum CoreError {
         document_bytes: usize,
         max_bytes: usize,
     },
+    /// The preparation of a commit in a publish batch panicked, so the
+    /// commit failed before its batch's WAL put and nothing of it was
+    /// committed. The string is the panic's message, which the runtime logs
+    /// and the error's text leaves out, because a panic's message can
+    /// include internal state.
+    #[error("the server hit a bug while it prepared the commit")]
+    CommitPreparationPanicked(String),
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]
@@ -541,6 +548,9 @@ impl CoreError {
             // The namespace's segment descriptors don't fit in one manifest
             // document, and a retry doesn't change that.
             CoreError::ManifestTooLarge { .. } => ErrorCode::ServerError,
+            // A bug in the server stopped the commit, and the same request
+            // would reach the same bug again.
+            CoreError::CommitPreparationPanicked(_) => ErrorCode::ServerError,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
@@ -660,6 +670,7 @@ impl CoreError {
             | CoreError::Forbidden { .. }
             | CoreError::LiveSetExceedsCollectionMemory { .. }
             | CoreError::ManifestTooLarge { .. }
+            | CoreError::CommitPreparationPanicked(_)
             | CoreError::StaleHeadPrecondition { .. }
             | CoreError::ManifestReplaced { .. } => None,
         }

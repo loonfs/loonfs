@@ -5,6 +5,7 @@ mod content;
 mod deletion;
 mod inline;
 mod merge;
+mod preparation_panic;
 mod retention_floor;
 mod unknown_outcome;
 

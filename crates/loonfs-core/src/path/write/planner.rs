@@ -94,9 +94,14 @@ impl NewInodeId {
     /// two creates fails at the second.
     ///
     /// An inode row is immutable and unique, so a second row for the same ID
-    /// would corrupt the namespace. The ID is present only if the merge's
-    /// planner has a bug: it mistook an inode that this namespace already has
-    /// (for example, one that an earlier merge created) for a new one, or it
+    /// would corrupt the namespace. The ID can be present without a bug when
+    /// another merge created the inode after this merge was planned. A
+    /// rebase replays a fork's commits into a new fork, and the replayed
+    /// creates keep the old fork's inode IDs. So if a merge of the old fork
+    /// and a merge of the new fork are both planned before either commits,
+    /// the second merge to commit finds the inodes that it creates already
+    /// present. The ID is also present if the merge's planner has a bug: it
+    /// mistook an inode that this namespace already has for a new one, or it
     /// assigned one ID to two creates.
     pub(super) async fn merged<S: ObjectStore + ?Sized>(
         view: &MetadataView<'_, '_, S>,
@@ -138,26 +143,19 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     }
 
     /// Returns the ID of the next inode that the commit creates.
-    ///
-    /// A merge whose operation creates an inode without an assigned ID, or
-    /// more than one inode, fails with `InvalidCommitRequest`. Only a bug in
-    /// the merge's planner causes that. A panic would return
-    /// `outcome_unknown` and panic again on every retry, so the merge
-    /// fails with an error that the caller doesn't retry.
-    pub(super) fn next_inode_id(&mut self) -> Result<NewInodeId> {
+    pub(super) fn next_inode_id(&mut self) -> NewInodeId {
         match &mut self.created_inode_ids {
             CreatedInodeIds::Generated { next_create_no } => {
                 let create_no = **next_create_no;
                 **next_create_no = create_no.checked_add(1).expect(
                     "a commit should create fewer inodes than its 32-bit delta positions allow",
                 );
-                Ok(NewInodeId(InodeId::generate(self.committed_seq, create_no)))
+                NewInodeId(InodeId::generate(self.committed_seq, create_no))
             }
-            CreatedInodeIds::Merge(assigned) => assigned.take().ok_or_else(|| {
-                CoreError::InvalidCommitRequest(
-                    "a merge operation creates an inode but has no assigned inode ID".to_owned(),
-                )
-            }),
+            CreatedInodeIds::Merge(assigned) => assigned.take().expect(
+                "a merge operation that creates an inode should have an assigned inode ID \
+                 and create no other inode",
+            ),
         }
     }
 

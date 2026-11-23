@@ -11,10 +11,12 @@ use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::path::write::{CommitIntent, FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::inline_content::InlineContent;
+use futures::FutureExt as _;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{Commit, CommittedReceipt};
 use loonfs_types::{CommitId, ContentId, NamespaceId};
 use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 
 /// How one batch candidate resolved during admission.
 pub(super) enum CandidateAdmission {
@@ -123,15 +125,41 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     {
         return CandidateAdmission::independent(Err(error));
     }
-    match session
-        .prepare_commit(candidate, authorizer, semantic_identity)
+    // A batch contains other callers' commits, so the batch is designed to
+    // continue after a panic in one commit's preparation. That commit fails
+    // with `server_error`, which no caller retries, and the batch prepares
+    // the rest as if the commit had never been in it. (A later candidate
+    // with the same commit ID gets the same error.) A merge's rights check
+    // also prepares a commit, but in its caller's own task, so a panic there
+    // fails that one request as a panic on a read path does.
+    //
+    // A panic here leaves nothing in the batch, because the batch applies a
+    // commit's rows only after its preparation returns. Preparation calls
+    // planning code, a store, or a callback only while it holds no std lock,
+    // so a panic in that code can't poison a lock, and the code that takes
+    // each lock still treats a poisoned lock as a bug. (A shared load keeps
+    // a tokio mutex locked across its store call, but a panic doesn't
+    // poison a tokio mutex.) A panic can leave behind cached durable rows
+    // and blocks, which stay true, and content objects that no row refers
+    // to, which garbage collection deletes.
+    //
+    // The error says that the server hit a bug, which stays true whatever
+    // happens to the batch's WAL put, so the commit settles independently of
+    // the batch. The put's failure never replaces the error, and a batch
+    // published again doesn't prepare the commit again, so the runtime sees
+    // the panic in exactly one attempt's results and records it there.
+    match AssertUnwindSafe(session.prepare_commit(candidate, authorizer, semantic_identity))
+        .catch_unwind()
         .await
     {
-        Ok(plan) => CandidateAdmission::Prepared(plan),
-        Err(error) => CandidateAdmission::Settled(BatchOutcomeSlot::Settled {
+        Ok(Ok(plan)) => CandidateAdmission::Prepared(plan),
+        Ok(Err(error)) => CandidateAdmission::Settled(BatchOutcomeSlot::Settled {
             outcome: Err(error),
             depends_on_batch: true,
         }),
+        Err(payload) => CandidateAdmission::independent(Err(CoreError::CommitPreparationPanicked(
+            loonfs_types::panic_message(payload.as_ref()).to_owned(),
+        ))),
     }
 }
 
