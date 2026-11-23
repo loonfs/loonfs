@@ -375,10 +375,9 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     let mut expected = before.clone();
     expected.manifest_no = before.manifest_no.successor().expect("next manifest");
     expected.compactor_epoch = loonfs_types::CompactorEpoch(before.compactor_epoch.0 + 1);
-    assert_eq!(
-        current_manifest_payload(store.as_ref(), &namespace).await,
-        expected
-    );
+    let claimed = current_manifest_payload(store.as_ref(), &namespace).await;
+    expected.publication_id = claimed.publication_id.clone();
+    assert_eq!(claimed, expected);
     let other = LoonFs::builder_with_store(shared, crate::Context::Service)
         .writer_id(loonfs_test_support::ids::writer_id("other"))
         .build()

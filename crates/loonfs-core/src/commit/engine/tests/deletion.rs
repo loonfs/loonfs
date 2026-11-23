@@ -229,3 +229,95 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         assert_eq!(store.counts().compare_and_swaps, 0);
     }
 }
+
+/// Checks that a deletion whose tombstone put loses its response returns the
+/// deletion's response when the put was written, and `namespace_deleted` when
+/// another deletion by the same writer published the same tombstone content
+/// at that number first.
+#[tokio::test]
+async fn a_deletion_whose_tombstone_put_loses_its_response_reads_back_whose_tombstone_it_is() {
+    use crate::namespace::writer_epoch::AcquiredWriter;
+    use loonfs_test_support::stores::{FailStore, InjectedError};
+
+    for rival in [false, true] {
+        let directory = tempdir().expect("directory");
+        let namespace_id = NamespaceId::parse("lost-tombstone").expect("namespace");
+        let base = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+        let context = context();
+        crate::test_support::NamespaceFixture::new(&base, &namespace_id, &context)
+            .create()
+            .await
+            .expect("bootstrap");
+        // The deletion claims the writer epoch at manifest 3, folds the
+        // claim's fence into manifest 4, and puts its tombstone at manifest 5.
+        let tombstone = metadata_manifest_object(&namespace_id, &loonfs_types::ManifestNo(5));
+        let failing = FailStore::new(
+            base.clone(),
+            KeyPredicate::exact(&tombstone),
+            OperationSelector::PutCreateIfAbsent,
+            InjectedError::Transport("lost response".to_owned()),
+        );
+        // Without a rival, the put is written and its response is lost. With
+        // one, the put waits while the rival publishes, and then fails before
+        // it reaches the store.
+        let failing = if rival {
+            failing
+        } else {
+            failing.apply_then_fail()
+        };
+        failing.fail_next(1);
+        let store = BlockingStore::new(
+            failing,
+            KeyPredicate::exact(&tombstone),
+            OperationSelector::PutCreateIfAbsent,
+        );
+        if rival {
+            store.block_next();
+        }
+        let mut engine = NamespaceCommitEngine::new(
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context).namespace,
+            context.writer_id.clone(),
+        );
+        let administrator = crate::test_support::administrator_of(&store, &namespace_id);
+        let deleted = engine.delete_namespace(&administrator, Default::default());
+        let (deleted, ()) = tokio::join!(deleted, async {
+            if !rival {
+                return;
+            }
+            store.wait_until_blocked().await;
+            let other = crate::test_support::NamespaceFixture::new(&base, &namespace_id, &context);
+            other
+                .namespace
+                .delete_namespace(
+                    Default::default(),
+                    AcquiredWriter {
+                        writer_id: context.writer_id.clone(),
+                        writer_epoch: WriterEpoch(1),
+                    },
+                    None,
+                    &other.namespace.start_clock(),
+                )
+                .await
+                .expect("the rival deletion");
+            store.release();
+        });
+        assert_eq!(store.inner().remaining(), 0);
+        if rival {
+            assert_matches!(deleted, Err(CoreError::NamespaceDeleted { .. }));
+        } else {
+            assert_eq!(deleted.expect("the deletion").namespace_id, namespace_id);
+        }
+        let current = crate::test_support::namespace_store(&base, &namespace_id)
+            .find_newest_manifest()
+            .await
+            .expect("newest manifest");
+        let crate::namespace::control::NewestManifest::Manifest(current) = current else {
+            panic!("the tombstone is the newest manifest");
+        };
+        assert_eq!(
+            current.manifest.payload().manifest_no,
+            loonfs_types::ManifestNo(5)
+        );
+        assert!(current.manifest.payload().status.is_deleted());
+    }
+}

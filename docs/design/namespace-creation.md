@@ -12,7 +12,7 @@ So LoonFS judges those objects by age. The "creation grace" of a pool record or 
 
 The pool record has a second job. It identifies the pool's first member, and the pool's collection finds every other member by walking fork snapshots from the first member (see [Content roots](../specs/format.md#119-content-roots)). Two create calls for one namespace ID each write a pool record, and the call whose manifest 1 put loses leaves a pool that has no members. The collection treats that pool like the pool of a failed create, and with the manifest boundary, a losing pool record that no collection deleted before the namespace was retired stays (see [The pool's collection](manifest-boundary.md#the-pools-collection)).
 
-Finally, a call can't tell whether its own manifest 1 put succeeded after the put has an unknown outcome, unless manifest 1 refers to an object or an ID that only this attempt created: the pool ID that the call generated, or the call's fork snapshot (see [Conflicting and unknown installations](../specs/format.md#93-conflicting-and-unknown-installations)). Every first manifest has to be built that way.
+Finally, a call whose manifest 1 put has an unknown outcome has to tell whether the put succeeded. Every manifest put stores a new [publication ID](../specs/glossary.md#publication-id) in the manifest, so the manifest 1 that the call reads back is the call's own exactly when it has the call's manifest reference (see [Conflicting and unknown installations](../specs/format.md#93-conflicting-and-unknown-installations)).
 
 ## The design
 

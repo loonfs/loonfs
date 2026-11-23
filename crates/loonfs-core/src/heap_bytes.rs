@@ -32,7 +32,7 @@ use loonfs_types::{
     Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
     MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PoolId, PrincipalId,
-    SnapshotId, SpanObjectId, Subject, UploadId, WriterId,
+    PublicationId, SnapshotId, SpanObjectId, Subject, UploadId, WriterId,
 };
 use loonfs_types::{DiffEntry, FilesystemEvent, MergeConflict, MergeConflictVersion};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -182,6 +182,7 @@ text_heap_bytes!(
     SnapshotId,
     PoolId,
     PrincipalId,
+    PublicationId,
     SpanObjectId,
     UploadId,
     WriterId,
@@ -642,6 +643,7 @@ impl HeapBytes for NamespaceManifestPayload {
             + self.created_by.heap_bytes()
             + self.fork_basis.heap_bytes()
             + self.pool_id.heap_bytes()
+            + self.publication_id.heap_bytes()
             + self.writer.heap_bytes()
             + self.runs.heap_bytes()
             + self

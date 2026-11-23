@@ -590,6 +590,8 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
+        publication_id: loonfs_types::PublicationId::parse("pub_5b7tx2k9wq0mhd4yzc8vn3jr6e")
+            .expect("valid publication id"),
 
         head_seq: CommitSeq(2),
         writer_epoch: WriterEpoch(3),

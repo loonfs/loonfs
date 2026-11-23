@@ -2592,7 +2592,7 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         ),
         async {
             blocked.wait_until_blocked().await;
-            let published = publish_once(&store, encode_manifest(winner.clone()))
+            let published = publish_once(&store, winner.clone())
                 .await
                 .expect("competing publication");
             assert_matches!(published, ManifestPublicationOutcome::Published(_));
@@ -2607,13 +2607,16 @@ async fn a_cancelled_finalization_does_not_take_the_races_it_has_left() {
         "the cancelled attempt must not be retried, got {finalization:?}"
     );
     assert_eq!(recorded.counts().create_if_absent_puts, 1);
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("current manifest");
     assert_eq!(
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("current manifest")
-            .payload(),
-        &winner,
+        current.payload(),
+        &loonfs_types::format::manifest::NamespaceManifestPayload {
+            publication_id: current.payload().publication_id.clone(),
+            ..winner
+        },
     );
 }
 
@@ -2805,13 +2808,9 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         .expect("tombstone");
     let mut successor = tombstone.payload().clone();
     successor.manifest_no = successor.manifest_no.successor().expect("next number");
-    let error = publish_once_within(
-        &store,
-        super::super::publish::encode_manifest(successor),
-        &OperationClock::start(0, timer.clone()),
-    )
-    .await
-    .expect_err("a tombstone ends the namespace");
+    let error = publish_once_within(&store, successor, &OperationClock::start(0, timer.clone()))
+        .await
+        .expect_err("a tombstone ends the namespace");
     assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceDeleted);
 }
 

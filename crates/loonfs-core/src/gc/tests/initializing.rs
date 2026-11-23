@@ -55,10 +55,12 @@ async fn the_collection_tombstones_an_abandoned_namespace_creation_after_the_gra
 
     let abandoned_at_ms = created_at_ms + GC_GRACE_WINDOW_MS;
     collect(&store, &target, &context(abandoned_at_ms)).await;
+    let tombstone = current().await;
     assert_eq!(
-        current().await,
+        tombstone,
         NamespaceManifestPayload {
             manifest_no: ManifestNo(2),
+            publication_id: tombstone.publication_id.clone(),
             ..manifest_1.tombstone(abandoned_at_ms)
         }
     );
