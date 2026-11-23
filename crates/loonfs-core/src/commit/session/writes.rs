@@ -8,7 +8,7 @@ use super::numbering::CommitNumbering;
 use crate::commit::{CommitOperand, CommitValidationError};
 use crate::error::Result;
 use crate::metadata::{InodeRecord, SubtreeTombstoneRecord};
-use crate::path::write::{AvailableName, ResolvedBinding, ResolvedTarget};
+use crate::path::write::{AvailableName, NewInodeId, ResolvedBinding, ResolvedTarget};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, RevisionSummary};
 use loonfs_types::format::wal::WalDelta;
@@ -27,14 +27,15 @@ pub(crate) enum NewChild {
 }
 
 impl<S: ObjectStore + ?Sized> CommitSession<'_, S> {
-    /// Creates a directory or file at `name`.
+    /// Creates a directory or file with the ID `new_inode` at `name`.
     pub(crate) async fn create(
         &mut self,
-        child_inode_id: InodeId,
+        new_inode: NewInodeId,
         name: AvailableName,
         child: NewChild,
     ) -> Result<()> {
         let op_index = self.numbering.reserve_op_index()?;
+        let child_inode_id = new_inode.inode_id();
         self.ensure_child_unbound(child_inode_id, None).await?;
         let parent_inode_id = name.parent_inode_id();
         let name_key = name.name_key();

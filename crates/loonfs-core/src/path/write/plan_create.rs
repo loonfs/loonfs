@@ -35,8 +35,8 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
         destination.ensure_mutation()?;
         let destination = self.view().resolve_destination(destination).await?;
         let name = self.view().ensure_vacant_destination(&destination).await?;
-        let child_inode_id = self.next_inode_id()?;
-        self.commit.create(child_inode_id, name, child).await
+        let new_inode = self.next_inode_id()?;
+        self.commit.create(new_inode, name, child).await
     }
 
     /// Plans a new directory at `absolute_path`, and with `parents`, the
@@ -62,9 +62,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .await?;
         self.create_parent_directories(parents).await?;
         let name = self.available_path(absolute_path).await?;
-        let child_inode_id = self.next_inode_id()?;
+        let new_inode = self.next_inode_id()?;
         self.commit
-            .create(child_inode_id, name, NewChild::Directory)
+            .create(new_inode, name, NewChild::Directory)
             .await
     }
 
@@ -244,9 +244,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 }
                 self.create_parent_directories(parents).await?;
                 let name = self.available_path(absolute_path).await?;
-                let child_inode_id = self.next_inode_id()?;
+                let new_inode = self.next_inode_id()?;
                 self.commit
-                    .create(child_inode_id, name, NewChild::File(content_ref))
+                    .create(new_inode, name, NewChild::File(content_ref))
                     .await
             }
             Err(other) => Err(other),
@@ -326,9 +326,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 .resolve_destination(destination)
                 .await?
                 .available_name(None)?;
-            let child_inode_id = self.next_inode_id()?;
+            let new_inode = self.next_inode_id()?;
+            let child_inode_id = new_inode.inode_id();
             self.commit
-                .create(child_inode_id, name, NewChild::Directory)
+                .create(new_inode, name, NewChild::Directory)
                 .await?;
             parent_inode_id = child_inode_id;
         }

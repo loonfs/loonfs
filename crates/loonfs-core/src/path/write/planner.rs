@@ -76,6 +76,19 @@ pub(super) struct OperationPlanningSession<'p, 'c, S: ObjectStore + ?Sized> {
     pub(super) temporary_move: Option<TemporaryMove>,
 }
 
+/// The ID of an inode that a create writes. Only
+/// [`OperationPlanningSession::next_inode_id`] makes one, so the ID is new to
+/// the namespace: a generated ID includes the commit's sequence, and the
+/// planning session checks that a merge's assigned ID is absent before it
+/// plans the operation.
+pub(crate) struct NewInodeId(InodeId);
+
+impl NewInodeId {
+    pub(crate) fn inode_id(&self) -> InodeId {
+        self.0
+    }
+}
+
 /// Where the IDs of the inodes that one operation creates come from.
 pub(super) enum CreatedInodeIds<'p> {
     /// Each ID is built from the commit's sequence and the create number of
@@ -105,16 +118,16 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
     /// the merge's planner causes that. A panic would return
     /// `outcome_unknown` and panic again on every retry, so the merge
     /// fails with an error that the caller doesn't retry.
-    pub(super) fn next_inode_id(&mut self) -> Result<InodeId> {
+    pub(super) fn next_inode_id(&mut self) -> Result<NewInodeId> {
         match &mut self.created_inode_ids {
             CreatedInodeIds::Generated { next_create_no } => {
                 let create_no = **next_create_no;
                 **next_create_no = create_no.checked_add(1).expect(
                     "a commit should create fewer inodes than its 32-bit delta positions allow",
                 );
-                Ok(InodeId::generate(self.committed_seq, create_no))
+                Ok(NewInodeId(InodeId::generate(self.committed_seq, create_no)))
             }
-            CreatedInodeIds::Merge(assigned) => assigned.take().ok_or_else(|| {
+            CreatedInodeIds::Merge(assigned) => assigned.take().map(NewInodeId).ok_or_else(|| {
                 CoreError::InvalidCommitRequest(
                     "a merge operation creates an inode but has no assigned inode ID".to_owned(),
                 )

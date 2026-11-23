@@ -257,13 +257,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 if expected_destination.is_some() {
                     return Err(CoreError::PathNotFound(path.to_owned()));
                 }
-                let child_inode_id = self.next_inode_id()?;
+                let new_inode = self.next_inode_id()?;
+                let child_inode_id = new_inode.inode_id();
                 self.commit
-                    .create(
-                        child_inode_id,
-                        available,
-                        NewChild::File(revision.content_ref),
-                    )
+                    .create(new_inode, available, NewChild::File(revision.content_ref))
                     .await?;
                 // A copy to a vacant destination is a new resource that
                 // stands for the source, so it starts with the source's

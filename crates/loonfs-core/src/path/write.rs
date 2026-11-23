@@ -18,6 +18,6 @@ mod publish_path_planning;
 mod session;
 
 pub use intent::{CommitIntent, FilesystemOperation};
-pub(crate) use planner::{commit_fingerprint, merge_fingerprint};
+pub(crate) use planner::{commit_fingerprint, merge_fingerprint, NewInodeId};
 pub(crate) use publish_path_planning::{AvailableName, ResolvedBinding, ResolvedTarget};
 pub(crate) use session::PublishPlanningSession;
