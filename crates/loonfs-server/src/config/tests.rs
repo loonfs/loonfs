@@ -240,9 +240,23 @@ root = "/tmp/loonfs-server"
     }
 }
 
+/// Checks that each invalid inline content setting fails validation, and
+/// that the error identifies the setting by its path in the config file.
 #[test]
 fn validate_rejects_invalid_inline_content_settings() {
-    let source = r#"
+    for setting in [
+        "inline_content_threshold_bytes",
+        "inline_content_wal_object_budget_bytes",
+        "inline_content_tail_limit_bytes",
+    ] {
+        let value = match setting {
+            "inline_content_threshold_bytes" => {
+                loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES + 1
+            }
+            _ => 0,
+        };
+        let source = format!(
+            r#"
 bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
 content_token_secret = "test-secret"
@@ -252,12 +266,17 @@ kind = "local_fs"
 root = "/tmp/loonfs-server"
 
 [inline_content]
-inline_content_tail_limit_bytes = 0
-"#;
-    assert_invalid_field(
-        parse_server_config(source).expect_err("zero inline content tail limit"),
-        "runtime",
-    );
+{setting} = {value}
+"#
+        );
+        let field = format!("inline_content.{setting}");
+        match parse_server_config(&source).expect_err("an invalid inline content setting") {
+            ServerError::Config(ConfigFieldError::Invalid { field: actual, .. }) => {
+                assert_eq!(actual, field)
+            }
+            other => panic!("expected invalid field error for {field}, got {other:?}"),
+        }
+    }
 }
 
 pub(super) fn assert_invalid_field(error: ServerError, field: &'static str) {
