@@ -237,9 +237,8 @@ impl<'a> Destination<'a> {
 /// A destination resolved to its parent directory and its current occupant.
 ///
 /// [`PlanningView::resolve_destination`] makes one from a [`Destination`],
-/// and [`ResolvedDestination::found`] and
-/// [`OperationPlanningSession::create_missing_directories`] make one from
-/// what a walk of the request's path returned.
+/// and [`OperationPlanningSession::create_missing_directories`] makes one
+/// for each name that a walk of the request's path found missing.
 pub(super) struct ResolvedDestination<'a> {
     parent_inode_id: InodeId,
     name: DisplayName,
@@ -267,20 +266,6 @@ impl<'a> ResolvedDestination<'a> {
             occupant,
             absence: Absence::Path(absolute_path.as_str()),
         }
-    }
-
-    /// Returns the destination at `absolute_path`, which a walk of the path
-    /// found occupied by `existing`.
-    pub(super) fn found(
-        absolute_path: &'a AbsolutePath,
-        existing: ResolvedVisiblePath,
-    ) -> Result<Self> {
-        Ok(Self::at_path(
-            absolute_path,
-            existing.parent_inode_id.unwrap_or(ROOT_INODE_ID),
-            final_component(absolute_path)?,
-            Some(existing),
-        ))
     }
 
     pub(super) fn parent_inode_id(&self) -> InodeId {
@@ -558,6 +543,29 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         )
         .await?;
         destination.available_name(None)
+    }
+
+    /// Returns the error for a new entry at `absolute_path`, which a walk of
+    /// the path found occupied by `existing`: the authorization error when
+    /// the subject lacks `create` on the parent of `existing`, and
+    /// `destination_exists` otherwise.
+    pub(super) async fn occupied_path_error(
+        &self,
+        absolute_path: &AbsolutePath,
+        existing: &ResolvedVisiblePath,
+    ) -> CoreError {
+        let parent_inode_id = existing.parent_inode_id.unwrap_or(ROOT_INODE_ID);
+        let absence = Absence::Path(absolute_path.as_str());
+        if let Err(error) = self
+            .authorize(parent_inode_id, AccessRight::Create.into(), absence)
+            .await
+        {
+            return error;
+        }
+        CoreError::DestinationExists {
+            path: absolute_path.as_str().to_owned(),
+            existing_display_name: Some(existing.display_name.clone()),
+        }
     }
 
     pub(super) async fn resolve_visible_inode(

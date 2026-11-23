@@ -2,9 +2,7 @@
 
 use super::planner::OperationPlanningSession;
 use super::preconditions::{ensure_expected_inode, ExpectedFileState};
-use super::publish_path_planning::{
-    ensure_file, AvailableName, Destination, ResolvedDestination, Target,
-};
+use super::publish_path_planning::{ensure_file, AvailableName, Destination, Target};
 use crate::authorize::{check_rights, Absence};
 use crate::commit::{CommitValidationError, NewChild};
 use crate::error::{CoreError, Result};
@@ -77,8 +75,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
             .await?;
         let name = match walk {
             VisiblePathWalk::Found(existing) => {
-                let destination = ResolvedDestination::found(absolute_path, existing)?;
-                self.view().authorize_vacant_name(&destination).await?
+                return Err(self
+                    .view()
+                    .occupied_path_error(absolute_path, &existing)
+                    .await);
             }
             VisiblePathWalk::Missing(missing) => {
                 self.view()
@@ -250,8 +250,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, '_, S> {
                 return self.commit.replace_file(binding, &content_ref, None).await;
             }
             VisiblePathWalk::Found(existing) => {
-                let destination = ResolvedDestination::found(absolute_path, existing)?;
-                self.view().authorize_vacant_name(&destination).await?
+                return Err(self
+                    .view()
+                    .occupied_path_error(absolute_path, &existing)
+                    .await);
             }
             VisiblePathWalk::Missing(missing) => {
                 self.view()
