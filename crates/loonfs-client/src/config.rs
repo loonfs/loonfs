@@ -89,6 +89,13 @@ impl ClientConfig {
                     reason: "must not be empty".to_owned(),
                 });
             }
+            if authorization_header(token).is_err() {
+                return Err(ConfigFieldError::Invalid {
+                    field: "auth_token",
+                    reason: "must be usable in an HTTP header, without control characters"
+                        .to_owned(),
+                });
+            }
             if server_uri.scheme_str() == Some("http") && !is_literal_loopback_host(&server_uri) {
                 return Err(ConfigFieldError::Invalid {
                     field: "server_url",
@@ -107,6 +114,14 @@ impl ClientConfig {
         }
         Ok(())
     }
+}
+
+/// Returns the `Authorization` header value that sends `token`, or an error
+/// when the token can't be sent in a header.
+pub(crate) fn authorization_header(
+    token: &SecretString,
+) -> std::result::Result<http::HeaderValue, http::header::InvalidHeaderValue> {
+    http::HeaderValue::from_str(&format!("Bearer {}", token.expose()))
 }
 
 fn is_literal_loopback_host(uri: &Uri) -> bool {
@@ -280,6 +295,30 @@ mod tests {
         let config: ClientConfig =
             toml::from_str("server_url = \"http://localhost:1\"\n").expect("minimal config");
         assert!(config.auth_token.is_none());
+    }
+
+    #[test]
+    fn a_token_that_cant_be_sent_in_a_header_fails_construction() {
+        let error = Client::new(
+            ClientConfig {
+                server_url: "https://example.com".to_owned(),
+                auth_token: Some("line\nbreak".into()),
+                actor: None,
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: None,
+            },
+            loonfs_types::Context::Service,
+        )
+        .expect_err("a token with a line break");
+        assert_matches!(
+            error,
+            ClientError::ConfigField(loonfs_types::config::ConfigFieldError::Invalid {
+                field: "auth_token",
+                ..
+            }),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

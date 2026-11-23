@@ -3,6 +3,7 @@
 use crate::{Body, Client, ClientConfig, TransportError};
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use futures::StreamExt as _;
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
 use loonfs_types::{ErrorCode, ErrorResponse};
@@ -14,6 +15,9 @@ use tower::Service;
 pub(crate) enum Outcome {
     TransportFailure,
     Success(Vec<u8>),
+    /// A 200 response whose body sends these bytes and then fails, as a
+    /// connection that drops while the body is read does.
+    BodyFailure(Vec<u8>),
     PartAccepted(String),
     /// A 206 response with this `Content-Range` header and body.
     PartialContent(String, Vec<u8>),
@@ -167,6 +171,13 @@ impl Service<Request<Body>> for ScriptedTransport {
                     "injected transport failure",
                 ))),
                 Outcome::Success(bytes) => Ok(Response::new(Body::from(Bytes::from(bytes)))),
+                Outcome::BodyFailure(bytes) => Ok(Response::new(Body::from_stream(
+                    futures::stream::iter([
+                        Ok(Bytes::from(bytes)),
+                        Err(std::io::Error::other("connection reset")),
+                    ])
+                    .boxed(),
+                ))),
                 Outcome::PartAccepted(etag) => Ok(Response::builder()
                     .header(http::header::ETAG, etag)
                     .body(Body::empty())

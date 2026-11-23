@@ -5,7 +5,7 @@ use crate::operations::Operation;
 use crate::transport_body::{timeout_error, wait_for_timeout, RequestActivity, TimedBody};
 use crate::{Body, Client, ClientError, PayloadStream, Result, TransportError};
 use bytes::Bytes;
-use futures::StreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
 use loonfs_types::{
@@ -13,7 +13,7 @@ use loonfs_types::{
     TransportRetryOutcome,
 };
 pub(crate) use loonfs_types::{MonotonicTimer, StdMonotonicTimer, TransportRetryPolicy};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub(crate) type Transport =
@@ -143,19 +143,33 @@ impl Client {
         body: PayloadStream,
         size_bytes: Option<u64>,
     ) -> Result<Vec<u8>> {
+        // A failed read of the caller's source fails the request, and the
+        // transport reports it like a network failure. The failure is kept
+        // here so that the request returns it as the local failure it is.
+        let source_failure = Arc::new(OnceLock::new());
+        let body = body
+            .inspect_err({
+                let source_failure = source_failure.clone();
+                move |error| {
+                    let _ = source_failure.set(error.to_string());
+                }
+            })
+            .boxed();
         let mut request_body = self.build(request, Body::from_stream(body))?;
         if let Some(size_bytes) = size_bytes {
             request_body
                 .headers_mut()
                 .append(http::header::CONTENT_LENGTH, size_bytes.into());
         }
-        self.send(request_body, None)
-            .await
-            .map_err(|attempt| attempt.error)?
-            .collect(&request.url)
-            .await
-            .map(|response| response.bytes)
-            .map_err(|attempt| attempt.error)
+        let sent = match self.send(request_body, None).await {
+            Ok(response) => response.collect(&request.url).await,
+            Err(attempt) => Err(attempt),
+        };
+        sent.map(|response| response.bytes)
+            .map_err(|attempt| match source_failure.get() {
+                Some(message) => ClientError::Io(format!("reading the payload failed: {message}")),
+                None => attempt.error,
+            })
     }
 
     /// Sends a request and returns a successful response with its body
@@ -314,10 +328,8 @@ impl Client {
             .uri(&request.url);
         if request.authenticate {
             if let Some(token) = &self.auth_token {
-                let mut value = http::HeaderValue::from_str(&format!("Bearer {}", token.expose()))
-                    .map_err(|error| {
-                        failed_attempt(&request.url, TransportError::new(error)).error
-                    })?;
+                let mut value = crate::config::authorization_header(token)
+                    .expect("the client validates its token when it is built");
                 value.set_sensitive(true);
                 builder = builder.header(http::header::AUTHORIZATION, value);
             }
@@ -325,9 +337,15 @@ impl Client {
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
-        builder
-            .body(body)
-            .map_err(|error| failed_attempt(&request.url, TransportError::new(error)).error)
+        // The URL and the headers that remain come from the server, such as a
+        // presigned URL, or from the caller, so a request that can't be built
+        // breaks the API's contract and would fail the same way again.
+        builder.body(body).map_err(|error| {
+            ClientError::Protocol(format!(
+                "request to `{}` can't be built: {error}",
+                request.url
+            ))
+        })
     }
 
     async fn send(

@@ -632,15 +632,55 @@ async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
         .open_direct_download(&grant_from(content_ref, "http://example.invalid/object", 4))
         .await
         .expect("resumed grant");
+    // The call fails until the caller supplies the four bytes it holds, so
+    // sending it again doesn't help.
+    for _ in 0..2 {
+        let error = resumed
+            .next_chunk()
+            .await
+            .expect_err("the skipped bytes are still owed");
+        assert_matches!(
+            &error,
+            ClientError::Protocol(message) if message.contains("resumed at offset 4"),
+            "unexpected error: {error}"
+        );
+        assert!(!error.retryable_without_operator_action(), "{error}");
+    }
     let error = resumed
-        .next_chunk()
-        .await
-        .expect_err("the skipped bytes are still owed");
+        .fold_resumed_prefix(&payload[..5])
+        .expect_err("a prefix past the start offset");
     assert_matches!(
         &error,
-        ClientError::Http(message) if message.contains("resumed at offset 4"),
+        ClientError::Protocol(_),
         "unexpected error: {error}"
     );
+    assert!(!error.retryable_without_operator_action(), "{error}");
+}
+
+#[tokio::test]
+async fn a_body_that_fails_over_the_network_is_a_failure_a_resend_can_get_past() {
+    let payload = b"aaaabbbb".to_vec();
+    let transport = scripted_transport::script([Outcome::BodyFailure(payload[..4].to_vec())]);
+    let client = scripted_transport::client(&transport);
+    let mut download = client
+        .open_direct_download(&grant(
+            crc32c_content_ref(&payload),
+            "http://example.invalid/object",
+        ))
+        .await
+        .expect("open the grant");
+    let first = download
+        .next_chunk()
+        .await
+        .expect("the bytes before the failure");
+    assert_eq!(first.as_deref(), Some(&payload[..4]));
+
+    let error = download
+        .next_chunk()
+        .await
+        .expect_err("the connection dropped");
+    assert_matches!(&error, ClientError::Http(_), "unexpected error: {error}");
+    assert!(error.retryable_without_operator_action(), "{error}");
 }
 
 #[tokio::test]

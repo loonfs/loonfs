@@ -743,6 +743,51 @@ fn retries_cover_transport_failures_and_unavailability_only() {
 }
 
 #[tokio::test]
+async fn a_request_that_cant_be_built_is_refused_without_a_send() {
+    let transport = scripted_transport::script([]);
+    let client = scripted_transport::client(&transport);
+    let request = WireRequest::presigned(
+        Method::PUT,
+        "http://example.invalid/an object",
+        SendPolicy::RetryWithoutDeadline,
+    )
+    .header("x-signed", "line\nbreak");
+    let error = client
+        .call(&request)
+        .await
+        .expect_err("the presigned request isn't valid");
+    assert_matches!(&error, ClientError::Protocol(message) if message.contains("can't be built"));
+    assert!(!error.retryable_without_operator_action());
+    assert_eq!(transport.attempts(), 0);
+}
+
+#[tokio::test]
+async fn a_failed_read_of_the_source_is_a_local_failure() {
+    let transport =
+        scripted_transport::script([scripted_transport::Outcome::Success(b"unused".to_vec())]);
+    let client = scripted_transport::client(&transport);
+    let request = client.request(
+        Operation::retry_without_deadline(Method::PUT),
+        "http://127.0.0.1/content",
+    );
+    let source = futures::stream::iter([
+        Ok(Bytes::from_static(b"some")),
+        Err(std::io::Error::other("disk read failed")),
+    ])
+    .boxed();
+    let error = client
+        .call_streamed_once(&request, source, None)
+        .await
+        .expect_err("the source failed");
+    assert_matches!(
+        &error,
+        ClientError::Io(message) if message.contains("disk read failed"),
+        "unexpected error: {error}"
+    );
+    assert!(!error.retryable_without_operator_action());
+}
+
+#[tokio::test]
 async fn transport_failures_resend_up_to_the_attempt_cap() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let max_attempts = DEFAULT.max_retries as usize + 1;

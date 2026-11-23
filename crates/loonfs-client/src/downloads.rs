@@ -72,7 +72,7 @@ impl DirectDownloadStream {
     /// checksum verification to fail.
     pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) -> Result<()> {
         self.verifier.fold_resumed_prefix(bytes).map_err(|refused| {
-            ClientError::Http(format!("download of `{}`: {refused}", self.target))
+            ClientError::Protocol(format!("download of `{}`: {refused}", self.target))
         })
     }
 
@@ -85,7 +85,7 @@ impl DirectDownloadStream {
         self.verifier
             .ensure_resumed_prefix_complete()
             .map_err(|incomplete| {
-                ClientError::Http(format!("download of `{}`: {incomplete}", self.target))
+                ClientError::Protocol(format!("download of `{}`: {incomplete}", self.target))
             })?;
         if let Some(error) = &self.failed {
             return Err(error.clone());
@@ -123,7 +123,7 @@ impl DirectDownloadStream {
                     return Ok(Some(chunk));
                 }
                 Some(Err(error)) => {
-                    return Err(ClientError::Io(format!(
+                    return Err(ClientError::Http(format!(
                         "read of `{}` failed: {error}",
                         self.target
                     )));
