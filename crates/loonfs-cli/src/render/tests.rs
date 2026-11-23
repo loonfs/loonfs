@@ -601,7 +601,7 @@ fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_wo
         [
             "next reclamation at 2023-11-14 22:13:20Z",
             "skipped the content sweep: the collection couldn't read every pool member's roots within its budget",
-            "skipped the content sweep: the collection couldn't read one pool member's roots",
+            "skipped the content sweep: the collection couldn't read one pool member's roots or load one layout segment's extent filter",
         ]
     );
 }
