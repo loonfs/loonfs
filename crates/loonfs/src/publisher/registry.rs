@@ -375,9 +375,9 @@ impl PublisherRegistry {
     }
 
     /// Tells the namespace's publisher how a mutation outside the publisher
-    /// changed the namespace, and drops the namespace's cached head when the
-    /// mutation may have changed the namespace in ways this runtime
-    /// hasn't recorded.
+    /// changed the namespace, and drops this runtime's view of the namespace
+    /// (see [`RuntimeCore::forget_namespace_view`]) when the mutation may
+    /// have changed the namespace in ways this runtime hasn't recorded.
     pub(crate) async fn invalidate_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -393,8 +393,8 @@ impl PublisherRegistry {
                 self.shared
                     .context
                     .runtime_core
-                    .invalidate_namespace_read_cache(namespace_id);
-                self.shared.drop_position(namespace_id).await;
+                    .forget_namespace_view(namespace_id)
+                    .await;
             }
         }
     }

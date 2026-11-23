@@ -418,12 +418,15 @@ impl RuntimeCore {
         ActiveNamespaceCatalogEntry::from_head(context.read_basis().head()).map_err(Error::from)
     }
 
-    /// Drops the namespace's cached head, after this runtime learns of a
-    /// change whose effect on the head it can't identify, so the next read
-    /// loads the namespace by discovery, whatever its consistency (see
+    /// Drops the namespace's cached head, so the next read that doesn't start
+    /// from a writer position loads the namespace by discovery, whatever its
+    /// consistency (see
     /// [`HeadAndWalTailCache::invalidate_head`](loonfs_core::cache::HeadAndWalTailCache::invalidate_head)).
-    /// A writer runtime calls `PublisherRegistry::invalidate_namespace`
-    /// instead, which also tells the namespace's publisher what changed.
+    /// A caller that finds this runtime's view of the namespace out of date
+    /// calls [`Self::forget_namespace_view`] instead, which also drops the
+    /// position of the namespace's writer session. A release of the
+    /// session's engine and a deletion call this method directly, because
+    /// the engine has already dropped its own position by then.
     ///
     /// Cached WAL-tail projections stay. A tail is keyed by namespace,
     /// manifest number, and head sequence, and that key identifies one

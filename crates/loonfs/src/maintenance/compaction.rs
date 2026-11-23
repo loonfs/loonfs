@@ -92,10 +92,9 @@ impl Maintenance {
 
     /// Returns the manifest of `position`, this runtime's writer position, as
     /// a basis, or `None` when the manifest is missing from the store and at
-    /// or below the manifest boundary. In that case the call drops the
-    /// position and then the cached head that the position becomes, as a
-    /// check of the position does (see
-    /// [`RuntimeCore::checked_writer_position`]), so the next use starts from
+    /// or below the manifest boundary. In that case the call drops this
+    /// runtime's view of the namespace, as a check of the position does (see
+    /// [`RuntimeCore::forget_namespace_view`]), so the next use starts from
     /// the newest manifest.
     pub(super) async fn position_basis(
         &self,
@@ -108,8 +107,7 @@ impl Maintenance {
             .load_position_basis(position)
             .await?;
         if basis.is_none() {
-            self.core.drop_writer_position(namespace_id).await;
-            self.core.invalidate_namespace_read_cache(namespace_id);
+            self.core.forget_namespace_view(namespace_id).await;
         }
         Ok(basis)
     }

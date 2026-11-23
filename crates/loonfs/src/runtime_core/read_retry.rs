@@ -215,12 +215,11 @@ impl RuntimeCore {
     /// replaced the manifest that this runtime's head of the namespace
     /// reads, so the next read starts from the newer manifest.
     ///
-    /// The position becomes the cached head when it's dropped, so the head
-    /// is dropped after the position, and then loaded from the store, which
-    /// finds the manifest that replaced the read's basis.
+    /// The call drops this runtime's view of the namespace (see
+    /// [`Self::forget_namespace_view`]), and then loads the head from the
+    /// store, which finds the manifest that replaced the read's basis.
     pub(crate) async fn reload_replaced_head(&self, namespace_id: &NamespaceId) -> Result<()> {
-        self.drop_writer_position(namespace_id).await;
-        self.invalidate_namespace_read_cache(namespace_id);
+        self.forget_namespace_view(namespace_id).await;
         self.reload_namespace_head(namespace_id).await?;
         Ok(())
     }
