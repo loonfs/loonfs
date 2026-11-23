@@ -191,8 +191,8 @@ pub mod control {
 pub mod publish {
     pub use crate::commit::engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishOutcome, SharedWriterSessionStatus, TailSource, WalTailReport,
-        WriterSessionStatus,
+        NamespaceCommitEnginePublishOutcome, TailSource, WalTailReport, WriterSessionStatus,
+        WriterSessionStatusGuard, WriterSessionStatusView,
     };
     pub use crate::commit::publish_view::{PositionCheck, WriterPosition};
     pub use crate::commit::CommitFingerprint;

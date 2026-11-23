@@ -1,7 +1,6 @@
 //! Snapshot retention, compaction, and publication budgets.
 
 use super::*;
-use crate::publish::SharedWriterSessionStatus;
 use crate::segment::block_memo::SessionBlockMemo;
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::{snapshot_prefix, wal_prefix};
@@ -1173,8 +1172,7 @@ async fn a_session_that_collides_with_a_floor_object_replays_it_and_isnt_fenced(
     let mut writer = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),
         test_context().writer_id,
-    )
-    .writer_session(SharedWriterSessionStatus::default());
+    );
     let (gone, deletion_seq) = create_and_delete(&mut writer, "gone").await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let planned = namespace

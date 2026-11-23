@@ -313,69 +313,59 @@ pub(crate) async fn publish<S: ObjectStore>(
         .remove(0)
 }
 
+/// Checks that a commit whose WAL put finds its number taken returns
+/// `stale_head` after that one put, and that a retry replays the object at
+/// that number and commits at the next number. The test writes the object
+/// at that number itself, as a floor object through the namespace store,
+/// in the same process and outside the session.
 #[tokio::test]
 async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_next_number() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("race").expect("namespace");
-    let store = std::sync::Arc::new(RecordingStore::new(
+    let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
-    ));
+    );
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
         .create()
         .await
         .expect("create");
-    let session = crate::commit::engine::SharedWriterSessionStatus::default();
-    let blocked = BlockingStore::new(
-        store.clone(),
-        KeyPredicate::exact(wal_object(&namespace_id, &WalNo(3))),
-        OperationSelector::PutCreateIfAbsent,
-    );
-    let mut first = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&blocked, &namespace_id),
-        context(1_000).writer_id,
-    )
-    .writer_session(Arc::clone(&session));
-    publish(&mut first, "seed").await.expect("seed");
-    let mut second = NamespaceCommitEngine::new(
+    let mut engine = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),
         context(1_000).writer_id,
-    )
-    .writer_session(session);
+    );
+    publish(&mut engine, "seed").await.expect("seed");
     store.reset();
-    blocked.block_next();
-    let (loser, winner) = futures::join!(publish(&mut first, "left"), async {
-        blocked.wait_until_blocked().await;
-        let result = publish(&mut second, "right").await;
-        blocked.release();
-        result
-    });
-    assert_eq!(winner.expect("winner").committed_seq, CommitSeq(2));
-    assert_eq!(loser.expect_err("collision").code(), ErrorCode::StaleHead);
-    // The session's put of `left` was in flight when `second` published, and
-    // the session owed a fence. `second` put the fence at 3 and its commit at
-    // 4, and `left`'s put collided with the fence.
-    assert_eq!(store.counts().create_if_absent_puts, 3);
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .publish_floor_object_at_tip(CommitSeq(1))
+        .await
+        .expect("a floor object at the session's next number");
     assert_eq!(
-        publish(&mut first, "left")
+        publish(&mut engine, "left")
+            .await
+            .expect_err("collision")
+            .code(),
+        ErrorCode::StaleHead
+    );
+    assert_eq!(store.counts().create_if_absent_puts, 2);
+    assert_eq!(
+        publish(&mut engine, "left")
             .await
             .expect("retry")
             .committed_seq,
-        CommitSeq(3)
+        CommitSeq(2)
     );
-    assert_eq!(store.counts().create_if_absent_puts, 4);
+    assert_eq!(store.counts().create_if_absent_puts, 3);
     assert_eq!(store.counts().compare_and_swaps, 0);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace.load_current_metadata_view().await.expect("view");
-    for path in ["/left", "/right"] {
-        view.resolve_path(
-            path,
-            AttributeInclusion::Omit,
-            &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
-        )
-        .await
-        .expect("committed");
-    }
+    view.resolve_path(
+        "/left",
+        AttributeInclusion::Omit,
+        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Service),
+    )
+    .await
+    .expect("committed");
 }
 
 #[tokio::test]
@@ -416,14 +406,11 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
         .await
         .expect("next")
         .is_none());
-    let session = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::commit::engine::WriterSessionStatus::Acquired(acquired),
-    ));
-    let mut active = NamespaceCommitEngine::new(
+    let mut active = NamespaceCommitEngine::with_acquired_session(
         crate::test_support::namespace_store(&store, &namespace_id),
         context(1_000).writer_id,
-    )
-    .writer_session(session);
+        acquired,
+    );
     assert_eq!(
         publish(&mut active, "new")
             .await

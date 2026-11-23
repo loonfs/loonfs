@@ -6,23 +6,20 @@ use super::folds::wal_tail_reached_fold_size;
 use super::metrics::PublishOutcome;
 use super::queue::{queued_candidates, BatchCandidate, OpenBatch, WorkItem};
 use super::session_tasks::WorkerHandle;
-use super::{
-    EngineSlot, LastPublish, NamespacePublisher, NamespacePublisherState, PublisherAdmissionStatus,
-};
+use super::{LastPublish, NamespacePublisher, NamespacePublisherState, PublisherAdmissionStatus};
 use crate::metrics::RESULT_OK;
 use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
-use crate::{CoreError, Error, Result, SharedObjectStore};
+use crate::{CoreError, Error, Result};
 use futures::FutureExt;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::{
-    is_retryable_wal_publish, settle_publish_attempt, NamespaceCommitEngine, TailSource,
-    WalPublishError,
+    is_retryable_wal_publish, settle_publish_attempt, TailSource, WalPublishError,
 };
 use loonfs_core::time::OperationClock;
 use loonfs_core::Phase;
 use loonfs_types::Commit;
-use loonfs_types::{panic_message, u64_from_usize, CommitId, WriterId};
+use loonfs_types::{panic_message, u64_from_usize, CommitId};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -167,9 +164,7 @@ impl NamespacePublisher {
         self.record_panic("publish", panic_message(payload.as_ref()));
         // A panic can follow the WAL put, so the position's tail may omit
         // committed bytes.
-        if let Some(engine) = self.lock_engine().await.engine.as_mut() {
-            engine.invalidate_projection();
-        }
+        self.lock_engine().await.invalidate_projection();
         let orphaned_waiters = {
             let mut state = self.lock_state();
             taken_commit_ids
@@ -251,11 +246,9 @@ impl NamespacePublisher {
         &self,
         candidates: &[CommitCandidate],
         permits: &[Arc<AdmissionPermit>],
-        writer_id: &WriterId,
         clock: &OperationClock,
     ) -> Vec<std::result::Result<Commit, CoreError>> {
-        let mut slot = self.lock_engine().await;
-        let engine = self.engine_for(&mut slot, writer_id);
+        let mut engine = self.lock_engine().await;
         // Boxing erases the engine's deeply nested publish future. Without
         // it, callers awaiting a put or commit (CLI, server, embedding
         // crates) exceed rustc's type-recursion depth.
@@ -270,7 +263,7 @@ impl NamespacePublisher {
             }
         }
         let fold_start = self.record_publication(&publish);
-        drop(slot);
+        drop(engine);
         if let Some(start) = fold_start {
             let _ = start.send(());
         }
@@ -329,27 +322,6 @@ impl NamespacePublisher {
             });
         }
         fold_start
-    }
-
-    /// Returns the publisher's lazily created commit engine, which commits as
-    /// `writer_id`.
-    ///
-    /// Each publish loads the namespace identity from the head, so construction
-    /// only needs the runtime's cache views and the writer session.
-    pub(super) fn engine_for<'slot>(
-        &self,
-        slot: &'slot mut EngineSlot,
-        writer_id: &WriterId,
-    ) -> &'slot mut NamespaceCommitEngine<SharedObjectStore> {
-        slot.engine.get_or_insert_with(|| {
-            NamespaceCommitEngine::new(
-                self.context
-                    .runtime_core
-                    .namespace_store(&self.namespace_id),
-                writer_id.clone(),
-            )
-            .writer_session(Arc::clone(&self.session))
-        })
     }
 
     pub(super) fn deliver_batch_results(
@@ -439,13 +411,10 @@ impl NamespacePublisher {
         permits: &[Arc<AdmissionPermit>],
         stopped: &mut [Option<CommitCandidate>],
     ) -> (Vec<Result<Commit>>, u64) {
-        let writer_id = match self.context.writer.upgrade() {
-            Some(writer) => writer.writer_id.clone(),
-            None => {
-                let error = Error::from(CoreError::ShuttingDown);
-                return (candidates.iter().map(|_| Err(error.clone())).collect(), 0);
-            }
-        };
+        if self.context.writer.upgrade().is_none() {
+            let error = Error::from(CoreError::ShuttingDown);
+            return (candidates.iter().map(|_| Err(error.clone())).collect(), 0);
+        }
         // The batch's retries share one clock. A retry that read the wall
         // clock again would count the earlier waiting twice.
         let clock = OperationClock::start(
@@ -464,7 +433,7 @@ impl NamespacePublisher {
                 .collect();
             let observed = match self.context.writer.upgrade() {
                 Some(_writer) => {
-                    self.publish_through_engine(&candidates, &attempt_permits, &writer_id, &clock)
+                    self.publish_through_engine(&candidates, &attempt_permits, &clock)
                         .await
                 }
                 None => candidates

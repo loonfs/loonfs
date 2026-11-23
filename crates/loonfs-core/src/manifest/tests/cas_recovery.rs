@@ -257,19 +257,14 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
         payload.manifest_no = predecessor.successor().expect("next number");
         let first = payload.clone();
         if newer_head {
-            let session = Arc::new(std::sync::Mutex::new(
-                crate::commit::engine::WriterSessionStatus::Acquired(
-                    crate::namespace::writer_epoch::AcquiredWriter {
-                        writer_id: context.writer_id.clone(),
-                        writer_epoch: current.payload().writer_epoch,
-                    },
-                ),
-            ));
-            let mut engine = crate::commit::engine::NamespaceCommitEngine::new(
+            let mut engine = crate::commit::engine::NamespaceCommitEngine::with_acquired_session(
                 crate::test_support::namespace_store(&store, &namespace_id),
                 context.writer_id.clone(),
-            )
-            .writer_session(session);
+                crate::namespace::writer_epoch::AcquiredWriter {
+                    writer_id: context.writer_id.clone(),
+                    writer_epoch: current.payload().writer_epoch,
+                },
+            );
             engine
                 .publish_batch(
                     vec![crate::commit::engine::CommitCandidate::new(

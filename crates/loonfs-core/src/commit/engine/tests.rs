@@ -251,19 +251,17 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
             .create()
             .await
             .expect("bootstrap");
-        let session = SharedWriterSessionStatus::default();
         let mut engine = NamespaceCommitEngine::new(
             crate::test_support::namespace_store(&store, &namespace_id),
             writer.writer_id.clone(),
-        )
-        .writer_session(Arc::clone(&session));
+        );
         engine
             .publish_batch(vec![create_dir("first", "alpha")], &writer.clock())
             .await
             .results
             .remove(0)
             .expect("the session's first commit acquires its epoch");
-        let acquired = match &*session.lock().expect("session lock") {
+        let acquired = match &*engine.position.lock_session() {
             WriterSessionStatus::Acquired(acquired) => acquired.clone(),
             other => panic!("{entry}: the session holds its epoch: {other:?}"),
         };
@@ -292,7 +290,7 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
         // anchor from the store.
         engine.invalidate_projection();
         if entry == "fence" {
-            *session.lock().expect("session lock") =
+            *engine.position.lock_session() =
                 WriterSessionStatus::HoldsEpochOwesFence(acquired.clone());
         }
         let error = match entry {
@@ -321,7 +319,7 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
         );
         assert!(
             !matches!(
-                *session.lock().expect("session lock"),
+                *engine.position.lock_session(),
                 WriterSessionStatus::Fenced(_)
             ),
             "{entry}: a corrupt store doesn't fence the session"
@@ -329,8 +327,11 @@ async fn a_stored_manifest_below_the_sessions_writer_epoch_is_corrupt() {
     }
 }
 
+/// Checks that after a takeover, the old session's next publish returns
+/// `stale_head` and every later one returns `writer_fenced`, and that the
+/// head keeps the new writer's epoch.
 #[tokio::test]
-async fn shared_session_keeps_fencing_across_engine_rebuilds() {
+async fn a_fenced_session_stays_fenced_and_leaves_the_head_alone() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -340,13 +341,11 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
         .await
         .expect("bootstrap");
 
-    let session = SharedWriterSessionStatus::default();
-    let mut engine_a1 = NamespaceCommitEngine::new(
+    let mut engine_a = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),
         writer_a.writer_id.clone(),
-    )
-    .writer_session(Arc::clone(&session));
-    engine_a1
+    );
+    engine_a
         .publish_batch(vec![create_dir("from-a-first", "alpha")], &writer_a.clock())
         .await
         .results
@@ -366,7 +365,7 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
         .expect("writer b takeover commit");
 
     for expected in [ErrorCode::StaleHead, ErrorCode::WriterFenced] {
-        let result = engine_a1
+        let result = engine_a
             .publish_batch(
                 vec![create_dir("from-a-second", "gamma")],
                 &writer_a.clock(),
@@ -386,21 +385,12 @@ async fn shared_session_keeps_fencing_across_engine_rebuilds() {
         .expect("read head")
         .writer_epoch;
 
-    // A rebuilt engine (for example after cache eviction or in cache-disabled
-    // mode) shares the session state, so the session stays terminally fenced
-    // and never touches the head.
-    drop(engine_a1);
-    let mut engine_a2 = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &namespace_id),
-        writer_a.writer_id.clone(),
-    )
-    .writer_session(session);
-    let still_fenced = engine_a2
+    let still_fenced = engine_a
         .publish_batch(vec![create_dir("from-a-third", "delta")], &writer_a.clock())
         .await;
     let error = still_fenced.results[0]
         .as_ref()
-        .expect_err("rebuilt engine stays fenced");
+        .expect_err("the session stays fenced");
     assert_eq!(error.code(), ErrorCode::WriterFenced);
     let head = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_state()
