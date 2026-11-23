@@ -456,3 +456,36 @@ fn a_merge_records_bound_counts_its_conflict_report() {
         merge_bytes(&without)
     );
 }
+
+/// Checks the bounds of a merge's creates that the docs state, so a change
+/// of the WAL format has to update them: a file create whose content has a
+/// layout of one extent plans 5,432 bytes (4,646 for the create and 786 for
+/// the layout), and a directory create plans 1,844 bytes. The passages are
+/// the `merge_too_large` sizing in `docs/specs/api.md` and the merge
+/// allowance in `docs/design/merge.md`. The file create's bound, or a
+/// figure derived from it, is also in the merge allowance in
+/// `crates/loonfs-server/docs/self-hosting.md`, on `max_merge_bytes` in
+/// `crates/loonfs-server/config/local-fs.example.toml`, on
+/// `DEFAULT_MAX_MERGE_BYTES` in `crates/loonfs/src/execution_budget.rs`,
+/// and on `MERGE_PEAK_PER_PLANNED_BYTE` in
+/// `crates/loonfs/src/publisher/admission.rs`.
+#[test]
+fn a_merges_creates_plan_the_bytes_that_the_docs_state() {
+    let file = FilesystemOperation::CreateFileByInode {
+        parent_inode_id: ROOT_INODE_ID,
+        display_name: DisplayName::parse("merged.txt").expect("name"),
+        content: loonfs_types::FileContent::Ref(ContentRef::blob_v1(
+            ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
+            b"merged",
+            loonfs_types::ChecksumAlgorithm::Crc64nvme,
+        )),
+    };
+    let directory = FilesystemOperation::CreateDirectoryByInode {
+        parent_inode_id: ROOT_INODE_ID,
+        display_name: DisplayName::parse("merged").expect("name"),
+    };
+    assert_eq!(merge_operation_bytes(&file, None), 4_646);
+    assert_eq!(layout_bytes(1), 786);
+    assert_eq!(merge_operation_bytes(&file, Some(1)), 5_432);
+    assert_eq!(merge_operation_bytes(&directory, None), 1_844);
+}

@@ -95,7 +95,9 @@ pub(crate) fn check_rights(
 
 /// Authorization for one read: the subject's rights, and where they are
 /// evaluated. A live read evaluates on the session it reads through. A
-/// snapshot read evaluates at the current head, on a separate view, and
+/// snapshot read evaluates on a separate view, at the live head that its
+/// caller captured (for a read view, the head that the view captured when
+/// it was opened, which a view from `at_seq` keeps from its parent), and
 /// every snapshot read is a history read.
 ///
 /// The rights that [`Self::can_read`] finds are memoized for the rest of the
@@ -106,7 +108,7 @@ pub(crate) struct ReadAccess<'a, S: ObjectStore + ?Sized> {
     rights: EffectiveRightsMemo,
 }
 
-/// The current head that a snapshot read's checks evaluate at.
+/// The head that a snapshot read's checks evaluate at.
 struct HeadAccess<'a, S: ObjectStore + ?Sized> {
     view: &'a LoadedMetadataView<'a, S>,
     /// The session that every [`ReadAccess::can_read`] of the read evaluates
